@@ -38,7 +38,7 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
   }
 
   for (DNLID leaf : dnl->getLeaves()) {
-    DNLInstanceFull instance = dnl->getDNLInstanceFromID(leaf);
+    const DNLInstanceFull& instance = dnl->getDNLInstanceFromID(leaf);
     size_t numberOfInputs = 0, numberOfOutputs = 0;
     for (DNLID termId = instance.getTermIndexes().first;
          termId != DNLID_MAX && termId <= instance.getTermIndexes().second;
@@ -174,7 +174,7 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
   }
   for (DNLID leaf : dnl->getLeaves()) {
-    DNLInstanceFull instance = dnl->getDNLInstanceFromID(leaf);
+    const DNLInstanceFull& instance = dnl->getDNLInstanceFromID(leaf);
     bool isSequential = false;
     std::vector<SNLBitTerm*> seqBitTerms;
 
@@ -276,10 +276,13 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
               if (localBit >= 64) {
                 // std::fprintf(stderr, "localBit out of range: %llu\n",
                 //             static_cast<unsigned long long>(localBit));
-                break;
+                // LCOV_EXCL_START
+                continue;
+                // LCOV_EXCL_STOP
               }
 
               // Correct shift using 1ULL and parentheses
+              assert(localBit < 64);
               uint64_t mask = (1ULL << localBit);
               // std::printf("mask = 0x%llx\n", static_cast<unsigned long
               // long>(mask));
