@@ -5,6 +5,10 @@
 
 #include "NLUniverse.h"
 
+#include "SNLDesign.h"
+#include "SNLDesignModeling.h"
+#include "SNLInstance.h"
+#include "SNLTruthTable.h"
 #include "SNLUtils.h"
 #include "SNLVRLConstructor.h"
 #include "MiterStrategy.h"
@@ -50,6 +54,21 @@ TEST_F(UnitDesignCompare, testDifferentDesigns) {
   SNLVRLConstructor constructor1(library1_);
   constructor1.construct(benchmarksPath/"simple1.v");
   auto top1 = SNLUtils::findTop(library1_);
+
+  auto halfadder0 = library0_->getSNLDesign(NLName("halfadder"));
+  ASSERT_NE(nullptr, halfadder0);
+  auto sumXor0 = halfadder0->getInstance(NLName("sum_xor"));
+  ASSERT_NE(nullptr, sumXor0);
+  auto ttSum0 = SNLDesignModeling::getTruthTable(sumXor0->getModel());
+
+  auto halfadder1 = library1_->getSNLDesign(NLName("halfadder"));
+  ASSERT_NE(nullptr, halfadder1);
+  auto sumXor1 = halfadder1->getInstance(NLName("sum_xor"));
+  ASSERT_NE(nullptr, sumXor1);
+  auto ttSum1 = SNLDesignModeling::getTruthTable(sumXor1->getModel());
+
+  EXPECT_EQ(ttSum0, SNLTruthTable(2, 6));   // xor
+  EXPECT_EQ(ttSum1, SNLTruthTable(2, 14));  // or (bug)
 
   KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
   EXPECT_FALSE(miterS.run());
