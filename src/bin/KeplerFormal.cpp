@@ -233,6 +233,7 @@ int main(int argc, char** argv) {
   }
 
   if (inputFormatType == FormatType::VERILOG) {
+    printf("Parsing verilog file: %s\n", inputPaths[0].c_str());
     if (db0 == nullptr) {
       db0 = NLDB::create(NLUniverse::get());
     }
@@ -248,11 +249,13 @@ int main(int argc, char** argv) {
       SPDLOG_ERROR("No top design was found after parsing verilog");
     }
   } else {  // SNL
-    std::printf("Loading SNL file: %s\n", inputPaths[0].c_str());
+    std::printf("Loading Naja IF: %s\n", inputPaths[0].c_str());
     db0 = SNLCapnP::load(inputPaths[0].c_str(), primitivesAreLoaded);
     if (!db0) {
-      SPDLOG_CRITICAL("Failed to load SNL file: {}", inputPaths[0]);
+      // LCOV_EXCL_START
+      SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[0]);
       return EXIT_FAILURE;
+      // LCOV_EXCL_STOP
     }
   }
 
@@ -282,6 +285,7 @@ int main(int argc, char** argv) {
   }
 
   if (inputFormatType == FormatType::VERILOG) {
+    printf("Parsing verilog file: %s\n", inputPaths[1].c_str());
     auto designLibrary = NLLibrary::create(db1, NLName("DESIGN"));
     SNLVRLConstructor constructor(designLibrary);
     constructor.construct(inputPaths[1].c_str());
@@ -294,11 +298,13 @@ int main(int argc, char** argv) {
       SPDLOG_ERROR("No top design was found after parsing verilog");
     }
   } else {  // SNL
-    std::printf("Loading SNL file: %s\n", inputPaths[1].c_str());
+    std::printf("Loading Naja IF: %s\n", inputPaths[1].c_str());
     db1 = SNLCapnP::load(inputPaths[1].c_str(), primitivesAreLoaded);
     if (!db1) {
-      SPDLOG_CRITICAL("Failed to load SNL file: {}", inputPaths[1]);
+      // LCOV_EXCL_START
+      SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[1]);
       return EXIT_FAILURE;
+      // LCOV_EXCL_STOP
     }
   }
 
@@ -350,19 +356,57 @@ int main(int argc, char** argv) {
       }
     }
   } else {
-    try {
-      KEPLER_FORMAL::MiterStrategy MiterS(top0, top1, logFileName);
-      MiterS.init();
-      if (MiterS.run()) {
-        SPDLOG_INFO("No difference was found.");
-      } else {
-        SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");
+    if (inputFormatType == FormatType::NAJA_IF && useScopes) {
+    KEPLER_FORMAL::MiterStrategy MiterS(top0, top1);
+    MiterS.init();
+    ScopeExtraction extractor(top0, top1);
+    extractor.collectVerificationScopes();
+    if (cleanScopes) {
+      extractor.cleanVerificationScopes(MiterS.getPIs0(), MiterS.getPIs1());
+    }
+    for (auto scopes : extractor.getScopesToVerify()) {
+      SPDLOG_INFO("Looking at scope: {} ",
+                  scopes.first->getName().getString());
+      // std::string scopeLogFile = (logFileName.empty() ? "kf_" : logFileName) + "_" +
+      //                           scopes.first->getName().getString() + ".txt";
+      try {
+        KEPLER_FORMAL::MiterStrategy MiterScope(scopes.first, scopes.second, logFileName);
+        MiterScope.init();
+        if (MiterScope.run()) {
+          SPDLOG_INFO("No difference was found for scope: {} , {}",
+                      scopes.first->getName().getString(),
+                      scopes.second->getName().getString());
+        } else {
+          SPDLOG_INFO("Difference was found for scope: {} , {}. Please refer to the log(miter_log_x.txt) for details.",
+                      scopes.first->getName().getString(),
+                      scopes.second->getName().getString());
+        }
+      } catch (const std::exception& e) {
+        // LCOV_EXCL_START
+        SPDLOG_ERROR("Workflow failed for scope: {} , {}: {}", 
+                      scopes.first->getName().getString(),
+                      scopes.second->getName().getString(),
+                      e.what());
+        return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
       }
-    } catch (const std::exception& e) {
-      // LCOV_EXCL_START
-      SPDLOG_ERROR("Workflow failed: {}", e.what());
-      return EXIT_FAILURE;
-      // LCOV_EXCL_STOP
+    }
+  } else {
+    try {
+        KEPLER_FORMAL::MiterStrategy MiterS(top0, top1, logFileName);
+      MiterS.init();
+        MiterS.init();
+      if (MiterS.run()) {
+          SPDLOG_INFO("No difference was found.");
+        } else {
+          SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");
+        }
+      } catch (const std::exception& e) {
+        // LCOV_EXCL_START
+        SPDLOG_ERROR("Workflow failed: {}", e.what());
+        return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
+    }
     }
   }
   const auto mainEnd{std::chrono::steady_clock::now()};
