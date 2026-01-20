@@ -24,7 +24,7 @@ set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard" FORCE)
 add_subdirectory(src)
 add_subdirectory(thirdparty)
 
-option(ENABLE_UNIT_TESTS ON)
+option(ENABLE_UNIT_TESTS "Enable unit tests" ON)
 if(ENABLE_UNIT_TESTS)
  include(CTest)
  enable_testing()
