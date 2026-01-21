@@ -234,9 +234,6 @@ int main(int argc, char** argv) {
 
   if (inputFormatType == FormatType::VERILOG) {
     printf("Parsing verilog file: %s\n", inputPaths[0].c_str());
-    if (db0 == nullptr) {
-      db0 = NLDB::create(NLUniverse::get());
-    }
     auto designLibrary = NLLibrary::create(db0, NLName("DESIGN"));
     SNLVRLConstructor constructor(designLibrary);
     constructor.construct(inputPaths[0].c_str());
@@ -269,8 +266,7 @@ int main(int argc, char** argv) {
   }
   db0->setID(2);  // Increment ID to avoid conflicts
 
-  NLDB* db1 = NLDB::create(NLUniverse::get());
-  db1->setID(1);
+  NLDB* db1 = nullptr;
 
   // Prepare second DB and primitives if needed
   if (libraryFormatType == LibraryFormatType::LIBERTY) {
@@ -395,7 +391,6 @@ int main(int argc, char** argv) {
     try {
         KEPLER_FORMAL::MiterStrategy MiterS(top0, top1, logFileName);
       MiterS.init();
-        MiterS.init();
       if (MiterS.run()) {
           SPDLOG_INFO("No difference was found.");
         } else {
