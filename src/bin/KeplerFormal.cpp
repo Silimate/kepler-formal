@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
           NLLibrary::create(db0, NLLibrary::Type::Primitives, NLName("PRIMS"));
       SNLLibertyConstructor constructor(primitivesLibrary);
       for (const auto& lf : libertyFiles) {
-        spdlog::info("Loading liberty file: %s\n", lf.c_str());
+        spdlog::info("Loading liberty file: {}\n", lf.c_str());
         constructor.construct(lf.c_str());
       }
       primitivesAreLoaded = true;
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
       auto primitivesLibrary =
           NLLibrary::create(db0, NLLibrary::Type::Primitives, NLName("PRIMS"));
       for (const auto& lf : libertyFiles) {
-        std::printf("Loading python library file: %s\n", lf.c_str());
+        std::printf("Loading python library file: {}\n", lf.c_str());
         SNLPyLoader::loadPrimitives(primitivesLibrary, lf); // pyLoader(primitivesLibrary);
       }
       primitivesAreLoaded = true;
@@ -266,8 +266,8 @@ int main(int argc, char** argv) {
   }
   db0->setID(2);  // Increment ID to avoid conflicts
 
-  NLDB* db1 = nullptr;
-
+  NLDB* db1 = NLDB::create(NLUniverse::get());
+  db1->setID(1);
   // Prepare second DB and primitives if needed
   if (libraryFormatType == LibraryFormatType::LIBERTY) {
     if (!libertyFiles.empty()) {
@@ -352,46 +352,10 @@ int main(int argc, char** argv) {
       }
     }
   } else {
-    if (inputFormatType == FormatType::NAJA_IF && useScopes) {
-    KEPLER_FORMAL::MiterStrategy MiterS(top0, top1);
-    MiterS.init();
-    ScopeExtraction extractor(top0, top1);
-    extractor.collectVerificationScopes();
-    if (cleanScopes) {
-      extractor.cleanVerificationScopes(MiterS.getPIs0(), MiterS.getPIs1());
-    }
-    for (auto scopes : extractor.getScopesToVerify()) {
-      SPDLOG_INFO("Looking at scope: {} ",
-                  scopes.first->getName().getString());
-      // std::string scopeLogFile = (logFileName.empty() ? "kf_" : logFileName) + "_" +
-      //                           scopes.first->getName().getString() + ".txt";
-      try {
-        KEPLER_FORMAL::MiterStrategy MiterScope(scopes.first, scopes.second, logFileName);
-        MiterScope.init();
-        if (MiterScope.run()) {
-          SPDLOG_INFO("No difference was found for scope: {} , {}",
-                      scopes.first->getName().getString(),
-                      scopes.second->getName().getString());
-        } else {
-          SPDLOG_INFO("Difference was found for scope: {} , {}. Please refer to the log(miter_log_x.txt) for details.",
-                      scopes.first->getName().getString(),
-                      scopes.second->getName().getString());
-        }
-      } catch (const std::exception& e) {
-        // LCOV_EXCL_START
-        SPDLOG_ERROR("Workflow failed for scope: {} , {}: {}", 
-                      scopes.first->getName().getString(),
-                      scopes.second->getName().getString(),
-                      e.what());
-        return EXIT_FAILURE;
-        // LCOV_EXCL_STOP
-      }
-    }
-  } else {
     try {
         KEPLER_FORMAL::MiterStrategy MiterS(top0, top1, logFileName);
-      MiterS.init();
-      if (MiterS.run()) {
+        MiterS.init();
+        if (MiterS.run()) {
           SPDLOG_INFO("No difference was found.");
         } else {
           SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");
@@ -401,8 +365,7 @@ int main(int argc, char** argv) {
         SPDLOG_ERROR("Workflow failed: {}", e.what());
         return EXIT_FAILURE;
         // LCOV_EXCL_STOP
-    }
-    }
+      }
   }
   const auto mainEnd{std::chrono::steady_clock::now()};
   const std::chrono::duration<double> mainElapsedSeconds{mainEnd - mainStart};

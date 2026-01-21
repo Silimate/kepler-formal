@@ -345,7 +345,6 @@ void SNLLogicCloud::compute() {
           throw std::runtime_error(error);
         }
       } else if (iso.getDrivers().empty()) {
-        iso.display(std::cerr);
         assert(iso.getDrivers().size() == 1 &&
                "Iso have no drivers and more than one reader, not supported");
       }

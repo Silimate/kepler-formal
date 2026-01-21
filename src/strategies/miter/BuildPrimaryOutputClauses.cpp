@@ -61,17 +61,6 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
          termId++) {
       const DNLTerminalFull& term = dnl->getDNLTerminalFromID(termId);
       if (term.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Output)
-        printf("model name %s -> turth table %\n", naja::DNL::get()
-                                             ->getDNLTerminalFromID(termId)
-                                             .getDNLInstance()
-                                             .getSNLModel()->getName().getString().c_str(), SNLDesignModeling::getTruthTable(naja::DNL::get()
-                                             ->getDNLTerminalFromID(termId)
-                                             .getDNLInstance()
-                                             .getSNLModel(), naja::DNL::get()
-                                    ->getDNLTerminalFromID(termId)
-                                    .getSnlBitTerm()
-                                    ->getOrderID()).toString().c_str());
-      if (term.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Output)
         numberOfInputs++;
       if (term.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Input)
         numberOfOutputs++;
