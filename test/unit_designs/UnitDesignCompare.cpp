@@ -10,6 +10,7 @@
 
 #include "SNLDesign.h"
 #include "SNLScalarTerm.h"
+#include "SNLScalarNet.h"
 #include "SNLDesignModeling.h"
 #include "SNLInstance.h"
 #include "SNLTruthTable.h"
@@ -106,6 +107,68 @@ TEST_F(UnitDesignCompare, testDiffWithConstants) {
 
   KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
   EXPECT_FALSE(miterS.run());
-  //should be different
-  //here the issue comes from missing truth table but nothing is reported
+}
+
+TEST_F(UnitDesignCompare, testManualAndDesigns) {
+  auto primitives = NLLibrary::create(
+      library0_->getDB(), NLLibrary::Type::Primitives, NLName("PRIMITIVES"));
+  const char* andName = "AND";
+  auto andModel =
+    SNLDesign::create(primitives, SNLDesign::Type::Primitive, NLName(andName));
+  auto andIn1 = SNLScalarTerm::create(andModel, SNLTerm::Direction::Input,
+                                        NLName("a"));
+  auto andIn2 = SNLScalarTerm::create(andModel, SNLTerm::Direction::Input,
+                                        NLName("b"));
+  auto andOut = SNLScalarTerm::create(andModel, SNLTerm::Direction::Output,
+                                        NLName("y"));
+
+  auto makeAndTop = [&](NLLibrary* library, const char* topName,
+                       const char* andName) -> SNLDesign* {
+
+    auto top =
+        SNLDesign::create(library, SNLDesign::Type::Standard, NLName(topName));
+    auto topIn1 = SNLScalarTerm::create(top, SNLTerm::Direction::Input,
+                                        NLName("in1"));
+    auto topIn2 = SNLScalarTerm::create(top, SNLTerm::Direction::Input,
+                                        NLName("in2"));
+    auto topOut = SNLScalarTerm::create(top, SNLTerm::Direction::Output,
+                                        NLName("out"));
+
+    auto andInst = SNLInstance::create(top, andModel, NLName("and0"));
+    auto netIn1 = SNLScalarNet::create(top, NLName("net_in1"));
+    auto netIn2 = SNLScalarNet::create(top, NLName("net_in2"));
+    auto netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+    topIn1->setNet(netIn1);
+    andInst->getInstTerm(andIn1)->setNet(netIn1);
+    topIn2->setNet(netIn2);
+    andInst->getInstTerm(andIn2)->setNet(netIn2);
+    topOut->setNet(netOut);
+    andInst->getInstTerm(andOut)->setNet(netOut);
+
+    return top;
+  };
+
+  auto top0 = makeAndTop(library0_, "top0", "AND");
+  auto top1 = makeAndTop(library1_, "top1", "AND");
+
+  ASSERT_NE(nullptr, top0);
+  ASSERT_NE(nullptr, top1);
+  EXPECT_EQ(1, top0->getInstances().size());
+  EXPECT_EQ(1, top1->getInstances().size());
+
+  {
+    //should be the same designs but no truth table
+    KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
+    EXPECT_FALSE(miterS.run());
+  }
+
+  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  EXPECT_TRUE(SNLDesignModeling::hasModeling(andModel));
+
+  {
+    //should be the same designs with same truth table
+    KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
+    EXPECT_TRUE(miterS.run());
+  }
 }
