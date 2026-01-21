@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
       auto primitivesLibrary =
           NLLibrary::create(db0, NLLibrary::Type::Primitives, NLName("PRIMS"));
       for (const auto& lf : libertyFiles) {
-        std::printf("Loading python library file: {}\n", lf.c_str());
+        spdlog::info("Loading python library file: {}", lf);
         SNLPyLoader::loadPrimitives(primitivesLibrary, lf); // pyLoader(primitivesLibrary);
       }
       primitivesAreLoaded = true;

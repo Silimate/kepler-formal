@@ -9,6 +9,7 @@
 #include "NLUniverse.h"
 
 #include "SNLDesign.h"
+#include "SNLScalarTerm.h"
 #include "SNLDesignModeling.h"
 #include "SNLInstance.h"
 #include "SNLTruthTable.h"
@@ -43,6 +44,20 @@ TEST_F(UnitDesignCompare, testSameDesigns) {
   std::filesystem::path benchmarksPath(BENCHMARKS_PATH);
   constructor0.construct(benchmarksPath/"simple0.v");
   auto top = SNLUtils::findTop(library0_);
+
+  auto sum = top->getScalarTerm(NLName("sum"));
+  ASSERT_NE(nullptr, sum);
+  EXPECT_EQ(SNLTerm::Direction::Output, sum->getDirection());
+  auto sumNet = sum->getNet();
+  ASSERT_NE(nullptr, sumNet);
+  EXPECT_EQ(2, sumNet->getComponents().size());
+
+  auto cout = top->getScalarTerm(NLName("cout"));
+  ASSERT_NE(nullptr, cout);
+  EXPECT_EQ(SNLTerm::Direction::Output, cout->getDirection());
+  auto coutNet = cout->getNet();
+  ASSERT_NE(nullptr, coutNet);
+  EXPECT_EQ(2, coutNet->getComponents().size());
 
   KEPLER_FORMAL::MiterStrategy miterS(top, top);
   EXPECT_TRUE(miterS.run());
