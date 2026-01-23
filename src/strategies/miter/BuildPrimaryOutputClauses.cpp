@@ -10,7 +10,7 @@
 #include <thread>
 #include <tbb/global_control.h>
 
-//#define DEBUG_PRINTS
+#define DEBUG_PRINTS
 //#define DEBUG_CHECKS
 
 #ifdef DEBUG_PRINTS

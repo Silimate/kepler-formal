@@ -586,6 +586,14 @@ bool MiterStrategy::run() {
     return false;
   }
 
+  // print all clauses
+  for (size_t i = 0; i < POs0.size(); ++i) {
+    logger->info("PO index {} clause0: {}", i, POs0[i]->toString());
+  }
+  for (size_t i = 0; i < POs1.size(); ++i) {
+    logger->info("PO index {} clause1: {}", i, POs1[i]->toString());
+  }
+
   // build the Boolean-miter expression
   logger->info("Building miter expression");
   auto miter = buildMiter(POs0, POs1);
@@ -677,8 +685,8 @@ bool MiterStrategy::run() {
         }
         failedPOs_.emplace_back(i);
         logger->info("Found difference for PO: {}", i);
-        logger->debug("Clause 0 {}", POs0[i]->toString());
-        logger->debug("Clause 1 {}", POs1[i]->toString());
+        logger->info("Clause 0 {}", POs0[i]->toString());
+        logger->info("Clause 1 {}", POs1[i]->toString());
         // print path of index i
         const auto&path0 = builder0_.getOutputs2OutputsIDs().at(builder0_.getDNLIDforOutput(i));
         std::string pathString = "";
