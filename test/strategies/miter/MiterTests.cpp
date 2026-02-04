@@ -114,9 +114,9 @@ TEST_F(MiterTests, TestMiterAND) {
   SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
   // 9. connect all instances inputs
   SNLNet* net1 = SNLScalarNet::create(top, NLName("logic_0_net"));
-  net1->setType(SNLNet::Type::Assign0);
+  //net1->setType(SNLNet::Type::Assign0);
   SNLNet* net2 = SNLScalarNet::create(top, NLName("logic_1_net"));
-  net2->setType(SNLNet::Type::Assign1);
+  //net2->setType(SNLNet::Type::Assign1);
   SNLNet* net3 = SNLScalarNet::create(top, NLName("and_output_net"));
   SNLNet* net4 = SNLScalarNet::create(top, NLName("and2_output_net"));
   // connect logic0 to and
@@ -931,9 +931,9 @@ TEST_F(MiterTests, CoverDiff) {
   //SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
   // 9. connect all instances inputs
   SNLNet* net1 = SNLScalarNet::create(top, NLName("logic_0_net"));
-  net1->setType(SNLNet::Type::Assign0);
+  //net1->setType(SNLNet::Type::Assign0);
   SNLNet* net2 = SNLScalarNet::create(top, NLName("logic_1_net"));
-  net2->setType(SNLNet::Type::Assign1);
+  //net2->setType(SNLNet::Type::Assign1);
   SNLNet* net3 = SNLScalarNet::create(top, NLName("and_output_net"));
   SNLNet* net4 = SNLScalarNet::create(top, NLName("and2_output_net"));
   // connect logic0 to and
