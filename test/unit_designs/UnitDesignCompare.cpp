@@ -174,7 +174,8 @@ TEST_F(UnitDesignCompare, testManualAndDesigns) {
   {
     //should be the same designs but no truth table
     KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
-    EXPECT_FALSE(miterS.run());
+    miterS.init();
+    EXPECT_TRUE(miterS.run());
   }
 
   SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
@@ -183,6 +184,7 @@ TEST_F(UnitDesignCompare, testManualAndDesigns) {
   {
     //should be the same designs with same truth table
     KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
+    miterS.init();
     EXPECT_TRUE(miterS.run());
   }
 }

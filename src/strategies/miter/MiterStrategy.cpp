@@ -28,6 +28,8 @@
 #include <spdlog/sinks/stdout_sinks.h>  // ensure console sink is available
 #include <spdlog/spdlog.h>
 
+#include "Conditioner.h"
+
 //#define DEBUG_CHECKS
 
 using namespace naja;
@@ -587,12 +589,12 @@ bool MiterStrategy::run() {
   }
 
   // print all clauses
-  for (size_t i = 0; i < POs0.size(); ++i) {
-    logger->info("PO index {} clause0: {}", i, POs0[i]->toString());
-  }
-  for (size_t i = 0; i < POs1.size(); ++i) {
-    logger->info("PO index {} clause1: {}", i, POs1[i]->toString());
-  }
+  // for (size_t i = 0; i < POs0.size(); ++i) {
+  //   logger->info("PO index {} clause0: {}", i, POs0[i]->toString());
+  // }
+  // for (size_t i = 0; i < POs1.size(); ++i) {
+  //   logger->info("PO index {} clause1: {}", i, POs1[i]->toString());
+  // }
 
   // build the Boolean-miter expression
   logger->info("Building miter expression");
@@ -685,8 +687,8 @@ bool MiterStrategy::run() {
         }
         failedPOs_.emplace_back(i);
         logger->info("Found difference for PO: {}", i);
-        logger->info("Clause 0 {}", POs0[i]->toString());
-        logger->info("Clause 1 {}", POs1[i]->toString());
+        //logger->info("Clause 0 {}", POs0[i]->toString());
+        //logger->info("Clause 1 {}", POs1[i]->toString());
         // print path of index i
         const auto&path0 = builder0_.getOutputs2OutputsIDs().at(builder0_.getDNLIDforOutput(i));
         std::string pathString = "";
@@ -770,6 +772,14 @@ bool MiterStrategy::run() {
           //   }
           // }
           for (const auto& DNLID : cone.getCollectedTerms()) {
+            if (naja::DNL::get()->getConstant0stub() == DNLID) {
+              insTerms1.insert("Constant 0");
+              continue;
+            }
+            if (naja::DNL::get()->getConstant1stub() == DNLID) {
+              insTerms1.insert("Constant 1");
+              continue;
+            }
             const naja::DNL::DNLTerminalFull& termFull =
                 naja::DNL::get()->getDNLTerminalFromID(DNLID);
             if (termFull.isTopPort()) {

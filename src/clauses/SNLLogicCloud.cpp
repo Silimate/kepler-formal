@@ -167,7 +167,7 @@ bool isPairVisitedETS(naja::DNL::DNLID termA,
 }
 
 bool SNLLogicCloud::isInput(naja::DNL::DNLID termID) {
-  return PIs_[termID];
+  return PIs_[termID] || (dnl_.getConstant0stub() == termID) || (dnl_.getConstant1stub() == termID);
 }
 
 bool SNLLogicCloud::isOutput(naja::DNL::DNLID termID) {
