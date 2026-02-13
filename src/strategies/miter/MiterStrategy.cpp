@@ -159,129 +159,142 @@ void ensureLoggerInitialized() {
 // Converts a BoolExpr into CNF clauses added to the solver.
 // Returns the integer variable representing the root of the expression.
 
+// Tseitin encoding for SATSolverWrapper (Kissat/Glucose-friendly)
+// Converts a BoolExpr into CNF clauses added to the solver.
+// Returns the *literal* (±(var_id+1)) representing the root of the expression.
 int tseitinEncode(
     SATSolverWrapper& solver,
     BoolExpr* root,
     std::unordered_map<BoolExpr*, int>& node2var,
     std::unordered_map<std::string, int>& varName2idx) {
 
-    ensureLoggerInitialized();
-    logger->debug("Starting Tseitin encode for root expr");
+  ensureLoggerInitialized();
+  logger->debug("Starting Tseitin encode for root expr");
 
-    auto getOrCreateVar = [&](const std::string& key) -> int {
-        auto it = varName2idx.find(key);
-        if (it != varName2idx.end())
-            return it->second;
-        int v = solver.newVar();
-        varName2idx[key] = v;
-        logger->trace("Created new var {} for key '{}'", v, key);
-        return v;
-    };
+  // Returns internal 0-based var index
+  auto getOrCreateVar = [&](const std::string& key) -> int {
+    auto it = varName2idx.find(key);
+    if (it != varName2idx.end())
+      return it->second;
+    int v = solver.newVar(); // 0-based
+    varName2idx[key] = v;
+    logger->trace("Created new var {} for key '{}'", v, key);
+    return v;
+  };
 
-    auto constVar = [&](bool value) -> int {
-        const std::string key = value ? "$__CONST_TRUE__" : "$__CONST_FALSE__";
-        int v = getOrCreateVar(key);
-        solver.addClause(value ? std::vector<int>{v} : std::vector<int>{-v});
-        logger->trace("Added constant clause for {} as var {}", value, v);
-        return v;
-    };
+  // Returns external literal (±(var+2)) for a constant
+  auto constVar = [&](bool value) -> int {
+    const std::string key = value ? "$__CONST_TRUE__" : "$__CONST_FALSE__";
+    int v = getOrCreateVar(key);   // 0-based var index
+    int lit = v + 2;               // external literal
+    // Force this var to the given polarity
+    solver.addClause(value ? std::vector<int>{ lit } : std::vector<int>{ -lit });
+    logger->trace("Added constant clause for {} as var {} (lit {})", value, v, lit);
+    return lit;
+  };
 
-    struct Frame {
-        BoolExpr* expr;
-        bool visited = false;
-        int leftVar = 0, rightVar = 0;
-    };
+  struct Frame {
+    BoolExpr* expr;
+    bool visited = false;
+    int leftLit = 0, rightLit = 0; // external literals (±(var+2))
+  };
 
-    std::stack<Frame> stk;
-    stk.push({root, false, 0, 0});
-    std::unordered_map<BoolExpr*, int> result;
+  std::stack<Frame> stk;
+  stk.push({root, false, 0, 0});
+  std::unordered_map<BoolExpr*, int> result; // node -> external literal
 
-    while (!stk.empty()) {
-        Frame& fr = stk.top();
-        BoolExpr* e = fr.expr;
+  while (!stk.empty()) {
+    Frame& fr = stk.top();
+    BoolExpr* e = fr.expr;
 
-        // Already encoded
-        if (node2var.count(e)) {
-            result[e] = node2var[e];
-            stk.pop();
-            continue;
-        }
-
-        // Leaf VAR or CONST
-        if (!fr.visited && e->getOp() == Op::VAR) {
-            int v;
-            const std::string& name = e->getName();
-            if (name == "0" || name == "false" || name == "False" || name == "FALSE")
-                v = constVar(false);
-            else if (name == "1" || name == "true" || name == "True" || name == "TRUE")
-                v = constVar(true);
-            else
-                v = getOrCreateVar(name);
-
-            node2var[e] = v;
-            result[e] = v;
-            stk.pop();
-            continue;
-        }
-
-        // First visit -> push children
-        if (!fr.visited) {
-            fr.visited = true;
-            if (e->getRight()) stk.push({e->getRight(), false, 0, 0});
-            if (e->getLeft())  stk.push({e->getLeft(), false, 0, 0});
-            continue;
-        }
-
-        // Children processed
-        if (e->getLeft())  fr.leftVar  = result[e->getLeft()];
-        if (e->getRight()) fr.rightVar = result[e->getRight()];
-
-        int v = solver.newVar();
-        node2var[e] = v;
-        result[e] = v;
-
-        logger->trace("Encoding node op={} as var {}", static_cast<int>(e->getOp()), v);
-
-        switch (e->getOp()) {
-            case Op::NOT:
-                // v ↔ ¬l  -> (-v -l) & (v l)
-                solver.addClause({-v, -fr.leftVar});
-                solver.addClause({v, fr.leftVar});
-                break;
-
-            case Op::AND:
-                // v ↔ l ∧ r  -> (-v l) & (-v r) & (v -l -r)
-                solver.addClause({-v, fr.leftVar});
-                solver.addClause({-v, fr.rightVar});
-                solver.addClause({v, -fr.leftVar, -fr.rightVar});
-                break;
-
-            case Op::OR:
-                // v ↔ l ∨ r  -> (-l v) & (-r v) & (-v l r)
-                solver.addClause({-fr.leftVar, v});
-                solver.addClause({-fr.rightVar, v});
-                solver.addClause({-v, fr.leftVar, fr.rightVar});
-                break;
-
-            case Op::XOR:
-                // v ↔ l xor r
-                solver.addClause({-v, -fr.leftVar, -fr.rightVar});
-                solver.addClause({-v, fr.leftVar, fr.rightVar});
-                solver.addClause({v, -fr.leftVar, fr.rightVar});
-                solver.addClause({v, fr.leftVar, -fr.rightVar});
-                break;
-
-            default:
-                logger->warn("Unhandled operator in tseitinEncode: {}", static_cast<int>(e->getOp()));
-                break;
-        }
-
-        stk.pop();
+    // Already encoded
+    if (node2var.count(e)) {
+      result[e] = node2var[e];
+      stk.pop();
+      continue;
     }
 
-    logger->debug("Finished Tseitin encode");
-    return result[root];
+    // Leaf VAR or CONST
+    if (!fr.visited && e->getOp() == Op::VAR) {
+      int lit;
+      const std::string& name = e->getName();
+      if (name == "0" || name == "false" || name == "False" || name == "FALSE") {
+        lit = constVar(false);
+      } else if (name == "1" || name == "true" || name == "True" || name == "TRUE") {
+        lit = constVar(true);
+      } else {
+        int v = getOrCreateVar(name); // 0-based var index
+        lit = v + 2;                  // external literal
+      }
+      node2var[e] = lit;
+      result[e] = lit;
+      stk.pop();
+      continue;
+    }
+
+    // First visit -> push children
+    if (!fr.visited) {
+      fr.visited = true;
+      if (e->getRight()) stk.push({e->getRight(), false, 0, 0});
+      if (e->getLeft())  stk.push({e->getLeft(),  false, 0, 0});
+      continue;
+    }
+
+    // Children processed
+    if (e->getLeft())  fr.leftLit  = result[e->getLeft()];
+    if (e->getRight()) fr.rightLit = result[e->getRight()];
+
+    // Fresh var for this node
+    int v = solver.newVar();   // 0-based var index
+    int lit = v + 2;           // external literal
+    node2var[e] = lit;
+    result[e]   = lit;
+
+    logger->trace("Encoding node op={} as var {} (lit {})",
+                  static_cast<int>(e->getOp()), v, lit);
+
+    switch (e->getOp()) {
+      case Op::NOT:
+        // lit ↔ ¬L  -> (-lit -L) & (lit L)
+        solver.addClause({-lit, -fr.leftLit});
+        solver.addClause({ lit,  fr.leftLit});
+        break;
+
+      case Op::AND:
+        // lit ↔ L ∧ R  -> (-lit L) & (-lit R) & (lit -L -R)
+        solver.addClause({-lit, fr.leftLit});
+        solver.addClause({-lit, fr.rightLit});
+        solver.addClause({ lit, -fr.leftLit, -fr.rightLit});
+        break;
+
+      case Op::OR:
+        // lit ↔ L ∨ R  -> (-L lit) & (-R lit) & (-lit L R)
+        solver.addClause({-fr.leftLit,  lit});
+        solver.addClause({-fr.rightLit, lit});
+        solver.addClause({-lit,         fr.leftLit, fr.rightLit});
+        break;
+
+      case Op::XOR:
+        // lit ↔ L xor R
+        solver.addClause({-lit, -fr.leftLit, -fr.rightLit});
+        solver.addClause({-lit,  fr.leftLit,  fr.rightLit});
+        solver.addClause({ lit, -fr.leftLit,  fr.rightLit});
+        solver.addClause({ lit,  fr.leftLit, -fr.rightLit});
+        break;
+
+      default:
+        logger->warn("Unhandled operator in tseitinEncode: {}", static_cast<int>(e->getOp()));
+        break;
+    }
+
+    stk.pop();
+  }
+
+  logger->debug("Finished Tseitin encode");
+  return result[root]; // external literal for root (±(var+2))
 }
+
+
 
 }  // namespace
 
