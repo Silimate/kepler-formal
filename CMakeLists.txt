@@ -27,7 +27,7 @@ include(ExternalProject)
 
 ExternalProject_Add(kissat_external
     SOURCE_DIR ${KISSAT_ROOT}
-    CONFIGURE_COMMAND CFLAGS=-O3 ./configure -h
+    CONFIGURE_COMMAND ./configure 
     BUILD_COMMAND make
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
@@ -43,9 +43,6 @@ add_dependencies(kissat kissat_external)
 
 add_subdirectory(src)
 add_subdirectory(thirdparty)
-
-
-
 
 # option(ENABLE_UNIT_TESTS ON)
 # if(ENABLE_UNIT_TESTS)
