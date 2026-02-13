@@ -10,6 +10,7 @@ target_link_libraries(kepler-formal
     naja_snl_pyloader
     naja_dnl
     naja_opt
+    kissat
     formal_strategies
     scope_extraction
     yaml-cpp

@@ -7,6 +7,7 @@ cmake_minimum_required(VERSION 3.21)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE INTERNAL
     "Allow parsing of subprojects that require CMake < 3.5")
 
+set(KISSAT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/kissat)
 set(GLUCOSE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/glucose)
 set(NAJA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/naja)
 
@@ -21,8 +22,30 @@ set(ARGPARSE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/naja/thirdparty/argparse
 
 set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard" FORCE)
 
+include(ExternalProject)
+
+
+ExternalProject_Add(kissat_external
+    SOURCE_DIR ${KISSAT_ROOT}
+    CONFIGURE_COMMAND CFLAGS=-O3 ./configure -h
+    BUILD_COMMAND make
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+)
+
+add_library(kissat STATIC IMPORTED)
+set_target_properties(kissat PROPERTIES
+    IMPORTED_LOCATION ${KISSAT_ROOT}/build/libkissat.a
+    INTERFACE_INCLUDE_DIRECTORIES ${KISSAT_ROOT}/src
+)
+
+add_dependencies(kissat kissat_external)
+
 add_subdirectory(src)
 add_subdirectory(thirdparty)
+
+
+
 
 # option(ENABLE_UNIT_TESTS ON)
 # if(ENABLE_UNIT_TESTS)
