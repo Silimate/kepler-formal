@@ -27,17 +27,28 @@ include(ExternalProject)
 
 ExternalProject_Add(kissat_external
     SOURCE_DIR ${KISSAT_ROOT}
-    CONFIGURE_COMMAND ./configure 
+    CONFIGURE_COMMAND ./configure
     BUILD_COMMAND make
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
+    BUILD_BYPRODUCTS
+        ${KISSAT_ROOT}/libkissat.a
+        ${KISSAT_ROOT}/build/libkissat.a
 )
 
 add_library(kissat STATIC IMPORTED)
-set_target_properties(kissat PROPERTIES
-    IMPORTED_LOCATION ${KISSAT_ROOT}/build/libkissat.a
-    INTERFACE_INCLUDE_DIRECTORIES ${KISSAT_ROOT}/src
+
+# Let CMake choose whichever exists
+set_property(TARGET kissat PROPERTY IMPORTED_LOCATION
+    ${KISSAT_ROOT}/libkissat.a
 )
+
+# Fallback for local macOS
+if(NOT EXISTS "${KISSAT_ROOT}/libkissat.a")
+    set_property(TARGET kissat PROPERTY IMPORTED_LOCATION
+        ${KISSAT_ROOT}/build/libkissat.a
+    )
+endif()
 
 add_dependencies(kissat kissat_external)
 
