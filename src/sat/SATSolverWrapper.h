@@ -9,25 +9,19 @@
 extern "C" {
   #include "kissat.h"
 }
-#define USE_KISSAT
+
+#include "../config/Config.h"
+
+//#define USE_KISSAT
 
 class SATSolverWrapper {
 public:
-  enum SolverType { GLUCOSE, KISSAT };
 
-  static SolverType selectBackend() {
-  #ifdef USE_KISSAT
-    return KISSAT;
-  #else
-    return GLUCOSE;
-  #endif
-  }
-
-  explicit SATSolverWrapper(SolverType type = GLUCOSE)
+  explicit SATSolverWrapper(KEPLER_FORMAL::Config::SolverType type = KEPLER_FORMAL::Config::SolverType::GLUCOSE)
     : solverType_(type) {
-    if (solverType_ == GLUCOSE) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       glucoseSolver_ = std::make_unique<Glucose::SimpSolver>();
-    } else if (solverType_ == KISSAT) {
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       kissatSolver_ = kissat_init();
       kissatNumVars_ = 0;
     } else {
@@ -36,16 +30,16 @@ public:
   }
 
   ~SATSolverWrapper() {
-    if (solverType_ == KISSAT && kissatSolver_) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT && kissatSolver_) {
       kissat_release(static_cast<kissat*>(kissatSolver_));
     }
   }
 
   // Create a new variable (returns 0-based index)
   int newVar() {
-    if (solverType_ == GLUCOSE) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       return glucoseSolver_->newVar();
-    } else if (solverType_ == KISSAT) {
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       // Kissat does not require explicit variable creation, but we track max var.
       return kissatNumVars_++;
     }
@@ -55,7 +49,7 @@ public:
   // Add a clause, literals are signed ints:
   // external convention: 0=false, 1=true, vars are ±(var_id + 2)
   void addClause(const std::vector<int>& lits) {
-    if (solverType_ == GLUCOSE) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       Glucose::vec<Glucose::Lit> clause;
       for (int lit : lits) {
         if (lit == 0 || lit == 1) {
@@ -72,7 +66,7 @@ public:
         clause.push((lit > 0) ? Glucose::mkLit(var) : ~Glucose::mkLit(var));
       }
       glucoseSolver_->addClause(clause);
-    } else if (solverType_ == KISSAT) {
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       // Kissat expects ±(var+1), 0 terminates a clause.
       for (int lit : lits) {
         if (lit == 0 || lit == 1) {
@@ -95,9 +89,9 @@ public:
   }
 
   bool solve() {
-    if (solverType_ == GLUCOSE) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       return glucoseSolver_->solve();
-    } else if (solverType_ == KISSAT) {
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       int res = kissat_solve(static_cast<kissat*>(kissatSolver_));
       return res == 10; // 10 = SAT, 20 = UNSAT
     }
@@ -105,18 +99,18 @@ public:
   }
 
   void* getSolver() {
-    if (solverType_ == GLUCOSE) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       return glucoseSolver_.get();
-    } else if (solverType_ == KISSAT) {
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       return kissatSolver_;
     }
     return nullptr;
   }
 
-  SolverType getSolverType() const { return solverType_; }
+  KEPLER_FORMAL::Config::SolverType getSolverType() const { return solverType_; }
 
 private:
-  SolverType solverType_;
+  KEPLER_FORMAL::Config::SolverType solverType_;
   std::unique_ptr<Glucose::SimpSolver> glucoseSolver_;
   void* kissatSolver_ = nullptr;
   int kissatNumVars_ = 0;

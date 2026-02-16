@@ -607,7 +607,7 @@ bool MiterStrategy::run() {
   logger->info("Finished building miter expression");
 
   // Now SAT check via Glucose
-  auto backend = SATSolverWrapper::selectBackend();
+  auto backend = KEPLER_FORMAL::Config::getSolverType();
   SATSolverWrapper solver(backend);
 
   // mappings for Tseitin encoding
@@ -664,7 +664,7 @@ bool MiterStrategy::run() {
       std::unordered_map<BoolExpr*, int> singleNode2var;
       std::unordered_map<std::string, int> singleVarName2idx;
       // Tseitin-encode the single miter
-      auto backend = SATSolverWrapper::selectBackend();
+      auto backend = KEPLER_FORMAL::Config::getSolverType();
       SATSolverWrapper singleSolver(backend);
 
       int singleRootVar = tseitinEncode(singleSolver, singleMiter, singleNode2var, singleVarName2idx);

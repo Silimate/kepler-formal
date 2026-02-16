@@ -24,6 +24,7 @@
 #include "SNLVRLDumper.h"
 #include "SNLUtils.h"
 #include "ScopeExtraction.h"
+#include "Config.h"
 
 static void print_usage(const char* prog) {
   std::printf(
@@ -116,6 +117,19 @@ int main(int argc, char** argv) {
           cleanScopes = cfg["clean_scopes"].as<bool>();
         }
 
+        // solver (glucose | kissat)
+        if (cfg["solver"] && cfg["solver"].IsScalar()) {
+          std::string solver = cfg["solver"].as<std::string>();
+          if (solver == "glucose") {
+            KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::GLUCOSE);
+          } else if (solver == "kissat") {
+            KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::KISSAT);
+          } else {
+            SPDLOG_CRITICAL("Unrecognized solver in config: {}", solver);
+            return EXIT_FAILURE;
+          }
+        }
+
         usedConfig = true;
       } catch (const std::exception& e) {
         SPDLOG_CRITICAL("Failed to parse config {}: {}", cfgPath, e.what());
@@ -179,6 +193,9 @@ int main(int argc, char** argv) {
   std::printf("Input format: %s\n", (inputFormatType == FormatType::NAJA_IF) ? "SNL" : "VERILOG");
   std::printf("Netlist 1: %s\n", inputPaths[0].c_str());
   std::printf("Netlist 2: %s\n", inputPaths[1].c_str());
+  auto solverType = KEPLER_FORMAL::Config::getSolverType();
+  std::printf("Solver: %s\n",
+              solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");
   if (!libertyFiles.empty()) {
     for (const auto& lf : libertyFiles) std::printf("Liberty: %s\n", lf.c_str());
   }

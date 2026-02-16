@@ -7,6 +7,7 @@ target_include_directories(kepler-formal PUBLIC ${ARGPARSE_DIR})
 
 target_link_libraries(kepler-formal
   PRIVATE
+    kepler_config
     naja_snl_pyloader
     naja_dnl
     naja_opt

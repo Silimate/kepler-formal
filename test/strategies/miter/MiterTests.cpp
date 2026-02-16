@@ -21,6 +21,8 @@
 #include "SNLCapnP.h"
 #include "DNL.h"
 
+#include "Config.h"
+
 using namespace naja;
 using namespace naja::NL;
 using namespace naja::NAJA_OPT;
@@ -1192,6 +1194,12 @@ TEST_F(MiterTests, tt65In) {
   MiterS.init();
   // Expect throw in run
   EXPECT_THROW(MiterS.run(), std::runtime_error);
+  // set config to glucose
+  KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
+  MiterStrategy MiterGlucose(top, topClone, "MultiDriver");
+  MiterGlucose.init();
+  // Expect throw in run
+  EXPECT_THROW(MiterGlucose.run(), std::runtime_error);
   naja::DNL::destroy();
 }
 
