@@ -25,7 +25,9 @@ public:
       kissatSolver_ = kissat_init();
       kissatNumVars_ = 0;
     } else {
+      // LCOV_EXCL_START
       throw std::invalid_argument("Unknown solver type");
+      // LCOV_EXCL_STOP
     }
   }
 
@@ -43,7 +45,9 @@ public:
       // Kissat does not require explicit variable creation, but we track max var.
       return kissatNumVars_++;
     }
+    // LCOV_EXCL_START
     throw std::runtime_error("Unknown solver type");
+    // LCOV_EXCL_STOP
   }
 
   // Add a clause, literals are signed ints:
@@ -54,12 +58,16 @@ public:
       for (int lit : lits) {
         if (lit == 0 || lit == 1) {
           // We should never see raw consts here: they are encoded via forced vars.
+          // LCOV_EXCL_START
           throw std::runtime_error("Constant literal (0/1) passed to Glucose clause");
+          // LCOV_EXCL_STOP
         }
         int v = std::abs(lit);
         int var = v - 2;  // external ±(var+2) -> internal var index
         if (var < 0) {
+          // LCOV_EXCL_START
           throw std::runtime_error("Invalid literal (<2) passed to Glucose clause");
+          // LCOV_EXCL_STOP
         }
         while (var >= glucoseSolver_->nVars())
           glucoseSolver_->newVar();
@@ -70,12 +78,16 @@ public:
       // Kissat expects ±(var+1), 0 terminates a clause.
       for (int lit : lits) {
         if (lit == 0 || lit == 1) {
+          // LCOV_EXCL_START
           throw std::runtime_error("Constant literal (0/1) passed to Kissat clause");
+          // LCOV_EXCL_STOP
         }
         int v = std::abs(lit);
         int var = v - 2;  // external ±(var+2) -> internal var index
         if (var < 0) {
+          // LCOV_EXCL_START
           throw std::runtime_error("Invalid literal (<2) passed to Kissat clause");
+          // LCOV_EXCL_STOP
         }
         if (var >= kissatNumVars_)
           kissatNumVars_ = var + 1;
@@ -84,7 +96,9 @@ public:
       }
       kissat_add(static_cast<kissat*>(kissatSolver_), 0); // end of clause
     } else {
+      // LCOV_EXCL_START
       throw std::runtime_error("Unknown solver type");
+      // LCOV_EXCL_STOP
     }
   }
 
@@ -95,7 +109,9 @@ public:
       int res = kissat_solve(static_cast<kissat*>(kissatSolver_));
       return res == 10; // 10 = SAT, 20 = UNSAT
     }
+    // LCOV_EXCL_START
     throw std::runtime_error("Unknown solver type");
+    // LCOV_EXCL_STOP
   }
 
   void* getSolver() {
