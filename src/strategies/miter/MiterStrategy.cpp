@@ -18,6 +18,7 @@
 #include "SNLEquipotential.h"
 #include "SNLLogicCone.h"
 #include "SNLPath.h"
+#include "../sat/SATSolverWrapper.h"
 
 // For executeCommand
 #include <cstdlib>
@@ -154,123 +155,135 @@ void ensureLoggerInitialized() {
 // varName2idx   coalesces all inputs of the same name to one var.
 //
 
-Glucose::Lit tseitinEncode(
-    Glucose::SimpSolver& S,
+// Tseitin encoding for SATSolverWrapper (Kissat-friendly)
+// Converts a BoolExpr into CNF clauses added to the solver.
+// Returns the integer variable representing the root of the expression.
+
+// Tseitin encoding for SATSolverWrapper (Kissat/Glucose-friendly)
+// Converts a BoolExpr into CNF clauses added to the solver.
+// Returns the *literal* (±(var_id+1)) representing the root of the expression.
+int tseitinEncode(
+    SATSolverWrapper& solver,
     BoolExpr* root,
     std::unordered_map<BoolExpr*, int>& node2var,
     std::unordered_map<std::string, int>& varName2idx) {
+
   ensureLoggerInitialized();
   logger->debug("Starting Tseitin encode for root expr");
 
+  // Returns internal 0-based var index
   auto getOrCreateVar = [&](const std::string& key) -> int {
     auto it = varName2idx.find(key);
     if (it != varName2idx.end())
       return it->second;
-    int v = S.newVar();
+    int v = solver.newVar(); // 0-based
     varName2idx[key] = v;
     logger->trace("Created new var {} for key '{}'", v, key);
     return v;
   };
 
-  auto constLit = [&](bool value) -> Glucose::Lit {
+  // Returns external literal (±(var+2)) for a constant
+  auto constVar = [&](bool value) -> int {
     const std::string key = value ? "$__CONST_TRUE__" : "$__CONST_FALSE__";
-    int v = getOrCreateVar(key);
-    Glucose::Lit lv = Glucose::mkLit(v);
-    S.addClause(value ? lv : ~lv);
-    logger->trace("Added constant clause for {} as var {}", value, v);
-    return lv;
+    int v = getOrCreateVar(key);   // 0-based var index
+    int lit = v + 2;               // external literal
+    // Force this var to the given polarity
+    solver.addClause(value ? std::vector<int>{ lit } : std::vector<int>{ -lit });
+    logger->trace("Added constant clause for {} as var {} (lit {})", value, v, lit);
+    return lit;
   };
 
   struct Frame {
     BoolExpr* expr;
     bool visited = false;
-    Glucose::Lit leftLit, rightLit;
+    int leftLit = 0, rightLit = 0; // external literals (±(var+2))
   };
 
   std::stack<Frame> stk;
-  stk.push({root, false, {}, {}});
-  std::unordered_map<BoolExpr*, Glucose::Lit> result;
+  stk.push({root, false, 0, 0});
+  std::unordered_map<BoolExpr*, int> result; // node -> external literal
 
   while (!stk.empty()) {
     Frame& fr = stk.top();
     BoolExpr* e = fr.expr;
 
-    // If already encoded, reuse
+    // Already encoded
     if (node2var.count(e)) {
-      result[e] = Glucose::mkLit(node2var[e]);
+      result[e] = node2var[e];
       stk.pop();
       continue;
     }
 
     // Leaf VAR or CONST
     if (!fr.visited && e->getOp() == Op::VAR) {
+      int lit;
       const std::string& name = e->getName();
-      Glucose::Lit lit;
-      if (name == "0" || name == "false" || name == "False" || name == "FALSE")
-        lit = constLit(false);
-      else if (name == "1" || name == "true" || name == "True" ||
-               name == "TRUE")
-        lit = constLit(true);
-      else {
-        int v = getOrCreateVar(name);
-        lit = Glucose::mkLit(v);
+      if (name == "0" || name == "false" || name == "False" || name == "FALSE") {
+        lit = constVar(false);
+      } else if (name == "1" || name == "true" || name == "True" || name == "TRUE") {
+        lit = constVar(true);
+      } else {
+        int v = getOrCreateVar(name); // 0-based var index
+        lit = v + 2;                  // external literal
       }
-      node2var[e] = Glucose::var(lit);
+      node2var[e] = lit;
       result[e] = lit;
       stk.pop();
       continue;
     }
 
-    // First time we see this node, push children
+    // First visit -> push children
     if (!fr.visited) {
       fr.visited = true;
-      if (e->getRight())
-        stk.push({e->getRight(), false, {}, {}});
-      if (e->getLeft())
-        stk.push({e->getLeft(), false, {}, {}});
+      if (e->getRight()) stk.push({e->getRight(), false, 0, 0});
+      if (e->getLeft())  stk.push({e->getLeft(),  false, 0, 0});
       continue;
     }
 
-    // Children have been processed; retrieve their lits
-    if (e->getLeft())
-      fr.leftLit = result[e->getLeft()];
-    if (e->getRight())
-      fr.rightLit = result[e->getRight()];
+    // Children processed
+    if (e->getLeft())  fr.leftLit  = result[e->getLeft()];
+    if (e->getRight()) fr.rightLit = result[e->getRight()];
 
-    // Create fresh var for this gate
-    int v = S.newVar();
-    Glucose::Lit lit_v = Glucose::mkLit(v);
-    node2var[e] = v;
-    result[e] = lit_v;
+    // Fresh var for this node
+    int v = solver.newVar();   // 0-based var index
+    int lit = v + 2;           // external literal
+    node2var[e] = lit;
+    result[e]   = lit;
 
-    logger->trace("Encoding node op={} as var {}", static_cast<int>(e->getOp()),
-                  v);
+    logger->trace("Encoding node op={} as var {} (lit {})",
+                  static_cast<int>(e->getOp()), v, lit);
 
-    // Emit Tseitin clauses
     switch (e->getOp()) {
       case Op::NOT:
-        S.addClause(~lit_v, ~fr.leftLit);
-        S.addClause(lit_v, fr.leftLit);
+        // lit ↔ ¬L  -> (-lit -L) & (lit L)
+        solver.addClause({-lit, -fr.leftLit});
+        solver.addClause({ lit,  fr.leftLit});
         break;
+
       case Op::AND:
-        S.addClause(~lit_v, fr.leftLit);
-        S.addClause(~lit_v, fr.rightLit);
-        S.addClause(lit_v, ~fr.leftLit, ~fr.rightLit);
+        // lit ↔ L ∧ R  -> (-lit L) & (-lit R) & (lit -L -R)
+        solver.addClause({-lit, fr.leftLit});
+        solver.addClause({-lit, fr.rightLit});
+        solver.addClause({ lit, -fr.leftLit, -fr.rightLit});
         break;
+
       case Op::OR:
-        S.addClause(~fr.leftLit, lit_v);
-        S.addClause(~fr.rightLit, lit_v);
-        S.addClause(~lit_v, fr.leftLit, fr.rightLit);
+        // lit ↔ L ∨ R  -> (-L lit) & (-R lit) & (-lit L R)
+        solver.addClause({-fr.leftLit,  lit});
+        solver.addClause({-fr.rightLit, lit});
+        solver.addClause({-lit,         fr.leftLit, fr.rightLit});
         break;
+
       case Op::XOR:
-        S.addClause(~lit_v, ~fr.leftLit, ~fr.rightLit);
-        S.addClause(~lit_v, fr.leftLit, fr.rightLit);
-        S.addClause(lit_v, ~fr.leftLit, fr.rightLit);
-        S.addClause(lit_v, fr.leftLit, ~fr.rightLit);
+        // lit ↔ L xor R
+        solver.addClause({-lit, -fr.leftLit, -fr.rightLit});
+        solver.addClause({-lit,  fr.leftLit,  fr.rightLit});
+        solver.addClause({ lit, -fr.leftLit,  fr.rightLit});
+        solver.addClause({ lit,  fr.leftLit, -fr.rightLit});
         break;
+
       default:
-        logger->warn("Unhandled operator in tseitinEncode: {}",
-                     static_cast<int>(e->getOp()));
+        logger->warn("Unhandled operator in tseitinEncode: {}", static_cast<int>(e->getOp()));
         break;
     }
 
@@ -278,8 +291,10 @@ Glucose::Lit tseitinEncode(
   }
 
   logger->debug("Finished Tseitin encode");
-  return result.at(root);
+  return result[root]; // external literal for root (±(var+2))
 }
+
+
 
 }  // namespace
 
@@ -592,17 +607,16 @@ bool MiterStrategy::run() {
   logger->info("Finished building miter expression");
 
   // Now SAT check via Glucose
-  Glucose::SimpSolver solver;
+  auto backend = KEPLER_FORMAL::Config::getSolverType();
+  SATSolverWrapper solver(backend);
 
   // mappings for Tseitin encoding
   std::unordered_map<BoolExpr*, int> node2var;
   std::unordered_map<std::string, int> varName2idx;
 
   // Tseitin-encode & get the literal for the root
-  Glucose::Lit rootLit = tseitinEncode(solver, miter, node2var, varName2idx);
-
-  // Assert root == true
-  solver.addClause(rootLit);
+  int rootVar = tseitinEncode(solver, miter, node2var, varName2idx);
+  solver.addClause({rootVar});
 
   // solve with no assumptions
   logger->info("Started Glucose solving");
@@ -650,11 +664,12 @@ bool MiterStrategy::run() {
       std::unordered_map<BoolExpr*, int> singleNode2var;
       std::unordered_map<std::string, int> singleVarName2idx;
       // Tseitin-encode the single miter
-      Glucose::SimpSolver singleSolver;
-      Glucose::Lit singleRootLit = tseitinEncode(
-          singleSolver, singleMiter, singleNode2var, singleVarName2idx);
+      auto backend = KEPLER_FORMAL::Config::getSolverType();
+      SATSolverWrapper singleSolver(backend);
 
-      singleSolver.addClause(singleRootLit);
+      int singleRootVar = tseitinEncode(singleSolver, singleMiter, singleNode2var, singleVarName2idx);
+      singleSolver.addClause({singleRootVar});
+
       if (singleSolver.solve()) {
         bool unSupportedVar = false;
         const auto&varSupportA = POs0[i]->getSupportVars();

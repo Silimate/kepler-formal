@@ -7,6 +7,7 @@ cmake_minimum_required(VERSION 3.21)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE INTERNAL
     "Allow parsing of subprojects that require CMake < 3.5")
 
+set(KISSAT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/kissat)
 set(GLUCOSE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/glucose)
 set(NAJA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/naja)
 
@@ -20,6 +21,36 @@ project(kepler-formal
 set(ARGPARSE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/naja/thirdparty/argparse-3.1/include)
 
 set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard" FORCE)
+
+include(ExternalProject)
+
+
+ExternalProject_Add(kissat_external
+    SOURCE_DIR ${KISSAT_ROOT}
+    CONFIGURE_COMMAND ./configure --ultimate
+    BUILD_COMMAND make
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_BYPRODUCTS
+        ${KISSAT_ROOT}/libkissat.a
+        ${KISSAT_ROOT}/build/libkissat.a
+)
+
+add_library(kissat STATIC IMPORTED)
+
+# Let CMake choose whichever exists
+set_property(TARGET kissat PROPERTY IMPORTED_LOCATION
+    ${KISSAT_ROOT}/libkissat.a
+)
+
+# Fallback for local macOS
+if(NOT EXISTS "${KISSAT_ROOT}/libkissat.a")
+    set_property(TARGET kissat PROPERTY IMPORTED_LOCATION
+        ${KISSAT_ROOT}/build/libkissat.a
+    )
+endif()
+
+add_dependencies(kissat kissat_external)
 
 add_subdirectory(src)
 add_subdirectory(thirdparty)

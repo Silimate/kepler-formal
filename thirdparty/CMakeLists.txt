@@ -4,4 +4,5 @@
 add_subdirectory(naja)
 add_subdirectory(glucose)
 add_subdirectory(yaml-cpp)
+#add_subdirectory(kissat)
 #add_subdirectory(cpptrace EXCLUDE_FROM_ALL)

@@ -17,6 +17,7 @@ include_directories(${GTEST_INCLUDE_DIRS})
 add_executable(miterTests MiterTests.cpp)
 
 target_link_libraries(miterTests
+    kepler_config
     naja_nl
     ${GTEST_LIBRARIES}
     naja_opt

@@ -21,6 +21,8 @@
 #include "SNLCapnP.h"
 #include "DNL.h"
 
+#include "Config.h"
+
 using namespace naja;
 using namespace naja::NL;
 using namespace naja::NAJA_OPT;
@@ -627,6 +629,15 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
     EXPECT_TRUE(MiterS.run());
   }
   {
+    KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
+    // print current solver type
+    MiterStrategy MiterGlucose(top, topClone, "MultiDriver");
+    MiterGlucose.init();
+    // Expect throw in run
+    EXPECT_TRUE(MiterGlucose.run());
+    KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  }
+  {
     // dump top to naja_if(CapProto)
     std::filesystem::path outputPath("./topEdited2.capnp");
     SNLCapnP::dump(db, outputPath);
@@ -1192,7 +1203,6 @@ TEST_F(MiterTests, tt65In) {
   MiterS.init();
   // Expect throw in run
   EXPECT_THROW(MiterS.run(), std::runtime_error);
-  naja::DNL::destroy();
 }
 
 TEST(KeplerCliSubprocessTests, ExampleTestRun) {
