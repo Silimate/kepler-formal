@@ -27,7 +27,7 @@ include(ExternalProject)
 
 ExternalProject_Add(kissat_external
     SOURCE_DIR ${KISSAT_ROOT}
-    CONFIGURE_COMMAND ./configure
+    CONFIGURE_COMMAND ./configure --ultimate
     BUILD_COMMAND make
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
