@@ -47,3 +47,4 @@ jobs:
       env:
         PYTHONMALLOC: malloc
       run: ctest -VV -E ".*[p|P]ython.*" -C ${{ env.BUILD_TYPE }}
+      
