@@ -1209,11 +1209,7 @@ TEST(KeplerCliSubprocessTests, ExampleTestRun) {
   std::filesystem::path p(KEPLER_BIN);
   if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
 
-  int rc = run_kepler_cli_with_args({"-verilog", "../../../../example/tinyrocket.v", "../../../../example/tinyrocket_edited.v", 
-                                         "../../../../example/NangateOpenCellLibrary_typical.lib",
-                                         "../../../../example/fakeram45_64x15.lib",
-                                         "../../../../example/fakeram45_64x32.lib",
-                                         "../../../../example/fakeram45_1024x32.lib"});
+  int rc = run_kepler_cli_with_args({"-config", "../../../../example/test_config_verilog.yaml"});
   EXPECT_EQ(rc, EXIT_SUCCESS);
 }
 
@@ -1223,6 +1219,15 @@ TEST(KeplerCliSubprocessTests, ExampleTestRunNajaIFWithScopeExtraction) {
 
   int rc = run_kepler_cli_with_args({"--config", "../../../../test/strategies/miter/test_config_naja_if_with_se.yaml"});
   EXPECT_EQ(rc, EXIT_SUCCESS);
+}
+
+// test failure with ../../../../test/strategies/miter/test_config_failure.yaml
+TEST(KeplerCliSubprocessTests, ExampleTestRunFailure) {
+  std::filesystem::path p(KEPLER_BIN);
+  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+
+  int rc = run_kepler_cli_with_args({"--config", "../../../../test/strategies/miter/test_config_failure.yaml"});
+  EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
 
