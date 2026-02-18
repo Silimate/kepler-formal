@@ -1,5 +1,6 @@
-# tinyrocket_config.yaml
-format: verilog
+# Copyright 2024-2025 keplertech.io
+# SPDX-License-Identifier: GPL-3.0-only
+# tinyrocket_config.yamlformat: verilog
 input_paths:
   - ../../../../example/tinyrocket.v
   - ../../../../example/tinyrocket_edited.v
