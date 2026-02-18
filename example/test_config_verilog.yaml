@@ -7,6 +7,6 @@ liberty_files:
   - NangateOpenCellLibrary_typical.lib
   - fakeram45_1024x32.lib
   - fakeram45_64x32.lib
+  - fakeram45_64x15.lib
 log_level: info
 solver: kissat
-
