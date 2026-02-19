@@ -27,9 +27,9 @@
 #include "Config.h"
 
 static void print_usage(const char* prog) {
-  std::printf(
-      "Usage: %s [--config <file>] | <-naja_if/-verilog> <netlist1> <netlist2> "
-      "[<liberty-file>...]\n",
+  SPDLOG_INFO(
+      "Usage: {} [--config <file>] | <-naja_if/-verilog> <netlist1> <netlist2> "
+      "[<liberty-file>...]",
       prog);
 }
 
@@ -189,125 +189,132 @@ int main(int argc, char** argv) {
   else
     spdlog::set_level(spdlog::level::info);
 
-  std::printf("KEPLER FORMAL: Run.\n");
-  std::printf("Input format: %s\n", (inputFormatType == FormatType::NAJA_IF) ? "SNL" : "VERILOG");
-  std::printf("Netlist 1: %s\n", inputPaths[0].c_str());
-  std::printf("Netlist 2: %s\n", inputPaths[1].c_str());
+  SPDLOG_INFO("KEPLER FORMAL: Run.");
+  SPDLOG_INFO("Input format: {}", (inputFormatType == FormatType::NAJA_IF) ? "SNL" : "VERILOG");
+  SPDLOG_INFO("Netlist 1: {}", inputPaths[0]);
+  SPDLOG_INFO("Netlist 2: {}", inputPaths[1]);
   auto solverType = KEPLER_FORMAL::Config::getSolverType();
-  std::printf("Solver: %s\n",
+  SPDLOG_INFO("Solver: {}",
               solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");
   if (!libertyFiles.empty()) {
-    for (const auto& lf : libertyFiles) std::printf("Liberty: %s\n", lf.c_str());
+    for (const auto& lf : libertyFiles) SPDLOG_INFO("Liberty: {}", lf);
   }
 
   // --------------------------------------------------------------------------
   // 2. Load two netlists via Cap’n Proto (or via VRL constructor)
   // --------------------------------------------------------------------------
-  NLUniverse::create();
-  NLDB* db0 = nullptr;
-  bool primitivesAreLoaded = false;
+  naja::NL::SNLDesign* top0 = nullptr;
+  naja::NL::SNLDesign* top1 = nullptr;
+  try {
+    NLUniverse::create();
+    NLDB* db0 = nullptr;
+    bool primitivesAreLoaded = false;
 
-  if (!libertyFiles.empty()) {
-    db0 = NLDB::create(NLUniverse::get());
-    auto primitivesLibrary =
-        NLLibrary::create(db0, NLLibrary::Type::Primitives, NLName("PRIMS"));
-    SNLLibertyConstructor constructor(primitivesLibrary);
-    for (const auto& lf : libertyFiles) {
-      std::printf("Loading liberty file: %s\n", lf.c_str());
-      constructor.construct(lf.c_str());
+    if (!libertyFiles.empty()) {
+      db0 = NLDB::create(NLUniverse::get());
+      auto primitivesLibrary =
+          NLLibrary::create(db0, NLLibrary::Type::Primitives, NLName("PRIMS"));
+      SNLLibertyConstructor constructor(primitivesLibrary);
+      for (const auto& lf : libertyFiles) {
+        SPDLOG_INFO("Loading liberty file: {}", lf);
+        constructor.construct(lf.c_str());
+      }
+      primitivesAreLoaded = true;
     }
-    primitivesAreLoaded = true;
-  }
 
-  if (inputFormatType == FormatType::VERILOG) {
-    printf("Parsing verilog file: %s\n", inputPaths[0].c_str());
-    auto designLibrary = NLLibrary::create(db0, NLName("DESIGN"));
-    SNLVRLConstructor constructor(designLibrary);
-    constructor.construct(inputPaths[0].c_str());
-    auto top = SNLUtils::findTop(designLibrary);
-    if (top) {
-      db0->setTopDesign(top);
-      SPDLOG_INFO("Found top design: {}", top->getString());
-    } else {
+    if (inputFormatType == FormatType::VERILOG) {
+      SPDLOG_INFO("Parsing verilog file: {}", inputPaths[0]);
+      auto designLibrary = NLLibrary::create(db0, NLName("DESIGN"));
+      SNLVRLConstructor constructor(designLibrary);
+      constructor.construct(inputPaths[0].c_str());
+      auto top = SNLUtils::findTop(designLibrary);
+      if (top) {
+        db0->setTopDesign(top);
+        SPDLOG_INFO("Found top design: {}", top->getString());
+      } else {
+        // LCOV_EXCL_START
+        SPDLOG_CRITICAL("No top design was found after parsing verilog");
+        return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
+      }
+    } else {  // SNL
+      SPDLOG_INFO("Loading Naja IF: {}", inputPaths[0]);
+      naja::NL::SNLCapnP::LoadingConfiguration config;
+      config.primitiveConflictPolicy_ = primitivesAreLoaded ? naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::PreferExisting :
+                                                              naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
+      db0 = SNLCapnP::load(inputPaths[0].c_str(), config);
+      if (!db0) {
+        // LCOV_EXCL_START
+        SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[0]);
+        return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
+      }
+    }
+
+    // get db0 top
+    top0 = db0->getTopDesign();
+    if (!top0) {
       // LCOV_EXCL_START
-      SPDLOG_CRITICAL("No top design was found after parsing verilog");
+      SPDLOG_CRITICAL("Top design not set for first netlist");
       return EXIT_FAILURE;
       // LCOV_EXCL_STOP
     }
-  } else {  // SNL
-    std::printf("Loading Naja IF: %s\n", inputPaths[0].c_str());
-    naja::NL::SNLCapnP::LoadingConfiguration config;
-    config.primitiveConflictPolicy_ = primitivesAreLoaded ? naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::PreferExisting :
-                                                            naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
-    db0 = SNLCapnP::load(inputPaths[0].c_str(), config);
-    if (!db0) {
+    db0->setID(2);  // Increment ID to avoid conflicts
+
+    NLDB* db1 = nullptr;
+
+    // Prepare second DB and primitives if needed
+    if (!libertyFiles.empty()) {
+      db1 = NLDB::create(NLUniverse::get());
+      db1->setID(1);
+      auto primitivesLibrary =
+          NLLibrary::create(db1, NLLibrary::Type::Primitives, NLName("PRIMS"));
+      SNLLibertyConstructor constructor(primitivesLibrary);
+      for (const auto& lf : libertyFiles) {
+        constructor.construct(lf.c_str());
+      }
+    }
+
+    if (inputFormatType == FormatType::VERILOG) {
+      SPDLOG_INFO("Parsing verilog file: {}", inputPaths[1]);
+      auto designLibrary = NLLibrary::create(db1, NLName("DESIGN"));
+      SNLVRLConstructor constructor(designLibrary);
+      constructor.construct(inputPaths[1].c_str());
+      auto top = SNLUtils::findTop(designLibrary);
+      if (top) {
+        db1->setTopDesign(top);
+        SPDLOG_INFO("Found top design: {}", top->getString());
+      } else {
+        // LCOV_EXCL_START
+        SPDLOG_CRITICAL("No top design was found after parsing verilog");
+        return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
+      }
+    } else {  // SNL
+      SPDLOG_INFO("Loading Naja IF: {}", inputPaths[1]);
+      naja::NL::SNLCapnP::LoadingConfiguration config;
+      config.primitiveConflictPolicy_ = primitivesAreLoaded ? naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::PreferExisting :
+                                                              naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
+      db1 = SNLCapnP::load(inputPaths[1].c_str(), config);
+      if (!db1) {
+        // LCOV_EXCL_START
+        SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[1]);
+        return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
+      }
+    }
+
+    // get db1 top
+    top1 = db1->getTopDesign();
+    if (!top1) {
       // LCOV_EXCL_START
-      SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[0]);
+      SPDLOG_CRITICAL("Top design not set for second netlist");
       return EXIT_FAILURE;
       // LCOV_EXCL_STOP
     }
-  }
-
-  // get db0 top
-  auto top0 = db0->getTopDesign();
-  if (!top0) {
-    // LCOV_EXCL_START
-    SPDLOG_CRITICAL("Top design not set for first netlist");
+  } catch (const std::exception& e) {
+    SPDLOG_CRITICAL("Netlist loading failed: {}", e.what());
     return EXIT_FAILURE;
-    // LCOV_EXCL_STOP
-  }
-  db0->setID(2);  // Increment ID to avoid conflicts
-
-  NLDB* db1 = nullptr;
-
-  // Prepare second DB and primitives if needed
-  if (!libertyFiles.empty()) {
-    db1 = NLDB::create(NLUniverse::get());
-    db1->setID(1);
-    auto primitivesLibrary =
-        NLLibrary::create(db1, NLLibrary::Type::Primitives, NLName("PRIMS"));
-    SNLLibertyConstructor constructor(primitivesLibrary);
-    for (const auto& lf : libertyFiles) {
-      constructor.construct(lf.c_str());
-    }
-  }
-
-  if (inputFormatType == FormatType::VERILOG) {
-    printf("Parsing verilog file: %s\n", inputPaths[1].c_str());
-    auto designLibrary = NLLibrary::create(db1, NLName("DESIGN"));
-    SNLVRLConstructor constructor(designLibrary);
-    constructor.construct(inputPaths[1].c_str());
-    auto top = SNLUtils::findTop(designLibrary);
-    if (top) {
-      db1->setTopDesign(top);
-      SPDLOG_INFO("Found top design: {}", top->getString());
-    } else {
-      // LCOV_EXCL_START
-      SPDLOG_CRITICAL("No top design was found after parsing verilog");
-      return EXIT_FAILURE;
-      // LCOV_EXCL_STOP
-    }
-  } else {  // SNL
-    std::printf("Loading Naja IF: %s\n", inputPaths[1].c_str());
-    naja::NL::SNLCapnP::LoadingConfiguration config;
-    config.primitiveConflictPolicy_ = primitivesAreLoaded ? naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::PreferExisting :
-                                                            naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
-    db1 = SNLCapnP::load(inputPaths[1].c_str(), config);
-    if (!db1) {
-      // LCOV_EXCL_START
-      SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[1]);
-      return EXIT_FAILURE;
-      // LCOV_EXCL_STOP
-    }
-  }
-
-  // get db1 top
-  auto top1 = db1->getTopDesign();
-  if (!top1) {
-    // LCOV_EXCL_START
-    SPDLOG_CRITICAL("Top design not set for second netlist");
-    return EXIT_FAILURE;
-    // LCOV_EXCL_STOP
   }
 
   // --------------------------------------------------------------------------
