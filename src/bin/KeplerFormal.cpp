@@ -173,15 +173,6 @@ int main(int argc, char** argv) {
           cleanScopes = cfg["clean_scopes"].as<bool>();
         }
 
-        if (cfg["dump_cnf"]) {
-          SPDLOG_CRITICAL("Config option 'dump_cnf' is no longer supported. Use 'cnf_export' instead.");
-          return EXIT_FAILURE;
-        }
-        if (cfg["dump_cnf_path"]) {
-          SPDLOG_CRITICAL("Config option 'dump_cnf_path' is no longer supported. Use 'cnf_export_path' instead.");
-          return EXIT_FAILURE;
-        }
-
         // cnf_export
         if (cfg["cnf_export"] && cfg["cnf_export"].IsScalar()) {
           dumpCnf = cfg["cnf_export"].as<bool>();
