@@ -773,6 +773,22 @@ TEST(KeplerCliSubprocessTests, ConfigUnrecognizedFormatReturnsFailure) {
   std::filesystem::remove(tmp);
 }
 
+TEST(KeplerCliSubprocessTests, ConfigUnknownKeyReturnsFailure) {
+  std::filesystem::path p(KEPLER_BIN);
+  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  std::filesystem::path tmp = std::filesystem::temp_directory_path() / "kepler_test_unknown_key.yaml";
+  {
+    std::ofstream ofs(tmp);
+    ofs << "format: verilog\n";
+    ofs << "input_paths:\n  - a\n  - b\n";
+    ofs << "cnf: true\n";
+    ofs.close();
+  }
+  int rc = run_kepler_cli_with_args({"--config", tmp.string()});
+  EXPECT_NE(rc, EXIT_SUCCESS);
+  std::filesystem::remove(tmp);
+}
+
 TEST(KeplerCliSubprocessTests, ConfigSnlFormatLoadFailureReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
   if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";

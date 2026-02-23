@@ -7,6 +7,7 @@
 #include "NLUniverse.h"
 #include "SNLDesignModeling.h"
 #include "SNLLogicCloud.h"
+#include "BoolExprCnfWriter.h"
 
 // include Glucose headers (adjust path to your checkout)
 #include "core/Solver.h"
@@ -298,12 +299,17 @@ int tseitinEncode(
 
 }  // namespace
 
- MiterStrategy::MiterStrategy(naja::NL::SNLDesign* top0, naja::NL::SNLDesign* top1, const std::string& logFileName, const std::string& prefix)
+  MiterStrategy::MiterStrategy(naja::NL::SNLDesign* top0, naja::NL::SNLDesign* top1, const std::string& logFileName, const std::string& prefix)
       : prefix_(prefix) {
     top0_ = top0;
     top1_ = top1;
     logFileName_ = logFileName;
   }
+
+void MiterStrategy::setCnfDump(bool enabled, const std::string& path) {
+  dumpCnf_ = enabled;
+  dumpCnfPath_ = path;
+}
 
 size_t MiterStrategy::normalizeInputs(
     std::vector<naja::DNL::DNLID>& inputs0,
@@ -605,6 +611,17 @@ bool MiterStrategy::run() {
   logger->info("Building miter expression");
   auto miter = buildMiter(POs0, POs1);
   logger->info("Finished building miter expression");
+
+  if (dumpCnf_) {
+    const std::string outPath = dumpCnfPath_.empty() ? "miter.cnf" : dumpCnfPath_;
+    if (dumpBoolExprToDimacs(miter, outPath)) {
+      logger->info("Dumped miter CNF to {}", outPath);
+    } else {
+      // LCOV_EXCL_START
+      logger->warn("Failed to dump miter CNF to {}", outPath);
+      // LCOV_EXCL_STOP
+    }
+  }
 
   // Now SAT check via Glucose
   auto backend = KEPLER_FORMAL::Config::getSolverType();

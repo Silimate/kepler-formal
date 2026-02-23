@@ -7,6 +7,8 @@
 #include <vector>
 #include <iostream>
 #include <optional>
+#include <cctype>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -43,6 +45,55 @@ static std::vector<std::string> yamlToVector(const YAML::Node& node) {
   return out;
 }
 
+static bool validateConfigKeys(const YAML::Node& cfg) {
+  if (!cfg || !cfg.IsMap()) {
+    return true;
+  }
+  static const std::unordered_set<std::string> kAllowedKeys = {
+      "format",
+      "input_paths",
+      "liberty_files",
+      "log_level",
+      "log_file",
+      "use_scopes",
+      "clean_scopes",
+      "cnf_export",
+      "cnf_export_path",
+      "dump_cnf",
+      "dump_cnf_path",
+      "solver",
+  };
+
+  for (auto it = cfg.begin(); it != cfg.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      SPDLOG_CRITICAL("Config key is not a scalar; invalid YAML key");
+      return false;
+    }
+    const std::string key = it->first.as<std::string>();
+    if (kAllowedKeys.find(key) == kAllowedKeys.end()) {
+      SPDLOG_CRITICAL("Unknown config option: {}", key);
+      return false;
+    }
+  }
+  return true;
+}
+
+static std::string sanitizeFileToken(const std::string& input) {
+  std::string out;
+  out.reserve(input.size());
+  for (unsigned char ch : input) {
+    if (std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.') {
+      out.push_back(static_cast<char>(ch));
+    } else {
+      out.push_back('_');
+    }
+  }
+  if (out.empty()) {
+    out = "scope";
+  }
+  return out;
+}
+
 int main(int argc, char** argv) {
   using namespace std::chrono;
   enum class FormatType { VERILOG, NAJA_IF };
@@ -66,6 +117,8 @@ int main(int argc, char** argv) {
 
   bool useScopes = false;
   bool cleanScopes = false;
+  bool dumpCnf = false;
+  std::string dumpCnfPath;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -77,6 +130,9 @@ int main(int argc, char** argv) {
       const std::string cfgPath = argv[i + 1];
       try {
         YAML::Node cfg = YAML::LoadFile(cfgPath);
+        if (!validateConfigKeys(cfg)) {
+          return EXIT_FAILURE;
+        }
 
         // format
         if (cfg["format"] && cfg["format"].IsScalar()) {
@@ -115,6 +171,16 @@ int main(int argc, char** argv) {
         // clean_scopes
         if (cfg["clean_scopes"] && cfg["clean_scopes"].IsScalar()) {
           cleanScopes = cfg["clean_scopes"].as<bool>();
+        }
+
+        // cnf_export
+        if (cfg["cnf_export"] && cfg["cnf_export"].IsScalar()) {
+          dumpCnf = cfg["cnf_export"].as<bool>();
+        }
+
+        // cnf_export_path (optional)
+        if (cfg["cnf_export_path"] && cfg["cnf_export_path"].IsScalar()) {
+          dumpCnfPath = cfg["cnf_export_path"].as<std::string>();
         }
 
         // solver (glucose | kissat)
@@ -335,6 +401,13 @@ int main(int argc, char** argv) {
       //                           scopes.first->getName().getString() + ".txt";
       try {
         KEPLER_FORMAL::MiterStrategy MiterScope(scopes.first, scopes.second, logFileName);
+        if (dumpCnf) {
+          std::string scopeName = sanitizeFileToken(scopes.first->getName().getString());
+          std::string outPath = dumpCnfPath.empty()
+                                    ? ("miter_" + scopeName + ".cnf")
+                                    : dumpCnfPath;
+          MiterScope.setCnfDump(true, outPath);
+        }
         MiterScope.init();
         if (MiterScope.run()) {
           SPDLOG_INFO("No difference was found for scope: {} , {}",
@@ -358,6 +431,10 @@ int main(int argc, char** argv) {
   } else {
     try {
       KEPLER_FORMAL::MiterStrategy MiterS(top0, top1, logFileName);
+      if (dumpCnf) {
+        const std::string outPath = dumpCnfPath.empty() ? "miter.cnf" : dumpCnfPath;
+        MiterS.setCnfDump(true, outPath);
+      }
       MiterS.init();
       if (MiterS.run()) {
         SPDLOG_INFO("No difference was found.");

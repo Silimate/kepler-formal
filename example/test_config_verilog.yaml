@@ -10,3 +10,5 @@ liberty_files:
   - fakeram45_64x15.lib
 log_level: info
 solver: kissat
+cnf_export: true
+cnf_export_path: ./sat.cnf
