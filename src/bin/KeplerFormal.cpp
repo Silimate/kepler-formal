@@ -7,6 +7,7 @@
 #include <vector>
 #include <iostream>
 #include <optional>
+#include <cctype>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -43,6 +44,22 @@ static std::vector<std::string> yamlToVector(const YAML::Node& node) {
   return out;
 }
 
+static std::string sanitizeFileToken(const std::string& input) {
+  std::string out;
+  out.reserve(input.size());
+  for (unsigned char ch : input) {
+    if (std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.') {
+      out.push_back(static_cast<char>(ch));
+    } else {
+      out.push_back('_');
+    }
+  }
+  if (out.empty()) {
+    out = "scope";
+  }
+  return out;
+}
+
 int main(int argc, char** argv) {
   using namespace std::chrono;
   enum class FormatType { VERILOG, NAJA_IF };
@@ -66,6 +83,8 @@ int main(int argc, char** argv) {
 
   bool useScopes = false;
   bool cleanScopes = false;
+  bool dumpCnf = false;
+  std::string dumpCnfPath;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -115,6 +134,16 @@ int main(int argc, char** argv) {
         // clean_scopes
         if (cfg["clean_scopes"] && cfg["clean_scopes"].IsScalar()) {
           cleanScopes = cfg["clean_scopes"].as<bool>();
+        }
+
+        // dump_cnf
+        if (cfg["dump_cnf"] && cfg["dump_cnf"].IsScalar()) {
+          dumpCnf = cfg["dump_cnf"].as<bool>();
+        }
+
+        // dump_cnf_path (optional)
+        if (cfg["dump_cnf_path"] && cfg["dump_cnf_path"].IsScalar()) {
+          dumpCnfPath = cfg["dump_cnf_path"].as<std::string>();
         }
 
         // solver (glucose | kissat)
@@ -335,6 +364,13 @@ int main(int argc, char** argv) {
       //                           scopes.first->getName().getString() + ".txt";
       try {
         KEPLER_FORMAL::MiterStrategy MiterScope(scopes.first, scopes.second, logFileName);
+        if (dumpCnf) {
+          std::string scopeName = sanitizeFileToken(scopes.first->getName().getString());
+          std::string outPath = dumpCnfPath.empty()
+                                    ? ("miter_" + scopeName + ".cnf")
+                                    : dumpCnfPath;
+          MiterScope.setCnfDump(true, outPath);
+        }
         MiterScope.init();
         if (MiterScope.run()) {
           SPDLOG_INFO("No difference was found for scope: {} , {}",
@@ -358,6 +394,10 @@ int main(int argc, char** argv) {
   } else {
     try {
       KEPLER_FORMAL::MiterStrategy MiterS(top0, top1, logFileName);
+      if (dumpCnf) {
+        const std::string outPath = dumpCnfPath.empty() ? "miter.cnf" : dumpCnfPath;
+        MiterS.setCnfDump(true, outPath);
+      }
       MiterS.init();
       if (MiterS.run()) {
         SPDLOG_INFO("No difference was found.");

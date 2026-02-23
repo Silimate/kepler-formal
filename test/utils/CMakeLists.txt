@@ -25,3 +25,14 @@ target_link_libraries(SNLTruthTableTreeTests
 )
 
 GTEST_DISCOVER_TESTS(SNLTruthTableTreeTests)
+
+# BoolExpr CNF writer tests
+add_executable(BoolExprCnfWriterTests BoolExprCnfWriterTests.cpp)
+
+target_link_libraries(BoolExprCnfWriterTests
+    GTest::gtest_main
+    formal_structures
+    pthread
+)
+
+GTEST_DISCOVER_TESTS(BoolExprCnfWriterTests)

@@ -25,6 +25,8 @@ class MiterStrategy {
 
   bool run();
 
+  void setCnfDump(bool enabled, const std::string& path = "");
+
   size_t normalizeInputs(std::vector<naja::DNL::DNLID>& inputs0,
                        std::vector<naja::DNL::DNLID>& inputs1,
                         const std::unordered_map<std::pair<std::vector<NLName>, std::vector<NLID::DesignObjectID>>, naja::DNL::DNLID, KEPLER_FORMAL::BuildPrimaryOutputClauses::KeyHash>& inputs0Map,
@@ -56,6 +58,8 @@ class MiterStrategy {
   naja::NL::SNLDesign* topInit_ = nullptr;
   std::vector<naja::DNL::DNLFull> dnls_;
   size_t lastCommonVarID_ = 1;
+  bool dumpCnf_ = false;
+  std::string dumpCnfPath_;
 };
 
 }  // namespace KEPLER_FORMAL

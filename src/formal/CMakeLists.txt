@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(formal_structures STATIC
     BoolExpr.cpp
     BoolExprCache.cpp
+    BoolExprCnfWriter.cpp
 )
 
 # Make headers accessible to other targets
