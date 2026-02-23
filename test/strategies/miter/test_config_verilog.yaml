@@ -11,3 +11,5 @@ liberty_files:
   - ../../../../example/fakeram45_64x15.lib
 log_level: info
 solver: kissat
+dump_cnf: true
+dump_cnf_path: ./sat.cnf

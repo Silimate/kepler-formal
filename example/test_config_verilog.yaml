@@ -11,4 +11,4 @@ liberty_files:
 log_level: info
 solver: kissat
 dump_cnf: true
-dump_cnf_path: ./dump_cnf.cnf
+dump_cnf_path: ./sat.cnf
