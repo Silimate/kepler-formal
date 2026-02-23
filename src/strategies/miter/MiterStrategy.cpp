@@ -617,7 +617,9 @@ bool MiterStrategy::run() {
     if (dumpBoolExprToDimacs(miter, outPath)) {
       logger->info("Dumped miter CNF to {}", outPath);
     } else {
+      // LCOV_EXCL_START
       logger->warn("Failed to dump miter CNF to {}", outPath);
+      // LCOV_EXCL_STOP
     }
   }
 
