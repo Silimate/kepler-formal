@@ -10,5 +10,5 @@ liberty_files:
   - fakeram45_64x15.lib
 log_level: info
 solver: kissat
-dump_cnf: true
-dump_cnf_path: ./cnf_dump.cnf
+cnf_dump: true
+cnf_dump_path: ./cnf_dump.cnf
