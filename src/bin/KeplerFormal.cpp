@@ -8,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <cctype>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -42,6 +43,39 @@ static std::vector<std::string> yamlToVector(const YAML::Node& node) {
     if (n.IsScalar()) out.emplace_back(n.as<std::string>());
   }
   return out;
+}
+
+static bool validateConfigKeys(const YAML::Node& cfg) {
+  if (!cfg || !cfg.IsMap()) {
+    return true;
+  }
+  static const std::unordered_set<std::string> kAllowedKeys = {
+      "format",
+      "input_paths",
+      "liberty_files",
+      "log_level",
+      "log_file",
+      "use_scopes",
+      "clean_scopes",
+      "cnf_export",
+      "cnf_export_path",
+      "dump_cnf",
+      "dump_cnf_path",
+      "solver",
+  };
+
+  for (auto it = cfg.begin(); it != cfg.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      SPDLOG_CRITICAL("Config key is not a scalar; invalid YAML key");
+      return false;
+    }
+    const std::string key = it->first.as<std::string>();
+    if (kAllowedKeys.find(key) == kAllowedKeys.end()) {
+      SPDLOG_CRITICAL("Unknown config option: {}", key);
+      return false;
+    }
+  }
+  return true;
 }
 
 static std::string sanitizeFileToken(const std::string& input) {
@@ -96,6 +130,9 @@ int main(int argc, char** argv) {
       const std::string cfgPath = argv[i + 1];
       try {
         YAML::Node cfg = YAML::LoadFile(cfgPath);
+        if (!validateConfigKeys(cfg)) {
+          return EXIT_FAILURE;
+        }
 
         // format
         if (cfg["format"] && cfg["format"].IsScalar()) {
@@ -136,14 +173,23 @@ int main(int argc, char** argv) {
           cleanScopes = cfg["clean_scopes"].as<bool>();
         }
 
-        // dump_cnf
-        if (cfg["dump_cnf"] && cfg["dump_cnf"].IsScalar()) {
-          dumpCnf = cfg["dump_cnf"].as<bool>();
+        if (cfg["dump_cnf"]) {
+          SPDLOG_CRITICAL("Config option 'dump_cnf' is no longer supported. Use 'cnf_export' instead.");
+          return EXIT_FAILURE;
+        }
+        if (cfg["dump_cnf_path"]) {
+          SPDLOG_CRITICAL("Config option 'dump_cnf_path' is no longer supported. Use 'cnf_export_path' instead.");
+          return EXIT_FAILURE;
         }
 
-        // dump_cnf_path (optional)
-        if (cfg["dump_cnf_path"] && cfg["dump_cnf_path"].IsScalar()) {
-          dumpCnfPath = cfg["dump_cnf_path"].as<std::string>();
+        // cnf_export
+        if (cfg["cnf_export"] && cfg["cnf_export"].IsScalar()) {
+          dumpCnf = cfg["cnf_export"].as<bool>();
+        }
+
+        // cnf_export_path (optional)
+        if (cfg["cnf_export_path"] && cfg["cnf_export_path"].IsScalar()) {
+          dumpCnfPath = cfg["cnf_export_path"].as<std::string>();
         }
 
         // solver (glucose | kissat)

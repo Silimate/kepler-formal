@@ -13,4 +13,4 @@ log_level: info
 use_scopes: true
 clean_scopes: true
 solver: glucose
-dump_cnf: true
+cnf_export: true
