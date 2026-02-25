@@ -573,28 +573,28 @@ bool MiterStrategy::run() {
   const auto & varNames = builder0_.getTermDNLID2VarID();
   for (size_t i = 0; i < inputs2DnlIds.size(); ++i) {
     const auto&path = builder0_.getInputs2InputsIDs().at(builder0_.getDNLIDforInput(i));
-    logger->info("VARID {} DNLID {}", varNames[inputs2DnlIds[i]], inputs2DnlIds[i]);
+    logger->debug("VARID {} DNLID {}", varNames[inputs2DnlIds[i]], inputs2DnlIds[i]);
     for (const auto& name : path.first) {
-      logger->info("{}.", name.getString().c_str());
+      logger->debug("{}.", name.getString().c_str());
     }
     for (const auto& id : path.second) {
-      logger->info("bit: {}.", id);
+      logger->debug("bit: {}.", id);
     }
-    logger->info("\n");
+    logger->debug("\n");
   }
   // same for builder1
   const auto & inputs2DnlIds1 = builder1_.getInputs();
   const auto & varNames1 = builder1_.getTermDNLID2VarID();
   for (size_t i = 0; i < inputs2DnlIds1.size(); ++i) {
     const auto& path = builder1_.getInputs2InputsIDs().at(builder1_.getDNLIDforInput(i));
-    logger->info("VARID {} DNLID {}", varNames1[inputs2DnlIds1[i]], inputs2DnlIds1[i]);
+    logger->debug("VARID {} DNLID {}", varNames1[inputs2DnlIds1[i]], inputs2DnlIds1[i]);
     for (const auto& name : path.first) {
-      logger->info("{}.", name.getString().c_str());
+      logger->debug("{}.", name.getString().c_str());
     }
     for (const auto& id : path.second) {
-      logger->info("bit: {}.", id);
+      logger->debug("bit: {}.", id);
     }
-    logger->info("\n");
+    logger->debug("\n");
   }
 
   if (topInit_ != nullptr) {
@@ -636,15 +636,15 @@ bool MiterStrategy::run() {
   solver.addClause({rootVar});
 
   // solve with no assumptions
-  logger->info("Started Glucose solving");
+  logger->info("SAT solver starting");
   bool sat = solver.solve();
-  logger->info("Finished Glucose solving: {}", sat ? "SAT" : "UNSAT");
+  logger->info("SAT solver finished: {}", sat ? "SAT" : "UNSAT");
 
   if (sat) {
-    logger->warn("Miter found a difference -> moving to analyze individual POs");
+    logger->info("Miter found a difference -> moving to analyze individual POs");
     for (size_t i = 0; i < POs0.size(); ++i) {
       if (POs0[i] == POs1[i]) { // We can do this comparison because of the caching in, if they are the same, they are the same pointer
-        logger->info("PO index {} expressions are equal; skipping", i);
+        logger->debug("PO index {} expressions are equal -> skipping", i);
         continue;
       }
       if (builder0_.getOutputs2OutputsIDs().at(builder0_.getDNLIDforOutput(i)) !=
