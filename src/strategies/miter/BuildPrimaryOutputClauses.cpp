@@ -383,7 +383,7 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
   // keep only terminals who are connected to nets
   for (const auto& out : outputsSet) {
     const DNLTerminalFull& term = dnl->getDNLTerminalFromID(out);
-    if (term.getIsoID() != DNLID_MAX) {
+    if (term.getIsoID() != DNLID_MAX && !dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().empty()) {
       outputs.emplace_back(out);
     }
   }
