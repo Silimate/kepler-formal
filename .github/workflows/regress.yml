@@ -71,6 +71,13 @@ jobs:
         cd kepler-formal-regress/nangate45_black_parrot
         ../../build/src/bin/kepler-formal --config objects/nangate45/bp/base/4_rsz_lec_test.yml
         grep "Circuits are IDENTICAL" logs/nangate45/bp/base/4_rsz_lec_check.log 
+    
+    - name: Run ihp-sg13g2_i2c-gpio-expander
+      working-directory: ${{github.workspace}}
+      run: |
+        cd kepler-formal-regress/ihp-sg13g2_i2c-gpio-expander
+        ../../build/src/bin/kepler-formal --config objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml
+        grep "Circuits are IDENTICAL" logs/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_check.log 
   
     - name: Run on naja if
       working-directory: ${{github.workspace}}
