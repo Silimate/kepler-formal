@@ -46,16 +46,18 @@ export PATH="/opt/homebrew/opt/flex/bin:/opt/homebrew/opt/bison/bin:$PATH"
 ```
 ## Build
 
+### CMake (primary)
+
 ```bash
 git clone --recurse-submodules https://github.com/keplertech/kepler-formal.git
 cd kepler-formal
 mkdir build
 cd build
-cmake .. 
+cmake ..
 make
 ```
 
-For best runtime performance: 
+For best runtime performance:
 
 ```bash
 cmake .. \
@@ -65,6 +67,37 @@ cmake .. \
   -DCMAKE_CXX_FLAGS_RELEASE="-Ofast -march=native -ffast-math -flto -DNDEBUG" \
   -DCMAKE_EXE_LINKER_FLAGS="-flto"
 ```
+
+### Bazel (experimental)
+
+Bazel build support is available alongside CMake. It uses [bzlmod](https://bazel.build/external/overview#bzlmod) (MODULE.bazel) and pulls most dependencies from the [Bazel Central Registry](https://registry.bazel.build/).
+
+```bash
+git clone --recurse-submodules https://github.com/keplertech/kepler-formal.git
+cd kepler-formal
+bazel build //src/bin:kepler-formal
+```
+
+Run tests:
+
+```bash
+bazel test //test/...
+```
+
+**Dependency strategy:**
+- **BCR**: yaml-cpp, googletest, zlib, spdlog, oneTBB (pulled automatically by Bazel)
+- **Native BUILD files**: kissat and glucose SAT solvers (simple C/C++ libraries)
+- **rules_foreign_cc** (cmake wrapper): naja (too complex for native BUILD files — uses flex/bison codegen, Cap'n Proto, nested submodules)
+- **System packages still required**: Boost headers, Cap'n Proto, Python3 (used by naja's cmake build inside the rules_foreign_cc sandbox)
+
+### Future work: bazel-orfs integration
+
+Once kepler-formal is fully buildable with Bazel, it can be consumed directly by [bazel-orfs](https://github.com/The-OpenROAD-Project/bazel-orfs) as a proper Bazel dependency instead of the current `$PATH`-based wrapper ([bazel-orfs#523](https://github.com/The-OpenROAD-Project/bazel-orfs/pull/523)). This enables:
+
+- **`bazel_dep` or `git_override`** in bazel-orfs MODULE.bazel to pin kepler-formal to a specific version or commit
+- **Hermetic LEC tests** in bazel-orfs CI without requiring a pre-installed kepler-formal binary
+- **Remote caching** of kepler-formal build artifacts shared across bazel-orfs users
+- **Eventual BCR publication** of kepler-formal as a first-class Bazel module
 
 ## Usage
 
