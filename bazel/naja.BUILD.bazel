@@ -30,7 +30,7 @@ cmake(
         "libnaja_verilog.a",
         "libyosys_liberty.a",
     ],
-    build_args = ["-j"],
+    build_args = ["-j2"],
     cache_entries = {
         "CMAKE_CXX_STANDARD": "20",
         "BUILD_NAJA_PYTHON": "OFF",
