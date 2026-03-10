@@ -6,7 +6,7 @@ cc_library(
     includes = ["."],
     visibility = ["//visibility:public"],
     deps = [
-        "//thirdparty/glucose",
-        "//thirdparty/kissat",
+        "@glucose",
+        "@kissat",
     ],
 )

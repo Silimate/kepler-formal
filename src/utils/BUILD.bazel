@@ -8,6 +8,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/formal:formal_structures",
-        "//thirdparty/naja",
+        "@naja",
     ],
 )

@@ -17,9 +17,9 @@ cc_library(
         "//src/config:kepler_config",
         "//src/formal:formal_structures",
         "//src/utils:kepler_formal_utils",
-        "//thirdparty/glucose",
-        "//thirdparty/kissat",
-        "//thirdparty/naja",
+        "@glucose",
+        "@kissat",
+        "@naja",
         "@spdlog",
     ],
 )

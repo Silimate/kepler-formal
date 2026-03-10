@@ -8,7 +8,7 @@ cc_test(
         "//src/formal:formal_structures",
         "//src/scope:scope_extraction",
         "//src/strategies:formal_strategies",
-        "//thirdparty/naja",
+        "@naja",
         "@googletest//:gtest_main",
     ],
 )

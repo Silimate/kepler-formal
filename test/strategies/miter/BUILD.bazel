@@ -8,7 +8,7 @@ cc_test(
         "//src/config:kepler_config",
         "//src/formal:formal_structures",
         "//src/strategies:formal_strategies",
-        "//thirdparty/naja",
+        "@naja",
         "@googletest//:gtest_main",
     ],
 )
