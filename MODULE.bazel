@@ -25,9 +25,9 @@ register_toolchains(
     "@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain",
 )
 
-# Submodule dependencies: BUILD files live in bazel/*.BUILD.bazel
-# and are overlaid onto the submodule checkouts via new_local_repository.
-# When a submodule gains native Bazel support (fork or upstream),
-# replace the corresponding entry here with a bazel_dep or git_override.
-submodules = use_extension("//bazel:deps.bzl", "submodules")
-use_repo(submodules, "glucose", "kissat", "naja")
+# Third-party dependencies fetched via http_archive for BCR compatibility.
+# BUILD file overlays live in bazel/*.BUILD.bazel.
+# The cmake flow uses git submodules (thirdparty/) directly.
+# See docs/bcr-roadmap.md for the full BCR publication plan.
+deps = use_extension("//bazel:deps.bzl", "deps")
+use_repo(deps, "glucose", "kissat", "naja")
