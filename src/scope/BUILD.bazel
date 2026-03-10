@@ -9,5 +9,6 @@ cc_library(
     deps = [
         "//src/utils:kepler_formal_utils",
         "@naja",
+        "@naja//:naja_extra_headers",
     ],
 )

@@ -17,5 +17,6 @@ cc_library(
     deps = [
         "//src/formal:formal_structures",
         "@naja",
+        "@naja//:naja_extra_headers",
     ],
 )

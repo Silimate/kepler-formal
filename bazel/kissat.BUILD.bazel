@@ -24,9 +24,6 @@ _EXCLUDE_SRCS = [
     "src/handle.c",
     "src/parse.c",
     "src/witness.c",
-    # sort.c contains only static inline functions and is #included
-    # by collect.c, dense.c, and watch.c — treat as textual header
-    "src/sort.c",
 ]
 
 cc_library(
