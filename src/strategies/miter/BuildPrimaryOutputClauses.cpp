@@ -383,6 +383,16 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
   // keep only terminals who are connected to nets
   for (const auto& out : outputsSet) {
     const DNLTerminalFull& term = dnl->getDNLTerminalFromID(out);
+    if (term.getIsoID() == DNLID_MAX) {
+      DEBUG_LOG("Skipping output %s of model %s as it is not connected to any net\n",
+                term.getSnlBitTerm()->getName().getString().c_str(),
+                term.getSnlBitTerm()
+                    ->getDesign()
+                    ->getName()
+                    .getString()
+                    .c_str());
+      continue;
+    }
     if (term.getIsoID() != DNLID_MAX && 
       dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().empty()) {
       DEBUG_LOG("Skipping output %s of model %s as it is not connected to any net\n",

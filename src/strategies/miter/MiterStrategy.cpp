@@ -603,7 +603,7 @@ bool MiterStrategy::run() {
 
   if (POs0.empty() || POs1.empty()) {
     logger->warn(
-        "No primary outputs found on one of the designs; aborting run");
+        "No valid outputs to compare. Miter vacuously equivalent.");
     return true; // vacuously equivalent
   }
 
