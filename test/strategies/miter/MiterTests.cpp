@@ -1221,6 +1221,48 @@ TEST_F(MiterTests, tt65In) {
   EXPECT_THROW(MiterS.run(), std::runtime_error);
 }
 
+TEST_F(MiterTests, ConnectedInouts) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryS =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("Stadarts"));
+  // create a top model with 2 inout ports
+  SNLDesign* top =
+      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+  auto topInout1 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout1"));
+  auto topInout2 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout2"));
+  // connect the 2 inouts together
+  SNLNet* net = SNLScalarNet::create(top, NLName("net"));
+  topInout1->setNet(net);
+  topInout2->setNet(net);
+  SNLDesign* topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "ConnectedInouts");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
+}
+
+TEST_F(MiterTests, UnconnectedTerms) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryS =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("Stadarts"));
+  // create a top model with 2 inout ports
+  SNLDesign* top =
+      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+  auto topInout1 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout1"));
+  auto topInout2 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout2"));
+  SNLDesign* topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "ConnectedInouts");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
+}
+
 TEST(KeplerCliSubprocessTests, ExampleTestRun) {
   std::filesystem::path p(KEPLER_BIN);
   if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
@@ -1256,48 +1298,6 @@ TEST(KeplerCliSubprocessTests, ExampleTestRunFailure) {
 
   int rc = run_kepler_cli_with_args({"--config", "../../../../test/strategies/miter/test_config_failure.yaml"});
   EXPECT_NE(rc, EXIT_SUCCESS);
-}
-
-TEST(KeplerCliSubprocessTests, ConnectedInouts) {
-  NLUniverse* univ = NLUniverse::create();
-  NLDB* db = NLDB::create(univ);
-  NLLibrary* libraryS =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("Stadarts"));
-  // create a top model with 2 inout ports
-  SNLDesign* top =
-      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName("top"));
-  univ->setTopDesign(top);
-  auto topInout1 =
-      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout1"));
-  auto topInout2 =
-      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout2"));
-  // connect the 2 inouts together
-  SNLNet* net = SNLScalarNet::create(top, NLName("net"));
-  topInout1->setNet(net);
-  topInout2->setNet(net);
-  SNLDesign* topClone = top->clone(NLName("topClone"));
-  MiterStrategy MiterS(top, topClone, "ConnectedInouts");
-  MiterS.init();
-  EXPECT_TRUE(MiterS.run());
-}
-
-TEST(KeplerCliSubprocessTests, unconnectedTerms) {
-  NLUniverse* univ = NLUniverse::create();
-  NLDB* db = NLDB::create(univ);
-  NLLibrary* libraryS =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("Stadarts"));
-  // create a top model with 2 inout ports
-  SNLDesign* top =
-      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName("top"));
-  univ->setTopDesign(top);
-  auto topInout1 =
-      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout1"));
-  auto topInout2 =
-      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout2"));
-  SNLDesign* topClone = top->clone(NLName("topClone"));
-  MiterStrategy MiterS(top, topClone, "ConnectedInouts");
-  MiterS.init();
-  EXPECT_TRUE(MiterS.run());
 }
 
 // Required main function for Google Test
