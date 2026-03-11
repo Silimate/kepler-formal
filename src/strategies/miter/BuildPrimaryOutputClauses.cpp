@@ -384,9 +384,28 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
   for (const auto& out : outputsSet) {
     const DNLTerminalFull& term = dnl->getDNLTerminalFromID(out);
     if (term.getIsoID() != DNLID_MAX && 
-      !dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().empty()) {
-      outputs.emplace_back(out);
+      dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().empty()) {
+      DEBUG_LOG("Skipping output %s of model %s as it is not connected to any net\n",
+                term.getSnlBitTerm()->getName().getString().c_str(),
+                term.getSnlBitTerm()
+                    ->getDesign()
+                    ->getName()
+                    .getString()
+                    .c_str());
+      continue;
     }
+    if (term.getIsoID() != DNLID_MAX && 
+      dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().size() > 1) {
+      DEBUG_LOG("Skipping output %s of model %s as it is driven by multiple drivers\n",
+                term.getSnlBitTerm()->getName().getString().c_str(),
+                term.getSnlBitTerm()
+                    ->getDesign()
+                    ->getName()
+                    .getString()
+                    .c_str());
+      continue;
+    }
+    outputs.emplace_back(out);
   }
   //outputs.assign(outputsSet.begin(), outputsSet.end());
   return outputs;
