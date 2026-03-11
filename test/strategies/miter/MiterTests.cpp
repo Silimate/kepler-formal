@@ -1258,7 +1258,6 @@ TEST(KeplerCliSubprocessTests, ExampleTestRunFailure) {
   EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
-// Create 2 citcuits with 2 top inouts ports connected to each others ane expect a passing test
 TEST(KeplerCliSubprocessTests, ConnectedInouts) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
@@ -1282,6 +1281,24 @@ TEST(KeplerCliSubprocessTests, ConnectedInouts) {
   EXPECT_TRUE(MiterS.run());
 }
 
+TEST(KeplerCliSubprocessTests, unconnectedTerms) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryS =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("Stadarts"));
+  // create a top model with 2 inout ports
+  SNLDesign* top =
+      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+  auto topInout1 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout1"));
+  auto topInout2 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout2"));
+  SNLDesign* topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "ConnectedInouts");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
+}
 
 // Required main function for Google Test
 int main(int argc, char** argv) {
