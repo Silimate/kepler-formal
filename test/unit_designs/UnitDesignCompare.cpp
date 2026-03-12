@@ -45,7 +45,16 @@ TEST_F(UnitDesignCompare, testSameDesigns) {
   std::filesystem::path benchmarksPath(BENCHMARKS_PATH);
   constructor0.construct(benchmarksPath/"simple0.v");
   auto top = SNLUtils::findTop(library0_);
-
+  auto halfadder0 = library0_->getSNLDesign(NLName("halfadder"));
+  ASSERT_NE(nullptr, halfadder0);
+  auto sumXor0 = halfadder0->getInstance(NLName("sum_xor"));
+  auto ttSum0 = SNLDesignModeling::getTruthTable(sumXor0->getModel());
+  auto or2 = top->getInstance(NLName("cout_or"));
+  printf("or2: %s\n", or2->getDescription().c_str());
+  auto ttOr2 = SNLDesignModeling::getTruthTable(or2->getModel());
+  printf("TT or2: %s\n", ttOr2.getString().c_str());
+  ASSERT_NE(nullptr, or2);
+  
   auto sum = top->getScalarTerm(NLName("sum"));
   ASSERT_NE(nullptr, sum);
   EXPECT_EQ(SNLTerm::Direction::Output, sum->getDirection());

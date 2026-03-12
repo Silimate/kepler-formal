@@ -10,8 +10,8 @@
 #include "SNLPath.h"
 #include "Tree2BoolExpr.h"
 
-// #define DEBUG_CHECKS
-// #define DEBUG_PRINTS
+#define DEBUG_CHECKS
+#define DEBUG_PRINTS
 
 #ifdef DEBUG_PRINTS
 #define DEBUG_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
@@ -167,7 +167,7 @@ bool isPairVisitedETS(naja::DNL::DNLID termA,
 }
 
 bool SNLLogicCloud::isInput(naja::DNL::DNLID termID) {
-  return PIs_[termID] || (dnl_.getConstant0stub() == termID) || (dnl_.getConstant1stub() == termID);
+  return PIs_[termID] /*|| dnl_.getDNLIsoDB().getIsoFromIsoIDconst(dnl_.getDNLTerminalFromID(termID).getIsoID()).isConstant()*/;
 }
 
 bool SNLLogicCloud::isOutput(naja::DNL::DNLID termID) {
@@ -258,7 +258,10 @@ void SNLLogicCloud::compute() {
 
   bool reachedPIs = true;
   size_t size = sizeOfNewIterationInputsETS();
+  
   for (size_t i = 0; i < size; i++) {
+    auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
+      dnl_.getDNLTerminalFromID(getNewIterationInputsETS().first[i]).getIsoID());
     if (!isInput(
             getNewIterationInputsETS().first
                 [i]) /* && !isOutput(getNewIterationInputsETS().first[i])*/) {
@@ -273,6 +276,26 @@ void SNLLogicCloud::compute() {
   size_t iter = 0;
 
   while (!reachedPIs) {
+    reachedPIs = true;
+    size_t sizeOfNewInputs = sizeOfNewIterationInputsETS();
+    for (size_t i = 0; i < sizeOfNewInputs; i++) {
+      auto iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
+          dnl_.getDNLTerminalFromID(
+              getNewIterationInputsETS().first[i])
+              .getIsoID());
+      if (!isInput(getNewIterationInputsETS().first[i]) &&
+      // check if already computed in cache
+        (Tree2BoolExpr::iso2boolExpr_.find(
+            dnl_.getDNLTerminalFromID(
+                getNewIterationInputsETS().first[i])
+                .getIsoID()) == Tree2BoolExpr::iso2boolExpr_.end() || 
+                iso.getDrivers().front() != getNewIterationInputsETS().first[i])
+                // check if constant
+                && !dnl_.getDNLIsoDB().getIsoFromIsoIDconst(dnl_.getDNLTerminalFromID(getNewIterationInputsETS().first[i]).getIsoID()).isConstant()) {
+        reachedPIs = false;
+        break;
+      }
+    }
     DEBUG_LOG("---iter %lu---\n", iter);
     DEBUG_LOG("Current iteration inputs size: %zu\n",
               sizeOfNewIterationInputsETS());
@@ -285,7 +308,9 @@ void SNLLogicCloud::compute() {
     size_t sizeOfCurrentInputs = sizeOfCurrentIterationInputsETS();
     for (size_t i = 0; i < sizeOfCurrentInputs; i++) {
       const auto& input = getCurrentIterationInputsETS().first[i];
-      if (isInput(input) /*|| isOutput(input)*/) {
+      const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
+          dnl_.getDNLTerminalFromID(input).getIsoID());
+      if (isInput(input) || iso.isConstant()) {
         pushBackNewIterationInputsETS(input);
         DEBUG_LOG("Adding input id: %zu %s\n", input,
                   dnl_.getDNLTerminalFromID(input)
@@ -298,8 +323,7 @@ void SNLLogicCloud::compute() {
         continue;
       }
 
-      const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
-          dnl_.getDNLTerminalFromID(input).getIsoID());
+      
       DEBUG_LOG("number of drivers: %zu\n", iso.getDrivers().size());
 
       for (const auto& driver : iso.getDrivers()) {
@@ -350,7 +374,7 @@ void SNLLogicCloud::compute() {
       }
       const auto& driver = iso.getDrivers().front();
       
-      if (isInput(driver) /* || isOutput(driver)*/
+      if (isInput(driver)
         || (Tree2BoolExpr::iso2boolExpr_.find(iso.getIsoID()) !=
           Tree2BoolExpr::iso2boolExpr_.end() && iter > 0)) {
         pushBackNewIterationInputsETS(driver);
@@ -417,6 +441,11 @@ void SNLLogicCloud::compute() {
                     .c_str());
             continue;
           }
+          auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
+              dnl_.getDNLTerminalFromID(termID).getIsoID());
+          // if (iso.isConstant()) {
+          //   pushBackInputsToMergeETS({naja::DNL::DNLID_MAX, termID});  // Placeholder for PI/PO
+          // }
           pushBackNewIterationInputsETS(termID);
         }
       }
@@ -430,23 +459,6 @@ void SNLLogicCloud::compute() {
               sizeOfInputsToMergeETS());
     table_.concatFull(getInputsToMergeETS().first,
                       sizeOfInputsToMergeETS());
-    reachedPIs = true;
-    size_t sizeOfNewInputs = sizeOfNewIterationInputsETS();
-    for (size_t i = 0; i < sizeOfNewInputs; i++) {
-      auto iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
-          dnl_.getDNLTerminalFromID(
-              getNewIterationInputsETS().first[i])
-              .getIsoID());
-      if (!isInput(getNewIterationInputsETS().first[i]) &&
-        (Tree2BoolExpr::iso2boolExpr_.find(
-            dnl_.getDNLTerminalFromID(
-                getNewIterationInputsETS().first[i])
-                .getIsoID()) == Tree2BoolExpr::iso2boolExpr_.end() || 
-                iso.getDrivers().front() != getNewIterationInputsETS().first[i])) {
-        reachedPIs = false;
-        break;
-      }
-    }
     DEBUG_LOG("--- End of iteration %zu\n", iter);
     iter++;
   }
@@ -466,7 +478,8 @@ void SNLLogicCloud::compute() {
     assert(isInput(input) || (Tree2BoolExpr::iso2boolExpr_.find(
             dnl_.getDNLTerminalFromID(input)
                 .getIsoID()) != Tree2BoolExpr::iso2boolExpr_.end() && 
-                iso.getDrivers().front() == input));
+                iso.getDrivers().front() == input)
+                || iso.isConstant());
   }
   #endif
 }

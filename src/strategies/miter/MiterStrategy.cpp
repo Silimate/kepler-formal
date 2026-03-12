@@ -772,16 +772,16 @@ bool MiterStrategy::run() {
           //   }
           // }
           for (const auto& DNLID : cone.getCollectedTerms()) {
-            if (naja::DNL::get()->getConstant0stub() == DNLID) {
+            const naja::DNL::DNLTerminalFull& termFull =
+                naja::DNL::get()->getDNLTerminalFromID(DNLID);
+            if (naja::DNL::get()->getDNLIsoDB().getIsoFromIsoIDconst(termFull.getIsoID()).isConstant0()) {
               insTerms1.insert("Constant 0");
               continue;
             }
-            if (naja::DNL::get()->getConstant1stub() == DNLID) {
+            if (naja::DNL::get()->getDNLIsoDB().getIsoFromIsoIDconst(termFull.getIsoID()).isConstant1()) {
               insTerms1.insert("Constant 1");
               continue;
             }
-            const naja::DNL::DNLTerminalFull& termFull =
-                naja::DNL::get()->getDNLTerminalFromID(DNLID);
             if (termFull.isTopPort()) {
               if (j == 0) {
                 terms0.insert(termFull.getSnlBitTerm());

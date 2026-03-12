@@ -438,8 +438,6 @@ void BuildPrimaryOutputClauses::collect() {
 
 void BuildPrimaryOutputClauses::initVarNames() {
   termDNLID2varID_.resize(naja::DNL::get()->getDNLTerms().size(), (size_t)-1);
-  termDNLID2varID_[naja::DNL::get()->getConstant0stub() ] = 0;
-  termDNLID2varID_[naja::DNL::get()->getConstant1stub() ] = 1;
   for (size_t i = 0; i < inputs_.size(); ++i) {
     // Get Truth Table for terminal
     const DNLTerminalFull& tTerm = naja::DNL::get()->getDNLTerminalFromID(inputs_[i]);
@@ -459,6 +457,24 @@ void BuildPrimaryOutputClauses::initVarNames() {
     }
     termDNLID2varID_[inputs_[i]] =
         i + 2;  // +2 to avoid 0 and 1 which are reserved for constants
+  }
+  for (DNLID constIsoID : naja::DNL::get()->getDNLIsoDB().getConstant0Isos()) {
+    const auto& constIso = naja::DNL::get()->getDNLIsoDB().getIsoFromIsoIDconst(constIsoID);
+    for (auto termID : constIso.getReaders()) {
+        termDNLID2varID_[termID] = 0;
+    }
+    for (auto termID : constIso.getDrivers()) {
+        termDNLID2varID_[termID] = 0;
+    }
+  }
+  for (DNLID constIsoID : naja::DNL::get()->getDNLIsoDB().getConstant1Isos()) {
+    const auto& constIso = naja::DNL::get()->getDNLIsoDB().getIsoFromIsoIDconst(constIsoID);
+    for (auto termID : constIso.getReaders()) {
+        termDNLID2varID_[termID] = 1;
+    }
+    for (auto termID : constIso.getDrivers()) {
+        termDNLID2varID_[termID] = 1;
+    }
   }
 }
 
