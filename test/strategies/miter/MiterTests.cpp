@@ -21,10 +21,29 @@
 #include "SNLCapnP.h"
 #include "DNL.h"
 
+#include "Config.h"
+
 using namespace naja;
 using namespace naja::NL;
 using namespace naja::NAJA_OPT;
 using namespace KEPLER_FORMAL;
+
+// Path to the kepler-formal CLI binary used by the project tests.
+// Bazel sets KEPLER_BIN env var via the test's BUILD.bazel; CMake uses
+// the default relative path from the build directory.
+static std::string get_kepler_bin() {
+  const char* env = std::getenv("KEPLER_BIN");
+  return env ? env : "../../../src/bin/kepler-formal";
+}
+static const std::string KEPLER_BIN_STR = get_kepler_bin();
+static const char* KEPLER_BIN = KEPLER_BIN_STR.c_str();
+
+// Prefix for test data paths. Bazel sets TEST_DATA_PREFIX="" (files are
+// in runfiles at workspace-relative paths); CMake uses "../../../../".
+static std::string get_test_data_prefix() {
+  const char* env = std::getenv("TEST_DATA_PREFIX");
+  return env ? env : "../../../../";
+}
 
 namespace {
 
@@ -591,10 +610,10 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
     std::filesystem::path outputPath("./topEdited1.capnp");
     SNLCapnP::dump(db, outputPath);
   }
-  //Check output of binary ../../../src/bin/kepler-formal on the 2 capnp files
+  //Check output of binary kepler-formal on the 2 capnp files
   executeCommand(
-      std::string("../../../src/bin/kepler-formal -naja_if ./top.capnp ./topEdited1.capnp")
-          .c_str());  
+      (get_kepler_bin() + " -naja_if ./top.capnp ./topEdited1.capnp")
+          .c_str());
   // look for "DIFFERENT" in the file ./miter_log_1.txt
   // open the file  
   std::ifstream miterLogFile("./miter_log_0.txt");
@@ -627,15 +646,24 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
     EXPECT_TRUE(MiterS.run());
   }
   {
+    KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
+    // print current solver type
+    MiterStrategy MiterGlucose(top, topClone, "MultiDriver");
+    MiterGlucose.init();
+    // Expect throw in run
+    EXPECT_TRUE(MiterGlucose.run());
+    KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  }
+  {
     // dump top to naja_if(CapProto)
     std::filesystem::path outputPath("./topEdited2.capnp");
     SNLCapnP::dump(db, outputPath);
   }
 
-  //Check output of binary ../../../src/bin/kepler-formal on the 2 capnp files
+  //Check output of binary kepler-formal on the 2 capnp files
   executeCommand(
-      std::string("../../../src/bin/kepler-formal -naja_if ./top.capnp ./topEdited2.capnp")
-          .c_str()); 
+      (get_kepler_bin() + " -naja_if ./top.capnp ./topEdited2.capnp")
+          .c_str());
   // look for "IDENTICAL" in the file ./miter_log_2.txt
   // open the file
   std::ifstream miterLogFile2("./miter_log_1.txt");
@@ -663,10 +691,6 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
 #include <string>
 #include <cstdlib>
 #include <cstdio>
-
-// Path to the kepler-formal CLI binary used by the project tests.
-// Adjust this path if your binary is located elsewhere.
-static const char* KEPLER_BIN = "../../../src/bin/kepler-formal";
 
 // Helper to run the CLI binary with arguments in a subprocess using std::system.
 // Returns the program's exit code (child exit status) when available, otherwise EXIT_FAILURE.
@@ -755,6 +779,22 @@ TEST(KeplerCliSubprocessTests, ConfigUnrecognizedFormatReturnsFailure) {
     std::ofstream ofs(tmp);
     ofs << "format: unknown_format\n";
     ofs << "input_paths:\n  - a\n  - b\n";
+    ofs.close();
+  }
+  int rc = run_kepler_cli_with_args({"--config", tmp.string()});
+  EXPECT_NE(rc, EXIT_SUCCESS);
+  std::filesystem::remove(tmp);
+}
+
+TEST(KeplerCliSubprocessTests, ConfigUnknownKeyReturnsFailure) {
+  std::filesystem::path p(KEPLER_BIN);
+  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  std::filesystem::path tmp = std::filesystem::temp_directory_path() / "kepler_test_unknown_key.yaml";
+  {
+    std::ofstream ofs(tmp);
+    ofs << "format: verilog\n";
+    ofs << "input_paths:\n  - a\n  - b\n";
+    ofs << "cnf: true\n";
     ofs.close();
   }
   int rc = run_kepler_cli_with_args({"--config", tmp.string()});
@@ -1192,18 +1232,73 @@ TEST_F(MiterTests, tt65In) {
   MiterS.init();
   // Expect throw in run
   EXPECT_THROW(MiterS.run(), std::runtime_error);
-  naja::DNL::destroy();
+}
+
+TEST_F(MiterTests, ConnectedInouts) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryS =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("Stadarts"));
+  // create a top model with 2 inout ports
+  SNLDesign* top =
+      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+  auto topInout1 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout1"));
+  auto topInout2 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout2"));
+  // connect the 2 inouts together
+  SNLNet* net = SNLScalarNet::create(top, NLName("net"));
+  topInout1->setNet(net);
+  topInout2->setNet(net);
+  SNLDesign* topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "ConnectedInouts");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
+}
+
+TEST_F(MiterTests, UnconnectedTerms) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryS =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("Stadarts"));
+  // create a top model with 2 inout ports
+  SNLDesign* top =
+      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+  auto topInout1 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout1"));
+  auto topInout2 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::InOut, NLName("inout2"));
+  SNLDesign* topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "ConnectedInouts");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
 }
 
 TEST(KeplerCliSubprocessTests, ExampleTestRun) {
   std::filesystem::path p(KEPLER_BIN);
   if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
 
-  int rc = run_kepler_cli_with_args({"-verilog", "../../../../example/tinyrocket.v", "../../../../example/tinyrocket_edited.v", 
-                                         "../../../../example/NangateOpenCellLibrary_typical.lib",
-                                         "../../../../example/fakeram45_64x15.lib",
-                                         "../../../../example/fakeram45_64x32.lib",
-                                         "../../../../example/fakeram45_1024x32.lib"});
+  std::string config = get_test_data_prefix() + "test/strategies/miter/test_config_verilog.yaml";
+  if (std::getenv("TEST_DATA_PREFIX"))
+    config = get_test_data_prefix() + "test/strategies/miter/test_config_verilog_bazel.yaml";
+  int rc = run_kepler_cli_with_args({"--config", config});
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+}
+
+TEST(KeplerCliSubprocessTests, ExampleTestRunCommandLine) {
+  std::filesystem::path p(KEPLER_BIN);
+  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+
+  std::string pfx = get_test_data_prefix();
+  int rc = run_kepler_cli_with_args({"-verilog",
+                                         pfx + "example/tinyrocket.v",
+                                         pfx + "example/tinyrocket_edited.v",
+                                         pfx + "example/NangateOpenCellLibrary_typical.lib",
+                                         pfx + "example/fakeram45_64x15.lib",
+                                         pfx + "example/fakeram45_64x32.lib",
+                                         pfx + "example/fakeram45_1024x32.lib"});
   EXPECT_EQ(rc, EXIT_SUCCESS);
 }
 
@@ -1211,10 +1306,24 @@ TEST(KeplerCliSubprocessTests, ExampleTestRunNajaIFWithScopeExtraction) {
   std::filesystem::path p(KEPLER_BIN);
   if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
 
-  int rc = run_kepler_cli_with_args({"--config", "../../../../test/strategies/miter/test_config_naja_if_with_se.yaml"});
+  std::string config = get_test_data_prefix() + "test/strategies/miter/test_config_naja_if_with_se.yaml";
+  if (std::getenv("TEST_DATA_PREFIX"))
+    config = get_test_data_prefix() + "test/strategies/miter/test_config_naja_if_with_se_bazel.yaml";
+  int rc = run_kepler_cli_with_args({"--config", config});
   EXPECT_EQ(rc, EXIT_SUCCESS);
 }
 
+// test failure with test_config_failure.yaml
+TEST(KeplerCliSubprocessTests, ExampleTestRunFailure) {
+  std::filesystem::path p(KEPLER_BIN);
+  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+
+  std::string config = get_test_data_prefix() + "test/strategies/miter/test_config_failure.yaml";
+  if (std::getenv("TEST_DATA_PREFIX"))
+    config = get_test_data_prefix() + "test/strategies/miter/test_config_failure_bazel.yaml";
+  int rc = run_kepler_cli_with_args({"--config", config});
+  EXPECT_NE(rc, EXIT_SUCCESS);
+}
 
 // Required main function for Google Test
 int main(int argc, char** argv) {

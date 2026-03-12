@@ -10,8 +10,10 @@
 #include "SNLPath.h"
 #include "Tree2BoolExpr.h"
 
-#define DEBUG_CHECKS
-#define DEBUG_PRINTS
+
+
+//#define DEBUG_CHECKS
+//#define DEBUG_PRINTS
 
 #ifdef DEBUG_PRINTS
 #define DEBUG_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
@@ -376,7 +378,7 @@ void SNLLogicCloud::compute() {
       
       if (isInput(driver)
         || (Tree2BoolExpr::iso2boolExpr_.find(iso.getIsoID()) !=
-          Tree2BoolExpr::iso2boolExpr_.end() && iter > 0)) {
+            Tree2BoolExpr::iso2boolExpr_.end() && iter > 0)) {
         pushBackNewIterationInputsETS(driver);
         DEBUG_LOG(
             "- %lu After analyzing input %s(%lu), addings driver %s(%lu) is a "

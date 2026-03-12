@@ -12,5 +12,5 @@ liberty_files:
 log_level: info
 use_scopes: true
 clean_scopes: true
-solver: glucose
-cnf_export: true
+solver: failure
+

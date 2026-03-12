@@ -1,0 +1,18 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+cc_binary(
+    name = "kepler-formal",
+    srcs = ["KeplerFormal.cpp"],
+    linkopts = ["-ltbb", "-ltbbmalloc", "-lz", "-lcapnp", "-lkj"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/config:kepler_config",
+        "//src/scope:scope_extraction",
+        "//src/strategies:formal_strategies",
+        "@kissat",
+        "@naja",
+        "@naja//:naja_extra_headers",
+        "@spdlog",
+        "@yaml-cpp",
+    ],
+)
