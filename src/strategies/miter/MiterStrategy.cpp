@@ -30,8 +30,6 @@
 #include <spdlog/sinks/stdout_sinks.h>  // ensure console sink is available
 #include <spdlog/spdlog.h>
 
-#include "Conditioner.h"
-
 //#define DEBUG_CHECKS
 
 using namespace naja;
