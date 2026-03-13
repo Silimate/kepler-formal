@@ -13,7 +13,6 @@
 #include "KeplerFormalUtils.h"
 
 extern int KeplerFormalMain(int argc, char** argv);
-extern void KeplerFormalTest_LogDesignPathsEmpty();
 
 namespace {
 
@@ -127,9 +126,6 @@ TEST(KeplerFormalCliTests, SanitizeFileToken) {
   EXPECT_EQ(sanitizeFileToken(""), "scope");
 }
 
-TEST(KeplerFormalCliTests, LogDesignPathsEmpty) {
-  KeplerFormalTest_LogDesignPathsEmpty();
-}
 
 TEST(KeplerFormalCliTests, DumpCnfFromConfig) {
   const auto root = repoRoot();

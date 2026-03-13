@@ -176,12 +176,6 @@ static void logDesignPaths(const char* label,
   SPDLOG_INFO("{}", oss.str());
 }
 
-#ifdef KEPLER_FORMAL_TESTING
-void KeplerFormalTest_LogDesignPathsEmpty() {
-  logDesignPaths("Netlist 1", {});
-}
-#endif
-
 static std::vector<std::filesystem::path> toPathVector(
     const std::vector<std::string>& inputs) {
   std::vector<std::filesystem::path> out;
@@ -382,18 +376,6 @@ int KeplerFormalMain(int argc, char** argv) {
     }
   }
 
-  // Basic validation
-  if (designInputs.design0.empty() || designInputs.design1.empty()) {
-    SPDLOG_CRITICAL("Need two input netlist paths (one per design)");
-    print_usage(argv[0]);
-    return EXIT_FAILURE;
-  }
-  if (inputFormatType == FormatType::NAJA_IF &&
-      (designInputs.design0.size() != 1 || designInputs.design1.size() != 1)) {
-    SPDLOG_CRITICAL("SNL input only supports one file per design");
-    return EXIT_FAILURE;
-  }
-
   // Configure logging level
   auto console = spdlog::stdout_color_mt("console");
   if (logLevel == "debug")
@@ -413,6 +395,19 @@ int KeplerFormalMain(int argc, char** argv) {
   SPDLOG_INFO("Input format: {}", (inputFormatType == FormatType::NAJA_IF) ? "SNL" : "VERILOG");
   logDesignPaths("Netlist 1", designInputs.design0);
   logDesignPaths("Netlist 2", designInputs.design1);
+
+  // Basic validation
+  if (designInputs.design0.empty() || designInputs.design1.empty()) {
+    SPDLOG_CRITICAL("Need two input netlist paths (one per design)");
+    print_usage(argv[0]);
+    return EXIT_FAILURE;
+  }
+  if (inputFormatType == FormatType::NAJA_IF &&
+      (designInputs.design0.size() != 1 || designInputs.design1.size() != 1)) {
+    SPDLOG_CRITICAL("SNL input only supports one file per design");
+    return EXIT_FAILURE;
+  }
+
   auto solverType = KEPLER_FORMAL::Config::getSolverType();
   SPDLOG_INFO("Solver: {}",
               solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");

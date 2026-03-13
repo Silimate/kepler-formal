@@ -37,7 +37,7 @@ add_executable(keplerFormalCliTests
     ${CMAKE_SOURCE_DIR}/src/bin/KeplerFormal.cpp
 )
 
-target_compile_definitions(keplerFormalCliTests PRIVATE KEPLER_FORMAL_NO_MAIN KEPLER_FORMAL_TESTING)
+target_compile_definitions(keplerFormalCliTests PRIVATE KEPLER_FORMAL_NO_MAIN)
 target_include_directories(keplerFormalCliTests PRIVATE ${CMAKE_SOURCE_DIR}/src/bin)
 
 target_link_libraries(keplerFormalCliTests
