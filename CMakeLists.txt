@@ -62,6 +62,13 @@ enable_testing()
 add_subdirectory(test)
 # endif()
 
+option(KEPLER_STATIC "Statically link libstdc++, libgcc, and Cap'n Proto" OFF)
+if(KEPLER_STATIC)
+  add_link_options(-static-libstdc++ -static-libgcc)
+  # Cap'n Proto: prefer static libs when available
+  set(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+endif()
+
 option(CODE_COVERAGE "Enable coverage reporting" OFF)
 if(CODE_COVERAGE)
   # Add required flags (GCC & LLVM/Clang)
