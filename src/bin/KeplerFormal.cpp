@@ -18,7 +18,6 @@
 #include <yaml-cpp/yaml.h>
 
 #include "NajaPerf.h"
-#include "KeplerFormalUtils.h"
 
 // Naja interfaces
 #include "DNL.h"
