@@ -186,7 +186,7 @@ void SNLLogicCloud::compute() {
         dnl_.getDNLTerminalFromID(seedOutputTerm_).getIsoID());
     // LCOV_EXCL_START
     if (iso.getDrivers().size() > 1) {
-      
+      #ifdef DEBUG_PRINTS
       for (const auto& driver : iso.getDrivers()) {
         DEBUG_LOG("Driver: %s\n", dnl_.getDNLTerminalFromID(driver)
                                       .getSnlBitTerm()
@@ -194,6 +194,7 @@ void SNLLogicCloud::compute() {
                                       .getString()
                                       .c_str());
       }
+      #endif
       throw std::runtime_error("Seed output term is not a single driver");
     } else if (iso.getDrivers().empty()) {
       std::string termName = dnl_.getDNLTerminalFromID(seedOutputTerm_)
