@@ -131,7 +131,7 @@ def _deps_impl(_module_ctx):
         naja_if_sha256 = "bfc0b22855aaf332efb86a5b2801363e36646b6fac816e4bcbed9284f627ab52",
         naja_if_strip_prefix = "naja-if-{}".format(_NAJA_IF_COMMIT),
         slang_url = "https://github.com/najaeda/slang/archive/{}.tar.gz".format(_SLANG_COMMIT),
-        slang_sha256 = "200ef0fc4f2ba1be9f18e934d72164f8aaabc17f0a21b606205237d1502423aa",
+        slang_sha256 = "ba927785f18c62bc5b8d4babff122a97cc6610692b5270b95ecbd79c68c4f47d",
         slang_strip_prefix = "slang-{}".format(_SLANG_COMMIT),
         googletest_url = "https://github.com/google/googletest/archive/{}.tar.gz".format(_GOOGLETEST_COMMIT),
         googletest_sha256 = "745c55415660044610f7fcd3af7a6420d5de16a7dbb9ebfe2e131275676232be",
