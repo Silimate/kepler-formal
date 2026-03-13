@@ -205,11 +205,58 @@ TEST(KeplerFormalCliTests, ConfigMissingInputPathsFails) {
   std::filesystem::remove(cfgPath);
 }
 
+TEST(KeplerFormalCliTests, ConfigEmptyInputPathsFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: []\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
 TEST(KeplerFormalCliTests, ConfigInputPathsNotSequenceFails) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
       "input_paths: foo\n"
       "log_level: info\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigUnknownKeyFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: [a.v, b.v]\n"
+      "bogus_key: 1\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigNonScalarKeyFails) {
+  const auto cfgPath = writeTempConfig(
+      "? [a, b]\n"
+      ": 1\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigUnknownFormatFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: unknown_format\n"
+      "input_paths: [a.v, b.v]\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigUnknownSolverFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: [a.v, b.v]\n"
+      "solver: nope\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
@@ -278,4 +325,13 @@ TEST(KeplerFormalCliTests, CliUnknownOptionFails) {
   int argc = 7;
   int rc = KeplerFormalMain(argc, argv);
   EXPECT_EQ(rc, EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliHelpPrintsUsage) {
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "--help";
+  char* argv[] = {argv0.data(), argv1.data()};
+  int argc = 2;
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_SUCCESS);
 }
