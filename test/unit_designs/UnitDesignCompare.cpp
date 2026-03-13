@@ -117,7 +117,7 @@ TEST_F(UnitDesignCompare, testDifferentDesigns) {
   //here the issue comes from missing truth table but nothing is reported
 }
 
-TEST_F(UnitDesignCompare, testDiffWithConstants) {
+TEST_F(UnitDesignCompare, testDiffWithConstants0) {
   std::filesystem::path benchmarksPath(BENCHMARKS_PATH);
   SNLVRLConstructor constructor0(library0_);
   constructor0.construct(benchmarksPath/"simple1.v");
@@ -125,6 +125,21 @@ TEST_F(UnitDesignCompare, testDiffWithConstants) {
 
   SNLVRLConstructor constructor1(library1_);
   constructor1.construct(benchmarksPath/"simple2.v");
+  auto top1 = SNLUtils::findTop(library1_);
+
+  KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
+  miterS.init();
+  EXPECT_FALSE(miterS.run());
+}
+
+TEST_F(UnitDesignCompare, testDiffWithConstan1) {
+  std::filesystem::path benchmarksPath(BENCHMARKS_PATH);
+  SNLVRLConstructor constructor0(library0_);
+  constructor0.construct(benchmarksPath/"simple1.v");
+  auto top0 = SNLUtils::findTop(library0_);
+
+  SNLVRLConstructor constructor1(library1_);
+  constructor1.construct(benchmarksPath/"simple3.v");
   auto top1 = SNLUtils::findTop(library1_);
 
   KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
