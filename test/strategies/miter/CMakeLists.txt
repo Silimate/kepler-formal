@@ -3,11 +3,12 @@
 
 add_executable(miterTests MiterTests.cpp)
 
-target_link_libraries(miterTests``
+target_link_libraries(miterTests
     kepler_config
     naja_nl
     ${GTEST_LIBRARIES}
     naja_opt
+    naja_snl_pyloader
     formal_strategies
     gmock gtest_main
 )
