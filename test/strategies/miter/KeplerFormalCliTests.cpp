@@ -13,6 +13,7 @@
 #include "KeplerFormalUtils.h"
 
 extern int KeplerFormalMain(int argc, char** argv);
+extern void KeplerFormalTest_LogDesignPathsEmpty();
 
 namespace {
 
@@ -126,6 +127,10 @@ TEST(KeplerFormalCliTests, SanitizeFileToken) {
   EXPECT_EQ(sanitizeFileToken(""), "scope");
 }
 
+TEST(KeplerFormalCliTests, LogDesignPathsEmpty) {
+  KeplerFormalTest_LogDesignPathsEmpty();
+}
+
 TEST(KeplerFormalCliTests, DumpCnfFromConfig) {
   const auto root = repoRoot();
   const auto exampleDir = root / "example";
@@ -205,6 +210,28 @@ TEST(KeplerFormalCliTests, ConfigMissingInputPathsFails) {
   std::filesystem::remove(cfgPath);
 }
 
+TEST(KeplerFormalCliTests, ConfigNestedSecondNotSequenceFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - [a.v]\n"
+      "  - b.v\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigNestedEmptyDesignFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - []\n"
+      "  - []\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
 TEST(KeplerFormalCliTests, ConfigEmptyInputPathsFails) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
@@ -260,6 +287,21 @@ TEST(KeplerFormalCliTests, ConfigUnknownSolverFails) {
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigLogFileAccepted) {
+  const auto tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_cli_log";
+  std::filesystem::create_directories(tmpDir);
+  const auto logPath = tmpDir / "kepler_formal_test.log";
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: [a.v, b.v]\n"
+      "log_file: " + logPath.string() + "\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(tmpDir);
 }
 
 TEST(KeplerFormalCliTests, ConfigInputPathsWrongSizeFails) {
@@ -334,4 +376,105 @@ TEST(KeplerFormalCliTests, CliHelpPrintsUsage) {
   int argc = 2;
   int rc = KeplerFormalMain(argc, argv);
   EXPECT_EQ(rc, EXIT_SUCCESS);
+}
+
+TEST(KeplerFormalCliTests, CliLibertyFlagCollectsPaths) {
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = "--design1";
+  std::string argv3 = "a.v";
+  std::string argv4 = "--design2";
+  std::string argv5 = "b.v";
+  std::string argv6 = "--liberty";
+  std::string argv7 = "lib1.lib";
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
+                  argv4.data(), argv5.data(), argv6.data(), argv7.data()};
+  int argc = 8;
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliExplicitMissingDesignsFails) {
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = "--design1";
+  std::string argv3 = "--design2";
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data()};
+  int argc = 4;
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, ConfigDebugLogLevelAccepted) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: [a.v, b.v]\n"
+      "log_level: debug\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigUnknownLogLevelDefaultsToInfo) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: [a.v, b.v]\n"
+      "log_level: loud\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, VerilogNoLibertyCreatesDbAndFailsOnSecondParse) {
+  const auto tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_no_lib";
+  std::filesystem::create_directories(tmpDir);
+  const auto design0 = tmpDir / "design0.v";
+  const auto design1 = tmpDir / "missing_design1.v";
+  {
+    std::ofstream f(design0);
+    f << "module top(input a, output y);\n";
+    f << "  assign y = a;\n";
+    f << "endmodule\n";
+  }
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = design0.string();
+  std::string argv3 = design1.string();
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data()};
+  int argc = 4;
+
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove_all(tmpDir);
+}
+
+TEST(KeplerFormalCliTests, SnlScopesNoDifference) {
+  const auto root = repoRoot();
+  const auto exampleDir = root / "example";
+  const auto design0 = exampleDir / "tinyrocket_naja.if";
+  const auto lib0 = exampleDir / "NangateOpenCellLibrary_typical.lib";
+  const auto lib1 = exampleDir / "fakeram45_1024x32.lib";
+  const auto lib2 = exampleDir / "fakeram45_64x32.lib";
+
+  ASSERT_TRUE(std::filesystem::exists(design0));
+  ASSERT_TRUE(std::filesystem::exists(lib0));
+  ASSERT_TRUE(std::filesystem::exists(lib1));
+  ASSERT_TRUE(std::filesystem::exists(lib2));
+
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "input_paths:\n"
+      "  - " + design0.string() + "\n"
+      "  - " + design0.string() + "\n"
+      "liberty_files:\n"
+      "  - " + lib0.string() + "\n"
+      "  - " + lib1.string() + "\n"
+      "  - " + lib2.string() + "\n"
+      "use_scopes: true\n");
+
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
 }

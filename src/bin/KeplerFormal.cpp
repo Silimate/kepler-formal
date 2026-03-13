@@ -176,6 +176,12 @@ static void logDesignPaths(const char* label,
   SPDLOG_INFO("{}", oss.str());
 }
 
+#ifdef KEPLER_FORMAL_TESTING
+void KeplerFormalTest_LogDesignPathsEmpty() {
+  logDesignPaths("Netlist 1", {});
+}
+#endif
+
 static std::vector<std::filesystem::path> toPathVector(
     const std::vector<std::string>& inputs) {
   std::vector<std::filesystem::path> out;
