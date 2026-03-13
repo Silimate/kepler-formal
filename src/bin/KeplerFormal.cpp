@@ -9,6 +9,8 @@
 #include <optional>
 #include <cctype>
 #include <unordered_set>
+#include <filesystem>
+#include <sstream>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -16,6 +18,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "NajaPerf.h"
+#include "KeplerFormalUtils.h"
 
 // Naja interfaces
 #include "DNL.h"
@@ -31,7 +34,8 @@
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
       "Usage: {} [--config <file>] | <-naja_if/-verilog> <netlist1> <netlist2> "
-      "[<liberty-file>...]",
+      "[<liberty-file>...] | <-naja_if/-verilog> --design1 <file...> --design2 "
+      "<file...> [--liberty <liberty-file>...]",
       prog);
 }
 
@@ -78,7 +82,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
   return true;
 }
 
-static std::string sanitizeFileToken(const std::string& input) {
+std::string sanitizeFileToken(const std::string& input) {
   std::string out;
   out.reserve(input.size());
   for (unsigned char ch : input) {
@@ -94,13 +98,102 @@ static std::string sanitizeFileToken(const std::string& input) {
   return out;
 }
 
-int main(int argc, char** argv) {
+struct DesignInputs {
+  std::vector<std::string> design0;
+  std::vector<std::string> design1;
+};
+
+static bool parseConfigInputPaths(const YAML::Node& node,
+                                  DesignInputs& out,
+                                  std::string& error) {
+  out.design0.clear();
+  out.design1.clear();
+  if (!node) {
+    error = "Missing input_paths in config";
+    return false;
+  }
+  if (!node.IsSequence()) {
+    error = "input_paths must be a sequence";
+    return false;
+  }
+  if (node.size() == 0) {
+    error = "input_paths must contain at least two entries";
+    return false;
+  }
+
+  const bool firstIsSequence = node[0].IsSequence();
+  if (firstIsSequence) {
+    if (node.size() != 2) {
+      error = "input_paths must contain exactly two design entries";
+      return false;
+    }
+    for (size_t i = 0; i < 2; ++i) {
+      if (!node[i].IsSequence()) {
+        error = "input_paths must be a sequence of sequences when using multi-file designs";
+        return false;
+      }
+      for (const auto& n : node[i]) {
+        if (!n.IsScalar()) {
+          error = "input_paths entries must be scalar file paths";
+          return false;
+        }
+        if (i == 0) out.design0.emplace_back(n.as<std::string>());
+        else out.design1.emplace_back(n.as<std::string>());
+      }
+    }
+  } else {
+    std::vector<std::string> flat = yamlToVector(node);
+    if (flat.size() != 2) {
+      error = "input_paths must contain exactly two file paths";
+      return false;
+    }
+    out.design0.emplace_back(flat[0]);
+    out.design1.emplace_back(flat[1]);
+  }
+
+  if (out.design0.empty() || out.design1.empty()) {
+    error = "input_paths must contain at least one file per design";
+    return false;
+  }
+  return true;
+}
+
+static void logDesignPaths(const char* label,
+                           const std::vector<std::string>& paths) {
+  if (paths.empty()) {
+    SPDLOG_INFO("{}: <none>", label);
+    return;
+  }
+  if (paths.size() == 1) {
+    SPDLOG_INFO("{}: {}", label, paths.front());
+    return;
+  }
+  std::ostringstream oss;
+  oss << label << ": ";
+  for (size_t i = 0; i < paths.size(); ++i) {
+    if (i) oss << ", ";
+    oss << paths[i];
+  }
+  SPDLOG_INFO("{}", oss.str());
+}
+
+static std::vector<std::filesystem::path> toPathVector(
+    const std::vector<std::string>& inputs) {
+  std::vector<std::filesystem::path> out;
+  out.reserve(inputs.size());
+  for (const auto& s : inputs) {
+    out.emplace_back(s);
+  }
+  return out;
+}
+
+int KeplerFormalMain(int argc, char** argv) {
   using namespace std::chrono;
   enum class FormatType { VERILOG, NAJA_IF };
 
   // Default values
   FormatType inputFormatType = FormatType::VERILOG;
-  std::vector<std::string> inputPaths;
+  DesignInputs designInputs;
   std::vector<std::string> libertyFiles;
   std::string logLevel = "info";
 
@@ -148,7 +241,13 @@ int main(int argc, char** argv) {
         }
 
         // input_paths
-        inputPaths = yamlToVector(cfg["input_paths"]);
+        {
+          std::string inputError;
+          if (!parseConfigInputPaths(cfg["input_paths"], designInputs, inputError)) {
+            SPDLOG_CRITICAL("Invalid input_paths in config: {}", inputError);
+            return EXIT_FAILURE;
+          }
+        }
 
         // liberty_files
         libertyFiles = yamlToVector(cfg["liberty_files"]);
@@ -223,20 +322,70 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
 
-    // collect paths and liberty files from argv
-    for (int i = 2; i < argc; ++i) inputPaths.emplace_back(argv[i]);
+    bool explicitDesignFlags = false;
+    std::vector<std::string>* currentDesign = nullptr;
+    bool currentLiberty = false;
+    std::vector<std::string> inputPaths;
 
-    // If user provided more than two paths, treat the rest as liberty files
-    if (inputPaths.size() > 2) {
-      for (size_t i = 2; i < inputPaths.size(); ++i)
-        libertyFiles.push_back(inputPaths[i]);
+    for (int i = 2; i < argc; ++i) {
+      std::string arg = argv[i];
+      if (arg == "--design1") {
+        explicitDesignFlags = true;
+        currentDesign = &designInputs.design0;
+        currentLiberty = false;
+        continue;
+      }
+      if (arg == "--design2") {
+        explicitDesignFlags = true;
+        currentDesign = &designInputs.design1;
+        currentLiberty = false;
+        continue;
+      }
+      if (arg == "--liberty" || arg == "--lib") {
+        explicitDesignFlags = true;
+        currentDesign = nullptr;
+        currentLiberty = true;
+        continue;
+      }
+
+      if (!arg.empty() && arg[0] == '-') {
+        SPDLOG_CRITICAL("Unrecognized option: {}", arg);
+        return EXIT_FAILURE;
+      }
+
+      if (explicitDesignFlags) {
+        if (currentLiberty) {
+          libertyFiles.push_back(arg);
+        } else if (currentDesign) {
+          currentDesign->push_back(arg);
+        } else {
+          SPDLOG_CRITICAL("Provide --design1 or --design2 before netlist paths");
+          return EXIT_FAILURE;
+        }
+      } else {
+        inputPaths.emplace_back(arg);
+      }
+    }
+
+    if (!explicitDesignFlags) {
+      if (inputPaths.size() > 2) {
+        for (size_t i = 2; i < inputPaths.size(); ++i)
+          libertyFiles.push_back(inputPaths[i]);
+      }
+      if (inputPaths.size() >= 1) designInputs.design0.emplace_back(inputPaths[0]);
+      if (inputPaths.size() >= 2) designInputs.design1.emplace_back(inputPaths[1]);
     }
   }
 
   // Basic validation
-  if (inputPaths.size() < 2) {
-    SPDLOG_CRITICAL("Need two input netlist paths; got {}", inputPaths.size());
+  if (designInputs.design0.empty() || designInputs.design1.empty()) {
+    SPDLOG_CRITICAL("Need two input netlist paths (one per design)");
     print_usage(argv[0]);
+    return EXIT_FAILURE;
+  }
+  if (inputFormatType == FormatType::NAJA_IF &&
+      (designInputs.design0.size() != 1 || designInputs.design1.size() != 1)) {
+    SPDLOG_CRITICAL("SNL input only supports one file per design");
     return EXIT_FAILURE;
   }
 
@@ -257,8 +406,8 @@ int main(int argc, char** argv) {
 
   SPDLOG_INFO("KEPLER FORMAL: Run.");
   SPDLOG_INFO("Input format: {}", (inputFormatType == FormatType::NAJA_IF) ? "SNL" : "VERILOG");
-  SPDLOG_INFO("Netlist 1: {}", inputPaths[0]);
-  SPDLOG_INFO("Netlist 2: {}", inputPaths[1]);
+  logDesignPaths("Netlist 1", designInputs.design0);
+  logDesignPaths("Netlist 2", designInputs.design1);
   auto solverType = KEPLER_FORMAL::Config::getSolverType();
   SPDLOG_INFO("Solver: {}",
               solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");
@@ -289,10 +438,14 @@ int main(int argc, char** argv) {
     }
 
     if (inputFormatType == FormatType::VERILOG) {
-      SPDLOG_INFO("Parsing verilog file: {}", inputPaths[0]);
+      if (!db0) {
+        db0 = NLDB::create(NLUniverse::get());
+      }
+      const auto design0Paths = toPathVector(designInputs.design0);
+      SPDLOG_INFO("Parsing verilog file(s) for design 1");
       auto designLibrary = NLLibrary::create(db0, NLName("DESIGN"));
       SNLVRLConstructor constructor(designLibrary);
-      constructor.construct(inputPaths[0].c_str());
+      constructor.construct(design0Paths);
       auto top = SNLUtils::findTop(designLibrary);
       if (top) {
         db0->setTopDesign(top);
@@ -304,14 +457,14 @@ int main(int argc, char** argv) {
         // LCOV_EXCL_STOP
       }
     } else {  // SNL
-      SPDLOG_INFO("Loading Naja IF: {}", inputPaths[0]);
+      SPDLOG_INFO("Loading Naja IF: {}", designInputs.design0[0]);
       naja::NL::SNLCapnP::LoadingConfiguration config;
       config.primitiveConflictPolicy_ = primitivesAreLoaded ? naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::PreferExisting :
                                                               naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
-      db0 = SNLCapnP::load(inputPaths[0].c_str(), config);
+      db0 = SNLCapnP::load(designInputs.design0[0].c_str(), config);
       if (!db0) {
         // LCOV_EXCL_START
-        SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[0]);
+        SPDLOG_CRITICAL("Failed to load Naja IF: {}", designInputs.design0[0]);
         return EXIT_FAILURE;
         // LCOV_EXCL_STOP
       }
@@ -342,10 +495,14 @@ int main(int argc, char** argv) {
     }
 
     if (inputFormatType == FormatType::VERILOG) {
-      SPDLOG_INFO("Parsing verilog file: {}", inputPaths[1]);
+      if (!db1) {
+        db1 = NLDB::create(NLUniverse::get());
+      }
+      const auto design1Paths = toPathVector(designInputs.design1);
+      SPDLOG_INFO("Parsing verilog file(s) for design 2");
       auto designLibrary = NLLibrary::create(db1, NLName("DESIGN"));
       SNLVRLConstructor constructor(designLibrary);
-      constructor.construct(inputPaths[1].c_str());
+      constructor.construct(design1Paths);
       auto top = SNLUtils::findTop(designLibrary);
       if (top) {
         db1->setTopDesign(top);
@@ -357,14 +514,14 @@ int main(int argc, char** argv) {
         // LCOV_EXCL_STOP
       }
     } else {  // SNL
-      SPDLOG_INFO("Loading Naja IF: {}", inputPaths[1]);
+      SPDLOG_INFO("Loading Naja IF: {}", designInputs.design1[0]);
       naja::NL::SNLCapnP::LoadingConfiguration config;
       config.primitiveConflictPolicy_ = primitivesAreLoaded ? naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::PreferExisting :
                                                               naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
-      db1 = SNLCapnP::load(inputPaths[1].c_str(), config);
+      db1 = SNLCapnP::load(designInputs.design1[0].c_str(), config);
       if (!db1) {
         // LCOV_EXCL_START
-        SPDLOG_CRITICAL("Failed to load Naja IF: {}", inputPaths[1]);
+        SPDLOG_CRITICAL("Failed to load Naja IF: {}", designInputs.design1[0]);
         return EXIT_FAILURE;
         // LCOV_EXCL_STOP
       }
@@ -451,3 +608,7 @@ int main(int argc, char** argv) {
 
   return EXIT_SUCCESS;
 }
+
+#ifndef KEPLER_FORMAL_NO_MAIN
+int main(int argc, char** argv) { return KeplerFormalMain(argc, argv); }
+#endif
