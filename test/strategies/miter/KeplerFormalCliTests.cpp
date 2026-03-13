@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -17,6 +18,27 @@ namespace {
 
 std::filesystem::path repoRoot() {
   return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+}
+
+std::filesystem::path writeTempConfig(const std::string& contents) {
+  const auto tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_cli_cfg";
+  std::filesystem::create_directories(tmpDir);
+  const auto cfgPath =
+      tmpDir / ("config_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".yaml");
+  std::ofstream cfg(cfgPath);
+  cfg << contents;
+  cfg.close();
+  return cfgPath;
+}
+
+int runWithConfigFile(const std::filesystem::path& cfgPath) {
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "--config";
+  std::string argv2 = cfgPath.string();
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data()};
+  int argc = 3;
+  return KeplerFormalMain(argc, argv);
 }
 
 }  // namespace
@@ -166,4 +188,86 @@ TEST(KeplerFormalCliTests, MultiFileVerilogConfig) {
   EXPECT_EQ(rc, EXIT_SUCCESS);
 
   std::filesystem::remove_all(tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigMissingInputPathsFails) {
+  const auto cfgPath = writeTempConfig("format: verilog\nlog_level: info\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigInputPathsNotSequenceFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: foo\n"
+      "log_level: info\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigInputPathsWrongSizeFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - only_one.v\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigInputPathsNestedWrongCountFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - [a.v]\n"
+      "  - [b.v]\n"
+      "  - [c.v]\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigInputPathsNestedNonScalarFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  -\n"
+      "    - [nested]\n"
+      "  -\n"
+      "    - b.v\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, SnlMultiFileRejected) {
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "input_paths:\n"
+      "  -\n"
+      "    - a.if\n"
+      "    - b.if\n"
+      "  -\n"
+      "    - c.if\n"
+      "    - d.if\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, CliUnknownOptionFails) {
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = "--design1";
+  std::string argv3 = "a.v";
+  std::string argv4 = "--design2";
+  std::string argv5 = "b.v";
+  std::string argv6 = "--bogus";
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
+                  argv4.data(), argv5.data(), argv6.data()};
+  int argc = 7;
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_FAILURE);
 }
