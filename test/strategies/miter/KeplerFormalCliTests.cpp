@@ -41,6 +41,82 @@ int runWithConfigFile(const std::filesystem::path& cfgPath) {
   return KeplerFormalMain(argc, argv);
 }
 
+struct MultiFileVerilogFixture {
+  std::filesystem::path tmpDir;
+  std::filesystem::path cfgPath;
+};
+
+MultiFileVerilogFixture createMultiFileVerilogFixture() {
+  MultiFileVerilogFixture fixture;
+  fixture.tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_cli_multi_v";
+  std::filesystem::create_directories(fixture.tmpDir);
+
+  const auto design0Leaf = fixture.tmpDir / "design0_leaf.v";
+  const auto design0Top = fixture.tmpDir / "design0_top.v";
+  const auto design1Leaf = fixture.tmpDir / "design1_leaf.v";
+  const auto design1Top = fixture.tmpDir / "design1_top.v";
+  fixture.cfgPath = fixture.tmpDir / "config.yaml";
+  const auto root = repoRoot();
+  const auto exampleDir = root / "example";
+  const auto lib0 = exampleDir / "NangateOpenCellLibrary_typical.lib";
+  const auto lib1 = exampleDir / "fakeram45_1024x32.lib";
+  const auto lib2 = exampleDir / "fakeram45_64x32.lib";
+  const auto lib3 = exampleDir / "fakeram45_64x15.lib";
+
+  {
+    std::ofstream leaf(design0Leaf);
+    leaf << "module leaf(input a, input b, output y);\n";
+    leaf << "  wire n;\n";
+    leaf << "  NAND2_X1 u1(.A1(a), .A2(b), .ZN(n));\n";
+    leaf << "  INV_X1 u2(.A(n), .ZN(y));\n";
+    leaf << "endmodule\n";
+  }
+  {
+    std::ofstream top(design0Top);
+    top << "module top(input a, input b, output y);\n";
+    top << "  wire w;\n";
+    top << "  leaf u1(.a(a), .b(b), .y(w));\n";
+    top << "  INV_X1 u2(.A(w), .ZN(y));\n";
+    top << "endmodule\n";
+  }
+  {
+    std::ofstream leaf(design1Leaf);
+    leaf << "module leaf(input a, input b, output y);\n";
+    leaf << "  wire n;\n";
+    leaf << "  NAND2_X1 u1(.A1(a), .A2(b), .ZN(n));\n";
+    leaf << "  INV_X1 u2(.A(n), .ZN(y));\n";
+    leaf << "endmodule\n";
+  }
+  {
+    std::ofstream top(design1Top);
+    top << "module top(input a, input b, output y);\n";
+    top << "  wire w;\n";
+    top << "  leaf u1(.a(a), .b(b), .y(w));\n";
+    top << "  INV_X1 u2(.A(w), .ZN(y));\n";
+    top << "endmodule\n";
+  }
+
+  std::ofstream cfg(fixture.cfgPath);
+  cfg << "format: verilog\n";
+  cfg << "input_paths:\n";
+  cfg << "  -\n";
+  cfg << "    - " << design0Leaf.string() << "\n";
+  cfg << "    - " << design0Top.string() << "\n";
+  cfg << "  -\n";
+  cfg << "    - " << design1Leaf.string() << "\n";
+  cfg << "    - " << design1Top.string() << "\n";
+  cfg << "liberty_files:\n";
+  cfg << "  - " << lib0.string() << "\n";
+  cfg << "  - " << lib1.string() << "\n";
+  cfg << "  - " << lib2.string() << "\n";
+  cfg << "  - " << lib3.string() << "\n";
+  cfg << "log_level: info\n";
+  cfg.close();
+
+  return fixture;
+}
+
 }  // namespace
 
 TEST(KeplerFormalCliTests, SanitizeFileToken) {
@@ -107,87 +183,19 @@ TEST(KeplerFormalCliTests, DumpCnfFromConfig) {
 }
 
 TEST(KeplerFormalCliTests, MultiFileVerilogConfig) {
-  const auto tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_multi_v";
-  std::filesystem::create_directories(tmpDir);
-
-  const auto design0Leaf = tmpDir / "design0_leaf.v";
-  const auto design0Top = tmpDir / "design0_top.v";
-  const auto design1Leaf = tmpDir / "design1_leaf.v";
-  const auto design1Top = tmpDir / "design1_top.v";
-  const auto cfgPath = tmpDir / "config.yaml";
-  const auto root = repoRoot();
-  const auto exampleDir = root / "example";
-  const auto lib0 = exampleDir / "NangateOpenCellLibrary_typical.lib";
-  const auto lib1 = exampleDir / "fakeram45_1024x32.lib";
-  const auto lib2 = exampleDir / "fakeram45_64x32.lib";
-  const auto lib3 = exampleDir / "fakeram45_64x15.lib";
-
-  ASSERT_TRUE(std::filesystem::exists(lib0));
-  ASSERT_TRUE(std::filesystem::exists(lib1));
-  ASSERT_TRUE(std::filesystem::exists(lib2));
-  ASSERT_TRUE(std::filesystem::exists(lib3));
-
-  {
-    std::ofstream leaf(design0Leaf);
-    leaf << "module leaf(input a, input b, output y);\n";
-    leaf << "  wire n;\n";
-    leaf << "  NAND2_X1 u1(.A1(a), .A2(b), .ZN(n));\n";
-    leaf << "  INV_X1 u2(.A(n), .ZN(y));\n";
-    leaf << "endmodule\n";
-  }
-  {
-    std::ofstream top(design0Top);
-    top << "module top(input a, input b, output y);\n";
-    top << "  wire w;\n";
-    top << "  leaf u1(.a(a), .b(b), .y(w));\n";
-    top << "  INV_X1 u2(.A(w), .ZN(y));\n";
-    top << "endmodule\n";
-  }
-  {
-    std::ofstream leaf(design1Leaf);
-    leaf << "module leaf(input a, input b, output y);\n";
-    leaf << "  wire n;\n";
-    leaf << "  NAND2_X1 u1(.A1(a), .A2(b), .ZN(n));\n";
-    leaf << "  INV_X1 u2(.A(n), .ZN(y));\n";
-    leaf << "endmodule\n";
-  }
-  {
-    std::ofstream top(design1Top);
-    top << "module top(input a, input b, output y);\n";
-    top << "  wire w;\n";
-    top << "  leaf u1(.a(a), .b(b), .y(w));\n";
-    top << "  INV_X1 u2(.A(w), .ZN(y));\n";
-    top << "endmodule\n";
-  }
-
-  std::ofstream cfg(cfgPath);
-  cfg << "format: verilog\n";
-  cfg << "input_paths:\n";
-  cfg << "  -\n";
-  cfg << "    - " << design0Leaf.string() << "\n";
-  cfg << "    - " << design0Top.string() << "\n";
-  cfg << "  -\n";
-  cfg << "    - " << design1Leaf.string() << "\n";
-  cfg << "    - " << design1Top.string() << "\n";
-  cfg << "liberty_files:\n";
-  cfg << "  - " << lib0.string() << "\n";
-  cfg << "  - " << lib1.string() << "\n";
-  cfg << "  - " << lib2.string() << "\n";
-  cfg << "  - " << lib3.string() << "\n";
-  cfg << "log_level: info\n";
-  cfg.close();
-
-  std::string argv0 = "kepler-formal";
-  std::string argv1 = "--config";
-  std::string argv2 = cfgPath.string();
-  char* argv[] = {argv0.data(), argv1.data(), argv2.data()};
-  int argc = 3;
-
-  int rc = KeplerFormalMain(argc, argv);
+  const auto fixture = createMultiFileVerilogFixture();
+  int rc = runWithConfigFile(fixture.cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
 
-  std::filesystem::remove_all(tmpDir);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, YamlMultiFileVerilogConfig) {
+  const auto fixture = createMultiFileVerilogFixture();
+  int rc = runWithConfigFile(fixture.cfgPath);
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+
+  std::filesystem::remove_all(fixture.tmpDir);
 }
 
 TEST(KeplerFormalCliTests, ConfigMissingInputPathsFails) {

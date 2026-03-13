@@ -69,10 +69,33 @@ cmake .. \
 ## Usage
 
 ```bash
-# Classic 
-"build/src/bin/kepler-formal <-verilog/-naja_if> <netlist1> <netlist2> [<liberty-file>...]"
+# Classic (single file per design)
+build/src/bin/kepler-formal <-verilog/-naja_if> <netlist1> <netlist2> [<liberty-file>...]
+
+# Multi-file Verilog designs
+build/src/bin/kepler-formal -verilog --design1 <file...> --design2 <file...> \
+  [--liberty <liberty-file>...]
+
 # Through yaml config file
-"build/src/bin/kepler-formal --config <yaml file>"
+build/src/bin/kepler-formal --config <yaml file>
+```
+
+### YAML Input Paths
+
+The YAML `input_paths` field accepts either:
+
+- A flat list of two files (one per design), or
+- A nested list with one list of files per design (multi-file Verilog).
+
+Example:
+
+```yaml
+format: verilog
+input_paths:
+  - [design0_part1.v, design0_part2.v]
+  - [design1_part1.v, design1_part2.v]
+liberty_files:
+  - NangateOpenCellLibrary_typical.lib
 ```
 
 ## Example 
