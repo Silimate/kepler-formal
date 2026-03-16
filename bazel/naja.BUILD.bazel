@@ -60,6 +60,7 @@ cc_library(
     name = "naja_extra_headers",
     hdrs = glob([
         "src/src/**/*.h",
+        "src/thirdparty/cpptrace/include/**/*.hpp",
         "src/thirdparty/naja-verilog/src/**/*.h",
         "src/thirdparty/yosys-liberty/src/**/*.h",
         "src/thirdparty/lefdef/src/**/*.h",
@@ -82,6 +83,7 @@ cc_library(
         "src/src/nl/nl/visual",
         "src/src/nl/python/pyloader",
         "src/src/optimization",
+        "src/thirdparty/cpptrace/include",
         "src/thirdparty/naja-verilog/src",
         "src/thirdparty/yosys-liberty/src",
         "src/thirdparty/lefdef/src/def/def",
