@@ -10,7 +10,8 @@ cmake(
     name = "naja",
     # All naja sources including nested submodules (under src/ symlink)
     lib_source = ":all_srcs",
-    # Output shared libraries that kepler-formal links against
+    # Naja builds these 5 as explicitly SHARED — cannot be made static.
+    # The release tarball bundles them alongside the binary with RPATH.
     out_shared_libs = [
         "libnaja_nl.so",
         "libnaja_dnl.so",
