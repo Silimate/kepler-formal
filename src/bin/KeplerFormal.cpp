@@ -462,10 +462,13 @@ int KeplerFormalMain(int argc, char** argv) {
       for (const auto& libraryFile : libertyFiles) {
         std::filesystem::path libraryPath(libraryFile);
         const auto extension = libraryPath.extension();
+        const bool isLibertyFile =
+            extension == ".lib" ||
+            (extension == ".gz" && libraryPath.stem().extension() == ".lib");
         SPDLOG_INFO("Loading library file: {}", libraryFile);
         if (extension == ".py") {
           SNLPyLoader::loadPrimitives(primitivesLibrary, libraryPath);
-        } else if (extension == ".lib") {
+        } else if (isLibertyFile) {
           SNLLibertyConstructor constructor(primitivesLibrary);
           constructor.construct(libraryPath);
         } else {

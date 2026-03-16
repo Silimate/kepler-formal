@@ -608,6 +608,29 @@ TEST(KeplerFormalCliTests, PythonLibraryFilesAreLoadedByExtension) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, GzippedLibertyFilesAreLoadedByExtension) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto gzLiberty =
+      repoRoot() / "thirdparty/naja/test/nl/formats/liberty/benchmarks/tests/small.lib.gz";
+  ASSERT_TRUE(std::filesystem::exists(gzLiberty));
+
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "liberty_files:\n"
+      "  - " + gzLiberty.string() + "\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, UnsupportedLibraryExtensionFails) {
   const auto fixture = createEquivalentDesignFixture(
       "v",

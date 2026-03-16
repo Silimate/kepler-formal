@@ -27,6 +27,7 @@ cmake(
         "libnaja_snl_visual.a",
         "libnaja_snl_verilog.a",
         "libnaja_snl_systemverilog.a",
+        "libsvlang.a",
         "libnaja_snl_liberty.a",
         "libnaja_lefdef.a",
         "libnaja_nl_dump.a",
