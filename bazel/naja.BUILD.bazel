@@ -18,12 +18,15 @@ cmake(
         "libnaja_bne.so",
         "libnaja_opt.so",
         "libnaja_metrics.so",
+        "libnaja_python.so",
+        "libnaja_snl_pyloader.so",
     ],
     # Output static libraries
     out_static_libs = [
         "libnaja_core.a",
         "libnaja_snl_visual.a",
         "libnaja_snl_verilog.a",
+        "libnaja_snl_systemverilog.a",
         "libnaja_snl_liberty.a",
         "libnaja_lefdef.a",
         "libnaja_nl_dump.a",
