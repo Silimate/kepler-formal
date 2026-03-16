@@ -363,6 +363,74 @@ TEST(KeplerFormalCliTests, CliSvAliasAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, FirstVerilogDesignWithoutTopFails) {
+  const auto tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_no_top_first";
+  std::filesystem::create_directories(tmpDir);
+  const auto design0 = tmpDir / "design0.v";
+  const auto design1 = tmpDir / "design1.v";
+  {
+    std::ofstream f(design0);
+    f << "module a(input x, output y);\n";
+    f << "  assign y = x;\n";
+    f << "endmodule\n";
+    f << "module b(input x, output y);\n";
+    f << "  assign y = x;\n";
+    f << "endmodule\n";
+  }
+  {
+    std::ofstream f(design1);
+    f << "module top(input a, output y);\n";
+    f << "  assign y = a;\n";
+    f << "endmodule\n";
+  }
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = design0.string();
+  std::string argv3 = design1.string();
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data()};
+  int argc = 4;
+
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove_all(tmpDir);
+}
+
+TEST(KeplerFormalCliTests, SecondVerilogDesignWithoutTopFails) {
+  const auto tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_no_top_second";
+  std::filesystem::create_directories(tmpDir);
+  const auto design0 = tmpDir / "design0.v";
+  const auto design1 = tmpDir / "design1.v";
+  {
+    std::ofstream f(design0);
+    f << "module top(input a, output y);\n";
+    f << "  assign y = a;\n";
+    f << "endmodule\n";
+  }
+  {
+    std::ofstream f(design1);
+    f << "module a(input x, output y);\n";
+    f << "  assign y = x;\n";
+    f << "endmodule\n";
+    f << "module b(input x, output y);\n";
+    f << "  assign y = x;\n";
+    f << "endmodule\n";
+  }
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = design0.string();
+  std::string argv3 = design1.string();
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data()};
+  int argc = 4;
+
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove_all(tmpDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigUnknownSolverFails) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
@@ -433,6 +501,38 @@ TEST(KeplerFormalCliTests, SnlMultiFileRejected) {
       "  -\n"
       "    - c.if\n"
       "    - d.if\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, MissingFirstNajaIfFails) {
+  const auto root = repoRoot();
+  const auto exampleDir = root / "example";
+  const auto design1 = exampleDir / "tinyrocket_naja.if";
+  ASSERT_TRUE(std::filesystem::exists(design1));
+
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "input_paths:\n"
+      "  - /definitely/missing/first.if\n"
+      "  - " + design1.string() + "\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, MissingSecondNajaIfFails) {
+  const auto root = repoRoot();
+  const auto exampleDir = root / "example";
+  const auto design0 = exampleDir / "tinyrocket_naja.if";
+  ASSERT_TRUE(std::filesystem::exists(design0));
+
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "input_paths:\n"
+      "  - " + design0.string() + "\n"
+      "  - /definitely/missing/second.if\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_FAILURE);
   std::filesystem::remove(cfgPath);

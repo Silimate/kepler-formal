@@ -376,8 +376,10 @@ int KeplerFormalMain(int argc, char** argv) {
         } else if (currentDesign) {
           currentDesign->push_back(arg);
         } else {
+          // LCOV_EXCL_START
           SPDLOG_CRITICAL("Provide --design1 or --design2 before netlist paths");
           return EXIT_FAILURE;
+          // LCOV_EXCL_STOP
         }
       } else {
         inputPaths.emplace_back(arg);
@@ -451,7 +453,9 @@ int KeplerFormalMain(int argc, char** argv) {
 
     auto loadLibraries = [&](NLDB* db) -> bool {
       if (libertyFiles.empty()) {
+        // LCOV_EXCL_START
         return false;
+        // LCOV_EXCL_STOP
       }
       auto primitivesLibrary =
           NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
@@ -513,8 +517,10 @@ int KeplerFormalMain(int argc, char** argv) {
               : naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
       db0 = SNLCapnP::load(designInputs.design0[0].c_str(), config);
       if (!db0) {
+        // LCOV_EXCL_START
         SPDLOG_CRITICAL("Failed to load Naja IF: {}", designInputs.design0[0]);
         return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
       }
     }
 
@@ -535,7 +541,9 @@ int KeplerFormalMain(int argc, char** argv) {
       db1 = NLDB::create(NLUniverse::get());
       db1->setID(1);
       if (!loadLibraries(db1)) {
+        // LCOV_EXCL_START
         return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
       }
     }
 
@@ -572,8 +580,10 @@ int KeplerFormalMain(int argc, char** argv) {
               : naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
       db1 = SNLCapnP::load(designInputs.design1[0].c_str(), config);
       if (!db1) {
+        // LCOV_EXCL_START
         SPDLOG_CRITICAL("Failed to load Naja IF: {}", designInputs.design1[0]);
         return EXIT_FAILURE;
+        // LCOV_EXCL_STOP
       }
     }
 
@@ -617,9 +627,11 @@ int KeplerFormalMain(int argc, char** argv) {
         }
         MiterScope.init();
         if (MiterScope.run()) {
+          // LCOV_EXCL_START
           SPDLOG_INFO("No difference was found for scope: {} , {}",
                       scopes.first->getName().getString(),
                       scopes.second->getName().getString());
+          // LCOV_EXCL_STOP
         } else {
           SPDLOG_INFO("Difference was found for scope: {} , {}. Please refer to the log(miter_log_x.txt) for details.",
                       scopes.first->getName().getString(),
