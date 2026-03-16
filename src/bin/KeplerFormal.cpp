@@ -630,11 +630,9 @@ int KeplerFormalMain(int argc, char** argv) {
         }
         MiterScope.init();
         if (MiterScope.run()) {
-          // LCOV_EXCL_START
           SPDLOG_INFO("No difference was found for scope: {} , {}",
                       scopes.first->getName().getString(),
                       scopes.second->getName().getString());
-          // LCOV_EXCL_STOP
         } else {
           SPDLOG_INFO("Difference was found for scope: {} , {}. Please refer to the log(miter_log_x.txt) for details.",
                       scopes.first->getName().getString(),

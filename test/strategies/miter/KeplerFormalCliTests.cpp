@@ -10,7 +10,12 @@
 #include <string>
 #include <vector>
 
+#include "DNL.h"
 #include "KeplerFormalUtils.h"
+#include "SNLCapnP.h"
+#include "SNLLibertyConstructor.h"
+#include "SNLUtils.h"
+#include "SNLVRLConstructor.h"
 
 extern int KeplerFormalMain(int argc, char** argv);
 
@@ -50,6 +55,13 @@ struct SimpleCliFixture {
   std::filesystem::path tmpDir;
   std::filesystem::path design0Path;
   std::filesystem::path design1Path;
+};
+
+struct ScopedNajaIfFixture {
+  std::filesystem::path tmpDir;
+  std::filesystem::path design0IfPath;
+  std::filesystem::path design1IfPath;
+  std::filesystem::path libertyPath;
 };
 
 struct EnvVarGuard {
@@ -167,6 +179,79 @@ SimpleCliFixture createEquivalentDesignFixture(const std::string& extension,
     std::ofstream design1(fixture.design1Path);
     design1 << moduleBody;
   }
+
+  return fixture;
+}
+
+void cleanupNajaTestState() {
+  naja::DNL::destroy();
+  if (NLUniverse::get()) {
+    NLUniverse::get()->destroy();
+  }
+}
+
+ScopedNajaIfFixture createEquivalentScopedNajaIfFixture() {
+  ScopedNajaIfFixture fixture;
+  fixture.tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_cli_scope_if";
+  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.design0IfPath = fixture.tmpDir / "design0.capnp";
+  fixture.design1IfPath = fixture.tmpDir / "design1.capnp";
+  fixture.libertyPath = repoRoot() / "example" / "NangateOpenCellLibrary_typical.lib";
+
+  const auto design0Child = fixture.tmpDir / "design0_child.v";
+  const auto design0Top = fixture.tmpDir / "design0_top.v";
+  const auto design1Child = fixture.tmpDir / "design1_child.v";
+  const auto design1Top = fixture.tmpDir / "design1_top.v";
+
+  {
+    std::ofstream child(design0Child);
+    child << "module child(input a, output y);\n";
+    child << "  assign y = a;\n";
+    child << "endmodule\n";
+  }
+  {
+    std::ofstream top(design0Top);
+    top << "module top(input a, output y);\n";
+    top << "  child u_child(.a(a), .y(y));\n";
+    top << "endmodule\n";
+  }
+  {
+    std::ofstream child(design1Child);
+    child << "module child(input a, output y);\n";
+    child << "  wire n;\n";
+    child << "  INV_X1 u0(.A(a), .ZN(n));\n";
+    child << "  INV_X1 u1(.A(n), .ZN(y));\n";
+    child << "endmodule\n";
+  }
+  {
+    std::ofstream top(design1Top);
+    top << "module top(input a, output y);\n";
+    top << "  child u_child(.a(a), .y(y));\n";
+    top << "endmodule\n";
+  }
+
+  const auto dumpDesign = [&](const std::vector<std::filesystem::path>& designPaths,
+                              const std::filesystem::path& dumpPath) {
+    cleanupNajaTestState();
+    NLUniverse::create();
+    auto* db = NLDB::create(NLUniverse::get());
+    auto* primitivesLibrary =
+        NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
+    SNLLibertyConstructor libertyConstructor(primitivesLibrary);
+    libertyConstructor.construct(fixture.libertyPath);
+    auto* designLibrary = NLLibrary::create(db, NLName("DESIGN"));
+    SNLVRLConstructor constructor(designLibrary);
+    constructor.construct(designPaths);
+    auto* top = SNLUtils::findTop(designLibrary);
+    ASSERT_NE(top, nullptr);
+    db->setTopDesign(top);
+    SNLCapnP::dump(db, dumpPath);
+    cleanupNajaTestState();
+  };
+
+  dumpDesign({design0Child, design0Top}, fixture.design0IfPath);
+  dumpDesign({design1Child, design1Top}, fixture.design1IfPath);
 
   return fixture;
 }
@@ -739,4 +824,25 @@ TEST(KeplerFormalCliTests, SnlScopesNoDifference) {
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
   std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, SnlScopesEquivalentEditedScopeNoDifference) {
+  const auto fixture = createEquivalentScopedNajaIfFixture();
+  ASSERT_TRUE(std::filesystem::exists(fixture.design0IfPath));
+  ASSERT_TRUE(std::filesystem::exists(fixture.design1IfPath));
+  ASSERT_TRUE(std::filesystem::exists(fixture.libertyPath));
+
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n"
+      "liberty_files:\n"
+      "  - " + fixture.libertyPath.string() + "\n"
+      "use_scopes: true\n");
+
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
 }
