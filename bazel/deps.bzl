@@ -45,6 +45,14 @@ def _naja_repo_impl(repo_ctx):
         output = "src/thirdparty/naja-if",
     )
 
+    # Download cpptrace
+    repo_ctx.download_and_extract(
+        url = repo_ctx.attr.cpptrace_url,
+        sha256 = repo_ctx.attr.cpptrace_sha256,
+        stripPrefix = repo_ctx.attr.cpptrace_strip_prefix,
+        output = "src/thirdparty/cpptrace",
+    )
+
     # Download slang (SystemVerilog parser)
     repo_ctx.download_and_extract(
         url = repo_ctx.attr.slang_url,
@@ -81,6 +89,9 @@ naja_repo = repository_rule(
         "naja_if_url": attr.string(mandatory = True),
         "naja_if_sha256": attr.string(mandatory = True),
         "naja_if_strip_prefix": attr.string(mandatory = True),
+        "cpptrace_url": attr.string(mandatory = True),
+        "cpptrace_sha256": attr.string(mandatory = True),
+        "cpptrace_strip_prefix": attr.string(mandatory = True),
         "slang_url": attr.string(mandatory = True),
         "slang_sha256": attr.string(mandatory = True),
         "slang_strip_prefix": attr.string(mandatory = True),
@@ -96,10 +107,11 @@ naja_repo = repository_rule(
 # to verify, then update the sha256 hashes.
 _GLUCOSE_COMMIT = "7f887abba7cf13636a5ac2d28653668a20a91b25"
 _KISSAT_COMMIT = "8af8e56f174b778aef3aa45af9f739b2a5f492c2"
-_NAJA_COMMIT = "7bf03dee61889f46717313683904ac7737f7c886"
+_NAJA_COMMIT = "1eef7310308ab9d0ffa7a1764281f39dd07b5ba6"
 _NAJA_VERILOG_COMMIT = "a377d7f2644bbbf98ff1ae9e8511d52eba8dd6ca"
 _NAJA_IF_COMMIT = "27ea776a0c3022fea0c29ccd14a4fb7daea941f0"
-_SLANG_COMMIT = "02462995b4bf330152952b8f9fae32040c7881fc"
+_CPPTRACE_COMMIT = "3db8da80111171c219ab5839905771386bee06b3"
+_SLANG_COMMIT = "79215d82c684d4d489b8ed573e6c34cfbb9d2f6d"
 _GOOGLETEST_COMMIT = "52eb8108c5bdec04579160ae17225d66034bd723"
 
 def _deps_impl(_module_ctx):
@@ -122,7 +134,7 @@ def _deps_impl(_module_ctx):
     naja_repo(
         name = "naja",
         naja_url = "https://github.com/nanocoh/naja/archive/{}.tar.gz".format(_NAJA_COMMIT),
-        naja_sha256 = "95ee90477fa46a7de23e1ddb274dd1677d0c0e6c7dd260f2e7776ba62462eb60",
+        naja_sha256 = "97dff2a9f4f7361dff240272b3a6c63f28bef32084cd7f1aa2d87af149217e57",
         naja_strip_prefix = "naja-{}".format(_NAJA_COMMIT),
         naja_verilog_url = "https://github.com/najaeda/naja-verilog/archive/{}.tar.gz".format(_NAJA_VERILOG_COMMIT),
         naja_verilog_sha256 = "beffd84e14da4b146d9a0dc4699ebf44596cd437cf8157e3b39430a4080c606d",
@@ -130,8 +142,11 @@ def _deps_impl(_module_ctx):
         naja_if_url = "https://github.com/najaeda/naja-if/archive/{}.tar.gz".format(_NAJA_IF_COMMIT),
         naja_if_sha256 = "bfc0b22855aaf332efb86a5b2801363e36646b6fac816e4bcbed9284f627ab52",
         naja_if_strip_prefix = "naja-if-{}".format(_NAJA_IF_COMMIT),
+        cpptrace_url = "https://github.com/jeremy-rifkin/cpptrace/archive/{}.tar.gz".format(_CPPTRACE_COMMIT),
+        cpptrace_sha256 = "77d689fd7956ff80351a079d83e86a03865dbbe2433b4559cc6cea50bed77390",
+        cpptrace_strip_prefix = "cpptrace-{}".format(_CPPTRACE_COMMIT),
         slang_url = "https://github.com/najaeda/slang/archive/{}.tar.gz".format(_SLANG_COMMIT),
-        slang_sha256 = "ba927785f18c62bc5b8d4babff122a97cc6610692b5270b95ecbd79c68c4f47d",
+        slang_sha256 = "3e8d0369dc10717de430579a664cded3e4a88163d5c7dc36fafbed56752e56f9",
         slang_strip_prefix = "slang-{}".format(_SLANG_COMMIT),
         googletest_url = "https://github.com/google/googletest/archive/{}.tar.gz".format(_GOOGLETEST_COMMIT),
         googletest_sha256 = "745c55415660044610f7fcd3af7a6420d5de16a7dbb9ebfe2e131275676232be",
