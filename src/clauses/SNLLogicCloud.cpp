@@ -279,8 +279,8 @@ void SNLLogicCloud::compute() {
   size_t iter = 0;
 
   while (!reachedPIs) {
-    // Originally computation of reachedPIs have been handled in the end of the loop
-    // by adding isConstant on isos as part of the check, it had to be moved to the beginning.
+    // Originally computation of reachedPIs have been handled in the end of the loop,
+    // but by adding isConstant on isos as part of the check, it had to be moved to the beginning.
     // Why? because before we cached the inputs of the leaves we meet and then we look at the drivers in the next loop iteration
     // and then we run the checks on the drivers in order to know if we need to iterate again, after the drivers were contacted to the cloud.
     // Now, we also check isos of inputs, which means that if an input has an iso that is constant, we will stop.
