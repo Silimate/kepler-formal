@@ -169,7 +169,7 @@ bool isPairVisitedETS(naja::DNL::DNLID termA,
 }
 
 bool SNLLogicCloud::isInput(naja::DNL::DNLID termID) {
-  return PIs_[termID] /*|| dnl_.getDNLIsoDB().getIsoFromIsoIDconst(dnl_.getDNLTerminalFromID(termID).getIsoID()).isConstant()*/;
+  return PIs_[termID];
 }
 
 bool SNLLogicCloud::isOutput(naja::DNL::DNLID termID) {
@@ -279,6 +279,12 @@ void SNLLogicCloud::compute() {
   size_t iter = 0;
 
   while (!reachedPIs) {
+    // Originally computation of reachedPIs have been handled in the end of the loop
+    // by adding isConstant on isos as part of the check, it had to be moved to the beginning.
+    // Why? because before we cached the inputs of the leaves we meet and then we look at the drivers in the next loop iteration
+    // and then we run the checks on the drivers in order to know if we need to iterate again, after the drivers were contacted to the cloud.
+    // Now, we also check isos of inputs, which means that if an input has an iso that is constant, we will stop.
+    // In this case, we have to make the check in the next loop iteration in order to force concating the constants to the cloud.
     reachedPIs = true;
     size_t sizeOfNewInputs = sizeOfNewIterationInputsETS();
     for (size_t i = 0; i < sizeOfNewInputs; i++) {
@@ -446,9 +452,6 @@ void SNLLogicCloud::compute() {
           }
           auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
               dnl_.getDNLTerminalFromID(termID).getIsoID());
-          // if (iso.isConstant()) {
-          //   pushBackInputsToMergeETS({naja::DNL::DNLID_MAX, termID});  // Placeholder for PI/PO
-          // }
           pushBackNewIterationInputsETS(termID);
         }
       }
