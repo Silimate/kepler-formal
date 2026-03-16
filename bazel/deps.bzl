@@ -122,7 +122,7 @@ def _deps_impl(_module_ctx):
     naja_repo(
         name = "naja",
         naja_url = "https://github.com/nanocoh/naja/archive/{}.tar.gz".format(_NAJA_COMMIT),
-        naja_sha256 = "95ee90477fa46a7de23e1ddb274dd1677d0c0e6c7dd260f2e7776ba62462eb60",
+        naja_sha256 = "ba14aab0e79cdbddca40227704dc6dd105506fe0a0dc8c6128d2eccb60b232a7",
         naja_strip_prefix = "naja-{}".format(_NAJA_COMMIT),
         naja_verilog_url = "https://github.com/najaeda/naja-verilog/archive/{}.tar.gz".format(_NAJA_VERILOG_COMMIT),
         naja_verilog_sha256 = "beffd84e14da4b146d9a0dc4699ebf44596cd437cf8157e3b39430a4080c606d",
