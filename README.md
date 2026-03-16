@@ -103,16 +103,17 @@ Once kepler-formal is fully buildable with Bazel, it can be consumed directly by
 
 ```bash
 # Classic (single file per design)
-build/src/bin/kepler-formal <-verilog/-systemverilog/-sv/-naja_if> <netlist1> <netlist2> [<library-file>...]
+build/src/bin/kepler-formal <-verilog/-systemverilog/-sv/-naja_if> [--verilog_preprocessing] <netlist1> <netlist2> [<library-file>...]
 
 # Multi-file Verilog / SystemVerilog designs
-build/src/bin/kepler-formal <-verilog/-systemverilog/-sv> --design1 <file...> --design2 <file...> \
+build/src/bin/kepler-formal <-verilog/-systemverilog/-sv> [--verilog_preprocessing] --design1 <file...> --design2 <file...> \
   [--liberty <library-file>...]
 
 # Through yaml config file
 build/src/bin/kepler-formal --config <yaml file>
 ```
 
+`--verilog_preprocessing` is also accepted as `--verilog-preprocessing`.
 ### Supported formats
 
 - CLI:
@@ -158,6 +159,7 @@ input_paths:
 liberty_files:
   - library_file0.lib
   - library_file1.lib
+verilog_preprocessing: true   # Optional: enables Verilog preprocessor
 ```
 
 SystemVerilog example:

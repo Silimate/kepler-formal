@@ -59,6 +59,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "format",
       "input_paths",
       "liberty_files",
+      "verilog_preprocessing",
       "log_level",
       "log_file",
       "use_scopes",
@@ -224,6 +225,7 @@ int KeplerFormalMain(int argc, char** argv) {
   bool useScopes = false;
   bool cleanScopes = false;
   bool dumpCnf = false;
+  bool verilogPreprocessing = false;
   std::string dumpCnfPath;
 
   for (int i = 1; i < argc; ++i) {
@@ -297,6 +299,11 @@ int KeplerFormalMain(int argc, char** argv) {
           dumpCnfPath = cfg["cnf_export_path"].as<std::string>();
         }
 
+        // verilog_preprocessing (optional)
+        if (cfg["verilog_preprocessing"] && cfg["verilog_preprocessing"].IsScalar()) {
+          verilogPreprocessing = cfg["verilog_preprocessing"].as<bool>();
+        }
+
         // solver (glucose | kissat)
         if (cfg["solver"] && cfg["solver"].IsScalar()) {
           std::string solver = cfg["solver"].as<std::string>();
@@ -362,6 +369,10 @@ int KeplerFormalMain(int argc, char** argv) {
         explicitDesignFlags = true;
         currentDesign = nullptr;
         currentLiberty = true;
+        continue;
+      }
+      if (arg == "--verilog_preprocessing") {
+        verilogPreprocessing = true;
         continue;
       }
 
@@ -501,6 +512,7 @@ int KeplerFormalMain(int argc, char** argv) {
         constructor.construct(design0Paths);
       } else {
         SNLVRLConstructor constructor(designLibrary);
+        constructor.config_.preprocessEnabled_ = verilogPreprocessing;
         constructor.construct(design0Paths);
       }
       auto top = SNLUtils::findTop(designLibrary);
@@ -564,6 +576,7 @@ int KeplerFormalMain(int argc, char** argv) {
         constructor.construct(design1Paths);
       } else {
         SNLVRLConstructor constructor(designLibrary);
+        constructor.config_.preprocessEnabled_ = verilogPreprocessing;
         constructor.construct(design1Paths);
       }
       auto top = SNLUtils::findTop(designLibrary);
