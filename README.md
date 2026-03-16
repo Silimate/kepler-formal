@@ -4,7 +4,7 @@
 
 ## Introduction
 
-Kepler-Formal is a logic equivalence checking (LEC) tool that operates on verilog and the naja interchange format(https://github.com/najaeda/naja-if) and focuses today on combinational equivalence checking only — sequential boundary changes are not supported yet and remain planned work.
+Kepler-Formal is a logic equivalence checking (LEC) tool that operates on Verilog, SystemVerilog, and the [Naja interchange format](https://github.com/najaeda/naja-if). It focuses today on combinational equivalence checking only; sequential boundary changes are not supported yet and remain planned work.
 
 ### Acknowledgement
 
@@ -15,7 +15,7 @@ This project is supported and funded by NLNet through the [NGI0 Entrust](https:/
 
 ## Requirements 
 
-### For Verilog:
+### For Verilog and SystemVerilog:
 
 - No change of sequential boundaries. 
 - No change in names of hierarchical instances, sequential instances and top terminals.
@@ -103,15 +103,45 @@ Once kepler-formal is fully buildable with Bazel, it can be consumed directly by
 
 ```bash
 # Classic (single file per design)
-build/src/bin/kepler-formal <-verilog/-naja_if> <netlist1> <netlist2> [<liberty-file>...]
+build/src/bin/kepler-formal <-verilog/-systemverilog/-sv/-naja_if> <netlist1> <netlist2> [<library-file>...]
 
-# Multi-file Verilog designs
-build/src/bin/kepler-formal -verilog --design1 <file...> --design2 <file...> \
-  [--liberty <liberty-file>...]
+# Multi-file Verilog / SystemVerilog designs
+build/src/bin/kepler-formal <-verilog/-systemverilog/-sv> --design1 <file...> --design2 <file...> \
+  [--liberty <library-file>...]
 
 # Through yaml config file
 build/src/bin/kepler-formal --config <yaml file>
 ```
+
+### Supported formats
+
+- CLI:
+  - `-verilog`
+  - `-systemverilog`
+  - `-sv`
+  - `-naja_if`
+- YAML `format`:
+  - `verilog`
+  - `systemverilog`
+  - `sv`
+  - `naja_if`
+  - `naja-if`
+  - `snl`
+
+### Library files
+
+Library files continue to use the existing `--liberty` CLI flag and `liberty_files` YAML field.
+
+Supported file types are:
+
+- `.lib`
+- `.lib.gz`
+- `.py`
+
+Behavior:
+
+- `.lib` and `.lib.gz` are loaded through `SNLLibertyConstructor`
+- `.py` is loaded through `SNLPyLoader`
 
 ### YAML Input Paths
 
@@ -130,6 +160,18 @@ input_paths:
 liberty_files:
   - library_file0.lib
   - library_file1.lib
+```
+
+SystemVerilog example:
+
+```yaml
+format: systemverilog
+input_paths:
+  - [design0_pkg.sv, design0_top.sv]
+  - [design1_pkg.sv, design1_top.sv]
+liberty_files:
+  - stdcells.lib.gz
+  - primitives.py
 ```
 
 ## Example 
