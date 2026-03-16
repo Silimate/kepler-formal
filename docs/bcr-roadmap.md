@@ -45,12 +45,26 @@ git_override(
 
 This works today — no BCR submission required.
 
+### Phase 2.5: Binary releases (done)
+
+Pre-built binaries are published as GitHub Releases.  Run
+`bazelisk run //:release` to tag and push; CI builds an optimized binary
+and uploads it.  See `docs/releasing.md` for full instructions.
+
+Cap'n Proto is statically linked.  Naja shared libraries and TBB
+(which has no static libs) are bundled in the tarball with a wrapper
+script.
+
+Downstream projects can fetch the tarball via `http_archive` for fast
+CI without building from source.
+
 ### Phase 3: BCR publication
 
 To publish to BCR:
 
 1. Ensure the version in `MODULE.bazel` follows semver (currently `1.0.0`).
-2. Create a GitHub release/tag matching the version (e.g. `v1.0.0`).
+2. Create a GitHub release/tag matching the version (e.g. `v1.0.0`) —
+   this now happens automatically via `bazelisk run //:release`.
 3. Submit to BCR via the
    [publish-to-bcr](https://github.com/bazel-contrib/publish-to-bcr) GitHub App
    or manual PR to [bazel-central-registry](https://github.com/bazelbuild/bazel-central-registry).
