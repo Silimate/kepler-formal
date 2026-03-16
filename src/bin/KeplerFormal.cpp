@@ -243,7 +243,7 @@ int KeplerFormalMain(int argc, char** argv) {
         // format
         if (cfg["format"] && cfg["format"].IsScalar()) {
           std::string fmt = cfg["format"].as<std::string>();
-          if (fmt == "naja_if" || fmt == "naja-if" || fmt == "snl")
+          if (fmt == "naja_if")
             inputFormatType = FormatType::NAJA_IF;
           else if (fmt == "verilog" || fmt == "v")
             inputFormatType = FormatType::VERILOG;
@@ -328,7 +328,7 @@ int KeplerFormalMain(int argc, char** argv) {
     }
 
     std::string formatType = argv[1];
-    if (formatType == "-naja_if" || formatType == "-naja-if") {
+    if (formatType == "-naja_if") {
       inputFormatType = FormatType::NAJA_IF;
     } else if (formatType == "-verilog") {
       inputFormatType = FormatType::VERILOG;

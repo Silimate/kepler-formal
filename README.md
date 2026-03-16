@@ -125,8 +125,6 @@ build/src/bin/kepler-formal --config <yaml file>
   - `systemverilog`
   - `sv`
   - `naja_if`
-  - `naja-if`
-  - `snl`
 
 ### Library files
 
