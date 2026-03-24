@@ -10,6 +10,7 @@
 #include "ConstantPropagation.h"
 #include "MiterStrategy.h"
 #include "NLLibraryTruthTables.h"
+#include "NLDB0.h"
 #include "NLUniverse.h"
 #include "NetlistGraph.h"
 #include "SNLDesign.h"
@@ -31,9 +32,28 @@ using namespace KEPLER_FORMAL;
 // Path to the kepler-formal CLI binary used by the project tests.
 // Bazel sets KEPLER_BIN env var via the test's BUILD.bazel; CMake uses
 // the default relative path from the build directory.
+static std::filesystem::path repoRoot() {
+  return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+}
+
 static std::string get_kepler_bin() {
   const char* env = std::getenv("KEPLER_BIN");
-  return env ? env : "../../../src/bin/kepler-formal";
+  if (env && *env) {
+    return env;
+  }
+  const auto root = repoRoot();
+  const std::vector<std::filesystem::path> candidates = {
+      root / "build/src/bin/kepler-formal",
+      root / "buildR/src/bin/kepler-formal",
+      root / "buildD/src/bin/kepler-formal",
+      root / "src/bin/kepler-formal",
+  };
+  for (const auto& candidate : candidates) {
+    if (std::filesystem::exists(candidate)) {
+      return candidate.string();
+    }
+  }
+  return (root / "build/src/bin/kepler-formal").string();
 }
 static const std::string KEPLER_BIN_STR = get_kepler_bin();
 static const char* KEPLER_BIN = KEPLER_BIN_STR.c_str();
@@ -52,6 +72,98 @@ void executeCommand(const std::string& command) {
   if (result != 0) {
     std::cerr << "Command execution failed." << std::endl;
   }
+}
+
+std::vector<std::filesystem::path> listMiterLogFiles() {
+  std::vector<std::filesystem::path> logs;
+  for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path())) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const auto name = entry.path().filename().string();
+    if (name.rfind("miter_log_", 0) == 0 && entry.path().extension() == ".txt") {
+      logs.push_back(entry.path().filename());
+    }
+  }
+  return logs;
+}
+
+std::filesystem::path findNewMiterLogFile(
+    const std::vector<std::filesystem::path>& beforeLogs) {
+  const auto afterLogs = listMiterLogFiles();
+  for (const auto& after : afterLogs) {
+    if (std::find(beforeLogs.begin(), beforeLogs.end(), after) == beforeLogs.end()) {
+      return after;
+    }
+  }
+  return {};
+}
+
+void expectGenericGateMiterEquivalent(const char* gateName,
+                                      SNLTruthTable::GenericType genericType) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+
+  NLDB0::GateType gateType = NLDB0::GateType::And;
+  switch (genericType) {
+    case SNLTruthTable::GenericType::NAND:
+      gateType = NLDB0::GateType::Nand;
+      break;
+    case SNLTruthTable::GenericType::NOR:
+      gateType = NLDB0::GateType::Nor;
+      break;
+    case SNLTruthTable::GenericType::XNOR:
+      gateType = NLDB0::GateType::Xnor;
+      break;
+    default:
+      throw std::runtime_error("Unsupported generic type for test");
+  }
+
+  auto gateModel = NLDB0::getOrCreateNInputGate(gateType, 2);
+  ASSERT_NE(gateModel, nullptr);
+  SNLBitTerm* gateOut = nullptr;
+  std::vector<SNLBitTerm*> gateInputs;
+  for (auto term : gateModel->getBitTerms()) {
+    if (term->getDirection() == SNLTerm::Direction::Input) {
+      gateInputs.push_back(term);
+    } else {
+      gateOut = term;
+    }
+  }
+  ASSERT_NE(gateOut, nullptr);
+  ASSERT_EQ(gateInputs.size(), 2u);
+
+  auto buildTop = [&](const char* topName) {
+    auto top =
+        SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(topName));
+    auto topIn0 =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+    auto topIn1 =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+    auto topOut =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+    auto inst = SNLInstance::create(top, gateModel, NLName("gate0"));
+
+    auto netIn0 = SNLScalarNet::create(top, NLName("net_a"));
+    auto netIn1 = SNLScalarNet::create(top, NLName("net_b"));
+    auto netOut = SNLScalarNet::create(top, NLName("net_y"));
+
+    topIn0->setNet(netIn0);
+    topIn1->setNet(netIn1);
+    topOut->setNet(netOut);
+    inst->getInstTerm(gateInputs[0])->setNet(netIn0);
+    inst->getInstTerm(gateInputs[1])->setNet(netIn1);
+    inst->getInstTerm(gateOut)->setNet(netOut);
+    return top;
+  };
+
+  auto top0 = buildTop("top0");
+  auto top1 = buildTop("top1");
+  KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
+  miterS.init();
+  EXPECT_TRUE(miterS.run());
 }
 
 }  // namespace
@@ -305,6 +417,124 @@ TEST_F(MiterTests, TestMiterANDNonConstant) {
   // Basic sanity checks: strings are non-empty
   EXPECT_FALSE(pos[0]->toString().empty());
   EXPECT_FALSE(pos[1]->toString().empty());
+}
+
+TEST_F(MiterTests, TestGenericNandTruthTable) {
+  expectGenericGateMiterEquivalent("NAND_GENERIC", SNLTruthTable::GenericType::NAND);
+}
+
+TEST_F(MiterTests, TestGenericNorTruthTable) {
+  expectGenericGateMiterEquivalent("NOR_GENERIC", SNLTruthTable::GenericType::NOR);
+}
+
+TEST_F(MiterTests, TestGenericXnorTruthTable) {
+  expectGenericGateMiterEquivalent("XNOR_GENERIC", SNLTruthTable::GenericType::XNOR);
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesConstantTrueOutput) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesign* logic1 =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC1"));
+  auto logic1Out =
+      SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1));
+  NLLibraryTruthTables::construct(library);
+
+  SNLInstance* inst = SNLInstance::create(top, logic1, NLName("const1"));
+  SNLNet* net = SNLScalarNet::create(top, NLName("const1_net"));
+  inst->getInstTerm(logic1Out)->setNet(net);
+  topOut->setNet(net);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+  builder.build();
+
+  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  EXPECT_EQ(builder.getPOs()[0]->toString(), "1");
+}
+
+TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSecondNetlist) {
+  MiterStrategy strategy(nullptr, nullptr, "normalizeOutputs");
+  using PathKey = BuildPrimaryOutputClauses::PathKey;
+  using OutputMap = std::unordered_map<PathKey, naja::DNL::DNLID,
+                                       BuildPrimaryOutputClauses::KeyHash>;
+
+  const PathKey common{{1}, {10}};
+  const PathKey onlySecond{{2}, {20}};
+
+  OutputMap outputs0Map;
+  OutputMap outputs1Map;
+  outputs0Map.emplace(common, 100);
+  outputs1Map.emplace(common, 200);
+  outputs1Map.emplace(onlySecond, 300);
+
+  std::vector<naja::DNL::DNLID> outputs0{100};
+  std::vector<naja::DNL::DNLID> outputs1{200, 300};
+
+  strategy.normalizeOutputs(outputs0, outputs1, outputs0Map, outputs1Map);
+
+  EXPECT_EQ(outputs0, std::vector<naja::DNL::DNLID>({100}));
+  EXPECT_EQ(outputs1, std::vector<naja::DNL::DNLID>({200}));
+}
+
+TEST_F(MiterTests, InvertedOutputsProduceConstantTrueMiter) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  NLLibrary* designs =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  SNLDesign* top0 =
+      SNLDesign::create(designs, SNLDesign::Type::Standard, NLName("top0"));
+  SNLDesign* top1 =
+      SNLDesign::create(designs, SNLDesign::Type::Standard, NLName("top1"));
+  univ->setTopDesign(top0);
+
+  auto top0In =
+      SNLScalarTerm::create(top0, SNLTerm::Direction::Input, NLName("a"));
+  auto top0Out =
+      SNLScalarTerm::create(top0, SNLTerm::Direction::Output, NLName("y"));
+  auto top1In =
+      SNLScalarTerm::create(top1, SNLTerm::Direction::Input, NLName("a"));
+  auto top1Out =
+      SNLScalarTerm::create(top1, SNLTerm::Direction::Output, NLName("y"));
+
+  SNLDesign* invModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("INV"));
+  auto invIn =
+      SNLScalarTerm::create(invModel, SNLTerm::Direction::Input, NLName("A"));
+  auto invOut =
+      SNLScalarTerm::create(invModel, SNLTerm::Direction::Output, NLName("ZN"));
+  SNLDesignModeling::setTruthTable(invModel, SNLTruthTable(1, 1));
+  NLLibraryTruthTables::construct(library);
+
+  auto top0InputNet = SNLScalarNet::create(top0, NLName("a_net"));
+  top0In->setNet(top0InputNet);
+  top0Out->setNet(top0InputNet);
+
+  auto top1InputNet = SNLScalarNet::create(top1, NLName("a_net"));
+  auto top1OutputNet = SNLScalarNet::create(top1, NLName("y_net"));
+  top1In->setNet(top1InputNet);
+  top1Out->setNet(top1OutputNet);
+  SNLInstance* inv = SNLInstance::create(top1, invModel, NLName("inv0"));
+  inv->getInstTerm(invIn)->setNet(top1InputNet);
+  inv->getInstTerm(invOut)->setNet(top1OutputNet);
+
+  MiterStrategy strategy(top0, top1, "constant_true_miter");
+  strategy.init();
+  EXPECT_FALSE(strategy.run());
 }
 
 
@@ -611,12 +841,13 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
     SNLCapnP::dump(db, outputPath);
   }
   //Check output of binary kepler-formal on the 2 capnp files
+  const auto beforeDifferentLogs = listMiterLogFiles();
   executeCommand(
       (get_kepler_bin() + " -naja_if ./top.capnp ./topEdited1.capnp")
           .c_str());
-  // look for "DIFFERENT" in the file ./miter_log_1.txt
-  // open the file  
-  std::ifstream miterLogFile("./miter_log_0.txt");
+  const auto differentLog = findNewMiterLogFile(beforeDifferentLogs);
+  ASSERT_FALSE(differentLog.empty());
+  std::ifstream miterLogFile(differentLog);
   std::string line;
   bool foundDifferent = false;
   if (miterLogFile.is_open()) {
@@ -661,12 +892,13 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
   }
 
   //Check output of binary kepler-formal on the 2 capnp files
+  const auto beforeIdenticalLogs = listMiterLogFiles();
   executeCommand(
       (get_kepler_bin() + " -naja_if ./top.capnp ./topEdited2.capnp")
           .c_str());
-  // look for "IDENTICAL" in the file ./miter_log_2.txt
-  // open the file
-  std::ifstream miterLogFile2("./miter_log_1.txt");
+  const auto identicalLog = findNewMiterLogFile(beforeIdenticalLogs);
+  ASSERT_FALSE(identicalLog.empty());
+  std::ifstream miterLogFile2(identicalLog);
   bool foundIdentical = false;
   if (miterLogFile2.is_open()) {
     while (getline(miterLogFile2, line)) {
@@ -825,12 +1057,11 @@ TEST(KeplerCliSubprocessTests, CliUnrecognizedFormatReturnsFailure) {
   EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
-// Program prints usage and returns success when argc < 4; keep that behavior expected.
-TEST(KeplerCliSubprocessTests, CliNotEnoughPathsReturnsSuccess) {
+TEST(KeplerCliSubprocessTests, CliNotEnoughPathsReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
   if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
   int rc = run_kepler_cli_with_args({"-verilog", "only_one_path.v"});
-  EXPECT_EQ(rc, EXIT_SUCCESS);
+  EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
 TEST(KeplerCliSubprocessTests, CliNajaIfFormatButMissingFilesReturnsFailure) {
@@ -1323,6 +1554,47 @@ TEST(KeplerCliSubprocessTests, ExampleTestRunFailure) {
     config = get_test_data_prefix() + "test/strategies/miter/test_config_failure_bazel.yaml";
   int rc = run_kepler_cli_with_args({"--config", config});
   EXPECT_NE(rc, EXIT_SUCCESS);
+}
+
+TEST(KeplerCliSubprocessTests, ExampleRunWritesConfiguredLogFile) {
+  std::filesystem::path p(KEPLER_BIN);
+  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+
+  const auto tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_subprocess_log";
+  std::filesystem::create_directories(tmpDir);
+  const auto logPath = tmpDir / "configured_miter.log";
+  const auto configPath = tmpDir / "config.yaml";
+  const auto root = repoRoot();
+
+  {
+    std::ofstream cfg(configPath);
+    cfg << "format: verilog\n";
+    cfg << "input_paths:\n";
+    cfg << "  - " << (root / "example/tinyrocket.v").string() << "\n";
+    cfg << "  - " << (root / "example/tinyrocket_edited.v").string() << "\n";
+    cfg << "liberty_files:\n";
+    cfg << "  - " << (root / "example/NangateOpenCellLibrary_typical.lib").string() << "\n";
+    cfg << "  - " << (root / "example/fakeram45_1024x32.lib").string() << "\n";
+    cfg << "  - " << (root / "example/fakeram45_64x32.lib").string() << "\n";
+    cfg << "  - " << (root / "example/fakeram45_64x15.lib").string() << "\n";
+    cfg << "log_file: " << logPath.string() << "\n";
+  }
+
+  if (std::filesystem::exists(logPath)) {
+    std::filesystem::remove(logPath);
+  }
+
+  int rc = run_kepler_cli_with_args({"--config", configPath.string()});
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+
+  std::ifstream logFile(logPath);
+  std::string contents((std::istreambuf_iterator<char>(logFile)),
+                       std::istreambuf_iterator<char>());
+  EXPECT_NE(contents.find("DIFFERENT"), std::string::npos);
+
+  std::filesystem::remove_all(tmpDir);
 }
 
 // Required main function for Google Test

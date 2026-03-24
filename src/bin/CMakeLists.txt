@@ -19,4 +19,3 @@ target_link_libraries(kepler-formal
 )
 
 install(TARGETS kepler-formal DESTINATION ${CMAKE_INSTALL_BINDIR})
-
