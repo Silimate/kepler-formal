@@ -38,19 +38,27 @@ static void print_usage(const char* prog) {
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
       "<netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] | "
+      "<file...> [--liberty <library-file>...] [--compact] "
+      "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
       "[--sv_design2_flist <file>] [--sv_design2_top <name>] "
-      "[--design1 <file...>] [--design2 <file...>]",
+      "[--design1 <file...>] [--design2 <file...>] [--compact] "
+      "[--report-skipped-pos]",
       prog);
 }
 
 static std::vector<std::string> yamlToVector(const YAML::Node& node) {
   std::vector<std::string> out;
-  if (!node) return out;
-  if (!node.IsSequence()) return out;
+  if (!node) {
+    return out;
+  }
+  if (!node.IsSequence()) {
+    return out;
+  }
   for (const auto& n : node) {
-    if (n.IsScalar()) out.emplace_back(n.as<std::string>());
+    if (n.IsScalar()) {
+      out.emplace_back(n.as<std::string>());
+    }
   }
   return out;
 }
@@ -72,6 +80,8 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "cnf_export_path",
       "dump_cnf",
       "dump_cnf_path",
+      "compact_mode",
+      "report_skipped_pos",
       "solver",
       "sv_design1_flist",
       "sv_design2_flist",
@@ -161,8 +171,11 @@ static bool parseConfigInputPaths(const YAML::Node& node,
           error = "input_paths entries must be scalar file paths";
           return false;
         }
-        if (i == 0) out.design0.emplace_back(n.as<std::string>());
-        else out.design1.emplace_back(n.as<std::string>());
+        if (i == 0) {
+          out.design0.emplace_back(n.as<std::string>());
+        } else {
+          out.design1.emplace_back(n.as<std::string>());
+        }
       }
     }
   } else {
@@ -195,7 +208,9 @@ static void logDesignPaths(const char* label,
   std::ostringstream oss;
   oss << label << ": ";
   for (size_t i = 0; i < paths.size(); ++i) {
-    if (i) oss << ", ";
+    if (i) {
+      oss << ", ";
+    }
     oss << paths[i];
   }
   SPDLOG_INFO("{}", oss.str());
@@ -317,6 +332,23 @@ static std::vector<std::filesystem::path> buildSystemVerilogInputPaths(
   return svInputPaths;
 }
 
+static KEPLER_FORMAL::MiterStrategy::CompactSnapshot captureCompactSnapshot(
+    const KEPLER_FORMAL::BuildPrimaryOutputClauses& builder) {
+  KEPLER_FORMAL::MiterStrategy::CompactSnapshot snapshot;
+  snapshot.inputs.reserve(builder.getInputs().size());
+  for (const auto input : builder.getInputs()) {
+    snapshot.inputs.emplace_back(builder.getInputs2InputsIDs().at(input));
+  }
+  snapshot.outputs.reserve(builder.getOutputs().size());
+  for (const auto output : builder.getOutputs()) {
+    snapshot.outputs.emplace_back(builder.getOutputs2OutputsIDs().at(output));
+  }
+  for (auto* expr : builder.getPOs()) {
+    snapshot.POs.push_back(expr);
+  }
+  return snapshot;
+}
+
 int KeplerFormalMain(int argc, char** argv) {
   using namespace std::chrono;
   enum class FormatType { VERILOG, SYSTEMVERILOG, NAJA_IF };
@@ -353,8 +385,12 @@ int KeplerFormalMain(int argc, char** argv) {
   bool useScopes = false;
   bool cleanScopes = false;
   bool dumpCnf = false;
+  bool compactMode = false;
+  bool reportSkippedPOs = false;
   bool verilogPreprocessing = false;
   std::string dumpCnfPath;
+
+  KEPLER_FORMAL::Config::setReportSkippedPOs(false);
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -373,13 +409,13 @@ int KeplerFormalMain(int argc, char** argv) {
         // format
         if (cfg["format"] && cfg["format"].IsScalar()) {
           std::string fmt = cfg["format"].as<std::string>();
-          if (fmt == "naja_if")
+          if (fmt == "naja_if") {
             inputFormatType = FormatType::NAJA_IF;
-          else if (fmt == "verilog" || fmt == "v")
+          } else if (fmt == "verilog" || fmt == "v") {
             inputFormatType = FormatType::VERILOG;
-          else if (fmt == "systemverilog" || fmt == "sv")
+          } else if (fmt == "systemverilog" || fmt == "sv") {
             inputFormatType = FormatType::SYSTEMVERILOG;
-          else {
+          } else {
             SPDLOG_CRITICAL("Unrecognized format in config: {}", fmt);
             return EXIT_FAILURE;
           }
@@ -425,6 +461,16 @@ int KeplerFormalMain(int argc, char** argv) {
         // cnf_export_path (optional)
         if (cfg["cnf_export_path"] && cfg["cnf_export_path"].IsScalar()) {
           dumpCnfPath = cfg["cnf_export_path"].as<std::string>();
+        }
+
+        // compact_mode
+        if (cfg["compact_mode"] && cfg["compact_mode"].IsScalar()) {
+          compactMode = cfg["compact_mode"].as<bool>();
+        }
+
+        // report_skipped_pos
+        if (cfg["report_skipped_pos"] && cfg["report_skipped_pos"].IsScalar()) {
+          reportSkippedPOs = cfg["report_skipped_pos"].as<bool>();
         }
 
         // verilog_preprocessing (optional)
@@ -516,6 +562,14 @@ int KeplerFormalMain(int argc, char** argv) {
         verilogPreprocessing = true;
         continue;
       }
+      if (arg == "--compact") {
+        compactMode = true;
+        continue;
+      }
+      if (arg == "--report-skipped-pos") {
+        reportSkippedPOs = true;
+        continue;
+      }
       if (arg == "--sv_design1_flist" || arg == "--sv_design2_flist" ||
           arg == "--sv_design1_top" || arg == "--sv_design2_top") {
         if (i + 1 >= argc) {
@@ -562,11 +616,16 @@ int KeplerFormalMain(int argc, char** argv) {
 
     if (!explicitDesignFlags) {
       if (inputPaths.size() > 2) {
-        for (size_t i = 2; i < inputPaths.size(); ++i)
+        for (size_t i = 2; i < inputPaths.size(); ++i) {
           libertyFiles.push_back(inputPaths[i]);
+        }
       }
-      if (inputPaths.size() >= 1) designInputs.design0.emplace_back(inputPaths[0]);
-      if (inputPaths.size() >= 2) designInputs.design1.emplace_back(inputPaths[1]);
+      if (inputPaths.size() >= 1) {
+        designInputs.design0.emplace_back(inputPaths[0]);
+      }
+      if (inputPaths.size() >= 2) {
+        designInputs.design1.emplace_back(inputPaths[1]);
+      }
     }
   }
 
@@ -575,10 +634,11 @@ int KeplerFormalMain(int argc, char** argv) {
   if (!console) {
     console = spdlog::stdout_color_mt("console");
   }
-  if (logLevel == "debug")
+  if (logLevel == "debug") {
     spdlog::set_level(spdlog::level::debug);
-  else if (logLevel == "info")
+  } else if (logLevel == "info") {
     spdlog::set_level(spdlog::level::info);
+  }
   // else if (logLevel == "warn")
   //   spdlog::set_level(spdlog::level::warn);
   // else if (logLevel == "error")
@@ -590,8 +650,12 @@ int KeplerFormalMain(int argc, char** argv) {
 
   SPDLOG_INFO("KEPLER FORMAL: Run.");
   std::string inputFormatName = "VERILOG";
-  if (inputFormatType == FormatType::NAJA_IF) inputFormatName = "SNL";
-  if (inputFormatType == FormatType::SYSTEMVERILOG) inputFormatName = "SYSTEMVERILOG";
+  if (inputFormatType == FormatType::NAJA_IF) {
+    inputFormatName = "SNL";
+  }
+  if (inputFormatType == FormatType::SYSTEMVERILOG) {
+    inputFormatName = "SYSTEMVERILOG";
+  }
   SPDLOG_INFO("Input format: {}", inputFormatName);
   logDesignPaths("Netlist 1", designInputs.design0);
   logDesignPaths("Netlist 2", designInputs.design1);
@@ -632,8 +696,11 @@ int KeplerFormalMain(int argc, char** argv) {
   }
 
   auto solverType = KEPLER_FORMAL::Config::getSolverType();
+  KEPLER_FORMAL::Config::setReportSkippedPOs(reportSkippedPOs);
   SPDLOG_INFO("Solver: {}",
               solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");
+  SPDLOG_INFO("Compact mode: {}", compactMode ? "enabled" : "disabled");
+  SPDLOG_INFO("Skipped PO reports: {}", reportSkippedPOs ? "enabled" : "disabled");
   if (!libertyFiles.empty()) {
     for (const auto& lf : libertyFiles) SPDLOG_INFO("Library: {}", lf);
   }
@@ -675,6 +742,142 @@ int KeplerFormalMain(int argc, char** argv) {
       }
       return true;
     };
+
+    auto loadOneDesign = [&](const std::vector<std::string>& designPaths,
+                             const SystemVerilogDesignOptions& designOptions,
+                             int designIndex,
+                             int dbID) -> NLDB* {
+      NLDB* db = nullptr;
+      bool primitivesLoadedForDesign = false;
+
+      if (!libertyFiles.empty()) {
+        db = NLDB::create(NLUniverse::get());
+        primitivesLoadedForDesign = loadLibraries(db);
+        if (!primitivesLoadedForDesign) {
+          throw std::runtime_error("Failed to load library files");
+        }
+      }
+
+      if (inputFormatType == FormatType::VERILOG ||
+          inputFormatType == FormatType::SYSTEMVERILOG) {
+        if (!db) {
+          db = NLDB::create(NLUniverse::get());
+        }
+        db->setID(dbID);
+        SPDLOG_INFO("Parsing {} file(s) for design {}",
+                    inputFormatType == FormatType::SYSTEMVERILOG ? "systemverilog" : "verilog",
+                    designIndex + 1);
+        auto designLibrary = NLLibrary::create(db, NLName("DESIGN"));
+        if (inputFormatType == FormatType::SYSTEMVERILOG) {
+          SNLSVConstructor constructor(designLibrary);
+          std::vector<std::filesystem::path> temporaryFiles;
+	          const auto svInputPaths =
+	              buildSystemVerilogInputPaths(designPaths, designOptions, temporaryFiles);
+	          try {
+	            constructor.construct(svInputPaths);
+              // LCOV_EXCL_START
+	          } catch (...) {
+	            for (const auto& temporaryFile : temporaryFiles) {
+	              std::error_code ec;
+	              std::filesystem::remove(temporaryFile, ec);
+	            }
+	            throw;
+	          }
+              // LCOV_EXCL_STOP
+          for (const auto& temporaryFile : temporaryFiles) {
+            std::error_code ec;
+            std::filesystem::remove(temporaryFile, ec);
+          }
+        } else {
+          SNLVRLConstructor constructor(designLibrary);
+          constructor.config_.preprocessEnabled_ = verilogPreprocessing;
+          constructor.construct(toPathVector(designPaths));
+        }
+	        auto top = SNLUtils::findTop(designLibrary);
+	        if (!top) {
+            // LCOV_EXCL_START
+	          throw std::runtime_error("No top design was found after parsing input");
+            // LCOV_EXCL_STOP
+	        }
+        db->setTopDesign(top);
+        SPDLOG_INFO("Found top design: {}", top->getString());
+      } else {
+        SPDLOG_INFO("Loading Naja IF: {}", designPaths[0]);
+        naja::NL::SNLCapnP::LoadingConfiguration config;
+        config.primitiveConflictPolicy_ =
+            primitivesLoadedForDesign
+                ? naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::PreferExisting
+                : naja::NL::SNLCapnP::LoadingConfiguration::PrimitiveConflictPolicy::ForbidConflicts;
+	        db = SNLCapnP::load(designPaths[0].c_str(), config);
+	        if (!db) {
+            // LCOV_EXCL_START
+	          throw std::runtime_error("Failed to load Naja IF: " + designPaths[0]);
+            // LCOV_EXCL_STOP
+	        }
+        db->setID(dbID);
+      }
+
+	      if (!db->getTopDesign()) {
+          // LCOV_EXCL_START
+	        throw std::runtime_error("Top design not set for loaded netlist");
+          // LCOV_EXCL_STOP
+	      }
+      return db;
+    };
+
+    auto buildCompactSnapshotForTop =
+        [&](naja::NL::SNLDesign* top,
+            const char* designLabel) {
+          KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
+          NLUniverse::get()->setTopDesign(top);
+          naja::DNL::destroy();
+          builder.collect();
+          SPDLOG_INFO("Collected {} PIs for {}", builder.getInputs().size(), designLabel);
+          SPDLOG_INFO("Collected {} POs for {}", builder.getOutputs().size(), designLabel);
+          auto inputs = builder.getInputs();
+          auto outputs = builder.getOutputs();
+          builder.setInputs(inputs);
+          builder.setOutputs(outputs);
+          builder.build();
+          return captureCompactSnapshot(builder);
+        };
+
+    if (compactMode && !useScopes) {
+      NLDB* compactDb0 =
+          loadOneDesign(designInputs.design0, systemVerilogOptions.design0, 0, 2);
+      top0 = compactDb0->getTopDesign();
+      auto snapshot0 = buildCompactSnapshotForTop(top0, "design 0");
+      naja::DNL::destroy();
+      compactDb0->destroy();
+      top0 = nullptr;
+
+      NLDB* compactDb1 =
+          loadOneDesign(designInputs.design1, systemVerilogOptions.design1, 1, 1);
+      top1 = compactDb1->getTopDesign();
+      auto snapshot1 = buildCompactSnapshotForTop(top1, "design 1");
+      naja::DNL::destroy();
+      compactDb1->destroy();
+      top1 = nullptr;
+
+      try {
+        KEPLER_FORMAL::MiterStrategy MiterS(nullptr, nullptr, logFileName);
+        if (dumpCnf) {
+          const std::string outPath = dumpCnfPath.empty() ? "miter.cnf" : dumpCnfPath;
+          MiterS.setCnfDump(true, outPath);
+        }
+        if (MiterS.runCompactSnapshots(snapshot0, snapshot1)) {
+          SPDLOG_INFO("No difference was found.");
+        } else {
+          SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");
+        }
+	      } catch (const std::exception& e) {
+          // LCOV_EXCL_START
+	        SPDLOG_ERROR("Workflow failed: {}", e.what());
+	        return EXIT_FAILURE;
+          // LCOV_EXCL_STOP
+	      }
+      return EXIT_SUCCESS;
+    }
 
     if (!libertyFiles.empty()) {
       db0 = NLDB::create(NLUniverse::get());
@@ -837,7 +1040,7 @@ int KeplerFormalMain(int argc, char** argv) {
   // --------------------------------------------------------------------------
   if (inputFormatType == FormatType::NAJA_IF && useScopes) {
     KEPLER_FORMAL::MiterStrategy MiterS(top0, top1);
-    MiterS.init();
+    MiterS.init(false);
     ScopeExtraction extractor(top0, top1);
     extractor.collectVerificationScopes();
     if (cleanScopes) {
@@ -858,7 +1061,7 @@ int KeplerFormalMain(int argc, char** argv) {
           MiterScope.setCnfDump(true, outPath);
         }
         MiterScope.init();
-        if (MiterScope.run()) {
+        if (MiterScope.run(compactMode)) {
           SPDLOG_INFO("No difference was found for scope: {} , {}",
                       scopes.first->getName().getString(),
                       scopes.second->getName().getString());
@@ -874,8 +1077,8 @@ int KeplerFormalMain(int argc, char** argv) {
                       scopes.second->getName().getString(),
                       e.what());
         return EXIT_FAILURE;
-        // LCOV_EXCL_STOP
       }
+        // LCOV_EXCL_STOP
     }
   } else {
     try {
@@ -885,7 +1088,7 @@ int KeplerFormalMain(int argc, char** argv) {
         MiterS.setCnfDump(true, outPath);
       }
       MiterS.init();
-      if (MiterS.run()) {
+      if (MiterS.run(compactMode)) {
         SPDLOG_INFO("No difference was found.");
       } else {
         SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");

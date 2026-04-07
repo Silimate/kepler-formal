@@ -3,10 +3,18 @@
 
 #include "BuildPrimaryOutputClauses.h"
 #include "DNL.h"
+#include "NLDB0.h"
 #include "SNLDesignModeling.h"
 #include "SNLLogicCloud.h"
 #include "Tree2BoolExpr.h"
 #include "SNLPath.h"
+#include "NajaProperty.h"
+#include "../../config/Config.h"
+#include <algorithm>
+#include <fstream>
+#include <mutex>
+#include <ostream>
+#include <string_view>
 #include <thread>
 #include <tbb/global_control.h>
 
@@ -43,6 +51,224 @@ BuildPrimaryOutputClauses::PathKey getTerminalPathKey(const DNLTerminalFull& ter
   return {std::move(pathIDs), std::move(objectIDs)};
 }
 
+void appendTerminalName(std::ostream& out, const DNLTerminalFull& term) {
+  const auto path = term.getDNLInstance().getPath().getPathNames();
+  for (size_t i = 0; i < path.size(); ++i) {
+    out << path[i].getString() << ".";
+  }
+  out << term.getSnlBitTerm()->getName().getString()
+      << term.getSnlBitTerm()->getBit();
+}
+
+bool shouldReportSkippedPOs() {
+  return KEPLER_FORMAL::Config::getReportSkippedPOs();
+}
+
+const char* kSkippedMultiDriverPOReport = "skipped_multi_driver_pos.txt";
+const char* kSkippedNoDriverPOReport = "skipped_no_driver_pos.txt";
+
+	struct SparseReportedIDs {
+	  bool mark(const DNLFull* dnl, size_t nBits, DNLID id) {
+	    if (id == DNLID_MAX) {
+	      return true; // LCOV_EXCL_LINE
+	    }
+	    if (owner != dnl) {
+	      for (uint32_t wordIndex : touchedWords) {
+	        words[wordIndex] = 0; // LCOV_EXCL_LINE
+	      }
+      touchedWords.clear();
+      owner = dnl;
+    }
+    ensureCapacity(std::max(nBits, static_cast<size_t>(id + 1)));
+    const size_t wordIndex = id >> 6;
+    const uint64_t mask = uint64_t{1} << (id & 63);
+    uint64_t& word = words[wordIndex];
+    if (word & mask) {
+      return false;
+    }
+    if (word == 0) {
+      touchedWords.push_back(static_cast<uint32_t>(wordIndex));
+    }
+    word |= mask;
+    return true;
+  }
+
+ private:
+  void ensureCapacity(size_t nBits) {
+    const size_t wordCount = (nBits + 63) / 64;
+    if (words.size() < wordCount) {
+      words.resize(wordCount, 0);
+    }
+  }
+
+  const DNLFull* owner = nullptr;
+  std::vector<uint64_t> words;
+  std::vector<uint32_t> touchedWords;
+};
+
+	void initializeSkippedPOReportFiles() {
+	  static std::once_flag once;
+	  if (!shouldReportSkippedPOs()) {
+	    return; // LCOV_EXCL_LINE
+	  }
+  std::call_once(once, []() {
+    std::ofstream(kSkippedMultiDriverPOReport, std::ios::trunc);
+    std::ofstream(kSkippedNoDriverPOReport, std::ios::trunc);
+  });
+}
+
+bool shouldEmitSkippedPOReport(const DNLFull* dnl,
+                               DNLID isoID) {
+  static std::mutex mutex;
+  static SparseReportedIDs reportedIsos;
+
+	  if (isoID == DNLID_MAX) {
+	    return true; // LCOV_EXCL_LINE
+	  }
+
+  std::lock_guard<std::mutex> lock(mutex);
+  return reportedIsos.mark(dnl, dnl->getDNLIsoDB().getNumIsos() + 1, isoID);
+}
+
+std::mutex& getReportWriteMutex(const char* reportFile) {
+  static std::mutex multiDriverMutex;
+  static std::mutex noDriverMutex;
+  return std::string_view(reportFile) == kSkippedMultiDriverPOReport
+             ? multiDriverMutex
+             : noDriverMutex;
+}
+
+void appendIsoTermName(std::ostream& out, const DNLFull* dnl, DNLID termID) {
+  const auto& term = dnl->getDNLTerminalFromID(termID);
+  out << term.getDNLInstance().getSNLModel()->getName().getString() << ":";
+  const auto path = term.getDNLInstance().getPath().getPathNames();
+  for (size_t i = 0; i < path.size(); ++i) {
+    out << path[i].getString() << ".";
+  }
+  out << term.getSnlBitTerm()->getName().getString()
+      << term.getSnlBitTerm()->getBit();
+}
+
+void appendNetReport(std::ostream& out, const SNLBitNet* net) {
+  out << "design=" << net->getDesign()->getName().getString()
+      << " name=" << net->getName().getString()
+      << " type=" << net->getType().getString()
+      << " is_assign=" << (net->getType().isAssign() ? "true" : "false")
+      << " is_supply=" << (net->getType().isSupply() ? "true" : "false")
+      << " is_constant0=" << (net->isConstant0() ? "true" : "false")
+      << " is_constant1=" << (net->isConstant1() ? "true" : "false")
+      << " model_is_assign=" << (net->getDesign()->isAssign() ? "true" : "false")
+      << " properties=[";
+  bool first = true;
+  for (auto* property : net->getProperties()) {
+    if (!first) {
+      out << ", ";
+    }
+    first = false;
+    out << property->getName() << "=" << property->getString();
+  }
+  out << "]";
+}
+
+template <typename TermIDs>
+void appendTermsToReport(std::ostream& out,
+                         const DNLFull* dnl,
+                         const char* label,
+                         const TermIDs& termIDs) {
+  out << label << ": [";
+  for (size_t i = 0; i < termIDs.size(); ++i) {
+    appendIsoTermName(out, dnl, termIDs[i]);
+    if (i + 1 != termIDs.size()) {
+      out << ", ";
+    }
+  }
+  out << "]";
+}
+
+void appendNetsToReport(std::ostream& out,
+                        const char* label,
+                        const std::set<SNLBitNet*>& nets) {
+  out << label << ": [";
+  size_t i = 0;
+  for (const auto* net : nets) {
+    appendNetReport(out, net);
+    // LCOV_EXCL_START
+    if (++i != nets.size()) {
+      out << ", ";
+    }
+    // LCOV_EXCL_STOP
+  }
+  out << "]";
+}
+
+void mergeDependencies(std::vector<uint64_t>& merged,
+                       const std::vector<uint64_t>& deps) {
+  if (merged.size() < deps.size()) {
+    merged.resize(deps.size(), 0);
+  }
+  for (size_t i = 0; i < deps.size(); ++i) {
+    merged[i] |= deps[i];
+  }
+}
+
+bool containsDependencyBit(const std::vector<uint64_t>& deps, uint64_t orderID) {
+  const size_t chunkIndex = orderID / 64;
+  if (chunkIndex >= deps.size()) {
+    return false;
+  }
+  return (deps[chunkIndex] & (uint64_t{1} << (orderID % 64))) != 0;
+}
+
+void reportSkippedPO(const DNLFull* dnl,
+                     const DNLTerminalFull& term,
+                     const char* reason,
+                     const char* reportFile) {
+  if (!shouldReportSkippedPOs()) {
+    return;
+  }
+  initializeSkippedPOReportFiles();
+  const bool isFirstForIso = shouldEmitSkippedPOReport(dnl, term.getIsoID());
+  std::lock_guard<std::mutex> lock(getReportWriteMutex(reportFile));
+  std::ofstream out(reportFile, std::ios::app);
+  if (out) {
+    out << "Skipping PO ";
+    appendTerminalName(out, term);
+    out << " of model "
+        << term.getSnlBitTerm()->getDesign()->getName().getString()
+        << " because " << reason;
+
+    if (term.getIsoID() != DNLID_MAX) {
+      out << ". iso=" << term.getIsoID();
+    }
+
+    if (!isFirstForIso) {
+      if (term.getIsoID() != DNLID_MAX) {
+        out << ". See first encounter of iso=" << term.getIsoID()
+            << " for details";
+      }
+    } else if (term.getIsoID() != DNLID_MAX) {
+      out << " ";
+      const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID());
+      appendTermsToReport(out, dnl, "readers", iso.getReaders());
+      out << " ";
+      appendTermsToReport(out, dnl, "drivers", iso.getDrivers());
+      if (std::string_view(reportFile) == kSkippedNoDriverPOReport) {
+        naja::DNL::DNLComplexIso complexIso(term.getIsoID());
+        dnl->getCustomIso(term.getIsoID(), complexIso);
+        out << " ";
+        appendTermsToReport(out, dnl, "complex_readers", complexIso.getReaders());
+        out << " ";
+        appendTermsToReport(out, dnl, "complex_drivers", complexIso.getDrivers());
+        out << " ";
+        appendTermsToReport(out, dnl, "complex_hier_terms", complexIso.getHierTerms());
+        out << " ";
+        appendNetsToReport(out, "complex_nets", complexIso.getNets());
+      }
+    }
+    out << "\n\n";
+  }
+}
+
 }  // namespace
 
 std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
@@ -66,6 +292,9 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
     const DNLInstanceFull& instance = dnl->getDNLInstanceFromID(leaf);
     if ((iter != modelCache_.end()) && iter->second.analyzedPIs) {
       const auto& cache = iter->second;
+      if (cache.PIs.empty()) {
+        continue;
+      }
       for (DNLID termId = instance.getTermIndexes().first;
          termId != DNLID_MAX && termId <= instance.getTermIndexes().second;
          termId++) {
@@ -82,10 +311,12 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
          termId != DNLID_MAX && termId <= instance.getTermIndexes().second;
          termId++) {
       const DNLTerminalFull& term = dnl->getDNLTerminalFromID(termId);
-      if (term.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Output)
+      if (term.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Output) {
         numberOfInputs++;
-      if (term.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Input)
+      }
+      if (term.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Input) {
         numberOfOutputs++;
+      }
     }
 
     if (numberOfInputs == 0 && numberOfOutputs > 0) {
@@ -142,8 +373,6 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
         const DNLTerminalFull& term = dnl->getDNLTerminalFromID(termId);
         if (term.getSnlBitTerm()->getDirection() !=
             SNLBitTerm::Direction::Input) {
-          auto deps =
-              SNLDesignModeling::getCombinatorialInputs(term.getSnlBitTerm());
           const auto tt = SNLDesignModeling::getTruthTable(term.getSnlBitTerm()->getDesign(), 
               term.getSnlBitTerm()->getOrderID());
           if (!tt.isInitialized()) {
@@ -227,6 +456,9 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     auto iter = modelCache_.find(instance.getSNLModel());
     if ((iter != modelCache_.end()) && iter->second.analyzedPOs) {
       const auto& cache = iter->second;
+      if (cache.POs.empty()) {
+        continue;
+      }
       for (DNLID termId = instance.getTermIndexes().first;
          termId != DNLID_MAX && termId <= instance.getTermIndexes().second;
          termId++) {
@@ -266,111 +498,42 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
 
     if (!isSequential) {
-      uint64_t inputNum = 0;
+      if (NLDB0::isMux2(instance.getSNLModel())) {
+        continue;
+      }
+
+      auto& cache = modelCache_[instance.getSNLModel()];
+      if (!cache.analyzedPODependencies) {
+        for (DNLID tId = instance.getTermIndexes().first;
+             tId != DNLID_MAX && tId <= instance.getTermIndexes().second;
+             tId++) {
+          const DNLTerminalFull& tTerm = dnl->getDNLTerminalFromID(tId);
+          if (tTerm.getSnlBitTerm()->getDirection() ==
+              SNLBitTerm::Direction::Input) {
+            continue;
+          }
+          const auto tt = SNLDesignModeling::getTruthTable(
+              tTerm.getSnlBitTerm()->getDesign(),
+              tTerm.getSnlBitTerm()->getOrderID());
+          if (tt.isInitialized()) {
+            mergeDependencies(cache.poTruthTableDependencies,
+                              tt.getDependencies());
+          }
+        }
+        cache.analyzedPODependencies = true;
+      }
+
       for (DNLID termId = instance.getTermIndexes().first;
            termId != DNLID_MAX && termId <= instance.getTermIndexes().second;
            termId++) {
         const DNLTerminalFull& term = dnl->getDNLTerminalFromID(termId);
         if (term.getSnlBitTerm()->getDirection() !=
             SNLBitTerm::Direction::Output) {
-          uint64_t orderID = inputNum;
-          inputNum++;
-          auto deps =
-              SNLDesignModeling::getCombinatorialOutputs(term.getSnlBitTerm());
-          // Collect all tt on the model
-          std::vector<SNLTruthTable> tts;
-          for (DNLID tId = instance.getTermIndexes().first;
-               tId != DNLID_MAX && tId <= instance.getTermIndexes().second;
-               tId++) {
-            const DNLTerminalFull& tTerm = dnl->getDNLTerminalFromID(tId);
-            // If direction is input, skip
-            if (tTerm.getSnlBitTerm()->getDirection() ==
-                SNLBitTerm::Direction::Input) {
-              continue;
-            }
-            const auto tt = SNLDesignModeling::getTruthTable(tTerm.getSnlBitTerm()->getDesign(), 
-              tTerm.getSnlBitTerm()->getOrderID());
-            if (tt.isInitialized()) {
-              tts.emplace_back(tt);
-              // print deps
-              for (const auto& d : tt.getDependencies()) {
-                DEBUG_LOG("TT deps: %llu\n", d);
-              }
-            } else if (tt.all0() || tt.all1()) {
-              tts.emplace_back(tt);
-            }
-          }
-          bool inTermInTTDeps = false;
-          for (const auto tt : tts) {
-            const auto ttDeps =
-                tt.getDependencies();  // expect std::vector<uint64_t>
-            // WRONG!!! We need the input's "orderID" not general terminal orderID
-            //uint64_t orderID =
-            //    term.getSnlBitTerm()->getOrderID();  // assume 0-based
-
-            // If orderID is 1-based, uncomment:
-            // if (orderID > 0) --orderID;
-
-            for (size_t index = 0; index < ttDeps.size(); ++index) {
-              uint64_t d = ttDeps[index];
-
-              uint64_t blockMin = index * 64ULL;     // inclusive
-              uint64_t blockMax = blockMin + 64ULL;  // exclusive
-
-              // If orderID is before this block, nothing more to find
-              if (orderID < blockMin) {
-                break;
-              }
-
-              // Skip if orderID beyond this block
-              if (orderID >= blockMax) {
-                continue;
-              }
-
-              uint64_t localBit = orderID - blockMin;  // 0..63
-
-              // std::printf("TT deps: %llu\n", static_cast<unsigned long
-              // long>(d)); std::printf("d = %llu, orderID = %llu, index = %zu,
-              // localBit = %llu\n",
-              //  static_cast<unsigned long long>(d),
-              //  static_cast<unsigned long long>(orderID),
-              //  index,
-              //  static_cast<unsigned long long>(localBit));
-
-              // Defensive: check localBit < 64
-              if (localBit >= 64) {
-                // std::fprintf(stderr, "localBit out of range: %llu\n",
-                //             static_cast<unsigned long long>(localBit));
-                // LCOV_EXCL_START
-                continue;
-                // LCOV_EXCL_STOP
-              }
-
-              // Correct shift using 1ULL and parentheses
-              assert(localBit < 64);
-              uint64_t mask = (1ULL << localBit);
-              // std::printf("mask = 0x%llx\n", static_cast<unsigned long
-              // long>(mask));
-
-              if ((d & mask) != 0ULL) {
-                inTermInTTDeps = true;
-              }
-
-              // we handled the block which contains orderID; stop scanning
-              // ttDeps
-              break;
-            }
-
-            if (inTermInTTDeps) {
-              // Found — act and break outer loop if that's desired
-              // std::puts("Found matching bit in this TT deps");
-              break;
-            }
-          }
-          if (/*deps.empty() &&*/ !inTermInTTDeps) {
+          if (!containsDependencyBit(cache.poTruthTableDependencies,
+                                     term.getSnlBitTerm()->getOrderID())) {
             outputsSet.insert(termId);
             modelCache_[instance.getSNLModel()].POs.insert(
-              term.getSnlBitTerm());
+                term.getSnlBitTerm());
             DEBUG_LOG("Collecting output %s of model %s\n",
                       term.getSnlBitTerm()->getName().getString().c_str(),
                       term.getSnlBitTerm()
@@ -390,10 +553,11 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
       if (term.getSnlBitTerm()->getDirection() !=
           SNLBitTerm::Direction::Output) {
         if (std::find(seqBitTerms.begin(), seqBitTerms.end(),
-                      term.getSnlBitTerm()) != seqBitTerms.end())
+                      term.getSnlBitTerm()) != seqBitTerms.end()) {
           outputsSet.insert(termId);
           modelCache_[instance.getSNLModel()].POs.insert(
               term.getSnlBitTerm());
+        }
         DEBUG_LOG(
             "Collecting seq output %s of model %s\n",
             term.getSnlBitTerm()->getName().getString().c_str(),
@@ -417,6 +581,8 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
     if (term.getIsoID() != DNLID_MAX && 
       dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().empty()) {
+      reportSkippedPO(
+          dnl, term, "its iso has no drivers", kSkippedNoDriverPOReport);
       DEBUG_LOG("Skipping output %s of model %s as it is not connected to any net\n",
                 term.getSnlBitTerm()->getName().getString().c_str(),
                 term.getSnlBitTerm()
@@ -428,6 +594,11 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
     if (term.getIsoID() != DNLID_MAX && 
       dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().size() > 1) {
+      reportSkippedPO(
+          dnl,
+          term,
+          "its iso has multiple drivers",
+          kSkippedMultiDriverPOReport);
       DEBUG_LOG("Skipping output %s of model %s as it is driven by multiple drivers\n",
                 term.getSnlBitTerm()->getName().getString().c_str(),
                 term.getSnlBitTerm()
@@ -562,8 +733,10 @@ void BuildPrimaryOutputClauses::build() {
 
     DNLID isoID = get()->getDNLTerminalFromID(out).getIsoID();
     DEBUG_LOG("isoID: %zu\n", isoID);
-    if (Tree2BoolExpr::iso2boolExpr_.find(isoID) != Tree2BoolExpr::iso2boolExpr_.end()) {
-      POs_[i] = Tree2BoolExpr::iso2boolExpr_[isoID];
+    auto cachedIt = Tree2BoolExpr::iso2boolExpr_.find(isoID);
+    if (cachedIt != Tree2BoolExpr::iso2boolExpr_.end() &&
+        cachedIt->second != nullptr) {
+      POs_[i] = cachedIt->second;
       #ifdef DEBUG_CHECKS
       assert(POs_[i] != nullptr);
       #endif
@@ -667,7 +840,9 @@ void BuildPrimaryOutputClauses::build() {
     #ifdef DEBUG_CHECKS
     auto startFin = std::chrono::steady_clock::now();    
     #endif
-    cloud.getTruthTable().finalize();
+    if (cloud.getTruthTable().isValid()) {
+      cloud.getTruthTable().finalize();
+    }
     #ifdef DEBUG_CHECKS
     auto endFin = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed_seconds_fin = endFin - startFin;
@@ -676,7 +851,11 @@ void BuildPrimaryOutputClauses::build() {
     #ifdef DEBUG_CHECKS
     auto startConv = std::chrono::steady_clock::now();
     #endif
-    POs_[i] = Tree2BoolExpr::convert(cloud.getTruthTable(), termDNLID2varID_);
+    if (cloud.getTruthTable().isValid()) {
+      POs_[i] = Tree2BoolExpr::convert(cloud.getTruthTable(), termDNLID2varID_);
+    } else {
+      POs_[i] = BoolExpr::createInvalid(); 
+    }
     #ifdef DEBUG_CHECKS
     auto endConv = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed_seconds_conv = endConv - startConv;
@@ -685,7 +864,13 @@ void BuildPrimaryOutputClauses::build() {
     cloud.destroy();
     // BoolExpr::getMutex().unlock();
     // printf("size of expr: %lu\n", POs_.back()->size());
-    Tree2BoolExpr::iso2boolExpr_[isoID] = POs_[i];
+    if (isoID != DNLID_MAX) {
+      // Publish only fully-built expressions; do not expose a placeholder entry.
+      auto insertResult = Tree2BoolExpr::iso2boolExpr_.insert({isoID, POs_[i]});
+      if (!insertResult.second) {
+        POs_[i] = insertResult.first->second;
+      }
+    }
   };
   Tree2BoolExpr::iso2boolExpr_.clear();
   if (getenv("KEPLER_NO_MT")) {
@@ -709,6 +894,7 @@ void BuildPrimaryOutputClauses::build() {
       tbb::static_partitioner()
     );
   }
+  SNLLogicCloud::flushSkippedPOReports();
   destroy();  // Clean up DNL instance
 }
 

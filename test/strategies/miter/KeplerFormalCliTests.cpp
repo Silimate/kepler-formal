@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -230,6 +231,27 @@ struct SolverGuard {
   KEPLER_FORMAL::Config::SolverType oldValue_;
 };
 
+struct ReportSkippedPOsGuard {
+  ReportSkippedPOsGuard(): oldValue_(KEPLER_FORMAL::Config::getReportSkippedPOs()) {}
+
+  ~ReportSkippedPOsGuard() {
+    KEPLER_FORMAL::Config::setReportSkippedPOs(oldValue_);
+  }
+
+  bool oldValue_;
+};
+
+struct CurrentPathGuard {
+  CurrentPathGuard(): oldPath_(std::filesystem::current_path()) {}
+
+  ~CurrentPathGuard() {
+    std::error_code ec;
+    std::filesystem::current_path(oldPath_, ec);
+  }
+
+  std::filesystem::path oldPath_;
+};
+
 std::vector<std::filesystem::path> listTemporarySystemVerilogCommandFiles() {
   std::vector<std::filesystem::path> files;
   std::error_code ec;
@@ -247,6 +269,25 @@ std::vector<std::filesystem::path> listTemporarySystemVerilogCommandFiles() {
     const auto name = entry.path().filename().string();
     if (name.rfind("kepler_formal_sv_top_", 0) == 0 &&
         entry.path().extension() == ".f") {
+      files.push_back(entry.path().filename());
+    }
+  }
+  std::sort(files.begin(), files.end());
+  return files;
+}
+
+std::vector<std::filesystem::path> listMiterLogsInCurrentDirectory() {
+  std::vector<std::filesystem::path> files;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path(), ec)) {
+    if (ec) {
+      break;
+    }
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const auto name = entry.path().filename().string();
+    if (name.rfind("miter_log_", 0) == 0 && entry.path().extension() == ".txt") {
       files.push_back(entry.path().filename());
     }
   }
@@ -325,8 +366,9 @@ MultiFileVerilogFixture createMultiFileVerilogFixture() {
   return fixture;
 }
 
-SimpleCliFixture createEquivalentDesignFixture(const std::string& extension,
-                                               const std::string& moduleBody) {
+SimpleCliFixture createDesignFixture(const std::string& extension,
+                                     const std::string& design0Body,
+                                     const std::string& design1Body) {
   SimpleCliFixture fixture;
   fixture.tmpDir =
       std::filesystem::temp_directory_path() / "kepler_formal_cli_simple";
@@ -337,14 +379,26 @@ SimpleCliFixture createEquivalentDesignFixture(const std::string& extension,
 
   {
     std::ofstream design0(fixture.design0Path);
-    design0 << moduleBody;
+    design0 << design0Body;
   }
   {
     std::ofstream design1(fixture.design1Path);
-    design1 << moduleBody;
+    design1 << design1Body;
   }
 
   return fixture;
+}
+
+SimpleCliFixture createEquivalentDesignFixture(const std::string& extension,
+                                               const std::string& moduleBody) {
+  return createDesignFixture(extension, moduleBody, moduleBody);
+}
+
+std::string readFileContents(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  std::ostringstream contents;
+  contents << file.rdbuf();
+  return contents.str();
 }
 
 SystemVerilogFlistFixture createSystemVerilogFlistFixture() {
@@ -637,11 +691,141 @@ TEST(KeplerFormalCliTests, CliWithoutVerilogPreprocessingFlagFailsOnDirectiveInp
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, CliCompactFlagAccepted) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = fixture.design0Path.string();
+  std::string argv3 = fixture.design1Path.string();
+  std::string argv4 = "--compact";
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(), argv4.data()};
+  int argc = 5;
+
+  EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliCompactFlagWritesIdenticalSummaryToDefaultLog) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto runDir = fixture.tmpDir / "compact_cli_run";
+  std::filesystem::create_directories(runDir);
+
+  {
+    CurrentPathGuard currentPathGuard;
+    std::filesystem::current_path(runDir);
+
+    std::string argv0 = "kepler-formal";
+    std::string argv1 = "-verilog";
+    std::string argv2 = fixture.design0Path.string();
+    std::string argv3 = fixture.design1Path.string();
+    std::string argv4 = "--compact";
+    char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
+                    argv4.data()};
+    int argc = 5;
+
+    EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
+
+    const auto logs = listMiterLogsInCurrentDirectory();
+    ASSERT_EQ(logs.size(), 1u);
+    const auto contents = readFileContents(runDir / logs.front());
+    EXPECT_NE(contents.find("Circuits are IDENTICAL"), std::string::npos);
+    EXPECT_EQ(contents.find("Due to compact mode, per PO analysis is skipped."),
+              std::string::npos);
+  }
+
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliCompactFlagAlignsReorderedInputsAndOutputs) {
+  const auto fixture = createDesignFixture(
+      "v",
+      "module top(input a, input b, output y0, output y1);\n"
+      "  assign y0 = a;\n"
+      "  assign y1 = b;\n"
+      "endmodule\n",
+      "module top(input b, input a, output y1, output y0);\n"
+      "  assign y1 = b;\n"
+      "  assign y0 = a;\n"
+      "endmodule\n");
+  const auto runDir = fixture.tmpDir / "compact_reordered_cli_run";
+  std::filesystem::create_directories(runDir);
+
+  {
+    CurrentPathGuard currentPathGuard;
+    std::filesystem::current_path(runDir);
+
+    std::string argv0 = "kepler-formal";
+    std::string argv1 = "-verilog";
+    std::string argv2 = fixture.design0Path.string();
+    std::string argv3 = fixture.design1Path.string();
+    std::string argv4 = "--compact";
+    char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
+                    argv4.data()};
+    int argc = 5;
+
+    EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
+
+    const auto logs = listMiterLogsInCurrentDirectory();
+    ASSERT_EQ(logs.size(), 1u);
+    const auto contents = readFileContents(runDir / logs.front());
+    EXPECT_NE(contents.find("Circuits are IDENTICAL"), std::string::npos);
+  }
+
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliReportSkippedPOsFlagAccepted) {
+  ReportSkippedPOsGuard reportGuard;
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = fixture.design0Path.string();
+  std::string argv3 = fixture.design1Path.string();
+  std::string argv4 = "--report-skipped-pos";
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(), argv4.data()};
+  int argc = 5;
+
+  EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
+  EXPECT_TRUE(KEPLER_FORMAL::Config::getReportSkippedPOs());
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigMissingInputPathsFails) {
   const auto cfgPath = writeTempConfig("format: verilog\nlog_level: info\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigScalarLibertyFilesIsIgnored) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "liberty_files: ignored_scalar_value\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
 }
 
 TEST(KeplerFormalCliTests, ConfigRootSequenceFallsBackToValidationFailure) {
@@ -765,6 +949,29 @@ TEST(KeplerFormalCliTests, ConfigSystemVerilogFlistAndTopAccepted) {
       "sv_design2_top: cva6\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigCompactSystemVerilogFlistWithLibertyAndCnfAccepted) {
+  const auto fixture = createSystemVerilogFlistFixture();
+  const auto cnfPath = fixture.tmpDir / "compact_sv.cnf";
+  const auto libertyPath = repoRoot() / "example" / "NangateOpenCellLibrary_typical.lib";
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "sv_design1_flist: " + fixture.design0FlistPath.string() + "\n"
+      "sv_design2_flist: " + fixture.design1FlistPath.string() + "\n"
+      "sv_design1_top: cva6\n"
+      "sv_design2_top: cva6\n"
+      "compact_mode: true\n"
+      "cnf_export: true\n"
+      "cnf_export_path: " + cnfPath.string() + "\n"
+      "liberty_files:\n"
+      "  - " + libertyPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_TRUE(std::filesystem::exists(cnfPath));
+
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -986,6 +1193,71 @@ TEST(KeplerFormalCliTests, ConfigKissatSolverAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, ConfigCompactModeAccepted) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "compact_mode: true\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigCompactModeWritesDifferentSummaryAndWarning) {
+  const auto fixture = createDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n",
+      "module top(input a, output y);\n"
+      "  assign y = 1'b0;\n"
+      "endmodule\n");
+  const auto logPath = fixture.tmpDir / "compact_config.log";
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "compact_mode: true\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto contents = readFileContents(logPath);
+  EXPECT_NE(contents.find("Circuits are DIFFERENT"), std::string::npos);
+  EXPECT_NE(contents.find("Due to compact mode, per PO analysis is skipped."),
+            std::string::npos);
+
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigReportSkippedPOsAccepted) {
+  ReportSkippedPOsGuard reportGuard;
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "report_skipped_pos: true\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_TRUE(KEPLER_FORMAL::Config::getReportSkippedPOs());
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigLogFileAccepted) {
   const auto tmpDir =
       std::filesystem::temp_directory_path() / "kepler_formal_cli_log";
@@ -1080,6 +1352,34 @@ TEST(KeplerFormalCliTests, MissingSecondNajaIfFails) {
       "  - /definitely/missing/second.if\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigCompactNajaIfAccepted) {
+  const auto root = repoRoot();
+  const auto exampleDir = root / "example";
+  const auto design = exampleDir / "tinyrocket_naja.if";
+  const auto lib0 = exampleDir / "NangateOpenCellLibrary_typical.lib";
+  const auto lib1 = exampleDir / "fakeram45_1024x32.lib";
+  const auto lib2 = exampleDir / "fakeram45_64x32.lib";
+
+  ASSERT_TRUE(std::filesystem::exists(design));
+  ASSERT_TRUE(std::filesystem::exists(lib0));
+  ASSERT_TRUE(std::filesystem::exists(lib1));
+  ASSERT_TRUE(std::filesystem::exists(lib2));
+
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "input_paths:\n"
+      "  - " + design.string() + "\n"
+      "  - " + design.string() + "\n"
+      "liberty_files:\n"
+      "  - " + lib0.string() + "\n"
+      "  - " + lib1.string() + "\n"
+      "  - " + lib2.string() + "\n"
+      "compact_mode: true\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
   std::filesystem::remove(cfgPath);
 }
 
@@ -1328,6 +1628,46 @@ TEST(KeplerFormalCliTests, CliSystemVerilogTopCommandFileCreationFailureFails) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, CliCompactSystemVerilogTopCommandFileCreationFailureFails) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(input logic a, output logic y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto noWriteDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_sv_compact_no_write";
+  std::filesystem::create_directories(noWriteDir);
+  auto perms = std::filesystem::status(noWriteDir).permissions();
+  std::filesystem::permissions(
+      noWriteDir,
+      std::filesystem::perms::owner_write | std::filesystem::perms::group_write |
+          std::filesystem::perms::others_write,
+      std::filesystem::perm_options::remove);
+
+  EnvVarGuard tmpDirGuard("TMPDIR");
+  tmpDirGuard.set(noWriteDir.string());
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-systemverilog";
+  std::string argv2 = "--sv_design1_top";
+  std::string argv3 = "top";
+  std::string argv4 = "--sv_design2_top";
+  std::string argv5 = "top";
+  std::string argv6 = "--compact";
+  std::string argv7 = fixture.design0Path.string();
+  std::string argv8 = fixture.design1Path.string();
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
+                  argv4.data(), argv5.data(), argv6.data(), argv7.data(),
+                  argv8.data()};
+  int argc = 9;
+
+  EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_FAILURE);
+
+  std::filesystem::permissions(noWriteDir, perms);
+  std::filesystem::remove_all(noWriteDir);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, CliSystemVerilogFirstDesignFailureCleansTemporaryCommandFile) {
   const auto tmpDir =
       std::filesystem::temp_directory_path() / "kepler_formal_sv_cleanup_first";
@@ -1508,6 +1848,33 @@ TEST(KeplerFormalCliTests, SnlScopesEquivalentEditedScopeNoDifference) {
 
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, SnlScopesCreatesOnlyOneDefaultMiterLogPerScopeRun) {
+  const auto fixture = createEquivalentScopedNajaIfFixture();
+  const auto runDir = fixture.tmpDir / "run_dir";
+  std::filesystem::create_directories(runDir);
+
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n"
+      "liberty_files:\n"
+      "  - " + fixture.libertyPath.string() + "\n"
+      "use_scopes: true\n");
+
+  {
+    CurrentPathGuard currentPathGuard;
+    std::filesystem::current_path(runDir);
+    EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+
+    const auto logs = listMiterLogsInCurrentDirectory();
+    EXPECT_EQ(logs.size(), 1u);
+  }
+
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }

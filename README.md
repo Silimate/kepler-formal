@@ -103,17 +103,20 @@ Once kepler-formal is fully buildable with Bazel, it can be consumed directly by
 
 ```bash
 # Classic (single file per design)
-build/src/bin/kepler-formal <-verilog/-naja_if> [--verilog_preprocessing] <netlist1> <netlist2> [<library-file>...]
+build/src/bin/kepler-formal <-verilog/-naja_if> [--verilog_preprocessing] [--compact] [--report-skipped-pos] <netlist1> <netlist2> [<library-file>...]
 
 # Multi-file Verilog designs
 build/src/bin/kepler-formal -verilog [--verilog_preprocessing] --design1 <file...> --design2 <file...> \
-  [--liberty <library-file>...]
+  [--liberty <library-file>...] [--compact] [--report-skipped-pos]
 
 # Through yaml config file
 build/src/bin/kepler-formal --config <yaml file>
 ```
 
 `--verilog_preprocessing` is also accepted as `--verilog-preprocessing`.
+
+Experimental SystemVerilog notes are tracked in [docs/systemverilog/README.md](docs/systemverilog/README.md). That flow is still ongoing work and is not part of the stable top-level interface yet.
+
 ### Supported formats
 
 - CLI:
@@ -138,6 +141,38 @@ Behavior:
 - `.lib` and `.lib.gz` are loaded through `SNLLibertyConstructor`
 - `.py` is loaded through `SNLPyLoader`
 
+### Optional compact mode
+
+Compact mode is disabled by default.
+
+Enable it with either:
+
+- CLI: `--compact`
+- YAML: `compact_mode: true`
+
+Behavior:
+
+- the full miter is still checked normally
+- if the miter is SAT, Kepler-Formal stops after the whole-design `DIFFERENT` result
+- per-PO analysis is skipped in that SAT case
+
+### Optional skipped-PO reports
+
+Skipped-PO reporting is disabled by default.
+
+Enable it with either:
+
+- CLI: `--report-skipped-pos`
+- YAML: `report_skipped_pos: true`
+
+When enabled, Kepler-Formal may emit the following files in the current working directory:
+
+- `skipped_multi_driver_pos.txt`
+- `skipped_no_driver_pos.txt`
+- `skipped_logical_loop_pos.txt`
+
+These reports are generated only for skipped POs, for example when a PO is ignored because it is driven by multiple drivers, has no driver, or closes a logical loop during cloud expansion.
+
 ### YAML Input Paths
 
 The YAML `input_paths` field accepts either:
@@ -156,6 +191,8 @@ liberty_files:
   - library_file0.lib
   - library_file1.lib
 verilog_preprocessing: true   # Optional: enables Verilog preprocessor
+compact_mode: true            # Optional: skips per-PO analysis after a SAT whole-miter result
+report_skipped_pos: true      # Optional: writes skipped PO reports, default is false
 ```
 
 ## Example 

@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <gtest/gtest.h>
+#include <chrono>
+#include <array>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include <sstream>
 #include <string>
 
 #include "gtest/gtest.h"
@@ -9,18 +16,23 @@
 #include "BuildPrimaryOutputClauses.h"
 #include "ConstantPropagation.h"
 #include "MiterStrategy.h"
+#include "SNLLogicCloud.h"
+#include "NajaDumpableProperty.h"
 #include "NLLibraryTruthTables.h"
 #include "NLDB0.h"
 #include "NLUniverse.h"
 #include "NetlistGraph.h"
+#include "../../../src/sat/SATSolverWrapper.h"
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
 #include "SNLDesignModeling.h"
+#include "SNLBusTerm.h"
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
 #include "SNLPath.h"
 #include "SNLCapnP.h"
 #include "DNL.h"
+#include "Tree2BoolExpr.h"
 
 #include "Config.h"
 
@@ -39,7 +51,11 @@ static std::filesystem::path repoRoot() {
 static std::string get_kepler_bin() {
   const char* env = std::getenv("KEPLER_BIN");
   if (env && *env) {
-    return env;
+    std::filesystem::path envPath(env);
+    if (envPath.is_absolute()) {
+      return envPath.string();
+    }
+    return std::filesystem::absolute(envPath).string();
   }
   const auto root = repoRoot();
   const std::vector<std::filesystem::path> candidates = {
@@ -62,10 +78,66 @@ static const char* KEPLER_BIN = KEPLER_BIN_STR.c_str();
 // in runfiles at workspace-relative paths); CMake uses "../../../../".
 static std::string get_test_data_prefix() {
   const char* env = std::getenv("TEST_DATA_PREFIX");
-  return env ? env : "../../../../";
+  if (env) {
+    return env;
+  }
+  return (repoRoot().string() + "/");
 }
 
 namespace {
+
+std::string sanitizePathComponent(std::string value) {
+  for (char& ch : value) {
+    if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' ||
+          ch == '-' || ch == '.')) {
+      ch = '_';
+    }
+  }
+  if (value.empty()) {
+    value = "test";
+  }
+  return value;
+}
+
+std::filesystem::path makeUniqueTestTempDir() {
+  static size_t counter = 0;
+  const auto* testInfo = ::testing::UnitTest::GetInstance()->current_test_info();
+  std::ostringstream name;
+  name << "kepler_formal_";
+  if (testInfo) {
+    name << sanitizePathComponent(testInfo->test_suite_name()) << "_"
+         << sanitizePathComponent(testInfo->name()) << "_";
+  }
+  name << std::chrono::steady_clock::now().time_since_epoch().count() << "_"
+       << counter++;
+  auto dir = std::filesystem::temp_directory_path() / name.str();
+  std::filesystem::create_directories(dir);
+  return dir;
+}
+
+class ScopedCurrentPath {
+ public:
+  explicit ScopedCurrentPath(const std::filesystem::path& path)
+      : original_(std::filesystem::current_path()) {
+    std::filesystem::current_path(path);
+  }
+  ~ScopedCurrentPath() { std::filesystem::current_path(original_); }
+
+ private:
+  std::filesystem::path original_;
+};
+
+std::vector<uint64_t> getInputFlatDependencies(const SNLDesign* design) {
+  std::vector<size_t> deps;
+  size_t flatPos = 0;
+  for (auto term : design->getBitTerms()) {
+    if (term->getDirection() != SNLTerm::Direction::Output) {
+      deps.push_back(flatPos);
+    }
+    ++flatPos;
+  }
+  return NLBitDependencies::encodeBits(deps);
+}
 
 void executeCommand(const std::string& command) {
   int result = system(command.c_str());
@@ -74,30 +146,76 @@ void executeCommand(const std::string& command) {
   }
 }
 
-std::vector<std::filesystem::path> listMiterLogFiles() {
-  std::vector<std::filesystem::path> logs;
-  for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path())) {
-    if (!entry.is_regular_file()) {
-      continue;
-    }
-    const auto name = entry.path().filename().string();
-    if (name.rfind("miter_log_", 0) == 0 && entry.path().extension() == ".txt") {
-      logs.push_back(entry.path().filename());
-    }
-  }
-  return logs;
+std::string readTextFile(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  return buffer.str();
 }
 
-std::filesystem::path findNewMiterLogFile(
-    const std::vector<std::filesystem::path>& beforeLogs) {
-  const auto afterLogs = listMiterLogFiles();
-  for (const auto& after : afterLogs) {
-    if (std::find(beforeLogs.begin(), beforeLogs.end(), after) == beforeLogs.end()) {
-      return after;
+naja::DNL::DNLID findDNLTermIDByInstanceAndTerm(const char* instanceName,
+                                                const char* termName) {
+  auto* dnl = naja::DNL::get();
+  for (naja::DNL::DNLID id = 0; id <= dnl->getNBterms(); ++id) {
+    const auto& term = dnl->getDNLTerminalFromID(id);
+    if (term.isNull()) {
+      continue;
+    }
+    auto* instance = term.getDNLInstance().getSNLInstance();
+    if (instance == nullptr) {
+      continue;
+    }
+    if (instance->getName().getString() == instanceName &&
+        term.getSnlBitTerm()->getName().getString() == termName) {
+      return id;
     }
   }
-  return {};
+  return naja::DNL::DNLID_MAX;
 }
+
+std::vector<std::string> getTermLabels(const std::vector<naja::DNL::DNLID, tbb::tbb_allocator<naja::DNL::DNLID>>& ids) {
+  std::vector<std::string> labels;
+  labels.reserve(ids.size());
+  for (auto id : ids) {
+    const auto& term = naja::DNL::get()->getDNLTerminalFromID(id);
+    std::string label;
+    if (auto* instance = term.getDNLInstance().getSNLInstance()) {
+      label += instance->getName().getString();
+      label += ".";
+    }
+    label += term.getSnlBitTerm()->getName().getString();
+    labels.push_back(label);
+  }
+  std::sort(labels.begin(), labels.end());
+  return labels;
+}
+
+size_t countSubstringOccurrences(const std::string& text,
+                                 const std::string& needle) {
+  if (needle.empty()) {
+    return 0;
+  }
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = text.find(needle, pos)) != std::string::npos) {
+    ++count;
+    pos += needle.size();
+  }
+  return count;
+}
+
+class ScopedReportSkippedPOs {
+ public:
+  explicit ScopedReportSkippedPOs(bool enabled)
+      : original_(Config::getReportSkippedPOs()) {
+    Config::setReportSkippedPOs(enabled);
+  }
+
+  ~ScopedReportSkippedPOs() { Config::setReportSkippedPOs(original_); }
+
+ private:
+  bool original_;
+};
 
 void expectGenericGateMiterEquivalent(const char* gateName,
                                       SNLTruthTable::GenericType genericType) {
@@ -179,6 +297,7 @@ class MiterTests : public ::testing::Test {
   void SetUp() override {
     // Code here will be called immediately after the constructor (right
     // before each test).
+    tempDir_ = makeUniqueTestTempDir();
   }
   void TearDown() override {
     // Code here will be called immediately after each test (right
@@ -187,7 +306,17 @@ class MiterTests : public ::testing::Test {
     naja::DNL::destroy();
     NLUniverse::get()->destroy();
     KEPLER_FORMAL::BoolExprCache::destroy();
+    if (!tempDir_.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(tempDir_, ec);
+    }
   }
+
+  std::filesystem::path testTempPath(const std::string& leaf) const {
+    return tempDir_ / leaf;
+  }
+
+  std::filesystem::path tempDir_;
 };
 
 TEST(HelloTest, ReturnsHelloWorld) {
@@ -220,8 +349,8 @@ TEST_F(MiterTests, TestMiterAND) {
   // add output to logic0
   auto logic1Out =
       SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
-  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0));
-  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1));
+  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1, SNLTruthTable::fullDependencies(0)));
   NLLibraryTruthTables::construct(library);
   // 5. create a logic_0 instace in top
   SNLInstance* inst1 = SNLInstance::create(top, logic0, NLName("logic0"));
@@ -242,7 +371,7 @@ TEST_F(MiterTests, TestMiterAND) {
   SNLInstance* inst3 = SNLInstance::create(top, andModel, NLName("and"));
   SNLInstance* inst4 = SNLInstance::create(top, andModel, NLName("and2"));
   // set truth table for and model
-  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8, SNLTruthTable::fullDependencies(2)));
   // 9. connect all instances inputs
   SNLNet* net1 = SNLScalarNet::create(top, NLName("logic_0_net"));
   //net1->setType(SNLNet::Type::Assign0);
@@ -348,7 +477,7 @@ TEST_F(MiterTests, TestMiterANDNonConstant) {
   SNLInstance* instB = SNLInstance::create(top, andModel, NLName("andB"));
 
   // 6. Set the truth table for the AND model (2-input AND = mask 0b1000 == 8)
-  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8, SNLTruthTable::fullDependencies(2)));
 
   // 7. Create nets
   SNLNet* netTopIn1 = SNLScalarNet::create(top, NLName("top_in1_net"));
@@ -446,7 +575,7 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesConstantTrueOutput) {
       SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC1"));
   auto logic1Out =
       SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
-  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1));
+  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1, SNLTruthTable::fullDependencies(0)));
   NLLibraryTruthTables::construct(library);
 
   SNLInstance* inst = SNLInstance::create(top, logic1, NLName("const1"));
@@ -462,6 +591,516 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesConstantTrueOutput) {
   ASSERT_EQ(builder.getPOs().size(), 1u);
   ASSERT_NE(builder.getPOs()[0], nullptr);
   EXPECT_EQ(builder.getPOs()[0]->toString(), "1");
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesUsesFlatDependencyCoordinatesForPOs) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topIn0 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto topIn1 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+
+  SNLDesign* flatDepsModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("FLAT_DEPS_AND"));
+  auto flatDepsOut = SNLScalarTerm::create(
+      flatDepsModel, SNLTerm::Direction::Output, NLName("y"));
+  auto flatDepsIn0 = SNLScalarTerm::create(
+      flatDepsModel, SNLTerm::Direction::Input, NLName("a"));
+  auto flatDepsIn1 = SNLScalarTerm::create(
+      flatDepsModel, SNLTerm::Direction::Input, NLName("b"));
+  SNLDesignModeling::setTruthTable(
+      flatDepsModel, SNLTruthTable(2, 0b1000, getInputFlatDependencies(flatDepsModel)));
+
+  auto inst = SNLInstance::create(top, flatDepsModel, NLName("u0"));
+  auto netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto netB = SNLScalarNet::create(top, NLName("net_b"));
+  auto netY = SNLScalarNet::create(top, NLName("net_y"));
+
+  topIn0->setNet(netA);
+  topIn1->setNet(netB);
+  topOut->setNet(netY);
+  inst->getInstTerm(flatDepsIn0)->setNet(netA);
+  inst->getInstTerm(flatDepsIn1)->setNet(netB);
+  inst->getInstTerm(flatDepsOut)->setNet(netY);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  ASSERT_EQ(builder.getOutputs().size(), 1u);
+  const auto outputTerm =
+      naja::DNL::get()->getDNLTerminalFromID(builder.getOutputs()[0]);
+  EXPECT_TRUE(outputTerm.isTopPort());
+  EXPECT_EQ(outputTerm.getSnlBitTerm()->getName().getString(), "y");
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesReportsSkippedNoDriverPO) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+
+  SNLDesign* passModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("PASS0"));
+  auto passIn = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("data"));
+  auto unusedIn0 = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("unused0"));
+  auto unusedIn1 = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("unused1"));
+  auto passOut = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Output, NLName("y"));
+  SNLDesignModeling::setTruthTable(
+      passModel,
+      SNLTruthTable(3, 0xF0,
+                    NLBitDependencies::encodeBits(std::vector<size_t>{0})));
+
+  auto inst = SNLInstance::create(top, passModel, NLName("u0"));
+  auto netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto netY = SNLScalarNet::create(top, NLName("net_y"));
+  auto floatingNet0 = SNLScalarNet::create(top, NLName("floating_net_0"));
+  auto floatingNet1 = SNLScalarNet::create(top, NLName("floating_net_1"));
+  auto* floatingPropA =
+      naja::NajaDumpableProperty::create(floatingNet0, "report_prop_a");
+  floatingPropA->addStringValue("alpha");
+  auto* floatingPropB =
+      naja::NajaDumpableProperty::create(floatingNet0, "report_prop_b");
+  floatingPropB->addUInt64Value(7);
+
+  topIn->setNet(netA);
+  topOut->setNet(netY);
+  inst->getInstTerm(passIn)->setNet(netA);
+  inst->getInstTerm(unusedIn0)->setNet(floatingNet0);
+  inst->getInstTerm(unusedIn1)->setNet(floatingNet1);
+  inst->getInstTerm(passOut)->setNet(netY);
+
+  ScopedCurrentPath scopedCurrentPath(tempDir_);
+  ScopedReportSkippedPOs reportGuard(true);
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+  builder.collect();
+
+  const auto reportPath = tempDir_ / "skipped_no_driver_pos.txt";
+  ASSERT_TRUE(std::filesystem::exists(reportPath));
+  const auto content = readTextFile(reportPath);
+  EXPECT_NE(content.find("its iso has no drivers"), std::string::npos);
+  EXPECT_NE(content.find("drivers: []"), std::string::npos);
+  EXPECT_NE(content.find("complex_nets"), std::string::npos);
+  EXPECT_NE(content.find("floating_net_0"), std::string::npos);
+  EXPECT_NE(content.find("floating_net_1"), std::string::npos);
+  EXPECT_NE(content.find("report_prop_a="), std::string::npos);
+  EXPECT_NE(content.find("report_prop_b="), std::string::npos);
+  EXPECT_NE(content.find("See first encounter of iso="), std::string::npos);
+  EXPECT_EQ(countSubstringOccurrences(content, "Skipping PO "), 4u);
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesReportsSkippedMultiDriverPO) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+
+  SNLDesign* logic0 =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC0"));
+  auto logic0Out =
+      SNLScalarTerm::create(logic0, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesignModeling::setTruthTable(
+      logic0, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+
+  SNLDesign* logic1 =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC1"));
+  auto logic1Out =
+      SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesignModeling::setTruthTable(
+      logic1, SNLTruthTable(0, 1, SNLTruthTable::fullDependencies(0)));
+
+  SNLDesign* passModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("PASS1"));
+  auto passIn = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("data"));
+  auto unusedIn = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("unused"));
+  auto passOut = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Output, NLName("y"));
+  SNLDesignModeling::setTruthTable(
+      passModel,
+      SNLTruthTable(2, 0b1100,
+                    NLBitDependencies::encodeBits(std::vector<size_t>{0})));
+
+  auto const0 = SNLInstance::create(top, logic0, NLName("const0"));
+  auto const1 = SNLInstance::create(top, logic1, NLName("const1"));
+  auto inst = SNLInstance::create(top, passModel, NLName("u0"));
+  auto netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto netY = SNLScalarNet::create(top, NLName("net_y"));
+  auto sharedNet = SNLScalarNet::create(top, NLName("shared_net"));
+  auto* sharedPropA =
+      naja::NajaDumpableProperty::create(sharedNet, "report_prop_a");
+  sharedPropA->addStringValue("beta");
+  auto* sharedPropB =
+      naja::NajaDumpableProperty::create(sharedNet, "report_prop_b");
+  sharedPropB->addUInt64Value(11);
+
+  topIn->setNet(netA);
+  topOut->setNet(netY);
+  const0->getInstTerm(logic0Out)->setNet(sharedNet);
+  const1->getInstTerm(logic1Out)->setNet(sharedNet);
+  inst->getInstTerm(passIn)->setNet(netA);
+  inst->getInstTerm(unusedIn)->setNet(sharedNet);
+  inst->getInstTerm(passOut)->setNet(netY);
+
+  ScopedCurrentPath scopedCurrentPath(tempDir_);
+  ScopedReportSkippedPOs reportGuard(true);
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+  builder.collect();
+
+  const auto reportPath = tempDir_ / "skipped_multi_driver_pos.txt";
+  ASSERT_TRUE(std::filesystem::exists(reportPath));
+  const auto content = readTextFile(reportPath);
+  EXPECT_NE(content.find("its iso has multiple drivers"), std::string::npos);
+  EXPECT_NE(content.find("LOGIC0"), std::string::npos);
+  EXPECT_NE(content.find("LOGIC1"), std::string::npos);
+  EXPECT_EQ(content.find("complex_nets"), std::string::npos);
+  EXPECT_EQ(content.find("report_prop_a="), std::string::npos);
+  EXPECT_EQ(content.find("report_prop_b="), std::string::npos);
+  EXPECT_NE(content.find("See first encounter of iso="), std::string::npos);
+  EXPECT_EQ(countSubstringOccurrences(content, "Skipping PO "), 2u);
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesInitializesSkippedPOReportFilesOnlyOnce) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topInA =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto topInB =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+  auto topOut0 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y0"));
+  auto topOut1 =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y1"));
+
+  SNLDesign* logic0 =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC0"));
+  auto logic0Out =
+      SNLScalarTerm::create(logic0, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesignModeling::setTruthTable(
+      logic0, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+
+  SNLDesign* logic1 =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC1"));
+  auto logic1Out =
+      SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesignModeling::setTruthTable(
+      logic1, SNLTruthTable(0, 1, SNLTruthTable::fullDependencies(0)));
+
+  SNLDesign* passModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("PASS1"));
+  auto passIn = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("data"));
+  auto unusedIn = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("unused"));
+  auto passOut = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Output, NLName("y"));
+  SNLDesignModeling::setTruthTable(
+      passModel,
+      SNLTruthTable(2, 0b1100,
+                    NLBitDependencies::encodeBits(std::vector<size_t>{0})));
+
+  auto const0 = SNLInstance::create(top, logic0, NLName("const0"));
+  auto const1 = SNLInstance::create(top, logic1, NLName("const1"));
+  auto noDriverInst = SNLInstance::create(top, passModel, NLName("u_no_driver"));
+  auto multiDriverInst =
+      SNLInstance::create(top, passModel, NLName("u_multi_driver"));
+
+  auto netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto netB = SNLScalarNet::create(top, NLName("net_b"));
+  auto netY0 = SNLScalarNet::create(top, NLName("net_y0"));
+  auto netY1 = SNLScalarNet::create(top, NLName("net_y1"));
+  auto floatingNet = SNLScalarNet::create(top, NLName("floating_net"));
+  auto sharedNet = SNLScalarNet::create(top, NLName("shared_net"));
+
+  topInA->setNet(netA);
+  topInB->setNet(netB);
+  topOut0->setNet(netY0);
+  topOut1->setNet(netY1);
+
+  const0->getInstTerm(logic0Out)->setNet(sharedNet);
+  const1->getInstTerm(logic1Out)->setNet(sharedNet);
+
+  noDriverInst->getInstTerm(passIn)->setNet(netA);
+  noDriverInst->getInstTerm(unusedIn)->setNet(floatingNet);
+  noDriverInst->getInstTerm(passOut)->setNet(netY0);
+
+  multiDriverInst->getInstTerm(passIn)->setNet(netB);
+  multiDriverInst->getInstTerm(unusedIn)->setNet(sharedNet);
+  multiDriverInst->getInstTerm(passOut)->setNet(netY1);
+
+  ScopedCurrentPath scopedCurrentPath(tempDir_);
+  ScopedReportSkippedPOs reportGuard(true);
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  EXPECT_TRUE(std::filesystem::exists(tempDir_ / "skipped_no_driver_pos.txt"));
+  EXPECT_TRUE(std::filesystem::exists(tempDir_ / "skipped_multi_driver_pos.txt"));
+}
+
+TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topInA =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto topInB =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+  auto topInC =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("c"));
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+
+  SNLDesign* andModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("AND2"));
+  auto andIn0 =
+      SNLScalarTerm::create(andModel, SNLTerm::Direction::Input, NLName("a"));
+  auto andIn1 =
+      SNLScalarTerm::create(andModel, SNLTerm::Direction::Input, NLName("b"));
+  auto andOut =
+      SNLScalarTerm::create(andModel, SNLTerm::Direction::Output, NLName("y"));
+  SNLDesignModeling::setTruthTable(
+      andModel, SNLTruthTable(2, 0b1000, SNLTruthTable::fullDependencies(2)));
+
+  SNLDesign* bufModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("BUF1"));
+  auto bufIn =
+      SNLScalarTerm::create(bufModel, SNLTerm::Direction::Input, NLName("a"));
+  auto bufOut =
+      SNLScalarTerm::create(bufModel, SNLTerm::Direction::Output, NLName("y"));
+  SNLDesignModeling::setTruthTable(
+      bufModel, SNLTruthTable(1, 0b10, SNLTruthTable::fullDependencies(1)));
+
+  SNLDesign* orModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("OR2"));
+  auto orIn0 =
+      SNLScalarTerm::create(orModel, SNLTerm::Direction::Input, NLName("a"));
+  auto orIn1 =
+      SNLScalarTerm::create(orModel, SNLTerm::Direction::Input, NLName("b"));
+  auto orOut =
+      SNLScalarTerm::create(orModel, SNLTerm::Direction::Output, NLName("y"));
+  SNLDesignModeling::setTruthTable(
+      orModel, SNLTruthTable(2, 0b1110, SNLTruthTable::fullDependencies(2)));
+
+  auto andInst = SNLInstance::create(top, andModel, NLName("and0"));
+  auto bufInst = SNLInstance::create(top, bufModel, NLName("buf0"));
+  auto orInst = SNLInstance::create(top, orModel, NLName("or0"));
+
+  auto netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto netB = SNLScalarNet::create(top, NLName("net_b"));
+  auto netC = SNLScalarNet::create(top, NLName("net_c"));
+  auto netAnd = SNLScalarNet::create(top, NLName("net_and"));
+  auto netBuf = SNLScalarNet::create(top, NLName("net_buf"));
+  auto netY = SNLScalarNet::create(top, NLName("net_y"));
+
+  topInA->setNet(netA);
+  topInB->setNet(netB);
+  topInC->setNet(netC);
+  topOut->setNet(netY);
+
+  andInst->getInstTerm(andIn0)->setNet(netA);
+  andInst->getInstTerm(andIn1)->setNet(netB);
+  andInst->getInstTerm(andOut)->setNet(netAnd);
+
+  bufInst->getInstTerm(bufIn)->setNet(netAnd);
+  bufInst->getInstTerm(bufOut)->setNet(netBuf);
+
+  orInst->getInstTerm(orIn0)->setNet(netBuf);
+  orInst->getInstTerm(orIn1)->setNet(netC);
+  orInst->getInstTerm(orOut)->setNet(netY);
+
+  naja::DNL::destroy();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  auto* dnl = naja::DNL::get();
+  ASSERT_EQ(builder.getOutputs().size(), 1u);
+
+  std::vector<bool> isPIs(dnl->getNBterms() + 1, false);
+  for (auto input : builder.getInputs()) {
+    isPIs[input] = true;
+  }
+
+  std::vector<bool> isPOs(dnl->getNBterms() + 1, false);
+  for (auto output : builder.getOutputs()) {
+    isPOs[output] = true;
+  }
+
+  const auto andOutID = findDNLTermIDByInstanceAndTerm("and0", "y");
+  ASSERT_NE(andOutID, naja::DNL::DNLID_MAX);
+  const auto andIsoID = dnl->getDNLTerminalFromID(andOutID).getIsoID();
+  ASSERT_NE(andIsoID, naja::DNL::DNLID_MAX);
+
+  Tree2BoolExpr::iso2boolExpr_.clear();
+  Tree2BoolExpr::iso2boolExpr_.insert({andIsoID, BoolExpr::Var(999)});
+
+  {
+    ScopedReportSkippedPOs reportGuard(false);
+    SNLLogicCloud cloud(builder.getOutputs()[0], isPIs, isPOs);
+    cloud.compute();
+    EXPECT_EQ(getTermLabels(cloud.getInputs()),
+              (std::vector<std::string>{"and0.y", "c"}));
+    cloud.destroy();
+  }
+
+  {
+    ScopedReportSkippedPOs reportGuard(true);
+    SNLLogicCloud cloud(builder.getOutputs()[0], isPIs, isPOs);
+    cloud.compute();
+    EXPECT_EQ(getTermLabels(cloud.getInputs()),
+              (std::vector<std::string>{"and0.y", "c"}));
+    cloud.destroy();
+  }
+
+  Tree2BoolExpr::iso2boolExpr_.clear();
+  naja::DNL::destroy();
+}
+
+TEST_F(MiterTests, MiterStrategySummaryUsesUnnamedFallbackLabels) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryS =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("standard"));
+
+  SNLDesign* top =
+      SNLDesign::create(libraryS, SNLDesign::Type::Standard, NLName(""));
+  univ->setTopDesign(top);
+  auto topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName(""));
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName(""));
+  auto net = SNLScalarNet::create(top, NLName("n0"));
+  topIn->setNet(net);
+  topOut->setNet(net);
+
+  SNLDesign* topClone = top->clone(NLName(""));
+
+  ScopedCurrentPath scopedCurrentPath(tempDir_);
+  const auto logPath = tempDir_ / "unnamed_summary.txt";
+  MiterStrategy strategy(top, topClone, logPath.string());
+  strategy.init();
+
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto content = readTextFile(logPath);
+  EXPECT_NE(content.find("<unnamed>"), std::string::npos);
+}
+
+TEST_F(MiterTests, SNLLogicCloudReportsSkippedNoDriverRoot) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+
+  SNLDesign* passModel =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("PASSCLOUD"));
+  auto passIn = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("data"));
+  auto unusedIn = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Input, NLName("unused"));
+  auto passOut = SNLScalarTerm::create(
+      passModel, SNLTerm::Direction::Output, NLName("y"));
+  SNLDesignModeling::setTruthTable(
+      passModel,
+      SNLTruthTable(2, 0b1100,
+                    NLBitDependencies::encodeBits(std::vector<size_t>{0})));
+
+  auto inst = SNLInstance::create(top, passModel, NLName("u0"));
+  auto netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto netY = SNLScalarNet::create(top, NLName("net_y"));
+  auto floatingNet = SNLScalarNet::create(top, NLName("floating_net"));
+
+  topIn->setNet(netA);
+  topOut->setNet(netY);
+  inst->getInstTerm(passIn)->setNet(netA);
+  inst->getInstTerm(unusedIn)->setNet(floatingNet);
+  inst->getInstTerm(passOut)->setNet(netY);
+
+  ScopedCurrentPath scopedCurrentPath(tempDir_);
+  ScopedReportSkippedPOs reportGuard(true);
+  naja::DNL::destroy();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+  auto* dnl = naja::DNL::get();
+  ASSERT_EQ(builder.getOutputs().size(), 1u);
+
+  std::vector<bool> isPIs(dnl->getNBterms() + 1, false);
+  for (auto input : builder.getInputs()) {
+    isPIs[input] = true;
+  }
+
+  std::vector<bool> isPOs(dnl->getNBterms() + 1, false);
+  for (auto output : builder.getOutputs()) {
+    isPOs[output] = true;
+  }
+
+  SNLLogicCloud cloud(builder.getOutputs()[0], isPIs, isPOs);
+  cloud.compute();
+  EXPECT_FALSE(cloud.getTruthTable().isValid());
+  SNLLogicCloud::flushSkippedPOReports();
+
+  const auto reportPath = tempDir_ / "skipped_no_driver_pos.txt";
+  ASSERT_TRUE(std::filesystem::exists(reportPath));
+  const auto content = readTextFile(reportPath);
+  EXPECT_NE(content.find("no drivers during cloud expansion"),
+            std::string::npos);
+  EXPECT_NE(content.find("current_input="), std::string::npos);
+  EXPECT_NE(content.find("drivers: []"), std::string::npos);
+}
+
+TEST(MiterStandaloneTests, KissatClauseAutoExpandsTrackedVariableCount) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  solver.addClause({5});
+  EXPECT_EQ(solver.newVar(), 4);
 }
 
 TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSecondNetlist) {
@@ -486,6 +1125,120 @@ TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSe
 
   EXPECT_EQ(outputs0, std::vector<naja::DNL::DNLID>({100}));
   EXPECT_EQ(outputs1, std::vector<naja::DNL::DNLID>({200}));
+}
+
+TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWritesCnf) {
+  using PathKey = BuildPrimaryOutputClauses::PathKey;
+  auto makePathKey = [](int nameID, int objectID) -> PathKey {
+    return {{static_cast<NLName::ID>(nameID)},
+            {static_cast<NLID::DesignObjectID>(objectID)}};
+  };
+
+  const PathKey a = makePathKey(1, 10);
+  const PathKey b = makePathKey(2, 20);
+  const PathKey only0 = makePathKey(3, 30);
+  const PathKey only1 = makePathKey(4, 40);
+  const PathKey logicOut = makePathKey(5, 50);
+  const PathKey constOut = makePathKey(6, 60);
+  const PathKey drop0 = makePathKey(7, 70);
+  const PathKey drop1 = makePathKey(8, 80);
+
+  MiterStrategy::CompactSnapshot snapshot0;
+  snapshot0.inputs = {a, b, only0};
+  snapshot0.outputs = {logicOut, constOut, drop0};
+  auto shared0 = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+  snapshot0.POs.emplace_back(
+      BoolExpr::Or(BoolExpr::Not(shared0),
+                   BoolExpr::Xor(shared0, BoolExpr::Var(4))));
+  snapshot0.POs.emplace_back(BoolExpr::createTrue());
+  snapshot0.POs.emplace_back(BoolExpr::Var(2));
+
+  MiterStrategy::CompactSnapshot snapshot1;
+  snapshot1.inputs = {b, a, only1};
+  snapshot1.outputs = {constOut, logicOut, drop1};
+  auto shared1 = BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(2));
+  snapshot1.POs.emplace_back(BoolExpr::createTrue());
+  snapshot1.POs.emplace_back(
+      BoolExpr::Or(BoolExpr::Not(shared1),
+                   BoolExpr::Xor(shared1, BoolExpr::Var(4))));
+  snapshot1.POs.emplace_back(BoolExpr::Var(3));
+
+  const auto tmpDir = std::filesystem::temp_directory_path() /
+                      "kepler_formal_compact_snapshot_cnf";
+  std::filesystem::create_directories(tmpDir);
+  const auto cnfPath = tmpDir / "compact_snapshot.cnf";
+
+  MiterStrategy strategy(nullptr, nullptr,
+                         (tmpDir / "compact_snapshot.log").string());
+  strategy.setCnfDump(true, cnfPath.string());
+
+  EXPECT_TRUE(strategy.runCompactSnapshots(snapshot0, snapshot1));
+  EXPECT_TRUE(std::filesystem::exists(cnfPath));
+
+  std::filesystem::remove_all(tmpDir);
+}
+
+TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsWithNoCommonOutputsIsVacuouslyEquivalent) {
+  using PathKey = BuildPrimaryOutputClauses::PathKey;
+  auto makePathKey = [](int nameID, int objectID) -> PathKey {
+    return {{static_cast<NLName::ID>(nameID)},
+            {static_cast<NLID::DesignObjectID>(objectID)}};
+  };
+
+  MiterStrategy::CompactSnapshot snapshot0;
+  snapshot0.inputs = {makePathKey(1, 10)};
+  snapshot0.outputs = {makePathKey(2, 20)};
+  snapshot0.POs.emplace_back(BoolExpr::Var(2));
+
+  MiterStrategy::CompactSnapshot snapshot1;
+  snapshot1.inputs = {makePathKey(1, 10)};
+  snapshot1.outputs = {makePathKey(3, 30)};
+  snapshot1.POs.emplace_back(BoolExpr::Var(2));
+
+  MiterStrategy strategy(nullptr, nullptr, "compactSnapshotsNoCommonOutputs");
+  EXPECT_TRUE(strategy.runCompactSnapshots(snapshot0, snapshot1));
+}
+
+TEST_F(MiterTests, CompactRunEquivalentDesignsInSeparateDBsWritesCnf) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db0 = NLDB::create(univ);
+  NLDB* db1 = NLDB::create(univ);
+
+  NLLibrary* library0 =
+      NLLibrary::create(db0, NLLibrary::Type::Standard, NLName("designs0"));
+  NLLibrary* library1 =
+      NLLibrary::create(db1, NLLibrary::Type::Standard, NLName("designs1"));
+
+  SNLDesign* top0 =
+      SNLDesign::create(library0, SNLDesign::Type::Standard, NLName("top0"));
+  SNLDesign* top1 =
+      SNLDesign::create(library1, SNLDesign::Type::Standard, NLName("top1"));
+  univ->setTopDesign(top0);
+
+  auto top0In =
+      SNLScalarTerm::create(top0, SNLTerm::Direction::Input, NLName("a"));
+  auto top0Out =
+      SNLScalarTerm::create(top0, SNLTerm::Direction::Output, NLName("y"));
+  auto top1In =
+      SNLScalarTerm::create(top1, SNLTerm::Direction::Input, NLName("a"));
+  auto top1Out =
+      SNLScalarTerm::create(top1, SNLTerm::Direction::Output, NLName("y"));
+
+  auto net0 = SNLScalarNet::create(top0, NLName("net_a"));
+  top0In->setNet(net0);
+  top0Out->setNet(net0);
+
+  auto net1 = SNLScalarNet::create(top1, NLName("net_a"));
+  top1In->setNet(net1);
+  top1Out->setNet(net1);
+
+  const auto cnfPath = testTempPath("compact_run_separate_dbs.cnf");
+  MiterStrategy strategy(top0, top1, testTempPath("compact_run_separate_dbs.log").string());
+  strategy.init();
+  strategy.setCnfDump(true, cnfPath.string());
+
+  EXPECT_TRUE(strategy.run(true));
+  EXPECT_TRUE(std::filesystem::exists(cnfPath));
 }
 
 TEST_F(MiterTests, InvertedOutputsProduceConstantTrueMiter) {
@@ -517,7 +1270,7 @@ TEST_F(MiterTests, InvertedOutputsProduceConstantTrueMiter) {
       SNLScalarTerm::create(invModel, SNLTerm::Direction::Input, NLName("A"));
   auto invOut =
       SNLScalarTerm::create(invModel, SNLTerm::Direction::Output, NLName("ZN"));
-  SNLDesignModeling::setTruthTable(invModel, SNLTruthTable(1, 1));
+  SNLDesignModeling::setTruthTable(invModel, SNLTruthTable(1, 1, SNLTruthTable::fullDependencies(1)));
   NLLibraryTruthTables::construct(library);
 
   auto top0InputNet = SNLScalarNet::create(top0, NLName("a_net"));
@@ -536,7 +1289,6 @@ TEST_F(MiterTests, InvertedOutputsProduceConstantTrueMiter) {
   strategy.init();
   EXPECT_FALSE(strategy.run());
 }
-
 
 TEST_F(MiterTests, TestMiterANDNonConstantWithSequentialElements) {
   printf("[TEST] MiterTests.TestMiterANDNonConstantWithSequentialElements\n");
@@ -592,7 +1344,7 @@ TEST_F(MiterTests, TestMiterANDNonConstantWithSequentialElements) {
   SNLInstance* inst3 = SNLInstance::create(top, andModel, NLName("and"));
   SNLInstance* inst4 = SNLInstance::create(top, andModel, NLName("and2"));
   // set truth table for and model
-  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8, SNLTruthTable::fullDependencies(2)));
   // 9. connect all instances inputs
   SNLNet* net1 = SNLScalarNet::create(top, NLName("top_in1_net"));
   SNLNet* net2 = SNLScalarNet::create(top, NLName("top_in2_net"));
@@ -692,10 +1444,411 @@ TEST_F(MiterTests, TestMiterANDNonConstantWithSequentialElements) {
   }
 }
 
+TEST_F(MiterTests, ReducedTruthTableArityStillQueuesAllInstanceInputs) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+
+  SNLDesign* buf2Model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("BUF2"));
+  auto bufIn1 =
+      SNLScalarTerm::create(buf2Model, SNLTerm::Direction::Input, NLName("in1"));
+  auto bufIn2 =
+      SNLScalarTerm::create(buf2Model, SNLTerm::Direction::Input, NLName("in2"));
+  auto bufOut = SNLScalarTerm::create(buf2Model, SNLTerm::Direction::Output,
+                                      NLName("out"));
+  SNLDesignModeling::setTruthTable(
+      buf2Model,
+      SNLTruthTable(1, 2, NLBitDependencies::encodeBits(std::vector<size_t>{0})));
+
+  auto buildTop = [&](const char* topName) {
+    auto top = SNLDesign::create(
+        libraryDesigns, SNLDesign::Type::Standard, NLName(topName));
+    univ->setTopDesign(top);
+
+    auto topA =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+    auto topB =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+    auto topOut =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+    auto inst = SNLInstance::create(top, buf2Model, NLName("buf2"));
+
+    auto netA = SNLScalarNet::create(top, NLName("net_a"));
+    auto netB = SNLScalarNet::create(top, NLName("net_b"));
+    auto netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+    topA->setNet(netA);
+    topB->setNet(netB);
+    topOut->setNet(netOut);
+
+    inst->getInstTerm(bufIn1)->setNet(netA);
+    inst->getInstTerm(bufIn2)->setNet(netB);
+    inst->getInstTerm(bufOut)->setNet(netOut);
+
+    return top;
+  };
+
+  auto top = buildTop("top");
+  auto topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "ReducedTruthTableArity");
+  MiterS.init();
+  try {
+    (void)MiterS.run();
+    FAIL() << "Expected arity mismatch runtime_error";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("SNLLogicCloud arity mismatch"), std::string::npos);
+    EXPECT_NE(message.find("TT arity=1"), std::string::npos);
+    EXPECT_NE(message.find("model non-output term count=2"), std::string::npos);
+  }
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesDoesNotTreatWideMuxInputsAsPOs) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  SNLDesign* muxModel = NLDB0::getOrCreateMux2(4);
+  ASSERT_NE(nullptr, muxModel);
+  EXPECT_EQ(4u, SNLDesignModeling::getTruthTableCount(muxModel));
+
+  auto top = SNLDesign::create(
+      libraryDesigns, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+
+  std::array<SNLScalarTerm*, 4> topA{};
+  std::array<SNLScalarTerm*, 4> topB{};
+  std::array<SNLScalarTerm*, 4> topY{};
+  for (size_t bit = 0; bit < 4; ++bit) {
+    topA[bit] = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Input, NLName("a" + std::to_string(bit)));
+    topB[bit] = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Input, NLName("b" + std::to_string(bit)));
+    topY[bit] = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Output, NLName("y" + std::to_string(bit)));
+  }
+  auto topS =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("s"));
+
+  auto muxInst = SNLInstance::create(top, muxModel, NLName("mux0"));
+  auto netS = SNLScalarNet::create(top, NLName("net_s"));
+  topS->setNet(netS);
+  muxInst->getInstTerm(NLDB0::getMux2Select(muxModel))->setNet(netS);
+
+  for (size_t bit = 0; bit < 4; ++bit) {
+    auto* netA =
+        SNLScalarNet::create(top, NLName("net_a" + std::to_string(bit)));
+    auto* netB =
+        SNLScalarNet::create(top, NLName("net_b" + std::to_string(bit)));
+    auto* netY =
+        SNLScalarNet::create(top, NLName("net_y" + std::to_string(bit)));
+    topA[bit]->setNet(netA);
+    topB[bit]->setNet(netB);
+    topY[bit]->setNet(netY);
+    muxInst->getInstTerm(NLDB0::getMux2InputA(muxModel)->getBit(bit))
+        ->setNet(netA);
+    muxInst->getInstTerm(NLDB0::getMux2InputB(muxModel)->getBit(bit))
+        ->setNet(netB);
+    muxInst->getInstTerm(NLDB0::getMux2Output(muxModel)->getBit(bit))
+        ->setNet(netY);
+  }
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  ASSERT_EQ(builder.getOutputs().size(), 4u);
+  std::set<std::string> outputNames;
+  for (const auto outputID : builder.getOutputs()) {
+    const auto& outputTerm = naja::DNL::get()->getDNLTerminalFromID(outputID);
+    EXPECT_TRUE(outputTerm.isTopPort());
+    outputNames.insert(outputTerm.getSnlBitTerm()->getName().getString());
+  }
+  EXPECT_EQ(outputNames, (std::set<std::string>{"y0", "y1", "y2", "y3"}));
+}
+
+TEST_F(MiterTests, WideMuxMiterEquivalent) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  SNLDesign* muxModel = NLDB0::getOrCreateMux2(4);
+  ASSERT_NE(nullptr, muxModel);
+  EXPECT_EQ(4u, SNLDesignModeling::getTruthTableCount(muxModel));
+
+  auto buildTop = [&](const char* topName) {
+    auto top = SNLDesign::create(
+        libraryDesigns, SNLDesign::Type::Standard, NLName(topName));
+    univ->setTopDesign(top);
+
+    std::array<SNLScalarTerm*, 4> topA{};
+    std::array<SNLScalarTerm*, 4> topB{};
+    std::array<SNLScalarTerm*, 4> topY{};
+    for (size_t bit = 0; bit < 4; ++bit) {
+      topA[bit] = SNLScalarTerm::create(
+          top, SNLTerm::Direction::Input, NLName("a" + std::to_string(bit)));
+      topB[bit] = SNLScalarTerm::create(
+          top, SNLTerm::Direction::Input, NLName("b" + std::to_string(bit)));
+      topY[bit] = SNLScalarTerm::create(
+          top, SNLTerm::Direction::Output, NLName("y" + std::to_string(bit)));
+    }
+    auto topS =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("s"));
+
+    auto muxInst = SNLInstance::create(top, muxModel, NLName("mux0"));
+    auto netS = SNLScalarNet::create(top, NLName("net_s"));
+    topS->setNet(netS);
+    muxInst->getInstTerm(NLDB0::getMux2Select(muxModel))->setNet(netS);
+
+    for (size_t bit = 0; bit < 4; ++bit) {
+      auto* netA =
+          SNLScalarNet::create(top, NLName("net_a" + std::to_string(bit)));
+      auto* netB =
+          SNLScalarNet::create(top, NLName("net_b" + std::to_string(bit)));
+      auto* netY =
+          SNLScalarNet::create(top, NLName("net_y" + std::to_string(bit)));
+      topA[bit]->setNet(netA);
+      topB[bit]->setNet(netB);
+      topY[bit]->setNet(netY);
+      muxInst->getInstTerm(NLDB0::getMux2InputA(muxModel)->getBit(bit))
+          ->setNet(netA);
+      muxInst->getInstTerm(NLDB0::getMux2InputB(muxModel)->getBit(bit))
+          ->setNet(netB);
+      muxInst->getInstTerm(NLDB0::getMux2Output(muxModel)->getBit(bit))
+          ->setNet(netY);
+    }
+
+    return top;
+  };
+
+  auto top = buildTop("top");
+  auto topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "WideMuxMiterEquivalent");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
+}
+
+TEST_F(MiterTests, Db0FAArityCheckFailureReproducer) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  SNLDesign* faModel = NLDB0::getFA();
+  ASSERT_NE(nullptr, faModel);
+
+  auto buildTop = [&](const char* topName) {
+    auto top = SNLDesign::create(
+        libraryDesigns, SNLDesign::Type::Standard, NLName(topName));
+    univ->setTopDesign(top);
+
+    auto topA =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+    auto topB =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+    auto topCI =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("ci"));
+    auto topS =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("s"));
+    auto topCO =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("co"));
+
+    auto inst = SNLInstance::create(top, faModel, NLName("fa0"));
+
+    auto netA = SNLScalarNet::create(top, NLName("net_a"));
+    auto netB = SNLScalarNet::create(top, NLName("net_b"));
+    auto netCI = SNLScalarNet::create(top, NLName("net_ci"));
+    auto netS = SNLScalarNet::create(top, NLName("net_s"));
+    auto netCO = SNLScalarNet::create(top, NLName("net_co"));
+
+    topA->setNet(netA);
+    topB->setNet(netB);
+    topCI->setNet(netCI);
+    topS->setNet(netS);
+    topCO->setNet(netCO);
+
+    inst->getInstTerm(NLDB0::getFAInputA())->setNet(netA);
+    inst->getInstTerm(NLDB0::getFAInputB())->setNet(netB);
+    inst->getInstTerm(NLDB0::getFAInputCI())->setNet(netCI);
+    inst->getInstTerm(NLDB0::getFAOutputS())->setNet(netS);
+    inst->getInstTerm(NLDB0::getFAOutputCO())->setNet(netCO);
+
+    return top;
+  };
+
+  auto top = buildTop("top");
+  auto topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "Db0FAArityCheck");
+  MiterS.init();
+  EXPECT_EQ(2, SNLDesignModeling::getTruthTableCount(faModel));
+
+  // Regression for the former workflow failure path: DB0 FA must be
+  // handled through per-output truth-table counting, not the single-output
+  // primitive truth-table API.
+  EXPECT_TRUE(MiterS.run());
+}
+
+TEST_F(MiterTests, InternalPOAssignCycleIsSkippedAndReported) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto assignModel = NLDB0::getAssign();
+  ASSERT_NE(nullptr, assignModel);
+  auto dffrnModel = NLDB0::getDFFRN();
+  ASSERT_NE(nullptr, dffrnModel);
+  auto faModel = NLDB0::getFA();
+  ASSERT_NE(nullptr, faModel);
+  auto muxModel = NLDB0::getMux2();
+  ASSERT_NE(nullptr, muxModel);
+
+  auto buildTop = [&](const char* topName) {
+    auto top = SNLDesign::create(
+        libraryDesigns, SNLDesign::Type::Standard, NLName(topName));
+    univ->setTopDesign(top);
+
+    auto topB =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+    auto topCI =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("ci"));
+    auto topRN =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rn"));
+    auto topC =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("c"));
+    auto topMuxA =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("ma"));
+    auto topMuxB =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("mb"));
+    auto topMuxS =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("ms"));
+
+    auto dffrnInst = SNLInstance::create(top, dffrnModel, NLName("ff0"));
+    auto assignSeedInst =
+        SNLInstance::create(top, assignModel, NLName("assign_seed"));
+    auto faInst = SNLInstance::create(top, faModel, NLName("fa0"));
+    auto assignSelInst =
+        SNLInstance::create(top, assignModel, NLName("assign_sel"));
+    auto mux0Inst = SNLInstance::create(top, muxModel, NLName("mux0"));
+    auto mux1Inst = SNLInstance::create(top, muxModel, NLName("mux1"));
+
+    auto netRN = SNLScalarNet::create(top, NLName("net_rn"));
+    auto netC = SNLScalarNet::create(top, NLName("net_c"));
+    auto netB = SNLScalarNet::create(top, NLName("net_b"));
+    auto netCI = SNLScalarNet::create(top, NLName("net_ci"));
+    auto netMuxA = SNLScalarNet::create(top, NLName("net_ma"));
+    auto netMuxB = SNLScalarNet::create(top, NLName("net_mb"));
+    auto netMuxS = SNLScalarNet::create(top, NLName("net_ms"));
+    auto netQ = SNLScalarNet::create(top, NLName("net_q"));
+    auto netSeedOut = SNLScalarNet::create(top, NLName("net_seed_out"));
+    auto netSeedIn = SNLScalarNet::create(top, NLName("net_seed_in"));
+    auto netFaS = SNLScalarNet::create(top, NLName("net_fa_s"));
+    auto netSelOut = SNLScalarNet::create(top, NLName("net_sel_out"));
+    auto netSelIn = SNLScalarNet::create(top, NLName("net_sel_in"));
+
+    topB->setNet(netB);
+    topCI->setNet(netCI);
+    topRN->setNet(netRN);
+    topC->setNet(netC);
+    topMuxA->setNet(netMuxA);
+    topMuxB->setNet(netMuxB);
+    topMuxS->setNet(netMuxS);
+
+    dffrnInst->getInstTerm(NLDB0::getDFFRNData())->setNet(netSeedOut);
+    dffrnInst->getInstTerm(NLDB0::getDFFRNResetN())->setNet(netRN);
+    dffrnInst->getInstTerm(NLDB0::getDFFRNClock())->setNet(netC);
+    dffrnInst->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ);
+
+    assignSeedInst->getInstTerm(NLDB0::getAssignInput())->setNet(netSeedIn);
+    assignSeedInst->getInstTerm(NLDB0::getAssignOutput())->setNet(netSeedOut);
+
+    faInst->getInstTerm(NLDB0::getFAInputA())->setNet(netSeedOut);
+    faInst->getInstTerm(NLDB0::getFAInputB())->setNet(netB);
+    faInst->getInstTerm(NLDB0::getFAInputCI())->setNet(netCI);
+    faInst->getInstTerm(NLDB0::getFAOutputS())->setNet(netFaS);
+
+    assignSelInst->getInstTerm(NLDB0::getAssignInput())->setNet(netSelIn);
+    assignSelInst->getInstTerm(NLDB0::getAssignOutput())->setNet(netSelOut);
+
+    mux0Inst->getInstTerm(NLDB0::getMux2InputA()->getBit(0))->setNet(netQ);
+    mux0Inst->getInstTerm(NLDB0::getMux2InputB()->getBit(0))->setNet(netFaS);
+    mux0Inst->getInstTerm(NLDB0::getMux2Select())->setNet(netSelOut);
+    mux0Inst->getInstTerm(NLDB0::getMux2Output()->getBit(0))->setNet(netSeedIn);
+
+    mux1Inst->getInstTerm(NLDB0::getMux2InputA()->getBit(0))->setNet(netMuxA);
+    mux1Inst->getInstTerm(NLDB0::getMux2InputB()->getBit(0))->setNet(netMuxB);
+    mux1Inst->getInstTerm(NLDB0::getMux2Select())->setNet(netMuxS);
+    mux1Inst->getInstTerm(NLDB0::getMux2Output()->getBit(0))->setNet(netSelIn);
+
+    return top;
+  };
+
+  auto top = buildTop("top");
+  auto topClone = top->clone(NLName("topClone"));
+  ScopedCurrentPath scopedCurrentPath(tempDir_);
+  const bool previousReportSkippedPOs = Config::getReportSkippedPOs();
+  Config::setReportSkippedPOs(true);
+  MiterStrategy MiterS(top, topClone, "InternalPOAssignCycle");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
+  Config::setReportSkippedPOs(previousReportSkippedPOs);
+
+  const auto reportPath = tempDir_ / "skipped_logical_loop_pos.txt";
+  ASSERT_TRUE(std::filesystem::exists(reportPath));
+  std::ifstream report(reportPath);
+  ASSERT_TRUE(report.good());
+  std::stringstream buffer;
+  buffer << report.rdbuf();
+  const std::string content = buffer.str();
+  EXPECT_NE(content.find("logical loop"), std::string::npos);
+  EXPECT_NE(content.find("loop_terms"), std::string::npos);
+  EXPECT_NE(content.find("D0"), std::string::npos);
+}
+
 // 1. create a circuit of 2 inputs that drives and AND gate that drives top output
 // 2. clone the the top and chain an inverter to the AND output
 // 3. verify that the miter strategy detects the difference
 TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
+  ScopedCurrentPath scopedCurrentPath(tempDir_);
+  auto runKeplerCliWithArgs = [](const std::vector<std::string>& args) {
+    std::string cmd;
+    cmd += KEPLER_BIN;
+    for (const auto& a : args) {
+      cmd += " ";
+      std::string quoted = "'";
+      for (char c : a) {
+        if (c == '\'') {
+          quoted += "'\\''";
+        } else {
+          quoted.push_back(c);
+        }
+      }
+      quoted += "'";
+      cmd += quoted;
+    }
+
+    int rc = std::system(cmd.c_str());
+    if (rc == -1) {
+      return EXIT_FAILURE;
+    }
+
+#if defined(_WIN32)
+    return rc;
+#else
+    if (WIFEXITED(rc)) {
+      return WEXITSTATUS(rc);
+    }
+    return EXIT_FAILURE;
+#endif
+  };
+
   // 1. Create SNL
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
@@ -734,7 +1887,7 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
                                       NLName("out"));
 
   // set truth table for and model
-  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8, SNLTruthTable::fullDependencies(2)));
   // 8. create an inverter model
   SNLDesign* inverterModel =
       SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("INV"));
@@ -743,7 +1896,7 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
       SNLScalarTerm::create(inverterModel, SNLTerm::Direction::Input, NLName("in"));
   auto invOut =
       SNLScalarTerm::create(inverterModel, SNLTerm::Direction::Output, NLName("out"));
-  SNLDesignModeling::setTruthTable(inverterModel, SNLTruthTable(1, 1));
+  SNLDesignModeling::setTruthTable(inverterModel, SNLTruthTable(1, 1, SNLTruthTable::fullDependencies(1)));
   NLLibraryTruthTables::construct(library);
   // set truth table for inverter model
  
@@ -786,15 +1939,13 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
 
   {
     // dump top to naja_if(CapProto)
-    std::filesystem::path outputPath("./top.capnp");
+    std::filesystem::path outputPath("top.capnp");
     SNLCapnP::dump(db, outputPath);
   }
   // Dump visual
   {
-    std::string dotFileName(
-        std::string(std::string("./beforeEdit") + std::string(".dot")));
-    std::string svgFileName(
-        std::string(std::string("./beforeEdit") + std::string(".svg")));
+    std::string dotFileName("beforeEdit.dot");
+    std::string svgFileName("beforeEdit.svg");
     SnlVisualiser snl(top);
     snl.process();
     snl.getNetlistGraph().dumpDotFile(dotFileName.c_str());
@@ -817,10 +1968,8 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
 
   // dump visual
   {
-    std::string dotFileName(
-        std::string(std::string("./afterEdit") + std::string(".dot")));
-    std::string svgFileName(
-        std::string(std::string("./afterEdit") + std::string(".svg")));
+    std::string dotFileName("afterEdit.dot");
+    std::string svgFileName("afterEdit.svg");
     SnlVisualiser snl(top);
     snl.process();
     snl.getNetlistGraph().dumpDotFile(dotFileName.c_str());
@@ -831,22 +1980,28 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
 
   // test the miter strategy
   {
-    MiterStrategy MiterS(top, topClone, "CaseC");
+    MiterStrategy MiterS(top, topClone, testTempPath("CaseC.log").string());
     MiterS.init();
     EXPECT_FALSE(MiterS.run());
   }
   {
     // dump top to naja_if(CapProto)
-    std::filesystem::path outputPath("./topEdited1.capnp");
+    std::filesystem::path outputPath("topEdited1.capnp");
     SNLCapnP::dump(db, outputPath);
   }
-  //Check output of binary kepler-formal on the 2 capnp files
-  const auto beforeDifferentLogs = listMiterLogFiles();
-  executeCommand(
-      (get_kepler_bin() + " -naja_if ./top.capnp ./topEdited1.capnp")
-          .c_str());
-  const auto differentLog = findNewMiterLogFile(beforeDifferentLogs);
-  ASSERT_FALSE(differentLog.empty());
+  const auto differentLog = testTempPath("different_miter.log");
+  const auto differentCfg = testTempPath("different.yaml");
+  {
+    std::ofstream cfg(differentCfg);
+    cfg << "format: naja_if\n";
+    cfg << "input_paths:\n";
+    cfg << "  - \"" << testTempPath("top.capnp").string() << "\"\n";
+    cfg << "  - \"" << testTempPath("topEdited1.capnp").string() << "\"\n";
+    cfg << "log_file: \"" << differentLog.string() << "\"\n";
+  }
+  int rc = runKeplerCliWithArgs({"--config", differentCfg.string()});
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(differentLog));
   std::ifstream miterLogFile(differentLog);
   std::string line;
   bool foundDifferent = false;
@@ -872,14 +2027,15 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
   topOut->setNet(net7);
   // test the miter strategy again
   {
-    MiterStrategy MiterS(top, topClone, "CaseD");
+    MiterStrategy MiterS(top, topClone, testTempPath("CaseD.log").string());
     MiterS.init();
     EXPECT_TRUE(MiterS.run());
   }
   {
     KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
     // print current solver type
-    MiterStrategy MiterGlucose(top, topClone, "MultiDriver");
+    MiterStrategy MiterGlucose(top, topClone,
+                               testTempPath("MultiDriver.log").string());
     MiterGlucose.init();
     // Expect throw in run
     EXPECT_TRUE(MiterGlucose.run());
@@ -887,17 +2043,23 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
   }
   {
     // dump top to naja_if(CapProto)
-    std::filesystem::path outputPath("./topEdited2.capnp");
+    std::filesystem::path outputPath("topEdited2.capnp");
     SNLCapnP::dump(db, outputPath);
   }
 
-  //Check output of binary kepler-formal on the 2 capnp files
-  const auto beforeIdenticalLogs = listMiterLogFiles();
-  executeCommand(
-      (get_kepler_bin() + " -naja_if ./top.capnp ./topEdited2.capnp")
-          .c_str());
-  const auto identicalLog = findNewMiterLogFile(beforeIdenticalLogs);
-  ASSERT_FALSE(identicalLog.empty());
+  const auto identicalLog = testTempPath("identical_miter.log");
+  const auto identicalCfg = testTempPath("identical.yaml");
+  {
+    std::ofstream cfg(identicalCfg);
+    cfg << "format: naja_if\n";
+    cfg << "input_paths:\n";
+    cfg << "  - \"" << testTempPath("top.capnp").string() << "\"\n";
+    cfg << "  - \"" << testTempPath("topEdited2.capnp").string() << "\"\n";
+    cfg << "log_file: \"" << identicalLog.string() << "\"\n";
+  }
+  rc = runKeplerCliWithArgs({"--config", identicalCfg.string()});
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(identicalLog));
   std::ifstream miterLogFile2(identicalLog);
   bool foundIdentical = false;
   if (miterLogFile2.is_open()) {
@@ -910,7 +2072,6 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
     miterLogFile2.close();
   }
   EXPECT_TRUE(foundIdentical);
-  
 }
 
 // ---------------------- Tests appended for coverage (subprocess approach, tolerant) ----------------------
@@ -934,8 +2095,11 @@ static int run_kepler_cli_with_args(const std::vector<std::string>& args) {
     // naive quoting: wrap in single quotes and escape any single quotes inside
     std::string quoted = "'";
     for (char c : a) {
-      if (c == '\'') quoted += "'\\''";
-      else quoted.push_back(c);
+      if (c == '\'') {
+        quoted += "'\\''";
+      } else {
+        quoted.push_back(c);
+      }
     }
     quoted += "'";
     cmd += quoted;
@@ -972,14 +2136,18 @@ TEST(KeplerCliSubprocessTests, BinaryExists) {
 
 TEST(KeplerCliSubprocessTests, PrintUsageOnNoArgs) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   int rc = run_kepler_cli_with_args({});
   EXPECT_EQ(rc, EXIT_SUCCESS);
 }
 
 TEST(KeplerCliSubprocessTests, HelpFlagReturnsSuccess) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   int rc = run_kepler_cli_with_args({"--help"});
   EXPECT_EQ(rc, EXIT_SUCCESS);
   rc = run_kepler_cli_with_args({"-h"});
@@ -988,7 +2156,9 @@ TEST(KeplerCliSubprocessTests, HelpFlagReturnsSuccess) {
 
 TEST(KeplerCliSubprocessTests, MissingConfigFileArgument) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   int rc = run_kepler_cli_with_args({"--config"});
   EXPECT_NE(rc, EXIT_SUCCESS);
   rc = run_kepler_cli_with_args({"-c"});
@@ -997,7 +2167,9 @@ TEST(KeplerCliSubprocessTests, MissingConfigFileArgument) {
 
 TEST(KeplerCliSubprocessTests, ConfigFileNotFoundReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   std::string tmpPath = "./nonexistent_config_12345.yaml";
   int rc = run_kepler_cli_with_args({"--config", tmpPath});
   EXPECT_NE(rc, EXIT_SUCCESS);
@@ -1005,7 +2177,9 @@ TEST(KeplerCliSubprocessTests, ConfigFileNotFoundReturnsFailure) {
 
 TEST(KeplerCliSubprocessTests, ConfigUnrecognizedFormatReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   std::filesystem::path tmp = std::filesystem::temp_directory_path() / "kepler_test_bad_format.yaml";
   {
     std::ofstream ofs(tmp);
@@ -1020,7 +2194,9 @@ TEST(KeplerCliSubprocessTests, ConfigUnrecognizedFormatReturnsFailure) {
 
 TEST(KeplerCliSubprocessTests, ConfigUnknownKeyReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   std::filesystem::path tmp = std::filesystem::temp_directory_path() / "kepler_test_unknown_key.yaml";
   {
     std::ofstream ofs(tmp);
@@ -1036,7 +2212,9 @@ TEST(KeplerCliSubprocessTests, ConfigUnknownKeyReturnsFailure) {
 
 TEST(KeplerCliSubprocessTests, ConfigSnlFormatLoadFailureReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   std::filesystem::path tmp = std::filesystem::temp_directory_path() / "kepler_test_snl.yaml";
   {
     std::ofstream ofs(tmp);
@@ -1052,28 +2230,36 @@ TEST(KeplerCliSubprocessTests, ConfigSnlFormatLoadFailureReturnsFailure) {
 
 TEST(KeplerCliSubprocessTests, CliUnrecognizedFormatReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   int rc = run_kepler_cli_with_args({"-badformat", "a", "b"});
   EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
 TEST(KeplerCliSubprocessTests, CliNotEnoughPathsReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   int rc = run_kepler_cli_with_args({"-verilog", "only_one_path.v"});
   EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
 TEST(KeplerCliSubprocessTests, CliNajaIfFormatButMissingFilesReturnsFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
   int rc = run_kepler_cli_with_args({"-naja_if", "/no/such/file1.capnp", "/no/such/file2.capnp"});
   EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
 TEST(KeplerCliSubprocessTests, ConfigParsingViaFilesCoversYamlToVectorBehavior) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
 
   // 1) Sequence of scalars -> valid config with two input_paths should proceed to further checks.
   std::filesystem::path tmpSeq = std::filesystem::temp_directory_path() / "kepler_test_seq.yaml";
@@ -1169,8 +2355,8 @@ TEST_F(MiterTests, CoverDiff) {
   // add output to logic0
   auto logic1Out =
       SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
-  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0));
-  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1));
+  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1, SNLTruthTable::fullDependencies(0)));
   SNLDesign* inverterModel =
       SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("INV"));
   // set truth table for inverter model
@@ -1178,7 +2364,7 @@ TEST_F(MiterTests, CoverDiff) {
       SNLScalarTerm::create(inverterModel, SNLTerm::Direction::Input, NLName("in"));
   auto invOut =
       SNLScalarTerm::create(inverterModel, SNLTerm::Direction::Output, NLName("out"));
-  SNLDesignModeling::setTruthTable(inverterModel, SNLTruthTable(1, 1));
+  SNLDesignModeling::setTruthTable(inverterModel, SNLTruthTable(1, 1, SNLTruthTable::fullDependencies(1)));
   NLLibraryTruthTables::construct(library);
   // 5. create a logic_0 instace in top
   SNLInstance* inst1 = SNLInstance::create(top, logic0, NLName("logic0"));
@@ -1199,7 +2385,7 @@ TEST_F(MiterTests, CoverDiff) {
   SNLInstance* inst3 = SNLInstance::create(top, seqModel, NLName("and"));
   SNLInstance* inst4 = SNLInstance::create(top, seqModel, NLName("and2"));
   // set truth table for and model
-  //SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  //SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8, SNLTruthTable::fullDependencies(2)));
   // 9. connect all instances inputs
   SNLNet* net1 = SNLScalarNet::create(top, NLName("logic_0_net"));
   //net1->setType(SNLNet::Type::Assign0);
@@ -1286,8 +2472,8 @@ TEST_F(MiterTests, multiDriver) {
   // add output to logic0
   auto logic1Out =
       SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
-  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0));
-  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1));
+  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1, SNLTruthTable::fullDependencies(0)));
   //NLLibraryTruthTables::construct(library);
   // 5. create a logic_0 instace in top
   SNLInstance* inst1 = SNLInstance::create(top, logic0, NLName("logic0"));
@@ -1308,7 +2494,7 @@ TEST_F(MiterTests, multiDriver) {
   SNLInstance* inst3 = SNLInstance::create(top, andModel, NLName("and"));
   SNLInstance* inst4 = SNLInstance::create(top, andModel, NLName("and2"));
   // set truth table for and model
-  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8, SNLTruthTable::fullDependencies(2)));
   NLLibraryTruthTables::construct(library);
   // 9. connect all instances inputs
   SNLNet* net1 = SNLScalarNet::create(top, NLName("net1"));
@@ -1332,8 +2518,7 @@ TEST_F(MiterTests, multiDriver) {
   // 11. create DNL
   MiterStrategy MiterS(top, topClone, "MultiDriver");
   MiterS.init();
-  // Expect throw in run
-  EXPECT_THROW(MiterS.run(), std::runtime_error);
+  EXPECT_TRUE(MiterS.run());
   naja::DNL::destroy();
 }
 
@@ -1368,8 +2553,8 @@ TEST_F(MiterTests, tt65In) {
   // add output to logic0
   auto logic1Out =
       SNLScalarTerm::create(logic1, SNLTerm::Direction::Output, NLName("out"));
-  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0));
-  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1));
+  SNLDesignModeling::setTruthTable(logic0, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+  SNLDesignModeling::setTruthTable(logic1, SNLTruthTable(0, 1, SNLTruthTable::fullDependencies(0)));
   //NLLibraryTruthTables::construct(library);
   // Create a model with 65 inputs and 1 output and set the truth table so 
   // output is 1 only when all inputs are 0
@@ -1396,7 +2581,8 @@ TEST_F(MiterTests, tt65In) {
   // set truth tables for all 65 outputs with and function for the 2 inputs
   std::vector<SNLTruthTable> tt65InTables;
   for (int i = 0; i < 65; ++i) {
-    tt65InTables.push_back(SNLTruthTable(2, 8));
+    tt65InTables.push_back(
+        SNLTruthTable(2, 8, getInputFlatDependencies(tt65InModel)));
   }
   SNLDesignModeling::setTruthTables(tt65InModel,tt65InTables);
   //NLLibraryTruthTables::construct(library);
@@ -1430,7 +2616,7 @@ TEST_F(MiterTests, tt65In) {
   SNLInstance* inst3 = SNLInstance::create(top, andModel, NLName("and"));
   SNLInstance* inst4 = SNLInstance::create(top, andModel, NLName("and2"));
   // set truth table for and model
-  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8));
+  SNLDesignModeling::setTruthTable(andModel, SNLTruthTable(2, 8, SNLTruthTable::fullDependencies(2)));
   //NLLibraryTruthTables::construct(library);
   // 9. connect all instances inputs
   SNLNet* net1 = SNLScalarNet::create(top, NLName("net1"));
@@ -1461,8 +2647,7 @@ TEST_F(MiterTests, tt65In) {
   // 11. create DNL
   MiterStrategy MiterS(top, topClone, "MultiDriver");
   MiterS.init();
-  // Expect throw in run
-  EXPECT_THROW(MiterS.run(), std::runtime_error);
+  EXPECT_TRUE(MiterS.run());
 }
 
 TEST_F(MiterTests, ConnectedInouts) {
@@ -1509,18 +2694,23 @@ TEST_F(MiterTests, UnconnectedTerms) {
 
 TEST(KeplerCliSubprocessTests, ExampleTestRun) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
 
   std::string config = get_test_data_prefix() + "test/strategies/miter/test_config_verilog.yaml";
-  if (std::getenv("TEST_DATA_PREFIX"))
+  if (std::getenv("TEST_DATA_PREFIX")) {
     config = get_test_data_prefix() + "test/strategies/miter/test_config_verilog_bazel.yaml";
+  }
   int rc = run_kepler_cli_with_args({"--config", config});
   EXPECT_EQ(rc, EXIT_SUCCESS);
 }
 
 TEST(KeplerCliSubprocessTests, ExampleTestRunCommandLine) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
 
   std::string pfx = get_test_data_prefix();
   int rc = run_kepler_cli_with_args({"-verilog",
@@ -1535,11 +2725,14 @@ TEST(KeplerCliSubprocessTests, ExampleTestRunCommandLine) {
 
 TEST(KeplerCliSubprocessTests, ExampleTestRunNajaIFWithScopeExtraction) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
 
   std::string config = get_test_data_prefix() + "test/strategies/miter/test_config_naja_if_with_se.yaml";
-  if (std::getenv("TEST_DATA_PREFIX"))
+  if (std::getenv("TEST_DATA_PREFIX")) {
     config = get_test_data_prefix() + "test/strategies/miter/test_config_naja_if_with_se_bazel.yaml";
+  }
   int rc = run_kepler_cli_with_args({"--config", config});
   EXPECT_EQ(rc, EXIT_SUCCESS);
 }
@@ -1547,18 +2740,23 @@ TEST(KeplerCliSubprocessTests, ExampleTestRunNajaIFWithScopeExtraction) {
 // test failure with test_config_failure.yaml
 TEST(KeplerCliSubprocessTests, ExampleTestRunFailure) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
 
   std::string config = get_test_data_prefix() + "test/strategies/miter/test_config_failure.yaml";
-  if (std::getenv("TEST_DATA_PREFIX"))
+  if (std::getenv("TEST_DATA_PREFIX")) {
     config = get_test_data_prefix() + "test/strategies/miter/test_config_failure_bazel.yaml";
+  }
   int rc = run_kepler_cli_with_args({"--config", config});
   EXPECT_NE(rc, EXIT_SUCCESS);
 }
 
 TEST(KeplerCliSubprocessTests, ExampleRunWritesConfiguredLogFile) {
   std::filesystem::path p(KEPLER_BIN);
-  if (!std::filesystem::exists(p)) GTEST_SKIP() << "kepler-formal binary missing";
+  if (!std::filesystem::exists(p)) {
+    GTEST_SKIP() << "kepler-formal binary missing";
+  }
 
   const auto tmpDir =
       std::filesystem::temp_directory_path() / "kepler_formal_subprocess_log";

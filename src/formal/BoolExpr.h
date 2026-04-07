@@ -26,6 +26,7 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {
   // Convenient constants
   static BoolExpr* createFalse() { return Var(0); }
   static BoolExpr* createTrue() { return Var(1); }
+  static BoolExpr* createInvalid() { return Var((size_t)-1); }
 
   // Factory methods (canonical, fold constants, share structure)
   static BoolExpr* Var(size_t id);
@@ -50,12 +51,15 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {
   BoolExpr* getLeft() const { return left_; }
   BoolExpr* getRight() const { return right_; }
   std::string getName() const {
-    if (op_ != Op::VAR)
+    if (op_ != Op::VAR) {
       throw std::logic_error("getName: not a variable");
-    if (varID_ == 0)
+    }
+    if (varID_ == 0) {
       return "FALSE";
-    if (varID_ == 1)
+    }
+    if (varID_ == 1) {
       return "TRUE";
+    }
     return "x" + std::to_string(varID_);
   }
   // default constructor
@@ -87,6 +91,12 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {
   static BoolExpr* simplify(BoolExpr* e);
 
   std::set<size_t> getSupportVars() const;
+
+  bool isValid() const {
+    return op_ != Op::NONE &&
+           ((op_ == Op::VAR && varID_ != (size_t)-1) ||
+            (op_ != Op::VAR && left_ != nullptr));
+  }
 
  private:
   // Private ctor: use factory methods
