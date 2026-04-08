@@ -63,6 +63,10 @@ static std::vector<std::string> yamlToVector(const YAML::Node& node) {
   return out;
 }
 
+static bool isPythonLoaderPath(const std::string& path) {
+  return std::filesystem::path(path).extension() == ".py";
+}
+
 static bool validateConfigKeys(const YAML::Node& cfg) {
   if (!cfg || !cfg.IsMap()) {
     return true;
@@ -71,6 +75,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "format",
       "input_paths",
       "liberty_files",
+      "py_tech_files",
       "verilog_preprocessing",
       "log_level",
       "log_file",
@@ -369,6 +374,7 @@ int KeplerFormalMain(int argc, char** argv) {
   DesignInputs designInputs;
   SystemVerilogOptions systemVerilogOptions;
   std::vector<std::string> libertyFiles;
+  std::vector<std::string> pythonFiles;
   std::string logLevel = "info";
 
   // Basic argument sanity
@@ -432,6 +438,7 @@ int KeplerFormalMain(int argc, char** argv) {
 
         // liberty_files
         libertyFiles = yamlToVector(cfg["liberty_files"]);
+        pythonFiles = yamlToVector(cfg["py_tech_files"]);
 
         // log level
         if (cfg["log_level"] && cfg["log_level"].IsScalar()) {
@@ -679,6 +686,15 @@ int KeplerFormalMain(int argc, char** argv) {
     SPDLOG_CRITICAL("SNL input only supports one file per design");
     return EXIT_FAILURE;
   }
+  for (const auto& libraryFile : libertyFiles) {
+    if (isPythonLoaderPath(libraryFile)) {
+      SPDLOG_CRITICAL(
+          "Python primitive loader {} must be provided through YAML config key "
+          "py_tech_files, not liberty_files/--liberty inputs",
+          libraryFile);
+      return EXIT_FAILURE;
+    }
+  }
   if (inputFormatType != FormatType::SYSTEMVERILOG &&
       (systemVerilogOptions.design0.flist || systemVerilogOptions.design0.top ||
        systemVerilogOptions.design1.flist || systemVerilogOptions.design1.top)) {
@@ -704,6 +720,9 @@ int KeplerFormalMain(int argc, char** argv) {
   if (!libertyFiles.empty()) {
     for (const auto& lf : libertyFiles) SPDLOG_INFO("Library: {}", lf);
   }
+  if (!pythonFiles.empty()) {
+    for (const auto& pf : pythonFiles) SPDLOG_INFO("Python library: {}", pf);
+  }
 
   // --------------------------------------------------------------------------
   // 2. Load two netlists via Cap’n Proto (or via VRL constructor)
@@ -716,7 +735,7 @@ int KeplerFormalMain(int argc, char** argv) {
     bool primitivesAreLoaded = false;
 
     auto loadLibraries = [&](NLDB* db) -> bool {
-      if (libertyFiles.empty()) {
+      if (libertyFiles.empty() && pythonFiles.empty()) {
         // LCOV_EXCL_START
         return false;
         // LCOV_EXCL_STOP
@@ -725,20 +744,14 @@ int KeplerFormalMain(int argc, char** argv) {
           NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
       for (const auto& libraryFile : libertyFiles) {
         std::filesystem::path libraryPath(libraryFile);
-        const auto extension = libraryPath.extension();
-        const bool isLibertyFile =
-            extension == ".lib" ||
-            (extension == ".gz" && libraryPath.stem().extension() == ".lib");
         SPDLOG_INFO("Loading library file: {}", libraryFile);
-        if (extension == ".py") {
-          SNLPyLoader::loadPrimitives(primitivesLibrary, libraryPath);
-        } else if (isLibertyFile) {
-          SNLLibertyConstructor constructor(primitivesLibrary);
-          constructor.construct(libraryPath);
-        } else {
-          SPDLOG_CRITICAL("Unsupported library file extension: {}", libraryPath.string());
-          return false;
-        }
+        SNLLibertyConstructor constructor(primitivesLibrary);
+        constructor.construct(libraryPath);
+      }
+      for (const auto& pythonFile : pythonFiles) {
+        std::filesystem::path pythonPath(pythonFile);
+        SPDLOG_INFO("Loading python primitive file: {}", pythonFile);
+        SNLPyLoader::loadPrimitives(primitivesLibrary, pythonPath);
       }
       return true;
     };
@@ -750,7 +763,7 @@ int KeplerFormalMain(int argc, char** argv) {
       NLDB* db = nullptr;
       bool primitivesLoadedForDesign = false;
 
-      if (!libertyFiles.empty()) {
+      if (!libertyFiles.empty() || !pythonFiles.empty()) {
         db = NLDB::create(NLUniverse::get());
         primitivesLoadedForDesign = loadLibraries(db);
         if (!primitivesLoadedForDesign) {
@@ -879,7 +892,7 @@ int KeplerFormalMain(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
 
-    if (!libertyFiles.empty()) {
+    if (!libertyFiles.empty() || !pythonFiles.empty()) {
       db0 = NLDB::create(NLUniverse::get());
       primitivesAreLoaded = loadLibraries(db0);
       if (!primitivesAreLoaded) {
@@ -956,7 +969,7 @@ int KeplerFormalMain(int argc, char** argv) {
     NLDB* db1 = nullptr;
 
     // Prepare second DB and primitives if needed
-    if (!libertyFiles.empty()) {
+    if (!libertyFiles.empty() || !pythonFiles.empty()) {
       db1 = NLDB::create(NLUniverse::get());
       db1->setID(1);
       if (!loadLibraries(db1)) {

@@ -14,16 +14,16 @@ python edit.py
   NangateOpenCellLibrary_typical.lib fakeram45_1024x32.lib fakeram45_64x32.lib fakeram45_64x15.lib
 # For systemverilog
 ../build/src/bin/kepler-formal -systemverilog design0.sv design1.sv \
-  --liberty stdcells.lib.gz primitives.py
+  --liberty stdcells.lib.gz
 # Short alias for systemverilog
 ../build/src/bin/kepler-formal -sv design0.sv design1.sv \
-  --liberty stdcells.lib.gz primitives.py
+  --liberty stdcells.lib.gz
 # For multi-file Verilog designs
 ../build/src/bin/kepler-formal -verilog --design1 <file...> --design2 <file...> \
   --liberty NangateOpenCellLibrary_typical.lib fakeram45_1024x32.lib fakeram45_64x32.lib fakeram45_64x15.lib
 # For multi-file SystemVerilog designs
 ../build/src/bin/kepler-formal -sv --design1 <file...> --design2 <file...> \
-  --liberty stdcells.lib.gz primitives.py
+  --liberty stdcells.lib.gz
 # Through config file
 ../build/src/bin/kepler-formal --config test_config_naja_if.yaml
 ../build/src/bin/kepler-formal --config test_config_verilog.yaml
@@ -42,4 +42,4 @@ python edit.py
 - Supported library files on the existing `--liberty` / `liberty_files` path:
   - `.lib`
   - `.lib.gz`
-  - `.py`
+- Python tech loaders are YAML-only under `py_tech_files`
