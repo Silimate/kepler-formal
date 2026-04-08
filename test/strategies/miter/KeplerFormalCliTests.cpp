@@ -394,6 +394,15 @@ SimpleCliFixture createEquivalentDesignFixture(const std::string& extension,
   return createDesignFixture(extension, moduleBody, moduleBody);
 }
 
+std::filesystem::path copyExampleLibertyFile(const std::filesystem::path& directory,
+                                             const std::string& filename) {
+  const auto source = repoRoot() / "example" / "NangateOpenCellLibrary_typical.lib";
+  const auto destination = directory / filename;
+  std::filesystem::copy_file(
+      source, destination, std::filesystem::copy_options::overwrite_existing);
+  return destination;
+}
+
 std::string readFileContents(const std::filesystem::path& path) {
   std::ifstream file(path);
   std::ostringstream contents;
@@ -1461,7 +1470,27 @@ TEST(KeplerFormalCliTests, CliPositionalLibertyPathsAfterNetlistsAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
-TEST(KeplerFormalCliTests, PythonLibraryFilesAreLoadedByExtension) {
+TEST(KeplerFormalCliTests, CliPositionalLibertyPathsWithoutStandardSuffixAccepted) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto renamedLiberty = copyExampleLibertyFile(fixture.tmpDir, "primitives.cells");
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = fixture.design0Path.string();
+  std::string argv3 = fixture.design1Path.string();
+  std::string argv4 = renamedLiberty.string();
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(), argv4.data()};
+  int argc = 5;
+
+  EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, PythonLibraryFilesAreLoadedFromDedicatedYamlKey) {
   const auto fixture = createEquivalentDesignFixture(
       "v",
       "module top(output y);\n"
@@ -1483,10 +1512,35 @@ TEST(KeplerFormalCliTests, PythonLibraryFilesAreLoadedByExtension) {
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n"
-      "liberty_files:\n"
+      "py_tech_files:\n"
       "  - " + pyPrimitives.string() + "\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, PythonLibraryFilesUnderLibertyFilesAreRejected) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(output y);\n"
+      "  wire z;\n"
+      "  LOGIC1 c0(.Z(z));\n"
+      "  BUF c1(.A(z), .Z(y));\n"
+      "endmodule\n");
+  const auto pyPrimitives =
+      repoRoot() / "thirdparty/naja/test/nl/python/pyloader/scripts/primitives1.py";
+  ASSERT_TRUE(std::filesystem::exists(pyPrimitives));
+
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "liberty_files:\n"
+      "  - " + pyPrimitives.string() + "\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -1514,7 +1568,7 @@ TEST(KeplerFormalCliTests, GzippedLibertyFilesAreLoadedByExtension) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
-TEST(KeplerFormalCliTests, UnsupportedLibraryExtensionFails) {
+TEST(KeplerFormalCliTests, InvalidLibertyFileContentFails) {
   const auto fixture = createEquivalentDesignFixture(
       "v",
       "module top(input a, output y);\n"
@@ -1536,6 +1590,30 @@ TEST(KeplerFormalCliTests, UnsupportedLibraryExtensionFails) {
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliPythonLibraryFilesAreRejected) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(output y);\n"
+      "  wire z;\n"
+      "  LOGIC1 c0(.Z(z));\n"
+      "  BUF c1(.A(z), .Z(y));\n"
+      "endmodule\n");
+  const auto pyPrimitives =
+      repoRoot() / "thirdparty/naja/test/nl/python/pyloader/scripts/primitives1.py";
+  ASSERT_TRUE(std::filesystem::exists(pyPrimitives));
+
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = fixture.design0Path.string();
+  std::string argv3 = fixture.design1Path.string();
+  std::string argv4 = pyPrimitives.string();
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(), argv4.data()};
+  int argc = 5;
+
+  EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_FAILURE);
   std::filesystem::remove_all(fixture.tmpDir);
 }
 

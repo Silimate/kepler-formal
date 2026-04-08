@@ -128,18 +128,16 @@ Experimental SystemVerilog notes are tracked in [docs/systemverilog/README.md](d
 
 ### Library files
 
-Library files continue to use the existing `--liberty` CLI flag and `liberty_files` YAML field.
+Liberty inputs continue to use the existing `--liberty` CLI flag and `liberty_files` YAML field.
 
-Supported file types are:
+These entries are loaded as Liberty without suffix checks.
 
-- `.lib`
-- `.lib.gz`
-- `.py`
+Python tech loaders are supported only through YAML `py_tech_files`.
 
 Behavior:
 
-- `.lib` and `.lib.gz` are loaded through `SNLLibertyConstructor`
-- `.py` is loaded through `SNLPyLoader`
+- `--liberty` and `liberty_files` entries are loaded through `SNLLibertyConstructor`
+- `py_tech_files` entries are loaded through `SNLPyLoader`
 
 ### Optional compact mode
 
@@ -190,6 +188,8 @@ input_paths:
 liberty_files:
   - library_file0.lib
   - library_file1.lib
+py_tech_files:
+  - primitives.py              # Optional: Python tech loaders are YAML-only
 verilog_preprocessing: true   # Optional: enables Verilog preprocessor
 compact_mode: true            # Optional: skips per-PO analysis after a SAT whole-miter result
 report_skipped_pos: true      # Optional: writes skipped PO reports, default is false

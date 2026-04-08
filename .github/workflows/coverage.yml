@@ -50,7 +50,7 @@ jobs:
       working-directory: ${{github.workspace}}/build
       env:
         PYTHONMALLOC: malloc
-      run: ctest -VV -E ".*[p|P]ython.*" -C ${{ env.BUILD_TYPE }}
+      run: ctest -VV -C ${{ env.BUILD_TYPE }}
     - name: lcov
       working-directory: ${{github.workspace}}/build
       run: |
