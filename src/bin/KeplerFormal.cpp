@@ -12,9 +12,11 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <yaml-cpp/yaml.h>
@@ -105,6 +107,72 @@ static const char* verificationModeName(VerificationMode mode) {
     default:
       return "LEC";
   }
+}
+
+static spdlog::level::level_enum parseLogLevel(const std::string& logLevel) {
+  if (logLevel == "debug") {
+    return spdlog::level::debug;
+  }
+  return spdlog::level::info;
+}
+
+static std::string chooseRunLogFilePath(const std::string& requestedPath) {
+  if (requestedPath.empty()) {
+    int logIndex = 0;
+    while (true) {
+      const std::string candidate = "miter_log_" + std::to_string(logIndex) + ".txt";
+      std::ifstream infile(candidate);
+      if (infile.good()) {
+        ++logIndex;
+        continue;
+      }
+      return candidate;
+    }
+  }
+
+  std::filesystem::path path(requestedPath);
+  const auto parent = path.parent_path();
+  if (!parent.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+      std::cerr << "Warning: failed to create log directory '" << parent.string()
+                << "': " << ec.message() << " (" << ec.value()
+                << "). Using default SEC log path.\n";
+      return chooseRunLogFilePath("");
+    }
+  }
+  return path.string();
+}
+
+static std::string configureMainLogger(const std::string& logLevel,
+                                       bool enableFileLog,
+                                       const std::string& requestedLogFilePath) {
+  std::vector<spdlog::sink_ptr> sinks;
+  sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+
+  std::string chosenLogFile;
+  if (enableFileLog) {
+    chosenLogFile = chooseRunLogFilePath(requestedLogFilePath);
+    try {
+      sinks.push_back(
+          std::make_shared<spdlog::sinks::basic_file_sink_mt>(chosenLogFile, true));
+    } catch (const spdlog::spdlog_ex& ex) {
+      std::cerr << "Warning: failed to create SEC log file '" << chosenLogFile
+                << "': " << ex.what() << ". Logging will continue on stdout only.\n";
+      chosenLogFile.clear();
+    }
+  }
+
+  spdlog::drop("kepler_formal_main_logger");
+  auto logger = std::make_shared<spdlog::logger>(
+      "kepler_formal_main_logger", sinks.begin(), sinks.end());
+  const auto level = parseLogLevel(logLevel);
+  logger->set_level(level);
+  logger->flush_on(spdlog::level::info);
+  spdlog::set_default_logger(logger);
+  spdlog::set_level(level);
+  return chosenLogFile;
 }
 
 static bool parseMaxKToken(const std::string& token,
@@ -796,24 +864,8 @@ int KeplerFormalMain(int argc, char** argv) {
     }
   }
 
-  // Configure logging level
-  auto console = spdlog::get("console");
-  if (!console) {
-    console = spdlog::stdout_color_mt("console");
-  }
-  if (logLevel == "debug") {
-    spdlog::set_level(spdlog::level::debug);
-  } else if (logLevel == "info") {
-    spdlog::set_level(spdlog::level::info);
-  }
-  // else if (logLevel == "warn")
-  //   spdlog::set_level(spdlog::level::warn);
-  // else if (logLevel == "error")
-  //   spdlog::set_level(spdlog::level::err);
-  // else if (logLevel == "critical")
-  //   spdlog::set_level(spdlog::level::critical);
-  else
-    spdlog::set_level(spdlog::level::info);
+  const std::string runLogFilePath = configureMainLogger(
+      logLevel, verificationMode == VerificationMode::SEC, logFileName);
 
   SPDLOG_INFO("KEPLER FORMAL: Run.");
   std::string inputFormatName = "VERILOG";
@@ -824,6 +876,9 @@ int KeplerFormalMain(int argc, char** argv) {
     inputFormatName = "SYSTEMVERILOG";
   }
   SPDLOG_INFO("Input format: {}", inputFormatName);
+  if (!runLogFilePath.empty()) {
+    SPDLOG_INFO("Run log: {}", runLogFilePath);
+  }
   logDesignPaths("Netlist 1", designInputs.design0);
   logDesignPaths("Netlist 2", designInputs.design1);
 
@@ -1247,6 +1302,9 @@ int KeplerFormalMain(int argc, char** argv) {
           return EXIT_SUCCESS;
         case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Different:
           SPDLOG_INFO("Difference was found. SEC found a counterexample at k = {}.", result.bound);
+          if (!result.reason.empty()) {
+            SPDLOG_INFO("SEC counterexample details:\n{}", result.reason);
+          }
           return EXIT_SUCCESS;
         case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Inconclusive:
           SPDLOG_CRITICAL("SEC was inconclusive up to max_k = {}: {}", secMaxK, result.reason);

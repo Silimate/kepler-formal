@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -44,6 +45,17 @@ SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
   key.second.push_back(
       static_cast<naja::NL::NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit()));
   return key;
+}
+
+std::string getTerminalDisplayName(const naja::DNL::DNLTerminalFull& terminal) {
+  std::ostringstream oss;
+  const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
+  for (const auto& name : pathNames) {
+    oss << name.getString() << ".";
+  }
+  oss << terminal.getSnlBitTerm()->getName().getString() << "["
+      << terminal.getSnlBitTerm()->getBit() << "]";
+  return oss.str();
 }
 
 std::string normalizePinName(const std::string& name) {
@@ -232,6 +244,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     const auto& term = dnl->getDNLTerminalFromID(inputTermID);
     SignalKey key = getTerminalPathKey(term);
     inputKeyByTerm.emplace(inputTermID, key);
+    model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
     if (isSequentialStateOutput(term)) {
       stateBits.insert(key);
     } else {
@@ -243,6 +256,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     const auto& term = dnl->getDNLTerminalFromID(outputTermID);
     SignalKey key = getTerminalPathKey(term);
     outputKeyByTerm.emplace(outputTermID, key);
+    model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
     if (term.isTopPort()) {
       observedOutputs.insert(key);
     }

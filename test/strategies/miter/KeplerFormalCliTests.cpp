@@ -19,9 +19,11 @@
 #include "NLUniverse.h"
 #include "SNLCapnP.h"
 #include "SNLDesign.h"
+#include "SNLDesignModeling.h"
 #include "SNLLibertyConstructor.h"
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
+#include "SNLTruthTable.h"
 #include "SNLUtils.h"
 #include "SNLVRLConstructor.h"
 
@@ -583,6 +585,70 @@ SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture() {
 
   dumpDesign(fixture.design0IfPath);
   dumpDesign(fixture.design1IfPath);
+
+  return fixture;
+}
+
+SequentialNajaIfFixture createDifferentSequentialNajaIfFixture() {
+  SequentialNajaIfFixture fixture;
+  fixture.tmpDir =
+      std::filesystem::temp_directory_path() / "kepler_formal_cli_seq_if_diff";
+  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.design0IfPath = fixture.tmpDir / "design0.capnp";
+  fixture.design1IfPath = fixture.tmpDir / "design1.capnp";
+
+  const auto dumpDesign = [&](const std::filesystem::path& dumpPath, bool invertData) {
+    cleanupNajaTestState();
+    NLUniverse::create();
+    auto* db = NLDB::create(NLUniverse::get());
+    auto* primitiveLibrary =
+        NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
+    auto* designLibrary =
+        NLLibrary::create(db, NLLibrary::Type::Standard, NLName("DESIGN"));
+    auto* top =
+        SNLDesign::create(designLibrary, SNLDesign::Type::Standard, NLName("top"));
+    auto* topIn = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+    auto* topClock =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+    auto* topOut =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+    auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+
+    auto* invModel =
+        SNLDesign::create(primitiveLibrary, SNLDesign::Type::Primitive, NLName("INV"));
+    auto* invIn =
+        SNLScalarTerm::create(invModel, SNLTerm::Direction::Input, NLName("A"));
+    auto* invOut =
+        SNLScalarTerm::create(invModel, SNLTerm::Direction::Output, NLName("Y"));
+    SNLDesignModeling::addCombinatorialArcs({invIn}, {invOut});
+    SNLDesignModeling::setTruthTable(invModel, SNLTruthTable::Inv());
+
+    auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+    auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+    auto* netData = SNLScalarNet::create(top, NLName("net_data"));
+    auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
+
+    topIn->setNet(netIn);
+    topClock->setNet(netClock);
+    topOut->setNet(netQ);
+
+    if (invertData) {
+      auto* inv = SNLInstance::create(top, invModel, NLName("inv0"));
+      inv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netIn);
+      inv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netData);
+    }
+
+    ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+    ff->getInstTerm(NLDB0::getDFFData())->setNet(invertData ? netData : netIn);
+    ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
+
+    db->setTopDesign(top);
+    SNLCapnP::dump(db, dumpPath);
+    cleanupNajaTestState();
+  };
+
+  dumpDesign(fixture.design0IfPath, false);
+  dumpDesign(fixture.design1IfPath, true);
 
   return fixture;
 }
@@ -1532,6 +1598,79 @@ TEST(KeplerFormalCliTests, ConfigSystemVerilogSecVerificationAccepted) {
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecVerificationWritesDefaultLog) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(\n"
+      "    input logic clk,\n"
+      "    input logic rst,\n"
+      "    input logic d,\n"
+      "    output logic q\n"
+      ");\n"
+      "  always_ff @(posedge clk)\n"
+      "  if (rst) begin\n"
+      "    q <= 1'b0;\n"
+      "  end else begin\n"
+      "    q <= d;\n"
+      "  end\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: SEC\n"
+      "max_k: 4\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+  const auto runDir = fixture.tmpDir / "sec_log_run";
+  std::filesystem::create_directories(runDir);
+
+  {
+    CurrentPathGuard currentPathGuard;
+    std::filesystem::current_path(runDir);
+    EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+
+    const auto logs = listMiterLogsInCurrentDirectory();
+    ASSERT_EQ(logs.size(), 1u);
+    const auto contents = readFileContents(runDir / logs.front());
+    EXPECT_NE(contents.find("Verification: SEC"), std::string::npos);
+    EXPECT_NE(contents.find("SEC proved equivalence at k = 1"), std::string::npos);
+  }
+
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecDifferenceLogIncludesWitnessDetails) {
+  const auto fixture = createDifferentSequentialNajaIfFixture();
+  const auto logPath = fixture.tmpDir / "sec_difference.log";
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 2\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto contents = readFileContents(logPath);
+  EXPECT_NE(contents.find("SEC counterexample details:"), std::string::npos);
+  EXPECT_NE(contents.find("cycle 1"), std::string::npos);
+  EXPECT_NE(contents.find("Input trace:"), std::string::npos);
+  EXPECT_NE(contents.find("in[0]"), std::string::npos);
+  EXPECT_NE(contents.find("out[0]"), std::string::npos);
+  EXPECT_NE(contents.find("Traceback for first differing point `out[0]` at cycle 1:"),
+            std::string::npos);
+  EXPECT_NE(contents.find("design0 cone to environment inputs:"), std::string::npos);
+  EXPECT_NE(contents.find("design1 cone to environment inputs:"), std::string::npos);
+  EXPECT_NE(contents.find("cone terms only in design1: inv0.Y[0]"),
+            std::string::npos);
+
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }

@@ -4,6 +4,9 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "../../config/Config.h"
 #include "kinduction/KInductionProblem.h"
@@ -19,6 +22,31 @@ enum class KInductionStatus {
 struct KInductionResult {
   KInductionStatus status = KInductionStatus::Inconclusive;
   size_t bound = 0;
+  struct SignalMismatch {
+    // Keep the normalized SEC key so higher layers can map the mismatch back
+    // onto the original netlist structure for reporting.
+    SignalKey key;
+    std::string signal;
+    bool design0Value = false;
+    bool design1Value = false;
+  };
+  struct FrameInputAssignments {
+    struct Assignment {
+      std::string signal;
+      bool value = false;
+    };
+
+    size_t frame = 0;
+    std::vector<Assignment> assignments;
+  };
+  struct CounterexampleWitness {
+    size_t badFrame = 0;
+    std::vector<FrameInputAssignments> inputTrace;
+    std::vector<SignalMismatch> outputMismatches;
+    std::vector<SignalMismatch> stateMismatches;
+  };
+
+  std::optional<CounterexampleWitness> witness;
 };
 
 // Runs the standard k-induction loop for the SEC problem: a BMC-style base
@@ -31,7 +59,8 @@ class KInductionEngine {
   KInductionResult run(size_t maxK) const;
 
  private:
-  bool hasBaseCounterexample(size_t k) const;
+  std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
+      size_t k) const;
   bool provesByInduction(size_t k) const;
 
   const KInductionProblem& problem_;

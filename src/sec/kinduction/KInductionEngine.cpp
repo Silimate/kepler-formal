@@ -3,6 +3,9 @@
 
 #include "kinduction/KInductionEngine.h"
 
+#include <stdexcept>
+#include <unordered_map>
+
 #include "kinduction/SatEncoding.h"
 
 namespace KEPLER_FORMAL::SEC {
@@ -58,6 +61,109 @@ void addTransitionRelation(SATSolverWrapper& solver,
   }
 }
 
+std::unordered_map<size_t, bool> buildFrameEnvironment(
+    const SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<size_t>& symbols,
+    size_t frame) {
+  std::unordered_map<size_t, bool> environment;
+  environment.reserve(symbols.size());
+  for (const auto symbol : symbols) {
+    environment.emplace(
+        symbol, solver.getLiteralValue(variables.getLiteral(symbol, frame)));
+  }
+  return environment;
+}
+
+size_t findFirstBadFrame(const SATSolverWrapper& solver,
+                         const FrameVariableStore& variables,
+                         const KInductionProblem& problem,
+                         size_t maxFrame) {
+  for (size_t frame = 0; frame <= maxFrame; ++frame) {
+    if (problem.bad->evaluate(
+            buildFrameEnvironment(solver, variables, problem.allSymbols, frame))) {
+      return frame;
+    }
+  }
+  throw std::runtime_error("SAT model does not satisfy any bad frame");
+}
+
+std::vector<KInductionResult::FrameInputAssignments> buildInputTrace(
+    const SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t lastFrame) {
+  std::vector<KInductionResult::FrameInputAssignments> trace;
+  trace.reserve(lastFrame + 1);
+  for (size_t frame = 0; frame <= lastFrame; ++frame) {
+    KInductionResult::FrameInputAssignments frameAssignments;
+    frameAssignments.frame = frame;
+    frameAssignments.assignments.reserve(problem.inputSymbols.size());
+    for (size_t i = 0; i < problem.inputSymbols.size(); ++i) {
+      frameAssignments.assignments.push_back(
+          {problem.environmentInputNames[i],
+           solver.getLiteralValue(
+               variables.getLiteral(problem.inputSymbols[i], frame))});
+    }
+    trace.push_back(std::move(frameAssignments));
+  }
+  return trace;
+}
+
+std::vector<KInductionResult::SignalMismatch> collectObservedOutputMismatches(
+    const SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t frame) {
+  const auto environment =
+      buildFrameEnvironment(solver, variables, problem.allSymbols, frame);
+  std::vector<KInductionResult::SignalMismatch> mismatches;
+  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
+    const bool value0 = problem.observedOutputExprs0[i]->evaluate(environment);
+    const bool value1 = problem.observedOutputExprs1[i]->evaluate(environment);
+    if (value0 != value1) {
+      mismatches.push_back(
+          {problem.observedOutputs[i], problem.observedOutputNames[i], value0, value1});
+    }
+  }
+  return mismatches;
+}
+
+std::vector<KInductionResult::SignalMismatch> collectStateMismatches(
+    const SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t frame) {
+  std::vector<KInductionResult::SignalMismatch> mismatches;
+  for (size_t i = 0; i < problem.state0Symbols.size(); ++i) {
+    const bool value0 =
+        solver.getLiteralValue(variables.getLiteral(problem.state0Symbols[i], frame));
+    const bool value1 =
+        solver.getLiteralValue(variables.getLiteral(problem.state1Symbols[i], frame));
+    if (value0 != value1) {
+      mismatches.push_back(
+          {problem.stateBits[i], problem.stateBitNames[i], value0, value1});
+    }
+  }
+  return mismatches;
+}
+
+KInductionResult::CounterexampleWitness buildCounterexampleWitness(
+    const SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t maxFrame) {
+  KInductionResult::CounterexampleWitness witness;
+  witness.badFrame = findFirstBadFrame(solver, variables, problem, maxFrame);
+  witness.inputTrace =
+      buildInputTrace(solver, variables, problem, witness.badFrame);
+  witness.outputMismatches = collectObservedOutputMismatches(
+      solver, variables, problem, witness.badFrame);
+  witness.stateMismatches = collectStateMismatches(
+      solver, variables, problem, witness.badFrame);
+  return witness;
+}
+
 }  // namespace
 
 KInductionEngine::KInductionEngine(
@@ -67,8 +173,8 @@ KInductionEngine::KInductionEngine(
 
 KInductionResult KInductionEngine::run(size_t maxK) const {
   // Handle the purely combinational mismatch case before any unrolling.
-  if (hasBaseCounterexample(0)) {
-    return {KInductionStatus::Different, 0};
+  if (auto witness = findBaseCounterexample(0); witness.has_value()) {
+    return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
   }
 
   // If there is no state, the base check already decided the whole problem.
@@ -78,8 +184,8 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
 
   for (size_t k = 1; k <= maxK; ++k) {
     // Base case: search for a reachable bad frame within 0..k.
-    if (hasBaseCounterexample(k)) {
-      return {KInductionStatus::Different, k};
+    if (auto witness = findBaseCounterexample(k); witness.has_value()) {
+      return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
     }
     // Induction step: assume the property along a simple path of length k and
     // ask whether the last frame can still be bad.
@@ -91,7 +197,8 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
   return {KInductionStatus::Inconclusive, maxK};
 }
 
-bool KInductionEngine::hasBaseCounterexample(size_t k) const {
+std::optional<KInductionResult::CounterexampleWitness>
+KInductionEngine::findBaseCounterexample(size_t k) const {
   SATSolverWrapper solver(solverType_);
   FrameVariableStore variables(solver, problem_.allSymbols, k + 1);
   addInitialStateRelation(solver, variables, problem_);
@@ -116,7 +223,10 @@ bool KInductionEngine::hasBaseCounterexample(size_t k) const {
   }
   solver.addClause(badClause);
 
-  return solver.solve();
+  if (!solver.solve()) {
+    return std::nullopt;
+  }
+  return buildCounterexampleWitness(solver, variables, problem_, k);
 }
 
 bool KInductionEngine::provesByInduction(size_t k) const {
