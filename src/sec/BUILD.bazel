@@ -1,0 +1,34 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "kepler_sec",
+    srcs = [
+        "common/BoolExprUtils.cpp",
+        "kinduction/KInductionEngine.cpp",
+        "kinduction/SatEncoding.cpp",
+        "model/SequentialDesignModel.cpp",
+        "strategy/SequentialEquivalenceStrategy.cpp",
+    ],
+    hdrs = [
+        "common/BoolExprUtils.h",
+        "common/SignalKey.h",
+        "kinduction/KInductionEngine.h",
+        "kinduction/KInductionProblem.h",
+        "kinduction/SatEncoding.h",
+        "model/SequentialDesignModel.h",
+        "strategy/SequentialEquivalenceStrategy.h",
+    ],
+    includes = [
+        ".",
+        "..",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/config:kepler_config",
+        "//src/formal:formal_structures",
+        "//src/sat:sat_solver_wrapper",
+        "//src/strategies:formal_strategies",
+        "@naja",
+        "@kissat",
+    ],
+)

@@ -27,7 +27,16 @@ python edit.py
 # Through config file
 ../build/src/bin/kepler-formal --config test_config_naja_if.yaml
 ../build/src/bin/kepler-formal --config test_config_verilog.yaml
+../build/src/bin/kepler-formal --config test_config_verilog_sec.yaml
+../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_sec.yaml
 ```
+
+`test_config_verilog_sec.yaml` is a small SEC example that uses the local
+`seq_design0.sv` / `seq_design1.sv` pair.
+
+`test_config_verilog_tinyrocket_sec.yaml` runs TinyRocket against itself
+through SEC with the same Liberty setup as the LEC example, so it is a
+passing large-design sanity check.
 
 ### YAML input_paths notes
 
