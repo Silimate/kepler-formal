@@ -4,6 +4,7 @@
 #include "strategy/SequentialEquivalenceStrategy.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iterator>
 #include <optional>
 #include <set>
@@ -34,9 +35,9 @@ std::string joinReasons(const std::vector<std::string>& reasons) {
   return oss.str();
 }
 
-std::string describeMismatchedKeys(const std::vector<SignalKey>& lhs,
-                                   const std::vector<SignalKey>& rhs,
-                                   const char* label) {
+std::string describeMismatchedNames(const std::vector<std::string>& lhs,
+                                    const std::vector<std::string>& rhs,
+                                    const char* label) {
   std::ostringstream oss;
   oss << "Mismatched " << label << " sets";
   if (!lhs.empty()) {
@@ -45,7 +46,7 @@ std::string describeMismatchedKeys(const std::vector<SignalKey>& lhs,
       if (i) {
         oss << ", ";
       }
-      oss << signalKeyToString(lhs[i]);
+      oss << lhs[i];
     }
     oss << "]";
   }
@@ -55,7 +56,7 @@ std::string describeMismatchedKeys(const std::vector<SignalKey>& lhs,
       if (i) {
         oss << ", ";
       }
-      oss << signalKeyToString(rhs[i]);
+      oss << rhs[i];
     }
     oss << "]";
   }
@@ -66,14 +67,39 @@ std::string formatBoolValue(bool value) {
   return value ? "1" : "0";
 }
 
+std::string normalizeSignalBaseName(const std::string& name) {
+  std::string base = name;
+  const auto bracket = base.find('[');
+  if (bracket != std::string::npos) {
+    base = base.substr(0, bracket);
+  }
+  std::transform(base.begin(), base.end(), base.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::toupper(ch));
+  });
+  return base;
+}
+
+std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+  const std::string normalized = normalizeSignalBaseName(displayName);
+  if (normalized == "RESET" || normalized == "RST") {
+    return true;
+  }
+  if (normalized == "RESET_N" || normalized == "RESETN" ||
+      normalized == "RST_N" || normalized == "RSTN") {
+    return false;
+  }
+  return std::nullopt;
+}
+
 SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
   SignalKey key;
   const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
   key.first.reserve(pathNames.size() + 1);
   for (const auto& name : pathNames) {
-    key.first.push_back(name.getID());
+    key.first.push_back(stableSignalKeyNameID(name.getString()));
   }
-  key.first.push_back(terminal.getSnlBitTerm()->getName().getID());
+  key.first.push_back(
+      stableSignalKeyNameID(terminal.getSnlBitTerm()->getName().getString()));
   key.second.push_back(
       static_cast<naja::NL::NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit()));
   return key;
@@ -146,6 +172,21 @@ struct ScopedDnlContext {
   naja::NL::SNLDesign* previousTop_ = nullptr;
   naja::DNL::DNLFull* dnl_ = nullptr;
 };
+
+std::optional<naja::DNL::DNLID> findTermByDisplayName(
+    naja::DNL::DNLFull* dnl,
+    const std::string& signalName) {
+  for (naja::DNL::DNLID termID = 0; termID < dnl->getDNLTerms().size(); ++termID) {
+    const auto& term = dnl->getDNLTerminalFromID(termID);
+    if (term.isNull()) {
+      continue;
+    }
+    if (getTerminalDisplayName(term) == signalName) {
+      return termID;
+    }
+  }
+  return std::nullopt;
+}
 
 std::optional<naja::DNL::DNLID> findTermByKey(naja::DNL::DNLFull* dnl,
                                               const SignalKey& key) {
@@ -310,13 +351,13 @@ struct ConeDiffReport {
 };
 
 ConeDiffReport buildConeDiffReport(naja::NL::SNLDesign* top,
-                                   const SignalKey& differenceKey,
+                                   const std::string& differenceSignal,
                                    const std::vector<SignalKey>& environmentInputs) {
   ConeDiffReport report;
   ScopedDnlContext dnlContext(top);
   auto* dnl = dnlContext.dnl();
 
-  const auto seedTermID = findTermByKey(dnl, differenceKey);
+  const auto seedTermID = findTermByDisplayName(dnl, differenceSignal);
   if (!seedTermID.has_value()) {
     report.error =
         "could not resolve the differing SEC signal back into the DNL";
@@ -333,26 +374,20 @@ std::string formatConeTraceback(const KInductionResult::CounterexampleWitness& w
                                 const SequentialDesignModel& model1,
                                 naja::NL::SNLDesign* top0,
                                 naja::NL::SNLDesign* top1) {
-  const KInductionResult::SignalMismatch* differencePoint = nullptr;
-  if (!witness.outputMismatches.empty()) {
-    differencePoint = &witness.outputMismatches.front();
-  } else if (!witness.stateMismatches.empty()) {
-    differencePoint = &witness.stateMismatches.front();
-  }
-
-  if (differencePoint == nullptr) {
+  if (witness.outputMismatches.empty()) {
     return "";
   }
+  const auto& differencePoint = witness.outputMismatches.front();
 
   std::ostringstream oss;
-  oss << "Traceback for first differing point `" << differencePoint->signal
+  oss << "Traceback for first differing point `" << differencePoint.signal
       << "` at cycle " << witness.badFrame << ":\n";
 
   try {
     const auto report0 = buildConeDiffReport(
-        top0, differencePoint->key, model0.environmentInputs);
+        top0, differencePoint.signal, model0.environmentInputs);
     const auto report1 = buildConeDiffReport(
-        top1, differencePoint->key, model1.environmentInputs);
+        top1, differencePoint.signal, model1.environmentInputs);
 
     if (!report0.error.empty() || !report1.error.empty()) {
       oss << "  Cone traceback unavailable: ";
@@ -434,23 +469,94 @@ std::string formatCounterexampleWitness(const KInductionResult& result,
     }
   }
 
-  if (!witness.stateMismatches.empty()) {
-    oss << "State mismatches at cycle " << witness.badFrame << ":\n";
-    for (const auto& mismatch : witness.stateMismatches) {
-      oss << "  " << mismatch.signal << ": design0="
-          << formatBoolValue(mismatch.design0Value)
-          << ", design1=" << formatBoolValue(mismatch.design1Value) << "\n";
-    }
-  }
-
   oss << formatConeTraceback(witness, model0, model1, top0, top1);
 
   return oss.str();
 }
 
-bool keysMatch(const std::vector<SignalKey>& lhs,
-               const std::vector<SignalKey>& rhs) {
-  return lhs == rhs;
+struct AlignedSignals {
+  std::vector<std::string> names;
+  std::vector<SignalKey> keys0;
+  std::vector<SignalKey> keys1;
+};
+
+std::unordered_map<std::string, SignalKey> buildNameToKeyMap(
+    const std::vector<SignalKey>& keys,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames,
+    const char* label) {
+  std::unordered_map<std::string, SignalKey> byName;
+  for (const auto& key : keys) {
+    const auto nameIt = displayNames.find(key);
+    if (nameIt == displayNames.end()) {
+      throw std::runtime_error(
+          std::string("Missing display name for SEC ") + label);
+    }
+    const auto [_, inserted] = byName.emplace(nameIt->second, key);
+    if (!inserted) {
+      throw std::runtime_error(
+          std::string("Duplicate SEC ") + label + " name `" + nameIt->second + "`");
+    }
+  }
+  return byName;
+}
+
+std::vector<std::string> sortedNames(
+    const std::unordered_map<std::string, SignalKey>& byName) {
+  std::vector<std::string> names;
+  names.reserve(byName.size());
+  for (const auto& [name, _] : byName) {
+    names.push_back(name);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
+AlignedSignals collectCommonSignalsByName(
+    const std::vector<SignalKey>& keys0,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames0,
+    const std::vector<SignalKey>& keys1,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames1,
+    const char* label) {
+  const auto byName0 = buildNameToKeyMap(keys0, displayNames0, label);
+  const auto byName1 = buildNameToKeyMap(keys1, displayNames1, label);
+
+  AlignedSignals aligned;
+  const auto names0 = sortedNames(byName0);
+  for (const auto& name : names0) {
+    const auto it1 = byName1.find(name);
+    if (it1 == byName1.end()) {
+      continue;
+    }
+    aligned.names.push_back(name);
+    aligned.keys0.push_back(byName0.at(name));
+    aligned.keys1.push_back(it1->second);
+  }
+  return aligned;
+}
+
+AlignedSignals alignSignalsByName(
+    const std::vector<SignalKey>& keys0,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames0,
+    const std::vector<SignalKey>& keys1,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames1,
+    const char* label) {
+  const auto byName0 = buildNameToKeyMap(keys0, displayNames0, label);
+  const auto byName1 = buildNameToKeyMap(keys1, displayNames1, label);
+  const auto names0 = sortedNames(byName0);
+  const auto names1 = sortedNames(byName1);
+  if (names0 != names1) {
+    throw std::runtime_error(describeMismatchedNames(names0, names1, label));
+  }
+
+  AlignedSignals aligned;
+  aligned.names = names0;
+  aligned.keys0.reserve(names0.size());
+  aligned.keys1.reserve(names0.size());
+  for (const auto& name : names0) {
+    aligned.keys0.push_back(byName0.at(name));
+    aligned.keys1.push_back(byName1.at(name));
+  }
+  return aligned;
 }
 
 template <typename MapT>
@@ -510,78 +616,95 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     };
   }
 
-  // Step 2: SEC only makes sense when the observable interfaces align exactly.
-  if (!keysMatch(model0.environmentInputs, model1.environmentInputs)) {
+  // Step 2: SEC only makes sense when the observable interfaces align by the
+  // user-visible term names, not by parser-local object IDs.
+  AlignedSignals alignedInputs;
+  AlignedSignals alignedOutputs;
+  try {
+    alignedInputs = alignSignalsByName(
+        model0.environmentInputs,
+        model0.displayNameByKey,
+        model1.environmentInputs,
+        model1.displayNameByKey,
+        "environment input");
+    alignedOutputs = alignSignalsByName(
+        model0.observedOutputs,
+        model0.displayNameByKey,
+        model1.observedOutputs,
+        model1.displayNameByKey,
+        "observed output");
+  } catch (const std::exception& e) {
     return {
         SequentialEquivalenceStatus::Unsupported,
         0,
-        describeMismatchedKeys(
-            model0.environmentInputs, model1.environmentInputs, "environment input"),
-    };
-  }
-  if (!keysMatch(model0.stateBits, model1.stateBits)) {
-    return {
-        SequentialEquivalenceStatus::Unsupported,
-        0,
-        describeMismatchedKeys(model0.stateBits, model1.stateBits, "state"),
-    };
-  }
-  if (!keysMatch(model0.observedOutputs, model1.observedOutputs)) {
-    return {
-        SequentialEquivalenceStatus::Unsupported,
-        0,
-        describeMismatchedKeys(
-            model0.observedOutputs, model1.observedOutputs, "observed output"),
+        e.what(),
     };
   }
 
   KInductionProblem problem;
-  problem.environmentInputs = model0.environmentInputs;
-  problem.stateBits = model0.stateBits;
-  problem.observedOutputs = model0.observedOutputs;
-  for (const auto& key : problem.environmentInputs) {
-    problem.environmentInputNames.push_back(model0.displayNameByKey.at(key));
-  }
-  for (const auto& key : problem.stateBits) {
-    problem.stateBitNames.push_back(model0.displayNameByKey.at(key));
-  }
-  for (const auto& key : problem.observedOutputs) {
-    problem.observedOutputNames.push_back(model0.displayNameByKey.at(key));
-  }
+  problem.environmentInputNames = alignedInputs.names;
+  problem.observedOutputNames = alignedOutputs.names;
 
   // Step 3: create the shared symbol space used by the combined SAT problem.
-  // Inputs are shared, while each design gets its own copy of the state bits.
-  std::unordered_map<SignalKey, size_t, SignalKeyHash> inputSymbols;
+  // Inputs are shared, while each design keeps its own private state vector.
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> inputSymbols0;
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> inputSymbols1;
   std::unordered_map<SignalKey, size_t, SignalKeyHash> state0Symbols;
   std::unordered_map<SignalKey, size_t, SignalKeyHash> state1Symbols;
   size_t nextSymbol = 2;
 
-  assignSymbols(problem.environmentInputs, inputSymbols, problem.allSymbols, nextSymbol);
-  assignSymbols(problem.stateBits, state0Symbols, problem.allSymbols, nextSymbol);
-  assignSymbols(problem.stateBits, state1Symbols, problem.allSymbols, nextSymbol);
+  assignSymbols(model0.stateBits, state0Symbols, problem.allSymbols, nextSymbol);
+  assignSymbols(model1.stateBits, state1Symbols, problem.allSymbols, nextSymbol);
 
-  for (const auto& key : problem.environmentInputs) {
-    problem.inputSymbols.push_back(inputSymbols.at(key));
+  for (size_t i = 0; i < alignedInputs.names.size(); ++i) {
+    const size_t symbol = nextSymbol++;
+    inputSymbols0.emplace(alignedInputs.keys0[i], symbol);
+    inputSymbols1.emplace(alignedInputs.keys1[i], symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.inputSymbols.push_back(symbol);
+    if (auto assertedValue = getResetAssertionValue(alignedInputs.names[i]);
+        assertedValue.has_value()) {
+      problem.resetBootstrapInputs.emplace_back(symbol, *assertedValue);
+    }
   }
-  for (const auto& key : problem.stateBits) {
+  for (const auto& key : model0.stateBits) {
     problem.state0Symbols.push_back(state0Symbols.at(key));
+  }
+  for (const auto& key : model1.stateBits) {
     problem.state1Symbols.push_back(state1Symbols.at(key));
   }
+  const auto alignedStateBootstrap = collectCommonSignalsByName(
+      model0.stateBits,
+      model0.displayNameByKey,
+      model1.stateBits,
+      model1.displayNameByKey,
+      "state bit");
+  for (size_t i = 0; i < alignedStateBootstrap.names.size(); ++i) {
+    problem.bootstrapStateEqualityPairs.emplace_back(
+        state0Symbols.at(alignedStateBootstrap.keys0[i]),
+        state1Symbols.at(alignedStateBootstrap.keys1[i]));
+  }
   for (const auto& relation : model0.complementedStateRelations) {
-    problem.complementedStatePairs0.emplace_back(
-        state0Symbols.at(relation.primaryKey),
-        state0Symbols.at(relation.complementedKey));
+    if (state0Symbols.find(relation.primaryKey) != state0Symbols.end() &&
+        state0Symbols.find(relation.complementedKey) != state0Symbols.end()) {
+      problem.complementedStatePairs0.emplace_back(
+          state0Symbols.at(relation.primaryKey),
+          state0Symbols.at(relation.complementedKey));
+    }
   }
   for (const auto& relation : model1.complementedStateRelations) {
-    problem.complementedStatePairs1.emplace_back(
-        state1Symbols.at(relation.primaryKey),
-        state1Symbols.at(relation.complementedKey));
+    if (state1Symbols.find(relation.primaryKey) != state1Symbols.end() &&
+        state1Symbols.find(relation.complementedKey) != state1Symbols.end()) {
+      problem.complementedStatePairs1.emplace_back(
+          state1Symbols.at(relation.primaryKey),
+          state1Symbols.at(relation.complementedKey));
+    }
   }
 
   const auto localToCombined0 =
-      buildLocalToCombinedMap(model0, inputSymbols, state0Symbols);
+      buildLocalToCombinedMap(model0, inputSymbols0, state0Symbols);
   const auto localToCombined1 =
-      buildLocalToCombinedMap(model1, inputSymbols, state1Symbols);
+      buildLocalToCombinedMap(model1, inputSymbols1, state1Symbols);
 
   std::unordered_map<BoolExpr*, BoolExpr*> remapMemo0;
   std::unordered_map<BoolExpr*, BoolExpr*> remapMemo1;
@@ -591,53 +714,79 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> remappedNext1;
 
   // Step 4: rewrite both designs' formulas into that shared symbol space.
-  for (const auto& key : problem.observedOutputs) {
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto& key0 = alignedOutputs.keys0[i];
+    const auto& key1 = alignedOutputs.keys1[i];
     remappedOutputs0.emplace(
-        key,
+        key0,
         remapBoolExprVariables(
-            model0.observedOutputExprByKey.at(key), localToCombined0, remapMemo0));
+            model0.observedOutputExprByKey.at(key0), localToCombined0, remapMemo0));
     remappedOutputs1.emplace(
-        key,
+        key1,
         remapBoolExprVariables(
-            model1.observedOutputExprByKey.at(key), localToCombined1, remapMemo1));
-    problem.observedOutputExprs0.push_back(remappedOutputs0.at(key));
-    problem.observedOutputExprs1.push_back(remappedOutputs1.at(key));
+            model1.observedOutputExprByKey.at(key1), localToCombined1, remapMemo1));
+    problem.observedOutputExprs0.push_back(remappedOutputs0.at(key0));
+    problem.observedOutputExprs1.push_back(remappedOutputs1.at(key1));
   }
 
-  for (const auto& key : problem.stateBits) {
+  for (const auto& key : model0.stateBits) {
     remappedNext0.emplace(
         key,
         remapBoolExprVariables(
             model0.nextStateExprByStateKey.at(key), localToCombined0, remapMemo0));
+  }
+  for (const auto& key : model1.stateBits) {
     remappedNext1.emplace(
         key,
         remapBoolExprVariables(
             model1.nextStateExprByStateKey.at(key), localToCombined1, remapMemo1));
   }
 
-  // Step 5: build the SEC property. A frame is "good" when observed outputs
-  // match and the two current state vectors are equal.
-  BoolExpr* property = BoolExpr::createTrue();
-  for (const auto& key : problem.observedOutputs) {
-    property = BoolExpr::And(
-        property,
-        makeEqualityExpr(remappedOutputs0.at(key), remappedOutputs1.at(key)));
+  // Step 5: if reset/init data is available, build the explicit frame-0 state
+  // constraint before we hand the problem to k-induction.
+  BoolExpr* initialCondition = BoolExpr::createTrue();
+  auto addInitialStateAssignments =
+      [&](const std::unordered_map<SignalKey, bool, SignalKeyHash>& initialValues,
+          const std::unordered_map<SignalKey, size_t, SignalKeyHash>& stateSymbols) {
+        for (const auto& [key, value] : initialValues) {
+          const auto symbolIt = stateSymbols.find(key);
+          if (symbolIt == stateSymbols.end()) {
+            continue;
+          }
+          BoolExpr* literal = BoolExpr::Var(symbolIt->second);
+          initialCondition = BoolExpr::And(
+              initialCondition, value ? literal : BoolExpr::Not(literal));
+          ++problem.initializedStateCount;
+        }
+      };
+  addInitialStateAssignments(model0.initialStateValueByKey, state0Symbols);
+  addInitialStateAssignments(model1.initialStateValueByKey, state1Symbols);
+  problem.totalStateCount = problem.state0Symbols.size() + problem.state1Symbols.size();
+  if (problem.hasExplicitInitialState()) {
+    problem.initialCondition = BoolExpr::simplify(initialCondition);
   }
-  for (const auto& key : problem.stateBits) {
+
+  // Step 6: build the SEC property. A frame is "good" when the observed
+  // outputs match. Internal state vectors are private to each design and are
+  // only used to unroll their transitions.
+  BoolExpr* property = BoolExpr::createTrue();
+  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
     property = BoolExpr::And(
         property,
-        makeEqualityExpr(
-            BoolExpr::Var(state0Symbols.at(key)),
-            BoolExpr::Var(state1Symbols.at(key))));
+        makeEqualityExpr(problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]));
+  }
+  for (const auto& key : model0.stateBits) {
     problem.transitions0.emplace_back(state0Symbols.at(key), remappedNext0.at(key));
+  }
+  for (const auto& key : model1.stateBits) {
     problem.transitions1.emplace_back(state1Symbols.at(key), remappedNext1.at(key));
   }
 
   problem.property = BoolExpr::simplify(property);
   problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
-  problem.description = "SEC property with aligned outputs and state bits";
+  problem.description = "SEC property with aligned observed outputs";
 
-  // Step 6: hand the combined transition system to the k-induction solver.
+  // Step 7: hand the combined transition system to the k-induction solver.
   KInductionEngine engine(problem, solverType_);
   const auto result = engine.run(maxK);
   switch (result.status) {

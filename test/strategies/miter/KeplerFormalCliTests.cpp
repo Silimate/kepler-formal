@@ -547,7 +547,9 @@ ScopedNajaIfFixture createEquivalentScopedNajaIfFixture() {
   return fixture;
 }
 
-SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture() {
+SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture(
+    const std::string& ffName0 = "ff0",
+    const std::string& ffName1 = "ff0") {
   SequentialNajaIfFixture fixture;
   fixture.tmpDir =
       std::filesystem::temp_directory_path() / "kepler_formal_cli_seq_if";
@@ -555,7 +557,8 @@ SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture() {
   fixture.design0IfPath = fixture.tmpDir / "design0.capnp";
   fixture.design1IfPath = fixture.tmpDir / "design1.capnp";
 
-  const auto dumpDesign = [&](const std::filesystem::path& dumpPath) {
+  const auto dumpDesign = [&](const std::filesystem::path& dumpPath,
+                              const std::string& ffName) {
     cleanupNajaTestState();
     NLUniverse::create();
     auto* db = NLDB::create(NLUniverse::get());
@@ -564,7 +567,7 @@ SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture() {
     auto* topIn = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
     auto* topClock = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
     auto* topOut = SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
-    auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+    auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName(ffName));
 
     auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
     auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
@@ -583,8 +586,8 @@ SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture() {
     cleanupNajaTestState();
   };
 
-  dumpDesign(fixture.design0IfPath);
-  dumpDesign(fixture.design1IfPath);
+  dumpDesign(fixture.design0IfPath, ffName0);
+  dumpDesign(fixture.design1IfPath, ffName1);
 
   return fixture;
 }
@@ -1562,6 +1565,21 @@ TEST(KeplerFormalCliTests, ConfigMaxKWithoutSecFails) {
 
 TEST(KeplerFormalCliTests, ConfigSecVerificationAccepted) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 4\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecIgnoresRenamedInternalState) {
+  const auto fixture =
+      createEquivalentSequentialNajaIfFixture("state_a", "state_b");
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: SEC\n"

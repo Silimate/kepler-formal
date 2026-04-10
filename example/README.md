@@ -38,6 +38,9 @@ python edit.py
 through SEC with the same Liberty setup as the LEC example, so it is a
 passing large-design sanity check.
 
+The current SEC flow compares observed outputs only. Internal register naming
+does not need to match between the two designs.
+
 ### YAML input_paths notes
 
 - Flat list (single file per design):

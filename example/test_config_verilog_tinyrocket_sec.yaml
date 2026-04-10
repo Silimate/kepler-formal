@@ -1,10 +1,10 @@
 # tinyrocket_sec_config.yaml
 format: verilog
 verification: SEC
-max_k: 4
+max_k: 30
 input_paths:
   - tinyrocket.v
-  - tinyrocket_edited.v
+  - tinyrocket.v
 liberty_files:
   - NangateOpenCellLibrary_typical.lib
   - fakeram45_1024x32.lib

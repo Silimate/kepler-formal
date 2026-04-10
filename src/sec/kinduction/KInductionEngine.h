@@ -23,9 +23,6 @@ struct KInductionResult {
   KInductionStatus status = KInductionStatus::Inconclusive;
   size_t bound = 0;
   struct SignalMismatch {
-    // Keep the normalized SEC key so higher layers can map the mismatch back
-    // onto the original netlist structure for reporting.
-    SignalKey key;
     std::string signal;
     bool design0Value = false;
     bool design1Value = false;
@@ -43,7 +40,6 @@ struct KInductionResult {
     size_t badFrame = 0;
     std::vector<FrameInputAssignments> inputTrace;
     std::vector<SignalMismatch> outputMismatches;
-    std::vector<SignalMismatch> stateMismatches;
   };
 
   std::optional<CounterexampleWitness> witness;

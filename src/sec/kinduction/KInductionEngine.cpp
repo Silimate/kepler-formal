@@ -12,17 +12,84 @@ namespace KEPLER_FORMAL::SEC {
 
 namespace {
 
-void addInitialStateRelation(SATSolverWrapper& solver,
-                             const FrameVariableStore& variables,
-                             const KInductionProblem& problem) {
-  // SEC starts from related states: frame 0 state bits of both designs must
-  // match before we unroll any transitions.
-  for (size_t i = 0; i < problem.stateBits.size(); ++i) {
+enum class InitialConstraintMode {
+  None,
+  ObservationOnly,
+  PartialInit,
+  CompleteInit,
+};
+
+size_t resetBootstrapFrames(const KInductionProblem& problem) {
+  // Large mapped designs such as TinyRocket often need a few asserted reset
+  // cycles before every observable path has converged to a comparable
+  // post-reset state. Keep the SEC horizon user-facing by subtracting this
+  // bootstrap prefix back out of reported witness cycles.
+  return (!problem.hasCompleteInitialState() && problem.hasResetBootstrap()) ? 3u : 0u;
+}
+
+void addResetBootstrapConstraints(SATSolverWrapper& solver,
+                                  const FrameVariableStore& variables,
+                                  const KInductionProblem& problem,
+                                  size_t numFrames) {
+  if (resetBootstrapFrames(problem) == 0) {
+    return;
+  }
+
+  for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
+    solver.addClause(
+        {assertedValue ? variables.getLiteral(symbol, 0)
+                       : -variables.getLiteral(symbol, 0)});
+    for (size_t frame = 1; frame < numFrames; ++frame) {
+      solver.addClause(
+          {assertedValue ? -variables.getLiteral(symbol, frame)
+                         : variables.getLiteral(symbol, frame)});
+    }
+  }
+}
+
+void addBootstrapStateEqualities(SATSolverWrapper& solver,
+                                 const FrameVariableStore& variables,
+                                 const KInductionProblem& problem,
+                                 size_t frame) {
+  for (const auto& [lhsSymbol, rhsSymbol] : problem.bootstrapStateEqualityPairs) {
     addLiteralEquivalence(
         solver,
-        variables.getLiteral(problem.state0Symbols[i], 0),
-        variables.getLiteral(problem.state1Symbols[i], 0));
+        variables.getLiteral(lhsSymbol, frame),
+        variables.getLiteral(rhsSymbol, frame));
   }
+}
+
+InitialConstraintMode addInitialConstraints(SATSolverWrapper& solver,
+                                            const FrameVariableStore& variables,
+                                            const KInductionProblem& problem) {
+  if (!problem.hasSequentialState()) {
+    return InitialConstraintMode::None;
+  }
+
+  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
+  if (problem.hasCompleteInitialState()) {
+    // When reset/init data is available for every extracted state bit, SEC can
+    // start from the real post-reset state instead of an arbitrary
+    // output-equivalent observation.
+    solver.addClause({encoder.encode(problem.initialCondition)});
+    return InitialConstraintMode::CompleteInit;
+  }
+
+  if (problem.hasExplicitInitialState()) {
+    // Partial reset coverage still helps rule out many impossible starts, but
+    // frame 0 is not fully characterized, so keep the old observation-aligned
+    // behavior for the first checked frame.
+    solver.addClause({encoder.encode(problem.initialCondition)});
+    solver.addClause({encoder.encode(problem.property)});
+    return InitialConstraintMode::PartialInit;
+  }
+
+  // Without init/reset information, output-only SEC does not assume any
+  // internal state correspondence between the two designs. The base case starts
+  // from an output-equivalent frame 0 observation and checks whether the
+  // outputs can diverge later.
+  solver.addClause({encoder.encode(problem.property)});
+  return InitialConstraintMode::ObservationOnly;
 }
 
 void addComplementedStateRelations(
@@ -78,8 +145,9 @@ std::unordered_map<size_t, bool> buildFrameEnvironment(
 size_t findFirstBadFrame(const SATSolverWrapper& solver,
                          const FrameVariableStore& variables,
                          const KInductionProblem& problem,
+                         size_t firstBadFrame,
                          size_t maxFrame) {
-  for (size_t frame = 0; frame <= maxFrame; ++frame) {
+  for (size_t frame = firstBadFrame; frame <= maxFrame; ++frame) {
     if (problem.bad->evaluate(
             buildFrameEnvironment(solver, variables, problem.allSymbols, frame))) {
       return frame;
@@ -92,12 +160,14 @@ std::vector<KInductionResult::FrameInputAssignments> buildInputTrace(
     const SATSolverWrapper& solver,
     const FrameVariableStore& variables,
     const KInductionProblem& problem,
-    size_t lastFrame) {
+    size_t firstFrame,
+    size_t lastFrame,
+    size_t frameOffset) {
   std::vector<KInductionResult::FrameInputAssignments> trace;
-  trace.reserve(lastFrame + 1);
-  for (size_t frame = 0; frame <= lastFrame; ++frame) {
+  trace.reserve(lastFrame - firstFrame + 1);
+  for (size_t frame = firstFrame; frame <= lastFrame; ++frame) {
     KInductionResult::FrameInputAssignments frameAssignments;
-    frameAssignments.frame = frame;
+    frameAssignments.frame = frame - frameOffset;
     frameAssignments.assignments.reserve(problem.inputSymbols.size());
     for (size_t i = 0; i < problem.inputSymbols.size(); ++i) {
       frameAssignments.assignments.push_back(
@@ -123,26 +193,7 @@ std::vector<KInductionResult::SignalMismatch> collectObservedOutputMismatches(
     const bool value1 = problem.observedOutputExprs1[i]->evaluate(environment);
     if (value0 != value1) {
       mismatches.push_back(
-          {problem.observedOutputs[i], problem.observedOutputNames[i], value0, value1});
-    }
-  }
-  return mismatches;
-}
-
-std::vector<KInductionResult::SignalMismatch> collectStateMismatches(
-    const SATSolverWrapper& solver,
-    const FrameVariableStore& variables,
-    const KInductionProblem& problem,
-    size_t frame) {
-  std::vector<KInductionResult::SignalMismatch> mismatches;
-  for (size_t i = 0; i < problem.state0Symbols.size(); ++i) {
-    const bool value0 =
-        solver.getLiteralValue(variables.getLiteral(problem.state0Symbols[i], frame));
-    const bool value1 =
-        solver.getLiteralValue(variables.getLiteral(problem.state1Symbols[i], frame));
-    if (value0 != value1) {
-      mismatches.push_back(
-          {problem.stateBits[i], problem.stateBitNames[i], value0, value1});
+          {problem.observedOutputNames[i], value0, value1});
     }
   }
   return mismatches;
@@ -152,15 +203,17 @@ KInductionResult::CounterexampleWitness buildCounterexampleWitness(
     const SATSolverWrapper& solver,
     const FrameVariableStore& variables,
     const KInductionProblem& problem,
-    size_t maxFrame) {
+    size_t firstBadFrame,
+    size_t maxFrame,
+    size_t frameOffset) {
   KInductionResult::CounterexampleWitness witness;
-  witness.badFrame = findFirstBadFrame(solver, variables, problem, maxFrame);
-  witness.inputTrace =
-      buildInputTrace(solver, variables, problem, witness.badFrame);
+  const size_t internalBadFrame =
+      findFirstBadFrame(solver, variables, problem, firstBadFrame, maxFrame);
+  witness.badFrame = internalBadFrame - frameOffset;
+  witness.inputTrace = buildInputTrace(
+      solver, variables, problem, frameOffset, internalBadFrame, frameOffset);
   witness.outputMismatches = collectObservedOutputMismatches(
-      solver, variables, problem, witness.badFrame);
-  witness.stateMismatches = collectStateMismatches(
-      solver, variables, problem, witness.badFrame);
+      solver, variables, problem, internalBadFrame);
   return witness;
 }
 
@@ -182,11 +235,18 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
     return {KInductionStatus::Equivalent, 0};
   }
 
+  // Search the whole bounded horizon for concrete counterexamples before an
+  // induction proof is allowed to conclude equivalence. This keeps SEC honest
+  // when a later output divergence exists even though a small-k induction step
+  // happens to be too coarse to expose it yet.
   for (size_t k = 1; k <= maxK; ++k) {
-    // Base case: search for a reachable bad frame within 0..k.
+    printf("Checking k=%zu...\n", k);
     if (auto witness = findBaseCounterexample(k); witness.has_value()) {
       return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
     }
+  // }
+
+  // for (size_t k = 1; k <= maxK; ++k) {
     // Induction step: assume the property along a simple path of length k and
     // ask whether the last frame can still be bad.
     if (provesByInduction(k)) {
@@ -199,25 +259,46 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
 
 std::optional<KInductionResult::CounterexampleWitness>
 KInductionEngine::findBaseCounterexample(size_t k) const {
+  const size_t bootstrapFrames = resetBootstrapFrames(problem_);
+  const size_t internalK = k + bootstrapFrames;
   SATSolverWrapper solver(solverType_);
-  FrameVariableStore variables(solver, problem_.allSymbols, k + 1);
-  addInitialStateRelation(solver, variables, problem_);
+  FrameVariableStore variables(solver, problem_.allSymbols, internalK + 1);
+  addResetBootstrapConstraints(solver, variables, problem_, internalK + 1);
+  const InitialConstraintMode initialMode =
+      bootstrapFrames == 0 ? addInitialConstraints(solver, variables, problem_)
+                           : InitialConstraintMode::None;
   // Multi-output flops such as Q/QN must preserve their within-design
   // complement relation at every frame, including frame 0.
   addComplementedStateRelations(
-      solver, variables, problem_.complementedStatePairs0, k + 1);
+      solver, variables, problem_.complementedStatePairs0, internalK + 1);
   addComplementedStateRelations(
-      solver, variables, problem_.complementedStatePairs1, k + 1);
+      solver, variables, problem_.complementedStatePairs1, internalK + 1);
 
   // Unroll the combined transition system for k steps.
-  for (size_t frame = 0; frame < k; ++frame) {
+  for (size_t frame = 0; frame < internalK; ++frame) {
     addTransitionRelation(solver, variables, problem_, frame);
   }
+  if (bootstrapFrames != 0) {
+    addBootstrapStateEqualities(solver, variables, problem_, bootstrapFrames);
+  }
 
-  // A base-case witness is any bad frame in the prefix 0..k.
+  // A fully initialized reset state makes frame 0 meaningful. Otherwise SEC
+  // still needs the old "matching observation at frame 0" guard before the
+  // first real bad frame.
+  size_t firstBadFrame = 0;
+  if (bootstrapFrames != 0) {
+    firstBadFrame = bootstrapFrames;
+  } else if (initialMode == InitialConstraintMode::ObservationOnly ||
+      initialMode == InitialConstraintMode::PartialInit) {
+    firstBadFrame = 1;
+  }
+  if (firstBadFrame > internalK) {
+    return std::nullopt;
+  }
+
   std::vector<int> badClause;
-  badClause.reserve(k + 1);
-  for (size_t frame = 0; frame <= k; ++frame) {
+  badClause.reserve(internalK - firstBadFrame + 1);
+  for (size_t frame = firstBadFrame; frame <= internalK; ++frame) {
     FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
     badClause.push_back(encoder.encode(problem_.bad));
   }
@@ -226,10 +307,14 @@ KInductionEngine::findBaseCounterexample(size_t k) const {
   if (!solver.solve()) {
     return std::nullopt;
   }
-  return buildCounterexampleWitness(solver, variables, problem_, k);
+  return buildCounterexampleWitness(
+      solver, variables, problem_, firstBadFrame, internalK, bootstrapFrames);
 }
 
 bool KInductionEngine::provesByInduction(size_t k) const {
+  if (resetBootstrapFrames(problem_) != 0) {
+    return false;
+  }
   SATSolverWrapper solver(solverType_);
   FrameVariableStore variables(solver, problem_.allSymbols, k + 1);
   addComplementedStateRelations(

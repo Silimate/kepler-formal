@@ -142,6 +142,13 @@ Select it with either:
 
 `max_k` is only valid with `SEC`.
 
+Current SEC semantics:
+
+- compares the observed outputs of the two designs
+- does not require internal register/state names to match across the designs
+- still relies on the current output-only k-induction model in the binary, so
+  it does not yet encode a full reset/init relation
+
 Current SEC limitations in the binary:
 
 - `compact_mode` is not supported

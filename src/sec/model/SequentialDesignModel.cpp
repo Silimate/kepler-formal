@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <sstream>
 #include <set>
 #include <stdexcept>
@@ -14,6 +15,7 @@
 #include "NLUniverse.h"
 #include "SNLDesignModeling.h"
 #include "SNLPath.h"
+#include "common/BoolExprUtils.h"
 #include "../../strategies/miter/BuildPrimaryOutputClauses.h"
 
 namespace KEPLER_FORMAL::SEC {
@@ -39,9 +41,10 @@ SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
   const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
   key.first.reserve(pathNames.size() + 1);
   for (const auto& name : pathNames) {
-    key.first.push_back(name.getID());
+    key.first.push_back(stableSignalKeyNameID(name.getString()));
   }
-  key.first.push_back(terminal.getSnlBitTerm()->getName().getID());
+  key.first.push_back(
+      stableSignalKeyNameID(terminal.getSnlBitTerm()->getName().getString()));
   key.second.push_back(
       static_cast<naja::NL::NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit()));
   return key;
@@ -204,6 +207,136 @@ BoolExpr* buildNextStateExpr(
   }
 
   return BoolExpr::simplify(next);
+}
+
+std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
+  const bool hasResetHigh = pending.pinTermIDs.find("R") != pending.pinTermIDs.end();
+  const bool hasResetLow = pending.pinTermIDs.find("RN") != pending.pinTermIDs.end();
+  const bool hasSetHigh = pending.pinTermIDs.find("S") != pending.pinTermIDs.end();
+
+  int controlKinds = 0;
+  controlKinds += hasResetHigh ? 1 : 0;
+  controlKinds += hasResetLow ? 1 : 0;
+  controlKinds += hasSetHigh ? 1 : 0;
+  if (controlKinds > 1) {
+    throw std::runtime_error(
+        "Unsupported sequential primitive with multiple control styles");
+  }
+
+  if (hasResetHigh || hasResetLow) {
+    return false;
+  }
+  if (hasSetHigh) {
+    return true;
+  }
+  return std::nullopt;
+}
+
+bool isConstBoolExpr(BoolExpr* expr, bool value) {
+  return expr != nullptr && expr->getOp() == Op::VAR &&
+         expr->getId() == static_cast<size_t>(value ? 1 : 0);
+}
+
+std::string normalizeSignalBaseName(const std::string& name) {
+  std::string base = name;
+  const auto bracket = base.find('[');
+  if (bracket != std::string::npos) {
+    base = base.substr(0, bracket);
+  }
+  return normalizePinName(base);
+}
+
+std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+  const std::string normalized = normalizeSignalBaseName(displayName);
+  if (normalized == "RESET" || normalized == "RST") {
+    return true;
+  }
+  if (normalized == "RESET_N" || normalized == "RESETN" ||
+      normalized == "RST_N" || normalized == "RSTN") {
+    return false;
+  }
+  return std::nullopt;
+}
+
+std::unordered_map<size_t, bool> collectResetAssignments(
+    const SequentialDesignModel& model) {
+  std::unordered_map<size_t, bool> assignments;
+  for (const auto& key : model.environmentInputs) {
+    const auto displayIt = model.displayNameByKey.find(key);
+    const auto varIt = model.inputVarByKey.find(key);
+    if (displayIt == model.displayNameByKey.end() ||
+        varIt == model.inputVarByKey.end()) {
+      continue;
+    }
+    const auto assertedValue = getResetAssertionValue(displayIt->second);
+    if (!assertedValue.has_value()) {
+      continue;
+    }
+    assignments.emplace(varIt->second, *assertedValue);
+  }
+  return assignments;
+}
+
+void inferSynthesizedResetInitialStateValues(SequentialDesignModel& model) {
+  const auto resetAssignments = collectResetAssignments(model);
+  if (resetAssignments.empty()) {
+    return;
+  }
+
+  // Many mapped netlists encode reset in the D cone instead of using an
+  // explicit flop reset pin. Keep propagating the asserted reset value through
+  // the next-state network until the post-reset value of every derivable state
+  // bit settles to a constant fixed point.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    std::unordered_map<size_t, bool> assignments = resetAssignments;
+    for (const auto& [key, value] : model.initialStateValueByKey) {
+      const auto varIt = model.inputVarByKey.find(key);
+      if (varIt == model.inputVarByKey.end()) {
+        continue;
+      }
+      assignments.emplace(varIt->second, value);
+    }
+
+    for (const auto& key : model.stateBits) {
+      if (model.initialStateValueByKey.find(key) !=
+          model.initialStateValueByKey.end()) {
+        continue;
+      }
+      const auto nextStateIt = model.nextStateExprByStateKey.find(key);
+      if (nextStateIt == model.nextStateExprByStateKey.end()) {
+        continue;
+      }
+      BoolExpr* resetExpr = BoolExpr::simplify(
+          substituteBoolExprVariables(nextStateIt->second, assignments));
+      if (isConstBoolExpr(resetExpr, false)) {
+        model.initialStateValueByKey.emplace(key, false);
+        changed = true;
+      } else if (isConstBoolExpr(resetExpr, true)) {
+        model.initialStateValueByKey.emplace(key, true);
+        changed = true;
+      }
+    }
+
+    for (const auto& relation : model.complementedStateRelations) {
+      const auto primaryIt = model.initialStateValueByKey.find(relation.primaryKey);
+      const auto complementedIt =
+          model.initialStateValueByKey.find(relation.complementedKey);
+      if (primaryIt != model.initialStateValueByKey.end() &&
+          complementedIt == model.initialStateValueByKey.end()) {
+        model.initialStateValueByKey.emplace(
+            relation.complementedKey, !primaryIt->second);
+        changed = true;
+      } else if (primaryIt == model.initialStateValueByKey.end() &&
+                 complementedIt != model.initialStateValueByKey.end()) {
+        model.initialStateValueByKey.emplace(
+            relation.primaryKey, !complementedIt->second);
+        changed = true;
+      }
+    }
+  }
 }
 
 }  // namespace
@@ -379,6 +512,14 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   // Rebuild next-state equations for the supported sequential cells.
   for (const auto& pending : pendingTransitions) {
     try {
+      const auto initialStateValue = detectInitialStateValue(pending);
+      if (initialStateValue.has_value()) {
+        model.initialStateValueByKey.emplace(pending.stateKey, *initialStateValue);
+        for (const auto& complementedKey : pending.complementedStateKeys) {
+          model.initialStateValueByKey.emplace(complementedKey, !*initialStateValue);
+        }
+      }
+
       BoolExpr* nextStateExpr =
           buildNextStateExpr(pending, termDNLID2varID, outputExprByTerm);
       model.nextStateExprByStateKey.emplace(pending.stateKey, nextStateExpr);
@@ -411,6 +552,8 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   };
   keepMappedInputs(model.environmentInputs);
   keepMappedInputs(model.stateBits);
+
+  inferSynthesizedResetInitialStateValues(model);
 
   // Missing formulas mean we do not have a sound SEC model, so report the
   // design as unsupported instead of continuing with partial information.

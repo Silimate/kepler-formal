@@ -14,12 +14,12 @@ namespace KEPLER_FORMAL::SEC {
 
 struct KInductionProblem {
   std::vector<SignalKey> environmentInputs;
-  std::vector<SignalKey> stateBits;
   std::vector<SignalKey> observedOutputs;
   std::vector<std::string> environmentInputNames;
-  std::vector<std::string> stateBitNames;
   std::vector<std::string> observedOutputNames;
   std::vector<size_t> inputSymbols;
+  std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
+  std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
   std::vector<size_t> state0Symbols;
   std::vector<size_t> state1Symbols;
   std::vector<size_t> allSymbols;
@@ -29,9 +29,28 @@ struct KInductionProblem {
   std::vector<BoolExpr*> observedOutputExprs1;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
   std::vector<std::pair<size_t, BoolExpr*>> transitions1;
+  BoolExpr* initialCondition = nullptr;
+  size_t initializedStateCount = 0;
+  size_t totalStateCount = 0;
   BoolExpr* property = nullptr;
   BoolExpr* bad = nullptr;
   std::string description;
+
+  bool hasSequentialState() const {
+    return !state0Symbols.empty() || !state1Symbols.empty();
+  }
+
+  bool hasExplicitInitialState() const {
+    return initializedStateCount != 0;
+  }
+
+  bool hasCompleteInitialState() const {
+    return initializedStateCount != 0 && initializedStateCount == totalStateCount;
+  }
+
+  bool hasResetBootstrap() const {
+    return !resetBootstrapInputs.empty();
+  }
 
   std::vector<size_t> combinedStateSymbols() const {
     std::vector<size_t> combined = state0Symbols;

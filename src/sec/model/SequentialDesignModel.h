@@ -32,6 +32,7 @@ struct SequentialDesignModel {
   std::unordered_map<SignalKey, std::string, SignalKeyHash> displayNameByKey;
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> observedOutputExprByKey;
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> nextStateExprByStateKey;
+  std::unordered_map<SignalKey, bool, SignalKeyHash> initialStateValueByKey;
   std::vector<ComplementedStateRelation> complementedStateRelations;
   std::vector<std::string> unsupportedReasons;
 

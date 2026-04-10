@@ -18,6 +18,15 @@ BoolExpr* remapBoolExprVariables(
     BoolExpr* root,
     const std::unordered_map<size_t, size_t>& varMap);
 
+BoolExpr* substituteBoolExprVariables(
+    BoolExpr* root,
+    const std::unordered_map<size_t, bool>& assignments,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo);
+
+BoolExpr* substituteBoolExprVariables(
+    BoolExpr* root,
+    const std::unordered_map<size_t, bool>& assignments);
+
 inline BoolExpr* makeEqualityExpr(BoolExpr* lhs, BoolExpr* rhs) {
   return BoolExpr::Not(BoolExpr::Xor(lhs, rhs));
 }

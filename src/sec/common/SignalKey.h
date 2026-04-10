@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include "../../strategies/miter/BuildPrimaryOutputClauses.h"
 
@@ -18,6 +20,22 @@ struct SignalKeyLess {
     return lhs < rhs;
   }
 };
+
+inline naja::NL::NLID::DesignObjectID stableSignalKeyNameID(
+    std::string_view name) {
+  // Use a deterministic string hash so SEC aligns signals by hierarchical
+  // path names instead of parser-local object IDs, which can drift after
+  // structural edits even when the user-visible signal names stay the same.
+  constexpr uint64_t kFnvOffset = 1469598103934665603ull;
+  constexpr uint64_t kFnvPrime = 1099511628211ull;
+
+  uint64_t hash = kFnvOffset;
+  for (const unsigned char ch : name) {
+    hash ^= ch;
+    hash *= kFnvPrime;
+  }
+  return static_cast<naja::NL::NLID::DesignObjectID>(hash);
+}
 
 inline std::string signalKeyToString(const SignalKey& key) {
   std::ostringstream oss;

@@ -46,7 +46,8 @@ SNLDesign* createDffTop(
     const std::string& name,
     SNLDesign* invModel,
     bool invertData,
-    bool invertOutput) {
+    bool invertOutput,
+    const std::string& ffName = "ff0") {
   auto* top =
       SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
   auto* topIn =
@@ -56,7 +57,7 @@ SNLDesign* createDffTop(
   auto* topOut =
       SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
 
-  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName(ffName));
   SNLInstance* dataInv = nullptr;
   SNLInstance* outputInv = nullptr;
   if (invertData) {
@@ -124,6 +125,53 @@ SNLDesign* createDffeTop(
   ff->getInstTerm(NLDB0::getDFFEData())->setNet(netIn);
   ff->getInstTerm(NLDB0::getDFFEEnable())->setNet(netEnable);
   ff->getInstTerm(NLDB0::getDFFEOutput())->setNet(netQ);
+
+  return top;
+}
+
+SNLDesign* createResetInitializedPipelineTop(
+    NLLibrary* library,
+    const std::string& name,
+    bool driveLastStageFromReset) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topResetN =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst_n"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* ff0 = SNLInstance::create(top, NLDB0::getDFFRN(), NLName("ff0"));
+  auto* ff1 = SNLInstance::create(top, NLDB0::getDFFRN(), NLName("ff1"));
+  auto* ff2 = SNLInstance::create(top, NLDB0::getDFFRN(), NLName("ff2"));
+
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netResetN = SNLScalarNet::create(top, NLName("net_rst_n"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netQ0 = SNLScalarNet::create(top, NLName("net_q0"));
+  auto* netQ1 = SNLScalarNet::create(top, NLName("net_q1"));
+  auto* netQ2 = SNLScalarNet::create(top, NLName("net_q2"));
+
+  topIn->setNet(netIn);
+  topResetN->setNet(netResetN);
+  topClock->setNet(netClock);
+  topOut->setNet(netQ0);
+
+  for (auto* ff : {ff0, ff1, ff2}) {
+    ff->getInstTerm(NLDB0::getDFFRNClock())->setNet(netClock);
+    ff->getInstTerm(NLDB0::getDFFRNResetN())->setNet(netResetN);
+  }
+
+  ff0->getInstTerm(NLDB0::getDFFRNData())->setNet(netQ1);
+  ff0->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ0);
+  ff1->getInstTerm(NLDB0::getDFFRNData())->setNet(netQ2);
+  ff1->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ1);
+  ff2->getInstTerm(NLDB0::getDFFRNData())->setNet(
+      driveLastStageFromReset ? netResetN : netIn);
+  ff2->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ2);
 
   return top;
 }
@@ -219,7 +267,7 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalent) {
   EXPECT_EQ(result.bound, 1u);
 }
 
-TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsInBaseCase) {
+TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObservation) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -234,7 +282,7 @@ TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsInBaseCase) {
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests, NextStateMismatchFailsAtOneStep) {
@@ -289,4 +337,38 @@ TEST_F(SequentialEquivalenceStrategyTests, ComplementedStateOutputsRemainConsist
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests, EquivalentDesignsWithRenamedStateAreAccepted) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createDffTop(library, "top0", invModel, false, false, "state_a");
+  auto* top1 = createDffTop(library, "top1", invModel, false, false, "state_b");
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(3);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetInitializedThreeStagePipelineFailsAtThreeSteps) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
+  auto* top1 = createResetInitializedPipelineTop(library, "top1", true);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(4);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 3u);
 }

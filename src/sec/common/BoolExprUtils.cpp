@@ -70,4 +70,66 @@ BoolExpr* remapBoolExprVariables(
   return remapBoolExprVariables(root, varMap, memo);
 }
 
+BoolExpr* substituteBoolExprVariables(
+    BoolExpr* root,
+    const std::unordered_map<size_t, bool>& assignments,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
+  if (root == nullptr) {
+    return nullptr;
+  }
+
+  if (auto it = memo.find(root); it != memo.end()) {
+    return it->second;
+  }
+
+  BoolExpr* substituted = nullptr;
+  switch (root->getOp()) {
+    case Op::VAR: {
+      const size_t id = root->getId();
+      if (id < 2) {
+        substituted = BoolExpr::Var(id);
+        break;
+      }
+      auto it = assignments.find(id);
+      substituted =
+          it == assignments.end() ? BoolExpr::Var(id)
+                                  : (it->second ? BoolExpr::createTrue()
+                                                : BoolExpr::createFalse());
+      break;
+    }
+    case Op::NOT:
+      substituted = BoolExpr::Not(
+          substituteBoolExprVariables(root->getLeft(), assignments, memo));
+      break;
+    case Op::AND:
+      substituted = BoolExpr::And(
+          substituteBoolExprVariables(root->getLeft(), assignments, memo),
+          substituteBoolExprVariables(root->getRight(), assignments, memo));
+      break;
+    case Op::OR:
+      substituted = BoolExpr::Or(
+          substituteBoolExprVariables(root->getLeft(), assignments, memo),
+          substituteBoolExprVariables(root->getRight(), assignments, memo));
+      break;
+    case Op::XOR:
+      substituted = BoolExpr::Xor(
+          substituteBoolExprVariables(root->getLeft(), assignments, memo),
+          substituteBoolExprVariables(root->getRight(), assignments, memo));
+      break;
+    case Op::NONE:
+    default:
+      throw std::runtime_error("Unsupported BoolExpr operator in substitution");
+  }
+
+  memo.emplace(root, substituted);
+  return substituted;
+}
+
+BoolExpr* substituteBoolExprVariables(
+    BoolExpr* root,
+    const std::unordered_map<size_t, bool>& assignments) {
+  std::unordered_map<BoolExpr*, BoolExpr*> memo;
+  return substituteBoolExprVariables(root, assignments, memo);
+}
+
 }  // namespace KEPLER_FORMAL::SEC
