@@ -1,0 +1,27 @@
+[2026-04-11 07:01:32.106] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:870] KEPLER FORMAL: Run.
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:878] Input format: VERILOG
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:880] Run log: tinyrocket_csrfile_sec.log
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:340] Netlist 1: tinyrocket_csrfile.v
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:340] Netlist 2: tinyrocket_csrfile.v
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:954] Solver: KISSAT
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:955] Verification: SEC
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:957] SEC max_k: 4
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:959] Compact mode: disabled
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:960] Skipped PO reports: disabled
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:962] Library: NangateOpenCellLibrary_typical.lib
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:962] Library: fakeram45_1024x32.lib
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:962] Library: fakeram45_64x32.lib
+[2026-04-11 07:01:32.107] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:962] Library: fakeram45_64x15.lib
+[2026-04-11 07:01:32.108] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: NangateOpenCellLibrary_typical.lib
+[2026-04-11 07:01:32.181] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: fakeram45_1024x32.lib
+[2026-04-11 07:01:32.181] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: fakeram45_64x32.lib
+[2026-04-11 07:01:32.181] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: fakeram45_64x15.lib
+[2026-04-11 07:01:32.182] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:1151] Parsing verilog file(s) for design 1
+[2026-04-11 07:01:32.238] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:1179] Found top design: CSRFile
+[2026-04-11 07:01:32.238] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: NangateOpenCellLibrary_typical.lib
+[2026-04-11 07:01:32.304] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: fakeram45_1024x32.lib
+[2026-04-11 07:01:32.304] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: fakeram45_64x32.lib
+[2026-04-11 07:01:32.304] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:988] Loading library file: fakeram45_64x15.lib
+[2026-04-11 07:01:32.304] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:1230] Parsing verilog file(s) for design 2
+[2026-04-11 07:01:32.349] [kepler_formal_main_logger] [info] [KeplerFormal.cpp:1258] Found top design: CSRFile
+[2026-04-11 07:01:40.933] [kepler_formal_main_logger] [critical] [KeplerFormal.cpp:1310] SEC was inconclusive up to max_k = 4: Reached max_k without a proof or counterexample
