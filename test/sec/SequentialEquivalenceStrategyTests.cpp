@@ -13,6 +13,8 @@
 #include "SNLScalarTerm.h"
 #include "kinduction/KInductionEngine.h"
 #include "model/SequentialDesignModel.h"
+#include "proof/ExactInterpolationEngine.h"
+#include "proof/IC3Engine.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 
 using namespace naja::NL;
@@ -176,6 +178,11 @@ SNLDesign* createResetInitializedPipelineTop(
     bool driveLastStageFromReset,
     const std::vector<std::string>& ffNames);
 
+SNLDesign* createResetInitializedShiftPipelineTopWithStages(
+    NLLibrary* library,
+    const std::string& name,
+    size_t stages);
+
 SNLDesign* createResetInitializedPipelineTop(
     NLLibrary* library,
     const std::string& name,
@@ -236,6 +243,54 @@ SNLDesign* createResetInitializedPipelineTop(
   ff2->getInstTerm(NLDB0::getDFFRNData())->setNet(
       driveLastStageFromReset ? netResetN : netIn);
   ff2->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ2);
+
+  return top;
+}
+
+SNLDesign* createResetInitializedShiftPipelineTopWithStages(
+    NLLibrary* library,
+    const std::string& name,
+    size_t stages) {
+  if (stages == 0) {
+    throw std::invalid_argument(
+        "createResetInitializedShiftPipelineTopWithStages expects at least one stage");
+  }
+
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topResetN =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst_n"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netResetN = SNLScalarNet::create(top, NLName("net_rst_n"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  std::vector<SNLScalarNet*> stageNets;
+  stageNets.reserve(stages);
+  for (size_t i = 0; i < stages; ++i) {
+    stageNets.push_back(
+        SNLScalarNet::create(top, NLName("net_q" + std::to_string(i))));
+  }
+
+  topIn->setNet(netIn);
+  topResetN->setNet(netResetN);
+  topClock->setNet(netClock);
+  topOut->setNet(stageNets.front());
+
+  for (size_t i = 0; i < stages; ++i) {
+    auto* ff = SNLInstance::create(
+        top, NLDB0::getDFFRN(), NLName("ff" + std::to_string(i)));
+    ff->getInstTerm(NLDB0::getDFFRNClock())->setNet(netClock);
+    ff->getInstTerm(NLDB0::getDFFRNResetN())->setNet(netResetN);
+    ff->getInstTerm(NLDB0::getDFFRNData())->setNet(
+        i + 1 == stages ? netIn : stageNets[i + 1]);
+    ff->getInstTerm(NLDB0::getDFFRNOutput())->setNet(stageNets[i]);
+  }
 
   return top;
 }
@@ -701,6 +756,24 @@ TEST_F(SequentialEquivalenceStrategyTests, EquivalentDesignsWithRenamedStateAreA
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RenamedStatePipelineIsProvedWithoutNameBasedStateMatching) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top0 = createResetInitializedPipelineTop(
+      library, "top0", false, {"left0", "left1", "left2"});
+  auto* top1 = createResetInitializedPipelineTop(
+      library, "top1", false, {"right0", "right1", "right2"});
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(3);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_LE(result.bound, 3u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ResetInitializedThreeStagePipelineFailsAtThreeSteps) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -733,7 +806,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ResetInitializedRenamedPipelineNeedsThreeStepSecProof) {
+       ResetInitializedRenamedPipelineClosesWithinThreeStepSecProof) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* library =
@@ -747,7 +820,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.run(4);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 3u);
+  EXPECT_LE(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -861,6 +934,91 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_LE(result.bound, 3u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralInvariantHandlesMismatchedStateCountsWithoutOscillation) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top0 = createResetInitializedShiftPipelineTopWithStages(
+      library, "top0", 5);
+  auto* top1 = createResetInitializedShiftPipelineTopWithStages(
+      library, "top1", 1);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(6);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_LE(result.bound, 6u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ExactInterpolationEngineDerivesOneStepReachableStateInvariant) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2, 3};
+  problem.inputSymbols = {3};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ExactInterpolationEngine engine(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto interpolant = engine.deriveOneStepReachableStateInvariant(4);
+
+  ASSERT_TRUE(interpolant.has_value());
+  EXPECT_TRUE((*interpolant)->evaluate({{2, false}}));
+  EXPECT_FALSE((*interpolant)->evaluate({{2, true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       IC3EngineProvesEquivalentSmallTransitionSystem) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  IC3Engine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3, 4);
+
+  EXPECT_EQ(result.status, IC3Status::Equivalent);
+  EXPECT_LE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       IC3EngineFindsReachableBadState) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  IC3Engine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3, 4);
+
+  EXPECT_EQ(result.status, IC3Status::Different);
+  EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

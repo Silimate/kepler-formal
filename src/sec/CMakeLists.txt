@@ -4,8 +4,14 @@
 add_library(kepler_sec STATIC
     common/BoolExprUtils.cpp
     model/SequentialDesignModel.cpp
+    proof/ExactInterpolationEngine.cpp
+    proof/IC3Engine.cpp
+    kinduction/BaseCaseSolver.cpp
+    kinduction/InductionStepSolver.cpp
     kinduction/SatEncoding.cpp
     kinduction/KInductionEngine.cpp
+    strategy/ReachableStateInvariant.cpp
+    strategy/StructuralStateInvariant.cpp
     strategy/SequentialEquivalenceStrategy.cpp
 )
 
