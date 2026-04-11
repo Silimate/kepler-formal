@@ -175,14 +175,23 @@ void addSimplePathConstraint(SATSolverWrapper& solver,
                              const FrameVariableStore& variables,
                              const std::vector<size_t>& stateSymbols,
                              size_t numFrames) {
+  addSimplePathConstraint(solver, variables, stateSymbols, 0, numFrames);
+}
+
+void addSimplePathConstraint(SATSolverWrapper& solver,
+                             const FrameVariableStore& variables,
+                             const std::vector<size_t>& stateSymbols,
+                             size_t firstFrame,
+                             size_t numFrames) {
   if (stateSymbols.empty()) {
     return;
   }
 
   // Slide-48 refinement: every pair of frames must differ in at least one
   // state bit, which rules out cyclic paths in the induction step.
-  for (size_t i = 0; i < numFrames; ++i) {
-    for (size_t j = i + 1; j < numFrames; ++j) {
+  const size_t lastFrame = firstFrame + numFrames;
+  for (size_t i = firstFrame; i < lastFrame; ++i) {
+    for (size_t j = i + 1; j < lastFrame; ++j) {
       std::vector<int> diffClause;
       diffClause.reserve(stateSymbols.size());
       for (const auto symbol : stateSymbols) {

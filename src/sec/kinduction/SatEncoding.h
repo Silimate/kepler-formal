@@ -54,5 +54,10 @@ void addSimplePathConstraint(SATSolverWrapper& solver,
                              const FrameVariableStore& variables,
                              const std::vector<size_t>& stateSymbols,
                              size_t numFrames);
+void addSimplePathConstraint(SATSolverWrapper& solver,
+                             const FrameVariableStore& variables,
+                             const std::vector<size_t>& stateSymbols,
+                             size_t firstFrame,
+                             size_t numFrames);
 
 }  // namespace KEPLER_FORMAL::SEC

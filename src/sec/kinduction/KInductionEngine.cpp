@@ -24,7 +24,9 @@ size_t resetBootstrapFrames(const KInductionProblem& problem) {
   // cycles before every observable path has converged to a comparable
   // post-reset state. Keep the SEC horizon user-facing by subtracting this
   // bootstrap prefix back out of reported witness cycles.
-  return (!problem.hasCompleteInitialState() && problem.hasResetBootstrap()) ? 3u : 0u;
+  return (!problem.hasCompleteInitialState() && problem.hasResetBootstrap())
+             ? problem.resetBootstrapCycles
+             : 0u;
 }
 
 void addResetBootstrapConstraints(SATSolverWrapper& solver,
@@ -65,6 +67,17 @@ void addBootstrapStateEqualities(SATSolverWrapper& solver,
   }
 }
 
+void addInitialStateEqualities(SATSolverWrapper& solver,
+                               const FrameVariableStore& variables,
+                               const KInductionProblem& problem) {
+  for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
+    addLiteralEquivalence(
+        solver,
+        variables.getLiteral(lhsSymbol, 0),
+        variables.getLiteral(rhsSymbol, 0));
+  }
+}
+
 void addBootstrapStateAssignments(SATSolverWrapper& solver,
                                   const FrameVariableStore& variables,
                                   const KInductionProblem& problem,
@@ -101,6 +114,7 @@ InitialConstraintMode addInitialConstraints(SATSolverWrapper& solver,
     return InitialConstraintMode::None;
   }
 
+  const bool hasInitialStateRelation = !problem.initialStateEqualityPairs.empty();
   FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
   if (problem.hasCompleteInitialState()) {
     // When reset/init data is available for every extracted state bit, SEC can
@@ -112,11 +126,18 @@ InitialConstraintMode addInitialConstraints(SATSolverWrapper& solver,
 
   if (problem.hasExplicitInitialState()) {
     // Partial reset coverage still helps rule out many impossible starts, but
-    // frame 0 is not fully characterized, so keep the old observation-aligned
-    // behavior for the first checked frame.
+    // frame 0 is only guaranteed meaningful when we also have a correspondence
+    // relation between the two designs' starting states.
     solver.addClause({encoder.encode(problem.initialCondition)});
+    if (hasInitialStateRelation) {
+      return InitialConstraintMode::CompleteInit;
+    }
     solver.addClause({encoder.encode(problem.property)});
     return InitialConstraintMode::PartialInit;
+  }
+
+  if (hasInitialStateRelation) {
+    return InitialConstraintMode::CompleteInit;
   }
 
   // Without init/reset information, output-only SEC does not assume any
@@ -308,6 +329,7 @@ KInductionEngine::findBaseCounterexample(size_t k) const {
       solver, variables, problem_.complementedStatePairs0, internalK + 1);
   addComplementedStateRelations(
       solver, variables, problem_.complementedStatePairs1, internalK + 1);
+  addInitialStateEqualities(solver, variables, problem_);
 
   // Unroll the combined transition system for k steps.
   for (size_t frame = 0; frame < internalK; ++frame) {
@@ -316,8 +338,6 @@ KInductionEngine::findBaseCounterexample(size_t k) const {
   if (bootstrapFrames != 0) {
     addBootstrapStateAssignments(solver, variables, problem_, bootstrapFrames);
     addBootstrapStateEqualities(solver, variables, problem_, bootstrapFrames);
-    addInductiveStateEqualities(
-        solver, variables, problem_, bootstrapFrames, internalK);
   }
 
   // A fully initialized reset state makes frame 0 meaningful. Otherwise SEC
@@ -350,9 +370,12 @@ KInductionEngine::findBaseCounterexample(size_t k) const {
 }
 
 bool KInductionEngine::provesByInduction(size_t k) const {
-  if (resetBootstrapFrames(problem_) != 0) {
-    return false;
-  }
+  const bool hasExplicitInductionInvariant = problem_.inductionProperty != nullptr;
+  BoolExpr* inductionProperty =
+      hasExplicitInductionInvariant ? problem_.inductionProperty
+                                            : problem_.property;
+  BoolExpr* inductionBad =
+      problem_.inductionBad != nullptr ? problem_.inductionBad : problem_.bad;
   SATSolverWrapper solver(solverType_);
   FrameVariableStore variables(solver, problem_.allSymbols, k + 1);
   addComplementedStateRelations(
@@ -360,7 +383,9 @@ bool KInductionEngine::provesByInduction(size_t k) const {
   addComplementedStateRelations(
       solver, variables, problem_.complementedStatePairs1, k + 1);
 
-  // Unroll k transitions without constraining the starting state.
+  // Unroll k transitions without constraining the starting state. The base
+  // case handles reset/bootstrap reachability; the induction step remains the
+  // standard arbitrary-state proof over simple paths.
   for (size_t frame = 0; frame < k; ++frame) {
     addTransitionRelation(solver, variables, problem_, frame);
   }
@@ -368,9 +393,11 @@ bool KInductionEngine::provesByInduction(size_t k) const {
   // Assume the SEC property on the first k frames.
   for (size_t frame = 0; frame < k; ++frame) {
     FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
-    solver.addClause({encoder.encode(problem_.property)});
+    solver.addClause({encoder.encode(inductionProperty)});
   }
-  addInductiveStateEqualities(solver, variables, problem_, 0, k - 1);
+  if (!hasExplicitInductionInvariant) {
+    addInductiveStateEqualities(solver, variables, problem_, 0, k - 1);
+  }
 
   addSimplePathConstraint(
       solver, variables, problem_.combinedStateSymbols(), k + 1);
@@ -378,7 +405,7 @@ bool KInductionEngine::provesByInduction(size_t k) const {
   // Try to violate the property at the successor frame. UNSAT means the
   // property is k-inductive over simple paths.
   FrameFormulaEncoder lastFrameEncoder(solver, variables.makeLeafLits(k));
-  solver.addClause({lastFrameEncoder.encode(problem_.bad)});
+  solver.addClause({lastFrameEncoder.encode(inductionBad)});
 
   return !solver.solve();
 }

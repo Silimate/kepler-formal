@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <optional>
 #include <set>
@@ -94,6 +96,25 @@ std::optional<bool> getResetAssertionValue(const std::string& displayName) {
     return false;
   }
   return std::nullopt;
+}
+
+std::unordered_map<size_t, bool> collectResetAssignments(
+    const SequentialDesignModel& model) {
+  std::unordered_map<size_t, bool> assignments;
+  for (const auto& key : model.environmentInputs) {
+    const auto displayIt = model.displayNameByKey.find(key);
+    const auto varIt = model.inputVarByKey.find(key);
+    if (displayIt == model.displayNameByKey.end() ||
+        varIt == model.inputVarByKey.end()) {
+      continue;
+    }
+    const auto assertedValue = getResetAssertionValue(displayIt->second);
+    if (!assertedValue.has_value()) {
+      continue;
+    }
+    assignments.emplace(varIt->second, *assertedValue);
+  }
+  return assignments;
 }
 
 SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
@@ -597,6 +618,69 @@ std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
 
 using LocalToAbstractVarMap = std::unordered_map<size_t, size_t>;
 
+struct ExprPairHash {
+  size_t operator()(const std::pair<BoolExpr*, BoolExpr*>& pair) const noexcept {
+    size_t seed = std::hash<const void*>()(pair.first);
+    seed ^= std::hash<const void*>()(pair.second) + 0x9e3779b9 + (seed << 6) +
+            (seed >> 2);
+    return seed;
+  }
+};
+
+bool areEquivalentUnderAbstractMaps(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const LocalToAbstractVarMap& abstractMap0,
+    const LocalToAbstractVarMap& abstractMap1,
+    std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool, ExprPairHash>& memo) {
+  if (expr0 == nullptr || expr1 == nullptr) {
+    return expr0 == expr1;
+  }
+
+  const auto key = std::make_pair(expr0, expr1);
+  if (const auto it = memo.find(key); it != memo.end()) {
+    return it->second;
+  }
+
+  bool equivalent = false;
+  if (expr0->getOp() == Op::VAR && expr1->getOp() == Op::VAR) {
+    if (expr0->getId() < 2 || expr1->getId() < 2) {
+      equivalent = expr0->getId() == expr1->getId();
+    } else {
+      const auto it0 = abstractMap0.find(expr0->getId());
+      const auto it1 = abstractMap1.find(expr1->getId());
+      equivalent = it0 != abstractMap0.end() && it1 != abstractMap1.end() &&
+                   it0->second == it1->second;
+    }
+  } else if (expr0->getOp() == expr1->getOp()) {
+    equivalent = areEquivalentUnderAbstractMaps(
+                     expr0->getLeft(),
+                     expr1->getLeft(),
+                     abstractMap0,
+                     abstractMap1,
+                     memo) &&
+                 areEquivalentUnderAbstractMaps(
+                     expr0->getRight(),
+                     expr1->getRight(),
+                     abstractMap0,
+                     abstractMap1,
+                     memo);
+  }
+
+  memo.emplace(key, equivalent);
+  return equivalent;
+}
+
+bool areEquivalentUnderAbstractMaps(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const LocalToAbstractVarMap& abstractMap0,
+    const LocalToAbstractVarMap& abstractMap1) {
+  std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool, ExprPairHash> memo;
+  return areEquivalentUnderAbstractMaps(
+      expr0, expr1, abstractMap0, abstractMap1, memo);
+}
+
 std::pair<LocalToAbstractVarMap, LocalToAbstractVarMap> buildAbstractTransitionMaps(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
@@ -647,6 +731,28 @@ AlignedSignals inferInductiveStateEqualities(
       model1.displayNameByKey,
       "state bit");
 
+  if (candidateStates.names.size() == model0.stateBits.size() &&
+      candidateStates.names.size() == model1.stateBits.size()) {
+    const auto [fullAbstractMap0, fullAbstractMap1] = buildAbstractTransitionMaps(
+        model0, model1, alignedInputs, candidateStates);
+    bool allEquivalent = true;
+    for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+      const auto& key0 = candidateStates.keys0[i];
+      const auto& key1 = candidateStates.keys1[i];
+      if (!areEquivalentUnderAbstractMaps(
+              model0.nextStateExprByStateKey.at(key0),
+              model1.nextStateExprByStateKey.at(key1),
+              fullAbstractMap0,
+              fullAbstractMap1)) {
+        allEquivalent = false;
+        break;
+      }
+    }
+    if (allEquivalent) {
+      return candidateStates;
+    }
+  }
+
   bool changed = true;
   while (changed) {
     changed = false;
@@ -657,11 +763,11 @@ AlignedSignals inferInductiveStateEqualities(
     for (size_t i = 0; i < candidateStates.names.size(); ++i) {
       const auto& key0 = candidateStates.keys0[i];
       const auto& key1 = candidateStates.keys1[i];
-      BoolExpr* abstractNext0 = BoolExpr::simplify(remapBoolExprVariables(
-          model0.nextStateExprByStateKey.at(key0), abstractMap0));
-      BoolExpr* abstractNext1 = BoolExpr::simplify(remapBoolExprVariables(
-          model1.nextStateExprByStateKey.at(key1), abstractMap1));
-      if (abstractNext0 != abstractNext1) {
+      if (!areEquivalentUnderAbstractMaps(
+              model0.nextStateExprByStateKey.at(key0),
+              model1.nextStateExprByStateKey.at(key1),
+              abstractMap0,
+              abstractMap1)) {
         changed = true;
         continue;
       }
@@ -697,27 +803,135 @@ AlignedSignals filterStateEqualitiesByInitialValue(
   return anchoredStates;
 }
 
+AlignedSignals filterStateEqualitiesByInitialCompatibility(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& candidateStates) {
+  AlignedSignals compatibleStates;
+  for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+    const auto initial0 = model0.initialStateValueByKey.find(candidateStates.keys0[i]);
+    const auto initial1 = model1.initialStateValueByKey.find(candidateStates.keys1[i]);
+    if (initial0 != model0.initialStateValueByKey.end() &&
+        initial1 != model1.initialStateValueByKey.end() &&
+        initial0->second != initial1->second) {
+      continue;
+    }
+
+    compatibleStates.names.push_back(candidateStates.names[i]);
+    compatibleStates.keys0.push_back(candidateStates.keys0[i]);
+    compatibleStates.keys1.push_back(candidateStates.keys1[i]);
+  }
+  return compatibleStates;
+}
+
+AlignedSignals filterStateEqualitiesByKnownValue(
+    const std::unordered_map<SignalKey, bool, SignalKeyHash>& knownValues0,
+    const std::unordered_map<SignalKey, bool, SignalKeyHash>& knownValues1,
+    const AlignedSignals& candidateStates) {
+  AlignedSignals anchoredStates;
+  for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+    const auto known0 = knownValues0.find(candidateStates.keys0[i]);
+    const auto known1 = knownValues1.find(candidateStates.keys1[i]);
+    if (known0 == knownValues0.end() || known1 == knownValues1.end() ||
+        known0->second != known1->second) {
+      continue;
+    }
+
+    anchoredStates.names.push_back(candidateStates.names[i]);
+    anchoredStates.keys0.push_back(candidateStates.keys0[i]);
+    anchoredStates.keys1.push_back(candidateStates.keys1[i]);
+  }
+  return anchoredStates;
+}
+
 size_t defaultResetBootstrapCycles(bool hasResetBootstrap, bool hasCompleteInitialState) {
   return (hasResetBootstrap && !hasCompleteInitialState) ? 3u : 0u;
+}
+
+std::optional<bool> evaluateConstantUnderAssignments(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& assignments,
+    std::unordered_map<BoolExpr*, std::optional<bool>>& memo) {
+  if (expr == nullptr) {
+    return std::nullopt;
+  }
+  if (const auto it = memo.find(expr); it != memo.end()) {
+    return it->second;
+  }
+
+  std::optional<bool> value;
+  switch (expr->getOp()) {
+    case Op::VAR:
+      if (expr->getId() < 2) {
+        value = expr->getId() == 1;
+      } else if (const auto it = assignments.find(expr->getId());
+                 it != assignments.end()) {
+        value = it->second;
+      }
+      break;
+    case Op::NOT: {
+      const auto operand =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      if (operand.has_value()) {
+        value = !*operand;
+      }
+      break;
+    }
+    case Op::AND: {
+      const auto lhs =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      if (lhs.has_value() && !*lhs) {
+        value = false;
+        break;
+      }
+      const auto rhs =
+          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
+      if (rhs.has_value() && !*rhs) {
+        value = false;
+      } else if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs && *rhs;
+      }
+      break;
+    }
+    case Op::OR: {
+      const auto lhs =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      if (lhs.has_value() && *lhs) {
+        value = true;
+        break;
+      }
+      const auto rhs =
+          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
+      if (rhs.has_value() && *rhs) {
+        value = true;
+      } else if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs || *rhs;
+      }
+      break;
+    }
+    case Op::XOR: {
+      const auto lhs =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      const auto rhs =
+          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
+      if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs != *rhs;
+      }
+      break;
+    }
+    case Op::NONE:
+    default:
+      break;
+  }
+
+  memo.emplace(expr, value);
+  return value;
 }
 
 std::unordered_map<SignalKey, bool, SignalKeyHash> deriveResetBootstrapStateValues(
     const SequentialDesignModel& model,
     size_t cycles) {
-  std::unordered_map<size_t, bool> resetAssignments;
-  for (const auto& key : model.environmentInputs) {
-    const auto displayIt = model.displayNameByKey.find(key);
-    const auto varIt = model.inputVarByKey.find(key);
-    if (displayIt == model.displayNameByKey.end() ||
-        varIt == model.inputVarByKey.end()) {
-      continue;
-    }
-    const auto assertedValue = getResetAssertionValue(displayIt->second);
-    if (!assertedValue.has_value()) {
-      continue;
-    }
-    resetAssignments.emplace(varIt->second, *assertedValue);
-  }
+  const auto resetAssignments = collectResetAssignments(model);
   if (resetAssignments.empty() || cycles == 0) {
     return {};
   }
@@ -734,19 +948,161 @@ std::unordered_map<SignalKey, bool, SignalKeyHash> deriveResetBootstrapStateValu
     }
 
     std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownStates;
+    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
     for (const auto& key : model.stateBits) {
-      BoolExpr* nextExpr = BoolExpr::simplify(substituteBoolExprVariables(
-          model.nextStateExprByStateKey.at(key), assignments));
-      if (isConstBoolExpr(nextExpr, false)) {
-        nextKnownStates.emplace(key, false);
-      } else if (isConstBoolExpr(nextExpr, true)) {
-        nextKnownStates.emplace(key, true);
+      const auto value = evaluateConstantUnderAssignments(
+          model.nextStateExprByStateKey.at(key), assignments, memo);
+      if (value.has_value()) {
+        nextKnownStates.emplace(key, *value);
       }
     }
     knownStates = std::move(nextKnownStates);
   }
 
   return knownStates;
+}
+
+AlignedSignals deriveResetBootstrapStateEqualities(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& candidateStates,
+    size_t cycles) {
+  const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
+  if (cycles == 0 || candidateStates.names.empty()) {
+    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);
+  }
+
+  const auto resetAssignments0 = collectResetAssignments(model0);
+  const auto resetAssignments1 = collectResetAssignments(model1);
+  if (resetAssignments0.empty() || resetAssignments1.empty()) {
+    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);
+  }
+
+  auto specializeForReset = [](const SequentialDesignModel& model,
+                               const std::unordered_map<size_t, bool>& resetAssignments) {
+    std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> specialized;
+    specialized.reserve(model.stateBits.size());
+    std::unordered_map<BoolExpr*, BoolExpr*> memo;
+    for (const auto& key : model.stateBits) {
+      specialized.emplace(
+          key,
+          substituteBoolExprVariables(
+              model.nextStateExprByStateKey.at(key), resetAssignments, memo));
+    }
+    return specialized;
+  };
+
+  const auto resetSpecializedNext0 = specializeForReset(model0, resetAssignments0);
+  const auto resetSpecializedNext1 = specializeForReset(model1, resetAssignments1);
+
+  AlignedSignals currentEqualities = filterStateEqualitiesByInitialValue(
+      model0, model1, candidateStates);
+  std::unordered_map<SignalKey, bool, SignalKeyHash> currentKnownValues0 =
+      model0.initialStateValueByKey;
+  std::unordered_map<SignalKey, bool, SignalKeyHash> currentKnownValues1 =
+      model1.initialStateValueByKey;
+
+  for (size_t step = 0; step < cycles; ++step) {
+    std::unordered_map<size_t, bool> stateAssignments0;
+    std::unordered_map<size_t, bool> stateAssignments1;
+    stateAssignments0.reserve(currentKnownValues0.size());
+    stateAssignments1.reserve(currentKnownValues1.size());
+    for (const auto& [key, value] : currentKnownValues0) {
+      if (const auto it = model0.inputVarByKey.find(key); it != model0.inputVarByKey.end()) {
+        stateAssignments0.emplace(it->second, value);
+      }
+    }
+    for (const auto& [key, value] : currentKnownValues1) {
+      if (const auto it = model1.inputVarByKey.find(key); it != model1.inputVarByKey.end()) {
+        stateAssignments1.emplace(it->second, value);
+      }
+    }
+
+    std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> specializedNext0;
+    std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> specializedNext1;
+    specializedNext0.reserve(model0.stateBits.size());
+    specializedNext1.reserve(model1.stateBits.size());
+    std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo0;
+    std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo1;
+    for (const auto& key : model0.stateBits) {
+      specializedNext0.emplace(
+          key,
+          substituteBoolExprVariables(
+              resetSpecializedNext0.at(key), stateAssignments0, stateSubMemo0));
+    }
+    for (const auto& key : model1.stateBits) {
+      specializedNext1.emplace(
+          key,
+          substituteBoolExprVariables(
+              resetSpecializedNext1.at(key), stateAssignments1, stateSubMemo1));
+    }
+
+    std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownValues0;
+    std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownValues1;
+    nextKnownValues0.reserve(model0.stateBits.size());
+    nextKnownValues1.reserve(model1.stateBits.size());
+    for (const auto& key : model0.stateBits) {
+      if (isConstBoolExpr(specializedNext0.at(key), false)) {
+        nextKnownValues0.emplace(key, false);
+      } else if (isConstBoolExpr(specializedNext0.at(key), true)) {
+        nextKnownValues0.emplace(key, true);
+      }
+    }
+    for (const auto& key : model1.stateBits) {
+      if (isConstBoolExpr(specializedNext1.at(key), false)) {
+        nextKnownValues1.emplace(key, false);
+      } else if (isConstBoolExpr(specializedNext1.at(key), true)) {
+        nextKnownValues1.emplace(key, true);
+      }
+    }
+
+    const auto [abstractMap0, abstractMap1] = buildAbstractTransitionMaps(
+        model0, model1, alignedInputs, currentEqualities);
+    AlignedSignals nextEqualities;
+    for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+      const auto& key0 = candidateStates.keys0[i];
+      const auto& key1 = candidateStates.keys1[i];
+
+      bool equalAfterStep = false;
+      const auto known0 = nextKnownValues0.find(key0);
+      const auto known1 = nextKnownValues1.find(key1);
+      if (known0 != nextKnownValues0.end() && known1 != nextKnownValues1.end() &&
+          known0->second == known1->second) {
+        equalAfterStep = true;
+      } else {
+        equalAfterStep = areEquivalentUnderAbstractMaps(
+            specializedNext0.at(key0),
+            specializedNext1.at(key1),
+            abstractMap0,
+            abstractMap1);
+      }
+
+      if (!equalAfterStep) {
+        continue;
+      }
+
+      nextEqualities.names.push_back(candidateStates.names[i]);
+      nextEqualities.keys0.push_back(key0);
+      nextEqualities.keys1.push_back(key1);
+    }
+
+    currentEqualities = std::move(nextEqualities);
+    currentKnownValues0 = std::move(nextKnownValues0);
+    currentKnownValues1 = std::move(nextKnownValues1);
+    if (secDiagEnabled) {
+      fprintf(
+          stderr,
+          "SEC diag: bootstrap step %zu equalities=%zu known0=%zu known1=%zu\n",
+          step + 1,
+          currentEqualities.names.size(),
+          currentKnownValues0.size(),
+          currentKnownValues1.size());
+      fflush(stderr);
+    }
+  }
+
+  return currentEqualities;
 }
 
 }  // namespace
@@ -758,9 +1114,23 @@ SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
     : top0_(top0), top1_(top1), solverType_(solverType) {}
 
 SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) const {
+  const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: start run\n");
+    fflush(stderr);
+  }
+
   // Step 1: extract both tops into the same normalized SEC representation.
   SequentialDesignModel model0 = SequentialDesignModel::extract(top0_);
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: extracted design0\n");
+    fflush(stderr);
+  }
   SequentialDesignModel model1 = SequentialDesignModel::extract(top1_);
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: extracted design1\n");
+    fflush(stderr);
+  }
 
   if (model0.hasUnsupportedFeatures() || model1.hasUnsupportedFeatures()) {
     std::vector<std::string> reasons = model0.unsupportedReasons;
@@ -781,6 +1151,10 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   AlignedSignals alignedOutputs;
   AlignedSignals inductiveStateEqualities;
   try {
+    if (secDiagEnabled) {
+      fprintf(stderr, "SEC diag: aligning inputs/outputs\n");
+      fflush(stderr);
+    }
     alignedInputs = alignSignalsByName(
         model0.environmentInputs,
         model0.displayNameByKey,
@@ -793,14 +1167,33 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         model1.observedOutputs,
         model1.displayNameByKey,
         "observed output");
+    if (secDiagEnabled) {
+      fprintf(stderr, "SEC diag: inferring inductive state equalities\n");
+      fflush(stderr);
+    }
     inductiveStateEqualities = inferInductiveStateEqualities(
         model0, model1, alignedInputs);
+    if (secDiagEnabled) {
+      fprintf(stderr, "SEC diag: inferred inductive state equalities\n");
+      fflush(stderr);
+    }
   } catch (const std::exception& e) {
     return {
         SequentialEquivalenceStatus::Unsupported,
         0,
         e.what(),
     };
+  }
+
+  if (secDiagEnabled) {
+    printf(
+        "SEC diag: aligned_inputs=%zu aligned_outputs=%zu inductive_state_equalities=%zu "
+        "state_bits0=%zu state_bits1=%zu\n",
+        alignedInputs.names.size(),
+        alignedOutputs.names.size(),
+        inductiveStateEqualities.names.size(),
+        model0.stateBits.size(),
+        model1.stateBits.size());
   }
 
   KInductionProblem problem;
@@ -879,6 +1272,10 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     problem.observedOutputExprs0.push_back(remappedOutputs0.at(key0));
     problem.observedOutputExprs1.push_back(remappedOutputs1.at(key1));
   }
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: remapped observed outputs\n");
+    fflush(stderr);
+  }
 
   for (const auto& key : model0.stateBits) {
     remappedNext0.emplace(
@@ -891,6 +1288,10 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         key,
         remapBoolExprVariables(
             model1.nextStateExprByStateKey.at(key), localToCombined1, remapMemo1));
+  }
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: remapped next-state formulas\n");
+    fflush(stderr);
   }
 
   // Step 5: if reset/init data is available, build the explicit frame-0 state
@@ -920,13 +1321,46 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
       defaultResetBootstrapCycles(!problem.resetBootstrapInputs.empty(),
                                   problem.hasCompleteInitialState());
 
+  const AlignedSignals initialStateCorrespondence =
+      filterStateEqualitiesByInitialCompatibility(
+          model0, model1, inductiveStateEqualities);
+  for (size_t i = 0; i < initialStateCorrespondence.names.size(); ++i) {
+    problem.initialStateEqualityPairs.emplace_back(
+        state0Symbols.at(initialStateCorrespondence.keys0[i]),
+        state1Symbols.at(initialStateCorrespondence.keys1[i]));
+  }
+
   AlignedSignals anchoredStateEqualities;
+  size_t chosenBootstrapCycles = bootstrapCycles;
+  std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues0;
+  std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues1;
   if (!problem.resetBootstrapInputs.empty()) {
-    anchoredStateEqualities = inductiveStateEqualities;
+    if (!initialStateCorrespondence.names.empty()) {
+      anchoredStateEqualities = initialStateCorrespondence;
+    } else {
+      anchoredStateEqualities = deriveResetBootstrapStateEqualities(
+          model0,
+          model1,
+          alignedInputs,
+          inductiveStateEqualities,
+          bootstrapCycles);
+    }
+
+    bootstrapValues0 =
+        deriveResetBootstrapStateValues(model0, chosenBootstrapCycles);
+    bootstrapValues1 =
+        deriveResetBootstrapStateValues(model1, chosenBootstrapCycles);
+    for (const auto& [key, value] : bootstrapValues0) {
+      problem.bootstrapStateAssignments.emplace_back(state0Symbols.at(key), value);
+    }
+    for (const auto& [key, value] : bootstrapValues1) {
+      problem.bootstrapStateAssignments.emplace_back(state1Symbols.at(key), value);
+    }
   } else if (problem.hasExplicitInitialState()) {
     anchoredStateEqualities = filterStateEqualitiesByInitialValue(
         model0, model1, inductiveStateEqualities);
   }
+  problem.resetBootstrapCycles = chosenBootstrapCycles;
   for (size_t i = 0; i < anchoredStateEqualities.names.size(); ++i) {
     problem.inductiveStateEqualityPairs.emplace_back(
         state0Symbols.at(anchoredStateEqualities.keys0[i]),
@@ -937,43 +1371,19 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
           state1Symbols.at(anchoredStateEqualities.keys1[i]));
     }
   }
-  if (bootstrapCycles != 0) {
-    const auto bootstrapValues0 =
-        deriveResetBootstrapStateValues(model0, bootstrapCycles);
-    const auto bootstrapValues1 =
-        deriveResetBootstrapStateValues(model1, bootstrapCycles);
-    for (const auto& [key, value] : bootstrapValues0) {
-      problem.bootstrapStateAssignments.emplace_back(state0Symbols.at(key), value);
-    }
-    for (const auto& [key, value] : bootstrapValues1) {
-      problem.bootstrapStateAssignments.emplace_back(state1Symbols.at(key), value);
-    }
-  }
 
   const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
       model0, model1, alignedInputs, anchoredStateEqualities);
-
-  // Step 6: build the SEC property. A frame is "good" when the observed
-  // outputs match. Internal state vectors are private to each design and are
-  // only used to unroll their transitions.
-  BoolExpr* property = BoolExpr::createTrue();
-  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
-    const auto& key0 = alignedOutputs.keys0[i];
-    const auto& key1 = alignedOutputs.keys1[i];
-    // Strengthen SEC with the inductive equalities we discovered for unchanged
-    // same-name state bits, and use that abstraction to prune output equations
-    // that are already implied before handing the SAT problem to k-induction.
-    const BoolExpr* abstractOutput0 = BoolExpr::simplify(remapBoolExprVariables(
-        model0.observedOutputExprByKey.at(key0), abstractOutputMap0));
-    const BoolExpr* abstractOutput1 = BoolExpr::simplify(remapBoolExprVariables(
-        model1.observedOutputExprByKey.at(key1), abstractOutputMap1));
-    if (abstractOutput0 == abstractOutput1) {
-      continue;
-    }
-    property = BoolExpr::And(
-        property,
-        makeEqualityExpr(problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]));
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: built abstract transition maps\n");
+    fflush(stderr);
   }
+
+  // Step 6: build the SEC proof obligations. The checked SEC property remains
+  // pure observed-output equality, while induction uses a stronger invariant
+  // made of the anchored internal-state equalities plus any remaining output
+  // obligations not already implied by that state correspondence.
+  BoolExpr* property = BoolExpr::createTrue();
   for (const auto& key : model0.stateBits) {
     problem.transitions0.emplace_back(state0Symbols.at(key), remappedNext0.at(key));
   }
@@ -981,11 +1391,66 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     problem.transitions1.emplace_back(state1Symbols.at(key), remappedNext1.at(key));
   }
 
+  // Keep the SEC property honest: the base case always checks every observed
+  // output, while the induction step uses a stronger invariant whose state
+  // equalities are explicit BoolExpr clauses instead of out-of-band SAT
+  // assumptions.
+  BoolExpr* inductionProperty = BoolExpr::createTrue();
+  for (size_t i = 0; i < anchoredStateEqualities.names.size(); ++i) {
+    inductionProperty = BoolExpr::And(
+        inductionProperty,
+        makeEqualityExpr(
+            BoolExpr::Var(state0Symbols.at(anchoredStateEqualities.keys0[i])),
+            BoolExpr::Var(state1Symbols.at(anchoredStateEqualities.keys1[i]))));
+  }
+  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
+    const auto outputEquality = makeEqualityExpr(
+        problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]);
+    property = BoolExpr::And(property, outputEquality);
+
+    const auto& key0 = alignedOutputs.keys0[i];
+    const auto& key1 = alignedOutputs.keys1[i];
+    if (areEquivalentUnderAbstractMaps(
+            model0.observedOutputExprByKey.at(key0),
+            model1.observedOutputExprByKey.at(key1),
+            abstractOutputMap0,
+            abstractOutputMap1)) {
+      continue;
+    }
+    inductionProperty = BoolExpr::And(inductionProperty, outputEquality);
+  }
+
   problem.property = BoolExpr::simplify(property);
   problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = BoolExpr::simplify(inductionProperty);
+  problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
   problem.description = "SEC property with aligned observed outputs";
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: built SEC and induction properties\n");
+    fflush(stderr);
+  }
+
+  if (secDiagEnabled) {
+    printf(
+        "SEC diag: property_is_true=%d induction_property_is_true=%d "
+        "bad_is_false=%d induction_bad_is_false=%d reset_bootstrap_inputs=%zu "
+        "bootstrap_cycles=%zu bootstrap_equalities=%zu inductive_equalities=%zu\n",
+        problem.property == BoolExpr::createTrue(),
+        problem.inductionProperty == BoolExpr::createTrue(),
+        problem.bad == BoolExpr::createFalse(),
+        problem.inductionBad == BoolExpr::createFalse(),
+        problem.resetBootstrapInputs.size(),
+        chosenBootstrapCycles,
+        problem.bootstrapStateEqualityPairs.size(),
+        problem.inductiveStateEqualityPairs.size());
+    fflush(stdout);
+  }
 
   // Step 7: hand the combined transition system to the k-induction solver.
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: entering k-induction engine\n");
+    fflush(stderr);
+  }
   KInductionEngine engine(problem, solverType_);
   const auto result = engine.run(maxK);
   switch (result.status) {

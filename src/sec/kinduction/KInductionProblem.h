@@ -18,7 +18,9 @@ struct KInductionProblem {
   std::vector<std::string> environmentInputNames;
   std::vector<std::string> observedOutputNames;
   std::vector<size_t> inputSymbols;
+  size_t resetBootstrapCycles = 0;
   std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
+  std::vector<std::pair<size_t, size_t>> initialStateEqualityPairs;
   std::vector<std::pair<size_t, bool>> bootstrapStateAssignments;
   std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
   std::vector<std::pair<size_t, size_t>> inductiveStateEqualityPairs;
@@ -36,6 +38,8 @@ struct KInductionProblem {
   size_t totalStateCount = 0;
   BoolExpr* property = nullptr;
   BoolExpr* bad = nullptr;
+  BoolExpr* inductionProperty = nullptr;
+  BoolExpr* inductionBad = nullptr;
   std::string description;
 
   bool hasSequentialState() const {

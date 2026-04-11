@@ -5,10 +5,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <deque>
 #include <optional>
 #include <sstream>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 #include <unordered_map>
 
 #include "DNL.h"
@@ -206,7 +210,7 @@ BoolExpr* buildNextStateExpr(
         BoolExpr::And(BoolExpr::Not(const_cast<BoolExpr*>(setHigh)), next));
   }
 
-  return BoolExpr::simplify(next);
+  return next;
 }
 
 std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
@@ -235,6 +239,86 @@ std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
 bool isConstBoolExpr(BoolExpr* expr, bool value) {
   return expr != nullptr && expr->getOp() == Op::VAR &&
          expr->getId() == static_cast<size_t>(value ? 1 : 0);
+}
+
+std::optional<bool> evaluateConstantUnderAssignments(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& assignments,
+    std::unordered_map<BoolExpr*, std::optional<bool>>& memo) {
+  if (expr == nullptr) {
+    return std::nullopt;
+  }
+  if (const auto it = memo.find(expr); it != memo.end()) {
+    return it->second;
+  }
+
+  std::optional<bool> value;
+  switch (expr->getOp()) {
+    case Op::VAR:
+      if (expr->getId() < 2) {
+        value = expr->getId() == 1;
+      } else if (const auto it = assignments.find(expr->getId());
+                 it != assignments.end()) {
+        value = it->second;
+      }
+      break;
+    case Op::NOT: {
+      const auto operand =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      if (operand.has_value()) {
+        value = !*operand;
+      }
+      break;
+    }
+    case Op::AND: {
+      const auto lhs =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      if (lhs.has_value() && !*lhs) {
+        value = false;
+        break;
+      }
+      const auto rhs =
+          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
+      if (rhs.has_value() && !*rhs) {
+        value = false;
+      } else if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs && *rhs;
+      }
+      break;
+    }
+    case Op::OR: {
+      const auto lhs =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      if (lhs.has_value() && *lhs) {
+        value = true;
+        break;
+      }
+      const auto rhs =
+          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
+      if (rhs.has_value() && *rhs) {
+        value = true;
+      } else if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs || *rhs;
+      }
+      break;
+    }
+    case Op::XOR: {
+      const auto lhs =
+          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
+      const auto rhs =
+          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
+      if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs != *rhs;
+      }
+      break;
+    }
+    case Op::NONE:
+    default:
+      break;
+  }
+
+  memo.emplace(expr, value);
+  return value;
 }
 
 std::string normalizeSignalBaseName(const std::string& name) {
@@ -283,58 +367,181 @@ void inferSynthesizedResetInitialStateValues(SequentialDesignModel& model) {
     return;
   }
 
-  // Many mapped netlists encode reset in the D cone instead of using an
-  // explicit flop reset pin. Keep propagating the asserted reset value through
-  // the next-state network until the post-reset value of every derivable state
-  // bit settles to a constant fixed point.
-  bool changed = true;
-  while (changed) {
-    changed = false;
+  auto countUniqueExprNodes =
+      [](const std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash>& exprByKey) {
+        std::unordered_set<BoolExpr*> visited;
+        std::vector<BoolExpr*> stack;
+        for (const auto& [_, root] : exprByKey) {
+          if (root != nullptr) {
+            stack.push_back(root);
+          }
+        }
 
-    std::unordered_map<size_t, bool> assignments = resetAssignments;
-    for (const auto& [key, value] : model.initialStateValueByKey) {
-      const auto varIt = model.inputVarByKey.find(key);
-      if (varIt == model.inputVarByKey.end()) {
+        while (!stack.empty()) {
+          BoolExpr* current = stack.back();
+          stack.pop_back();
+          if (current == nullptr || !visited.insert(current).second) {
+            continue;
+          }
+          if (current->getLeft() != nullptr) {
+            stack.push_back(current->getLeft());
+          }
+          if (current->getRight() != nullptr) {
+            stack.push_back(current->getRight());
+          }
+        }
+        return visited.size();
+      };
+
+  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> resetSpecializedNextStateByKey;
+  resetSpecializedNextStateByKey.reserve(model.stateBits.size());
+  std::unordered_map<BoolExpr*, BoolExpr*> resetSubstitutionMemo;
+  for (const auto& key : model.stateBits) {
+    const auto nextStateIt = model.nextStateExprByStateKey.find(key);
+    if (nextStateIt == model.nextStateExprByStateKey.end()) {
+      continue;
+    }
+    resetSpecializedNextStateByKey.emplace(
+        key,
+        substituteBoolExprVariables(
+            nextStateIt->second, resetAssignments, resetSubstitutionMemo));
+  }
+  constexpr size_t kMaxResetSpecializedExprNodesForInitInference = 200000;
+  const size_t resetSpecializedExprNodes =
+      countUniqueExprNodes(resetSpecializedNextStateByKey);
+  if (resetSpecializedExprNodes >
+      kMaxResetSpecializedExprNodesForInitInference) {
+    if (std::getenv("KEPLER_SEC_DIAG") != nullptr) {
+      fprintf(
+          stderr,
+          "SEC diag: skip synthesized init inference for %zu reset-specialized nodes (limit=%zu)\n",
+          resetSpecializedExprNodes,
+          kMaxResetSpecializedExprNodesForInitInference);
+      fflush(stderr);
+    }
+    return;
+  }
+
+  auto collectReferencedStateVars = [](BoolExpr* expr) {
+    std::unordered_set<size_t> referencedVars;
+    if (expr == nullptr) {
+      return referencedVars;
+    }
+
+    std::vector<BoolExpr*> stack = {expr};
+    std::unordered_set<BoolExpr*> visited;
+    while (!stack.empty()) {
+      BoolExpr* current = stack.back();
+      stack.pop_back();
+      if (current == nullptr || !visited.insert(current).second) {
         continue;
       }
+      if (current->getOp() == Op::VAR) {
+        if (current->getId() >= 2) {
+          referencedVars.insert(current->getId());
+        }
+        continue;
+      }
+      if (current->getLeft() != nullptr) {
+        stack.push_back(current->getLeft());
+      }
+      if (current->getRight() != nullptr) {
+        stack.push_back(current->getRight());
+      }
+    }
+    return referencedVars;
+  };
+
+  std::unordered_map<size_t, SignalKey> stateKeyByVar;
+  std::unordered_map<size_t, std::vector<SignalKey>> dependentStatesByVar;
+  stateKeyByVar.reserve(model.stateBits.size());
+  dependentStatesByVar.reserve(model.stateBits.size());
+  for (const auto& key : model.stateBits) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      stateKeyByVar.emplace(varIt->second, key);
+    }
+  }
+  for (const auto& key : model.stateBits) {
+    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
+    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
+      continue;
+    }
+    const auto referencedVars = collectReferencedStateVars(nextStateIt->second);
+    for (const auto referencedVar : referencedVars) {
+      if (stateKeyByVar.find(referencedVar) == stateKeyByVar.end()) {
+        continue;
+      }
+      dependentStatesByVar[referencedVar].push_back(key);
+    }
+  }
+
+  std::unordered_map<SignalKey, SignalKey, SignalKeyHash> complementedPartnerByKey;
+  complementedPartnerByKey.reserve(model.complementedStateRelations.size() * 2);
+  for (const auto& relation : model.complementedStateRelations) {
+    complementedPartnerByKey.emplace(relation.primaryKey, relation.complementedKey);
+    complementedPartnerByKey.emplace(relation.complementedKey, relation.primaryKey);
+  }
+
+  std::unordered_map<size_t, bool> assignments = resetAssignments;
+  for (const auto& [key, value] : model.initialStateValueByKey) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
       assignments.emplace(varIt->second, value);
     }
+  }
 
-    for (const auto& key : model.stateBits) {
-      if (model.initialStateValueByKey.find(key) !=
-          model.initialStateValueByKey.end()) {
-        continue;
-      }
-      const auto nextStateIt = model.nextStateExprByStateKey.find(key);
-      if (nextStateIt == model.nextStateExprByStateKey.end()) {
-        continue;
-      }
-      BoolExpr* resetExpr = BoolExpr::simplify(
-          substituteBoolExprVariables(nextStateIt->second, assignments));
-      if (isConstBoolExpr(resetExpr, false)) {
-        model.initialStateValueByKey.emplace(key, false);
-        changed = true;
-      } else if (isConstBoolExpr(resetExpr, true)) {
-        model.initialStateValueByKey.emplace(key, true);
-        changed = true;
+  std::deque<SignalKey> workQueue(model.stateBits.begin(), model.stateBits.end());
+  auto recordKnownState = [&](const SignalKey& key, bool value) {
+    const auto [it, inserted] = model.initialStateValueByKey.emplace(key, value);
+    if (!inserted) {
+      return;
+    }
+
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      assignments[varIt->second] = value;
+      const auto dependentIt = dependentStatesByVar.find(varIt->second);
+      if (dependentIt != dependentStatesByVar.end()) {
+        workQueue.insert(
+            workQueue.end(),
+            dependentIt->second.begin(),
+            dependentIt->second.end());
       }
     }
 
-    for (const auto& relation : model.complementedStateRelations) {
-      const auto primaryIt = model.initialStateValueByKey.find(relation.primaryKey);
-      const auto complementedIt =
-          model.initialStateValueByKey.find(relation.complementedKey);
-      if (primaryIt != model.initialStateValueByKey.end() &&
-          complementedIt == model.initialStateValueByKey.end()) {
-        model.initialStateValueByKey.emplace(
-            relation.complementedKey, !primaryIt->second);
-        changed = true;
-      } else if (primaryIt == model.initialStateValueByKey.end() &&
-                 complementedIt != model.initialStateValueByKey.end()) {
-        model.initialStateValueByKey.emplace(
-            relation.primaryKey, !complementedIt->second);
-        changed = true;
+    const auto partnerIt = complementedPartnerByKey.find(key);
+    if (partnerIt != complementedPartnerByKey.end() &&
+        model.initialStateValueByKey.find(partnerIt->second) ==
+            model.initialStateValueByKey.end()) {
+      workQueue.push_back(partnerIt->second);
+    }
+  };
+
+  while (!workQueue.empty()) {
+    const SignalKey key = workQueue.front();
+    workQueue.pop_front();
+
+    if (model.initialStateValueByKey.find(key) != model.initialStateValueByKey.end()) {
+      const auto partnerIt = complementedPartnerByKey.find(key);
+      if (partnerIt != complementedPartnerByKey.end() &&
+          model.initialStateValueByKey.find(partnerIt->second) ==
+              model.initialStateValueByKey.end()) {
+        recordKnownState(partnerIt->second, !model.initialStateValueByKey.at(key));
       }
+      continue;
+    }
+
+    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
+    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
+      continue;
+    }
+
+    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
+    const auto resetValue = evaluateConstantUnderAssignments(
+        nextStateIt->second, assignments, memo);
+    if (resetValue.has_value()) {
+      recordKnownState(key, *resetValue);
     }
   }
 }
@@ -353,6 +560,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
 
   SequentialDesignModel model;
   auto* previousTop = universe->getTopDesign();
+  const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
 
   naja::DNL::destroy();
   universe->setTopDesign(top);
@@ -360,7 +568,22 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
   // Reuse the existing miter frontend to discover the relevant boundary
   // signals before we ask it to build Boolean formulas.
+  if (secDiagEnabled) {
+    fprintf(
+        stderr, "SEC diag: extract(%s) collect begin\n",
+        top->getName().getString().c_str());
+    fflush(stderr);
+  }
   builder.collect();
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) collect end inputs=%zu outputs=%zu\n",
+        top->getName().getString().c_str(),
+        builder.getInputs().size(),
+        builder.getOutputs().size());
+    fflush(stderr);
+  }
 
   auto* dnl = naja::DNL::get();
   std::unordered_map<naja::DNL::DNLID, SignalKey> inputKeyByTerm;
@@ -472,11 +695,34 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   }
 
   // Materialize the combinational BoolExpr DAGs for the design boundary.
+  if (secDiagEnabled) {
+    fprintf(
+        stderr, "SEC diag: extract(%s) build begin\n",
+        top->getName().getString().c_str());
+    fflush(stderr);
+  }
   builder.build();
+  if (secDiagEnabled) {
+    fprintf(
+        stderr, "SEC diag: extract(%s) build end\n",
+        top->getName().getString().c_str());
+    fflush(stderr);
+  }
 
   model.environmentInputs.assign(environmentInputs.begin(), environmentInputs.end());
   model.stateBits.assign(stateBits.begin(), stateBits.end());
   model.observedOutputs.assign(observedOutputs.begin(), observedOutputs.end());
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) boundary normalized env=%zu state=%zu outputs=%zu pending=%zu\n",
+        top->getName().getString().c_str(),
+        model.environmentInputs.size(),
+        model.stateBits.size(),
+        model.observedOutputs.size(),
+        pendingTransitions.size());
+    fflush(stderr);
+  }
 
   const auto& termDNLID2varID = builder.getTermDNLID2VarID();
   // Preserve the symbolic variable chosen by the clause builder for each
@@ -490,10 +736,18 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
       continue;
     }
     const size_t varID = termDNLID2varID[inputTermID];
-    if (varID < 2) {
-      continue;
-    }
-    model.inputVarByKey.emplace(keyIt->second, varID);
+      if (varID < 2) {
+        continue;
+      }
+      model.inputVarByKey.emplace(keyIt->second, varID);
+  }
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) mapped boundary vars=%zu\n",
+        top->getName().getString().c_str(),
+        model.inputVarByKey.size());
+    fflush(stderr);
   }
 
   std::unordered_map<naja::DNL::DNLID, BoolExpr*> outputExprByTerm;
@@ -507,6 +761,15 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
         observedOutputs.find(keyIt->second) != observedOutputs.end()) {
       model.observedOutputExprByKey.emplace(keyIt->second, outputExprs[i]);
     }
+  }
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) materialized output exprs observed=%zu total=%zu\n",
+        top->getName().getString().c_str(),
+        model.observedOutputExprByKey.size(),
+        outputExprByTerm.size());
+    fflush(stderr);
   }
 
   // Rebuild next-state equations for the supported sequential cells.
@@ -529,13 +792,22 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
       for (const auto& complementedKey : pending.complementedStateKeys) {
         model.nextStateExprByStateKey.emplace(
             complementedKey,
-            BoolExpr::simplify(BoolExpr::Not(nextStateExpr)));
+            BoolExpr::Not(nextStateExpr));
       }
     } catch (const std::exception& e) {
       model.unsupportedReasons.push_back(
           "Unsupported sequential primitive for `" +
           signalKeyToString(pending.stateKey) + "`: " + e.what());
     }
+  }
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) rebuilt next-state exprs=%zu init=%zu\n",
+        top->getName().getString().c_str(),
+        model.nextStateExprByStateKey.size(),
+        model.initialStateValueByKey.size());
+    fflush(stderr);
   }
 
   // Inputs or state bits can disappear if the underlying BoolExpr builder
@@ -552,8 +824,25 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   };
   keepMappedInputs(model.environmentInputs);
   keepMappedInputs(model.stateBits);
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) filtered env=%zu state=%zu\n",
+        top->getName().getString().c_str(),
+        model.environmentInputs.size(),
+        model.stateBits.size());
+    fflush(stderr);
+  }
 
   inferSynthesizedResetInitialStateValues(model);
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) synthesized init inference done init=%zu\n",
+        top->getName().getString().c_str(),
+        model.initialStateValueByKey.size());
+    fflush(stderr);
+  }
 
   // Missing formulas mean we do not have a sound SEC model, so report the
   // design as unsupported instead of continuing with partial information.
@@ -573,6 +862,10 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   // Restore the original top design for callers that keep using the universe.
   if (previousTop != nullptr) {
     universe->setTopDesign(previousTop);
+  }
+  if (secDiagEnabled) {
+    fprintf(stderr, "SEC diag: extract(%s) end\n", top->getName().getString().c_str());
+    fflush(stderr);
   }
 
   return model;
