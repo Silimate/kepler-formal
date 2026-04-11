@@ -31,15 +31,21 @@ void addResetBootstrapConstraints(SATSolverWrapper& solver,
                                   const FrameVariableStore& variables,
                                   const KInductionProblem& problem,
                                   size_t numFrames) {
-  if (resetBootstrapFrames(problem) == 0) {
+  const size_t bootstrapFrames = resetBootstrapFrames(problem);
+  if (bootstrapFrames == 0) {
     return;
   }
 
   for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
-    solver.addClause(
-        {assertedValue ? variables.getLiteral(symbol, 0)
-                       : -variables.getLiteral(symbol, 0)});
-    for (size_t frame = 1; frame < numFrames; ++frame) {
+    // Keep reset asserted across the whole bootstrap prefix so the SAT problem
+    // matches the same multi-cycle reset schedule used when we derive known
+    // post-reset state values. Release reset only after the bootstrap window.
+    for (size_t frame = 0; frame < std::min(bootstrapFrames, numFrames); ++frame) {
+      solver.addClause(
+          {assertedValue ? variables.getLiteral(symbol, frame)
+                         : -variables.getLiteral(symbol, frame)});
+    }
+    for (size_t frame = bootstrapFrames; frame < numFrames; ++frame) {
       solver.addClause(
           {assertedValue ? -variables.getLiteral(symbol, frame)
                          : variables.getLiteral(symbol, frame)});
@@ -56,6 +62,35 @@ void addBootstrapStateEqualities(SATSolverWrapper& solver,
         solver,
         variables.getLiteral(lhsSymbol, frame),
         variables.getLiteral(rhsSymbol, frame));
+  }
+}
+
+void addBootstrapStateAssignments(SATSolverWrapper& solver,
+                                  const FrameVariableStore& variables,
+                                  const KInductionProblem& problem,
+                                  size_t frame) {
+  for (const auto& [symbol, value] : problem.bootstrapStateAssignments) {
+    solver.addClause({value ? variables.getLiteral(symbol, frame)
+                            : -variables.getLiteral(symbol, frame)});
+  }
+}
+
+void addInductiveStateEqualities(SATSolverWrapper& solver,
+                                 const FrameVariableStore& variables,
+                                 const KInductionProblem& problem,
+                                 size_t firstFrame,
+                                 size_t lastFrame) {
+  if (problem.inductiveStateEqualityPairs.empty() || firstFrame > lastFrame) {
+    return;
+  }
+
+  for (size_t frame = firstFrame; frame <= lastFrame; ++frame) {
+    for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(lhsSymbol, frame),
+          variables.getLiteral(rhsSymbol, frame));
+    }
   }
 }
 
@@ -279,7 +314,10 @@ KInductionEngine::findBaseCounterexample(size_t k) const {
     addTransitionRelation(solver, variables, problem_, frame);
   }
   if (bootstrapFrames != 0) {
+    addBootstrapStateAssignments(solver, variables, problem_, bootstrapFrames);
     addBootstrapStateEqualities(solver, variables, problem_, bootstrapFrames);
+    addInductiveStateEqualities(
+        solver, variables, problem_, bootstrapFrames, internalK);
   }
 
   // A fully initialized reset state makes frame 0 meaningful. Otherwise SEC
@@ -332,6 +370,7 @@ bool KInductionEngine::provesByInduction(size_t k) const {
     FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
     solver.addClause({encoder.encode(problem_.property)});
   }
+  addInductiveStateEqualities(solver, variables, problem_, 0, k - 1);
 
   addSimplePathConstraint(
       solver, variables, problem_.combinedStateSymbols(), k + 1);

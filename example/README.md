@@ -29,14 +29,20 @@ python edit.py
 ../build/src/bin/kepler-formal --config test_config_verilog.yaml
 ../build/src/bin/kepler-formal --config test_config_verilog_sec.yaml
 ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_sec.yaml
+python extract_tinyrocket_csrfile_sec.py
+../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_csrfile_sec.yaml
 ```
 
 `test_config_verilog_sec.yaml` is a small SEC example that uses the local
 `seq_design0.sv` / `seq_design1.sv` pair.
 
-`test_config_verilog_tinyrocket_sec.yaml` runs TinyRocket against itself
-through SEC with the same Liberty setup as the LEC example, so it is a
-passing large-design sanity check.
+`test_config_verilog_tinyrocket_sec.yaml` keeps the original full-TinyRocket
+SEC self-compare setup for experimentation with the same Liberty files as the
+LEC example.
+
+`test_config_verilog_tinyrocket_csrfile_sec.yaml` extracts `CSRFile` from
+`tinyrocket.v` with Najaeda and then runs a TinyRocket-derived SEC example that
+first fails at `k = 3` on the existing `io_decode_0_fp_illegal` output.
 
 The current SEC flow compares observed outputs only. Internal register naming
 does not need to match between the two designs.

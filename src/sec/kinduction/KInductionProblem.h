@@ -19,7 +19,9 @@ struct KInductionProblem {
   std::vector<std::string> observedOutputNames;
   std::vector<size_t> inputSymbols;
   std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
+  std::vector<std::pair<size_t, bool>> bootstrapStateAssignments;
   std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
+  std::vector<std::pair<size_t, size_t>> inductiveStateEqualityPairs;
   std::vector<size_t> state0Symbols;
   std::vector<size_t> state1Symbols;
   std::vector<size_t> allSymbols;

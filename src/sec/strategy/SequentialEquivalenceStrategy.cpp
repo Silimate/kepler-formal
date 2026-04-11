@@ -67,6 +67,11 @@ std::string formatBoolValue(bool value) {
   return value ? "1" : "0";
 }
 
+bool isConstBoolExpr(BoolExpr* expr, bool value) {
+  return expr != nullptr && expr->getOp() == Op::VAR &&
+         expr->getId() == static_cast<size_t>(value ? 1 : 0);
+}
+
 std::string normalizeSignalBaseName(const std::string& name) {
   std::string base = name;
   const auto bracket = base.find('[');
@@ -590,6 +595,160 @@ std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
   return localToCombined;
 }
 
+using LocalToAbstractVarMap = std::unordered_map<size_t, size_t>;
+
+std::pair<LocalToAbstractVarMap, LocalToAbstractVarMap> buildAbstractTransitionMaps(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedStates) {
+  LocalToAbstractVarMap abstractMap0;
+  LocalToAbstractVarMap abstractMap1;
+  size_t nextAbstractSymbol = 2;
+
+  // Shared environment inputs keep the same abstract variable in both designs,
+  // while private state only becomes shared when we currently believe that the
+  // same-name state bit should stay equal across both transition systems.
+  for (size_t i = 0; i < alignedInputs.names.size(); ++i) {
+    const size_t symbol = nextAbstractSymbol++;
+    abstractMap0.emplace(model0.inputVarByKey.at(alignedInputs.keys0[i]), symbol);
+    abstractMap1.emplace(model1.inputVarByKey.at(alignedInputs.keys1[i]), symbol);
+  }
+  for (size_t i = 0; i < alignedStates.names.size(); ++i) {
+    const size_t symbol = nextAbstractSymbol++;
+    abstractMap0.emplace(model0.inputVarByKey.at(alignedStates.keys0[i]), symbol);
+    abstractMap1.emplace(model1.inputVarByKey.at(alignedStates.keys1[i]), symbol);
+  }
+
+  auto assignPrivateStateSymbols = [&](const SequentialDesignModel& model,
+                                       LocalToAbstractVarMap& abstractMap) {
+    for (const auto& key : model.stateBits) {
+      const size_t localVar = model.inputVarByKey.at(key);
+      if (abstractMap.find(localVar) != abstractMap.end()) {
+        continue;
+      }
+      abstractMap.emplace(localVar, nextAbstractSymbol++);
+    }
+  };
+  assignPrivateStateSymbols(model0, abstractMap0);
+  assignPrivateStateSymbols(model1, abstractMap1);
+
+  return {std::move(abstractMap0), std::move(abstractMap1)};
+}
+
+AlignedSignals inferInductiveStateEqualities(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs) {
+  AlignedSignals candidateStates = collectCommonSignalsByName(
+      model0.stateBits,
+      model0.displayNameByKey,
+      model1.stateBits,
+      model1.displayNameByKey,
+      "state bit");
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    const auto [abstractMap0, abstractMap1] = buildAbstractTransitionMaps(
+        model0, model1, alignedInputs, candidateStates);
+    AlignedSignals refinedStates;
+    for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+      const auto& key0 = candidateStates.keys0[i];
+      const auto& key1 = candidateStates.keys1[i];
+      BoolExpr* abstractNext0 = BoolExpr::simplify(remapBoolExprVariables(
+          model0.nextStateExprByStateKey.at(key0), abstractMap0));
+      BoolExpr* abstractNext1 = BoolExpr::simplify(remapBoolExprVariables(
+          model1.nextStateExprByStateKey.at(key1), abstractMap1));
+      if (abstractNext0 != abstractNext1) {
+        changed = true;
+        continue;
+      }
+
+      refinedStates.names.push_back(candidateStates.names[i]);
+      refinedStates.keys0.push_back(key0);
+      refinedStates.keys1.push_back(key1);
+    }
+    candidateStates = std::move(refinedStates);
+  }
+
+  return candidateStates;
+}
+
+AlignedSignals filterStateEqualitiesByInitialValue(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& candidateStates) {
+  AlignedSignals anchoredStates;
+  for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+    const auto initial0 = model0.initialStateValueByKey.find(candidateStates.keys0[i]);
+    const auto initial1 = model1.initialStateValueByKey.find(candidateStates.keys1[i]);
+    if (initial0 == model0.initialStateValueByKey.end() ||
+        initial1 == model1.initialStateValueByKey.end() ||
+        initial0->second != initial1->second) {
+      continue;
+    }
+
+    anchoredStates.names.push_back(candidateStates.names[i]);
+    anchoredStates.keys0.push_back(candidateStates.keys0[i]);
+    anchoredStates.keys1.push_back(candidateStates.keys1[i]);
+  }
+  return anchoredStates;
+}
+
+size_t defaultResetBootstrapCycles(bool hasResetBootstrap, bool hasCompleteInitialState) {
+  return (hasResetBootstrap && !hasCompleteInitialState) ? 3u : 0u;
+}
+
+std::unordered_map<SignalKey, bool, SignalKeyHash> deriveResetBootstrapStateValues(
+    const SequentialDesignModel& model,
+    size_t cycles) {
+  std::unordered_map<size_t, bool> resetAssignments;
+  for (const auto& key : model.environmentInputs) {
+    const auto displayIt = model.displayNameByKey.find(key);
+    const auto varIt = model.inputVarByKey.find(key);
+    if (displayIt == model.displayNameByKey.end() ||
+        varIt == model.inputVarByKey.end()) {
+      continue;
+    }
+    const auto assertedValue = getResetAssertionValue(displayIt->second);
+    if (!assertedValue.has_value()) {
+      continue;
+    }
+    resetAssignments.emplace(varIt->second, *assertedValue);
+  }
+  if (resetAssignments.empty() || cycles == 0) {
+    return {};
+  }
+
+  std::unordered_map<SignalKey, bool, SignalKeyHash> knownStates =
+      model.initialStateValueByKey;
+  for (size_t step = 0; step < cycles; ++step) {
+    std::unordered_map<size_t, bool> assignments = resetAssignments;
+    for (const auto& [key, value] : knownStates) {
+      const auto varIt = model.inputVarByKey.find(key);
+      if (varIt != model.inputVarByKey.end()) {
+        assignments.emplace(varIt->second, value);
+      }
+    }
+
+    std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownStates;
+    for (const auto& key : model.stateBits) {
+      BoolExpr* nextExpr = BoolExpr::simplify(substituteBoolExprVariables(
+          model.nextStateExprByStateKey.at(key), assignments));
+      if (isConstBoolExpr(nextExpr, false)) {
+        nextKnownStates.emplace(key, false);
+      } else if (isConstBoolExpr(nextExpr, true)) {
+        nextKnownStates.emplace(key, true);
+      }
+    }
+    knownStates = std::move(nextKnownStates);
+  }
+
+  return knownStates;
+}
+
 }  // namespace
 
 SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
@@ -620,6 +779,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   // user-visible term names, not by parser-local object IDs.
   AlignedSignals alignedInputs;
   AlignedSignals alignedOutputs;
+  AlignedSignals inductiveStateEqualities;
   try {
     alignedInputs = alignSignalsByName(
         model0.environmentInputs,
@@ -633,6 +793,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         model1.observedOutputs,
         model1.displayNameByKey,
         "observed output");
+    inductiveStateEqualities = inferInductiveStateEqualities(
+        model0, model1, alignedInputs);
   } catch (const std::exception& e) {
     return {
         SequentialEquivalenceStatus::Unsupported,
@@ -672,17 +834,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   }
   for (const auto& key : model1.stateBits) {
     problem.state1Symbols.push_back(state1Symbols.at(key));
-  }
-  const auto alignedStateBootstrap = collectCommonSignalsByName(
-      model0.stateBits,
-      model0.displayNameByKey,
-      model1.stateBits,
-      model1.displayNameByKey,
-      "state bit");
-  for (size_t i = 0; i < alignedStateBootstrap.names.size(); ++i) {
-    problem.bootstrapStateEqualityPairs.emplace_back(
-        state0Symbols.at(alignedStateBootstrap.keys0[i]),
-        state1Symbols.at(alignedStateBootstrap.keys1[i]));
   }
   for (const auto& relation : model0.complementedStateRelations) {
     if (state0Symbols.find(relation.primaryKey) != state0Symbols.end() &&
@@ -765,12 +916,60 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   if (problem.hasExplicitInitialState()) {
     problem.initialCondition = BoolExpr::simplify(initialCondition);
   }
+  const size_t bootstrapCycles =
+      defaultResetBootstrapCycles(!problem.resetBootstrapInputs.empty(),
+                                  problem.hasCompleteInitialState());
+
+  AlignedSignals anchoredStateEqualities;
+  if (!problem.resetBootstrapInputs.empty()) {
+    anchoredStateEqualities = inductiveStateEqualities;
+  } else if (problem.hasExplicitInitialState()) {
+    anchoredStateEqualities = filterStateEqualitiesByInitialValue(
+        model0, model1, inductiveStateEqualities);
+  }
+  for (size_t i = 0; i < anchoredStateEqualities.names.size(); ++i) {
+    problem.inductiveStateEqualityPairs.emplace_back(
+        state0Symbols.at(anchoredStateEqualities.keys0[i]),
+        state1Symbols.at(anchoredStateEqualities.keys1[i]));
+    if (!problem.resetBootstrapInputs.empty()) {
+      problem.bootstrapStateEqualityPairs.emplace_back(
+          state0Symbols.at(anchoredStateEqualities.keys0[i]),
+          state1Symbols.at(anchoredStateEqualities.keys1[i]));
+    }
+  }
+  if (bootstrapCycles != 0) {
+    const auto bootstrapValues0 =
+        deriveResetBootstrapStateValues(model0, bootstrapCycles);
+    const auto bootstrapValues1 =
+        deriveResetBootstrapStateValues(model1, bootstrapCycles);
+    for (const auto& [key, value] : bootstrapValues0) {
+      problem.bootstrapStateAssignments.emplace_back(state0Symbols.at(key), value);
+    }
+    for (const auto& [key, value] : bootstrapValues1) {
+      problem.bootstrapStateAssignments.emplace_back(state1Symbols.at(key), value);
+    }
+  }
+
+  const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
+      model0, model1, alignedInputs, anchoredStateEqualities);
 
   // Step 6: build the SEC property. A frame is "good" when the observed
   // outputs match. Internal state vectors are private to each design and are
   // only used to unroll their transitions.
   BoolExpr* property = BoolExpr::createTrue();
   for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
+    const auto& key0 = alignedOutputs.keys0[i];
+    const auto& key1 = alignedOutputs.keys1[i];
+    // Strengthen SEC with the inductive equalities we discovered for unchanged
+    // same-name state bits, and use that abstraction to prune output equations
+    // that are already implied before handing the SAT problem to k-induction.
+    const BoolExpr* abstractOutput0 = BoolExpr::simplify(remapBoolExprVariables(
+        model0.observedOutputExprByKey.at(key0), abstractOutputMap0));
+    const BoolExpr* abstractOutput1 = BoolExpr::simplify(remapBoolExprVariables(
+        model1.observedOutputExprByKey.at(key1), abstractOutputMap1));
+    if (abstractOutput0 == abstractOutput1) {
+      continue;
+    }
     property = BoolExpr::And(
         property,
         makeEqualityExpr(problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]));

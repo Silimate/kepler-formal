@@ -110,6 +110,17 @@ jobs:
       working-directory: ${{github.workspace}}/example
       run: python edit.py
 
+    - name: Generate TinyRocket CSRFile SEC example
+      working-directory: ${{github.workspace}}/example
+      run: python extract_tinyrocket_csrfile_sec.py
+
+    - name: Run TinyRocket CSRFile SEC k3 example
+      working-directory: ${{github.workspace}}/example
+      run: |
+        rm -f tinyrocket_csrfile_sec.log
+        ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_csrfile_sec.yaml
+        grep "SEC found a counterexample at k = 3" tinyrocket_csrfile_sec.log
+
     - name: Run on naja if edited
       working-directory: ${{github.workspace}}/example
       run: |
