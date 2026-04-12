@@ -18,12 +18,14 @@
 #include "common/BoolExprUtils.h"
 #include "kinduction/BaseCaseSolver.h"
 #include "kinduction/KInductionEngine.h"
+#include "kinduction/SatEncoding.h"
 #include "kinduction/InductionStepSolver.h"
 #include "model/SequentialDesignModel.h"
 #include "proof/ExactInterpolationEngine.h"
 #include "proof/IC3Engine.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
+#include "strategy/StructuralStateInvariant.h"
 
 using namespace naja::NL;
 using namespace KEPLER_FORMAL::SEC;
@@ -679,6 +681,26 @@ SNLDesign* createNamedComplementSequentialModel(
   return model;
 }
 
+SNLDesign* createComplementFirstSequentialModel(
+    NLLibrary* library,
+    const std::string& name,
+    const std::string& primaryPinName,
+    const std::string& complementPinName) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* data =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* complement = SNLScalarTerm::create(
+      model, SNLTerm::Direction::Output, NLName(complementPinName));
+  auto* primary = SNLScalarTerm::create(
+      model, SNLTerm::Direction::Output, NLName(primaryPinName));
+  SNLDesignModeling::addInputsToClockArcs({data}, clock);
+  SNLDesignModeling::addClockToOutputsArcs(clock, {primary, complement});
+  return model;
+}
+
 SNLDesign* createSetOnlySequentialModel(NLLibrary* library,
                                         const std::string& name) {
   auto* model =
@@ -704,6 +726,25 @@ SNLDesign* createNoDataSequentialModel(NLLibrary* library,
       SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
   auto* output =
       SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
+  SNLDesignModeling::addClockToOutputsArcs(clock, {output});
+  return model;
+}
+
+SNLDesign* createResetSetSequentialModel(NLLibrary* library,
+                                         const std::string& name) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* data =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
+  auto* reset =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("R"));
+  auto* set =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("S"));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* output =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
+  SNLDesignModeling::addInputsToClockArcs({data, reset, set}, clock);
   SNLDesignModeling::addClockToOutputsArcs(clock, {output});
   return model;
 }
@@ -820,6 +861,45 @@ SNLDesign* createNoDataSequentialTop(
   topClock->setNet(netClock);
   topOut->setNet(netOut);
 
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("Q")))->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createResetSetSequentialTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topReset =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst"));
+  auto* topSet =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("set"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netReset = SNLScalarNet::create(top, NLName("net_rst"));
+  auto* netSet = SNLScalarNet::create(top, NLName("net_set"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topReset->setNet(netReset);
+  topSet->setNet(netSet);
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("D")))->setNet(netIn);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("R")))->setNet(netReset);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("S")))->setNet(netSet);
   seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
   seq->getInstTerm(sequentialModel->getScalarTerm(NLName("Q")))->setNet(netOut);
 
@@ -1410,11 +1490,162 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantFallsBackWhenBootstrapHasNoCandidates) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.displayNameByKey.emplace(rst0, "rst");
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.displayNameByKey.emplace(rst1, "rst");
+
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, AlignedSignals{}, AlignedSignals{});
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantFallsBackWhenOnlyOneSideHasResetAssignments) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(state0, 3);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.initialStateValueByKey.emplace(state0, false);
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(state1, 4);
+  model1.initialStateValueByKey.emplace(state1, false);
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
+
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, AlignedSignals{}, candidateStates);
+
+  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantCoversBootstrapValuePropagationEdgeCases) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey truth0 = makeSignalKey("truth0");
+  const SignalKey truth1 = makeSignalKey("truth1");
+  const SignalKey invalid0 = makeSignalKey("invalid0");
+  const SignalKey invalid1 = makeSignalKey("invalid1");
+  const SignalKey null0 = makeSignalKey("null0");
+  const SignalKey null1 = makeSignalKey("null1");
+  const SignalKey diff0 = makeSignalKey("diff0");
+  const SignalKey diff1 = makeSignalKey("diff1");
+  const SignalKey shadow0 = makeSignalKey("shadow0");
+  const SignalKey shadow1 = makeSignalKey("shadow1");
+  BoolExpr invalidExpr0;
+  BoolExpr invalidExpr1;
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0, shadow0};
+  model0.stateBits = {truth0, invalid0, null0, diff0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(truth0, 3);
+  model0.inputVarByKey.emplace(invalid0, 4);
+  model0.inputVarByKey.emplace(null0, 5);
+  model0.inputVarByKey.emplace(diff0, 6);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.nextStateExprByStateKey.emplace(
+      truth0,
+      BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::createFalse()));
+  model0.nextStateExprByStateKey.emplace(invalid0, &invalidExpr0);
+  model0.nextStateExprByStateKey.emplace(null0, nullptr);
+  model0.nextStateExprByStateKey.emplace(diff0, BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1, shadow1};
+  model1.stateBits = {truth1, invalid1, null1, diff1};
+  model1.inputVarByKey.emplace(rst1, 10);
+  model1.inputVarByKey.emplace(truth1, 11);
+  model1.inputVarByKey.emplace(invalid1, 12);
+  model1.inputVarByKey.emplace(null1, 13);
+  model1.inputVarByKey.emplace(diff1, 14);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.nextStateExprByStateKey.emplace(
+      truth1,
+      BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::createFalse()));
+  model1.nextStateExprByStateKey.emplace(invalid1, &invalidExpr1);
+  model1.nextStateExprByStateKey.emplace(null1, nullptr);
+  model1.nextStateExprByStateKey.emplace(diff1, BoolExpr::Not(BoolExpr::Var(10)));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"truth", "invalid", "null", "diff"};
+  candidateStates.keys0 = {truth0, invalid0, null0, diff0};
+  candidateStates.keys1 = {truth1, invalid1, null1, diff1};
+
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, alignedInputs, candidateStates);
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  EXPECT_TRUE(invariant.bootstrapValues0.at(truth0));
+  EXPECT_TRUE(invariant.bootstrapValues1.at(truth1));
+  EXPECT_TRUE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "truth") != invariant.anchoredStateEqualities.names.end());
+  EXPECT_TRUE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "diff") == invariant.anchoredStateEqualities.names.end());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BoolExprRemapThrowsOnMissingVariableMapping) {
   auto* expr = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
 
   EXPECT_THROW(
       static_cast<void>(remapBoolExprVariables(expr, {{2, 10}})),
+      std::runtime_error);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BoolExprHelpersCoverNullXorAndInvalidOperators) {
+  EXPECT_EQ(remapBoolExprVariables(nullptr, {}), nullptr);
+  EXPECT_EQ(substituteBoolExprVariables(nullptr, {}), nullptr);
+
+  BoolExpr invalid;
+  EXPECT_THROW(
+      static_cast<void>(remapBoolExprVariables(&invalid, {})),
+      std::runtime_error);
+
+  auto* xorExpr = BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::Var(3));
+  auto* substituted =
+      substituteBoolExprVariables(xorExpr, {{2, true}, {3, false}});
+  EXPECT_TRUE(substituted->evaluate({}));
+
+  EXPECT_THROW(
+      static_cast<void>(substituteBoolExprVariables(&invalid, {})),
       std::runtime_error);
 }
 
@@ -1426,6 +1657,45 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(substituted->evaluate({}));
   EXPECT_EQ(substituted->getOp(), KEPLER_FORMAL::Op::VAR);
   EXPECT_EQ(substituted->getId(), 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SatEncodingHelpersCoverConstantCachingAndErrorBranches) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  FrameVariableStore variables(solver, {2, 3}, 2);
+
+  EXPECT_THROW(
+      static_cast<void>(variables.getLiteral(99, 0)),
+      std::runtime_error);
+  EXPECT_THROW(
+      static_cast<void>(variables.makeLeafLits(3)),
+      std::runtime_error);
+
+  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
+  EXPECT_THROW(static_cast<void>(encoder.encode(nullptr)), std::invalid_argument);
+  EXPECT_THROW(
+      static_cast<void>(encoder.encode(BoolExpr::Var(99))),
+      std::runtime_error);
+
+  BoolExpr invalid;
+  EXPECT_THROW(static_cast<void>(encoder.encode(&invalid)), std::runtime_error);
+
+  const int trueLit = encoder.encode(BoolExpr::createTrue());
+  EXPECT_EQ(trueLit, encoder.encode(BoolExpr::createTrue()));
+
+  addSimplePathConstraint(solver, variables, {}, 2);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SatSolverWrapperGetLiteralValueHandlesConstantsUnknownModelsAndErrors) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
+  const int symbol = solver.newVar() + 2;
+  EXPECT_TRUE(solver.solve());
+
+  EXPECT_FALSE(solver.getLiteralValue(0));
+  EXPECT_TRUE(solver.getLiteralValue(1));
+  EXPECT_FALSE(solver.getLiteralValue(symbol));
+  EXPECT_THROW(static_cast<void>(solver.getLiteralValue(-1)), std::runtime_error);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -1510,6 +1780,61 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ASSERT_EQ(witness->inputTrace[0].assignments.size(), 2u);
   EXPECT_EQ(witness->inputTrace[0].assignments[0].signal, "rst");
   EXPECT_FALSE(witness->inputTrace[0].assignments[0].value);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverPartialInitWithoutStateRelationUsesObservationFallback) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"in"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {2};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::Var(2)}};
+  problem.transitions1 = {{4, BoolExpr::createFalse()}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(3));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 2;
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverPartialInitWithStateRelationKeepsFrameZeroAligned) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"in"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {2};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::Var(2)}};
+  problem.transitions1 = {{4, BoolExpr::createFalse()}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(3));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 2;
+  problem.initialStateEqualityPairs = {{3, 4}};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -1601,6 +1926,30 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto interpolant = engine.deriveOneStepReachableStateInvariant(4);
 
   EXPECT_FALSE(interpolant.has_value());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ExactInterpolationEngineUsesBootstrapAssignmentsAndComplementedStatePairs) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.allSymbols = {2, 3};
+  problem.resetBootstrapCycles = 1;
+  problem.bootstrapStateAssignments = {{2, false}, {3, true}};
+  problem.complementedStatePairs0 = {{2, 3}};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(3, BoolExpr::createTrue());
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ExactInterpolationEngine engine(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto interpolant = engine.deriveOneStepReachableStateInvariant(4);
+
+  ASSERT_TRUE(interpolant.has_value());
+  EXPECT_TRUE((*interpolant)->evaluate({{2, false}, {3, true}}));
+  EXPECT_FALSE((*interpolant)->evaluate({{2, true}, {3, false}}));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -1709,6 +2058,64 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       IC3EngineUsesBootstrapAssignmentsAndComplementedStatePairs) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.allSymbols = {2, 3};
+  problem.resetBootstrapCycles = 1;
+  problem.bootstrapStateAssignments = {{2, false}, {3, true}};
+  problem.complementedStatePairs0 = {{2, 3}};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(3, BoolExpr::createTrue());
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  IC3Engine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2, 4);
+
+  EXPECT_EQ(result.status, IC3Status::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       IC3EngineReportsRecursiveCounterexampleDepth) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3, 4};
+  problem.allSymbols = {2, 3, 4};
+  problem.transitions0.emplace_back(2, BoolExpr::Var(3));
+  problem.transitions0.emplace_back(3, BoolExpr::Var(4));
+  problem.transitions0.emplace_back(
+      4,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(2)),
+          BoolExpr::And(
+              BoolExpr::Not(BoolExpr::Var(3)),
+              BoolExpr::Not(BoolExpr::Var(4)))));
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(2)),
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(3)),
+          BoolExpr::Not(BoolExpr::Var(4))));
+  problem.initializedStateCount = 3;
+  problem.totalStateCount = 3;
+  problem.bad = BoolExpr::And(
+      BoolExpr::Var(2),
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(3)),
+          BoolExpr::Not(BoolExpr::Var(4))));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  IC3Engine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(4, 4);
+
+  EXPECT_EQ(result.status, IC3Status::Different);
+  EXPECT_GE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        InductionStepSolverUsesExplicitInvariantWhenProvided) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -1724,6 +2131,20 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_TRUE(
       provesByInduction(problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionEngineCombinationalProblemReturnsImmediately) {
+  KInductionProblem problem;
+  problem.allSymbols = {2};
+  problem.property = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_EQ(result.bound, 0u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -1762,6 +2183,90 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_FALSE(model.hasUnsupportedFeatures());
   EXPECT_EQ(model.initialStateValueByKey.size(), model.stateBits.size());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralStateInvariantRefinesConstantsUnknownVarsAndInvalidNodes) {
+  const SignalKey a0 = makeSignalKey("a0");
+  const SignalKey b0 = makeSignalKey("b0");
+  const SignalKey c0 = makeSignalKey("c0");
+  const SignalKey a1 = makeSignalKey("a1");
+  const SignalKey b1 = makeSignalKey("b1");
+  const SignalKey c1 = makeSignalKey("c1");
+  BoolExpr invalid0;
+  BoolExpr invalid1;
+
+  SequentialDesignModel model0;
+  model0.stateBits = {a0, b0, c0};
+  model0.inputVarByKey.emplace(a0, 2);
+  model0.inputVarByKey.emplace(b0, 3);
+  model0.inputVarByKey.emplace(c0, 4);
+  model0.initialStateValueByKey.emplace(a0, false);
+  model0.initialStateValueByKey.emplace(b0, true);
+  model0.initialStateValueByKey.emplace(c0, false);
+  model0.nextStateExprByStateKey.emplace(a0, BoolExpr::createFalse());
+  model0.nextStateExprByStateKey.emplace(b0, BoolExpr::Var(99));
+  model0.nextStateExprByStateKey.emplace(c0, &invalid0);
+  model0.complementedStateRelations.push_back({a0, b0});
+
+  SequentialDesignModel model1;
+  model1.stateBits = {b1, c1, a1};
+  model1.inputVarByKey.emplace(a1, 5);
+  model1.inputVarByKey.emplace(b1, 6);
+  model1.inputVarByKey.emplace(c1, 7);
+  model1.initialStateValueByKey.emplace(a1, false);
+  model1.initialStateValueByKey.emplace(b1, true);
+  model1.initialStateValueByKey.emplace(c1, false);
+  model1.nextStateExprByStateKey.emplace(a1, BoolExpr::createFalse());
+  model1.nextStateExprByStateKey.emplace(b1, BoolExpr::Var(123));
+  model1.nextStateExprByStateKey.emplace(c1, &invalid1);
+  model1.complementedStateRelations.push_back({a1, b1});
+
+  const auto aligned = inferStructurallyEquivalentStatePairs(
+      model0, model1, AlignedSignals{});
+
+  EXPECT_EQ(aligned.names.size(), 3u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralStateInvariantReturnsEmptyWhenOneSideHasNoState) {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model1.stateBits = {makeSignalKey("s1")};
+  model1.inputVarByKey.emplace(model1.stateBits.front(), 2);
+  model1.nextStateExprByStateKey.emplace(model1.stateBits.front(), BoolExpr::createFalse());
+
+  const auto aligned = inferStructurallyEquivalentStatePairs(
+      model0, model1, AlignedSignals{});
+
+  EXPECT_TRUE(aligned.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralStateInvariantHandlesNullNextStateExpressions) {
+  const SignalKey null0 = makeSignalKey("null0");
+  const SignalKey false0 = makeSignalKey("false0");
+  const SignalKey null1 = makeSignalKey("null1");
+  const SignalKey false1 = makeSignalKey("false1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {null0, false0};
+  model0.inputVarByKey.emplace(null0, 2);
+  model0.inputVarByKey.emplace(false0, 3);
+  model0.nextStateExprByStateKey.emplace(null0, nullptr);
+  model0.nextStateExprByStateKey.emplace(false0, BoolExpr::createFalse());
+
+  SequentialDesignModel model1;
+  model1.stateBits = {false1, null1};
+  model1.inputVarByKey.emplace(false1, 4);
+  model1.inputVarByKey.emplace(null1, 5);
+  model1.nextStateExprByStateKey.emplace(false1, BoolExpr::createFalse());
+  model1.nextStateExprByStateKey.emplace(null1, nullptr);
+
+  const auto aligned = inferStructurallyEquivalentStatePairs(
+      model0, model1, AlignedSignals{});
+
+  EXPECT_EQ(aligned.names.size(), 2u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -1861,6 +2366,26 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractRejectsMultipleControlStyles) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createResetSetSequentialModel(primitives, "SEQ_RST_SET");
+  auto* top = createResetSetSequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_TRUE(extracted.hasUnsupportedFeatures());
+  ASSERT_FALSE(extracted.unsupportedReasons.empty());
+  EXPECT_NE(
+      extracted.unsupportedReasons.front().find("multiple control styles"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractMirrorsComplementedInitialStateValue) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -1902,6 +2427,28 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       extracted.unsupportedReasons.front().find("multiple state outputs"),
       std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractFindsPrimaryStateOutputWhenComplementAppearsFirst) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createComplementFirstSequentialModel(
+      primitives, "DFF_STATEN_STATE", "STATE", "STATEN");
+  auto* top = createSequentialOutputPairTop(
+      library, "top", model, "STATE", "STATEN");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  ASSERT_EQ(extracted.complementedStateRelations.size(), 1u);
+  EXPECT_EQ(
+      extracted.complementedStateRelations.front().primaryKey,
+      extracted.stateBits.front());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -1958,6 +2505,25 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.bound, 2u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ZeroBoundFallsBackToIc3ForEquivalentSequentialDesigns) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createDffTop(library, "top0", invModel, false, false);
+  auto* top1 = createDffTop(library, "top1", invModel, false, false);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(0);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.bound, 0u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -47,6 +47,15 @@ std::filesystem::path writeTempConfig(const std::string& contents) {
   return cfgPath;
 }
 
+std::filesystem::path makeUniqueTempDir(const std::string& prefix) {
+  const auto uniqueName =
+      prefix + "_" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto dir = std::filesystem::temp_directory_path() / uniqueName;
+  std::filesystem::create_directories(dir);
+  return dir;
+}
+
 int runWithConfigFile(const std::filesystem::path& cfgPath) {
   std::string argv0 = "kepler-formal";
   std::string argv1 = "--config";
@@ -54,6 +63,15 @@ int runWithConfigFile(const std::filesystem::path& cfgPath) {
   char* argv[] = {argv0.data(), argv1.data(), argv2.data()};
   int argc = 3;
   return KeplerFormalMain(argc, argv);
+}
+
+int runWithArgs(std::vector<std::string> args) {
+  std::vector<char*> argv;
+  argv.reserve(args.size());
+  for (auto& arg : args) {
+    argv.push_back(arg.data());
+  }
+  return KeplerFormalMain(static_cast<int>(argv.size()), argv.data());
 }
 
 std::filesystem::path findBuiltNajaModuleDir() {
@@ -78,9 +96,7 @@ struct MultiFileVerilogFixture {
 
 MultiFileVerilogFixture createVerilogPreprocessingFixture(bool enablePreprocessing) {
   MultiFileVerilogFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_preproc_v";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_preproc_v");
 
   const auto design0Aux = fixture.tmpDir / "design0_aux.v";
   const auto design0Top = fixture.tmpDir / "design0_top.v";
@@ -143,9 +159,7 @@ MultiFileVerilogFixture createVerilogPreprocessingFixture(bool enablePreprocessi
 
 MultiFileVerilogFixture createDefaultNettypeDirectiveFixture(bool enablePreprocessing) {
   MultiFileVerilogFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_default_nettype_v";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_default_nettype_v");
 
   const auto design0 = fixture.tmpDir / "design0.v";
   const auto design1 = fixture.tmpDir / "design1.v";
@@ -310,9 +324,7 @@ std::vector<std::filesystem::path> listMiterLogsInCurrentDirectory() {
 
 MultiFileVerilogFixture createMultiFileVerilogFixture() {
   MultiFileVerilogFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_multi_v";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_multi_v");
 
   const auto design0Leaf = fixture.tmpDir / "design0_leaf.v";
   const auto design0Top = fixture.tmpDir / "design0_top.v";
@@ -383,9 +395,7 @@ SimpleCliFixture createDesignFixture(const std::string& extension,
                                      const std::string& design0Body,
                                      const std::string& design1Body) {
   SimpleCliFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_simple";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_simple");
 
   fixture.design0Path = fixture.tmpDir / ("design0." + extension);
   fixture.design1Path = fixture.tmpDir / ("design1." + extension);
@@ -425,9 +435,7 @@ std::string readFileContents(const std::filesystem::path& path) {
 
 SystemVerilogFlistFixture createSystemVerilogFlistFixture() {
   SystemVerilogFlistFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_sv_flist";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_sv_flist");
 
   fixture.design0ChildPath = fixture.tmpDir / "design0_child.sv";
   fixture.design0TopPath = fixture.tmpDir / "design0_top.sv";
@@ -483,9 +491,7 @@ void cleanupNajaTestState() {
 
 ScopedNajaIfFixture createEquivalentScopedNajaIfFixture() {
   ScopedNajaIfFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_scope_if";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_scope_if");
   fixture.design0IfPath = fixture.tmpDir / "design0.capnp";
   fixture.design1IfPath = fixture.tmpDir / "design1.capnp";
   fixture.libertyPath = repoRoot() / "example" / "NangateOpenCellLibrary_typical.lib";
@@ -551,9 +557,7 @@ SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture(
     const std::string& ffName0 = "ff0",
     const std::string& ffName1 = "ff0") {
   SequentialNajaIfFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_seq_if";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_seq_if");
   fixture.design0IfPath = fixture.tmpDir / "design0.capnp";
   fixture.design1IfPath = fixture.tmpDir / "design1.capnp";
 
@@ -594,9 +598,7 @@ SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture(
 
 SequentialNajaIfFixture createDifferentSequentialNajaIfFixture() {
   SequentialNajaIfFixture fixture;
-  fixture.tmpDir =
-      std::filesystem::temp_directory_path() / "kepler_formal_cli_seq_if_diff";
-  std::filesystem::create_directories(fixture.tmpDir);
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_seq_if_diff");
   fixture.design0IfPath = fixture.tmpDir / "design0.capnp";
   fixture.design1IfPath = fixture.tmpDir / "design1.capnp";
 
@@ -1546,6 +1548,58 @@ TEST(KeplerFormalCliTests, ConfigInvalidVerificationModeFails) {
   std::filesystem::remove(cfgPath);
 }
 
+TEST(KeplerFormalCliTests, ConfigExplicitLecVerificationAccepted) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "verification: LEC\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigVerificationMustBeScalar) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "verification:\n"
+      "  - SEC\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigMaxKMustBeScalar) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "verification: SEC\n"
+      "max_k:\n"
+      "  - 4\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigInvalidMaxKTokenFails) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: nope\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigMaxKWithoutSecFails) {
   const auto fixture = createEquivalentDesignFixture(
       "v",
@@ -1739,6 +1793,116 @@ TEST(KeplerFormalCliTests, ConfigSecRejectsCompactMode) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, ConfigSecRejectsScopeExtraction) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 4\n"
+      "use_scopes: true\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecRejectsCnfExport) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 4\n"
+      "cnf_export: true\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecRejectsSkippedPoReporting) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 4\n"
+      "report_skipped_pos: true\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(\n"
+      "    input logic clk,\n"
+      "    input logic rst,\n"
+      "    input logic d,\n"
+      "    output logic q\n"
+      ");\n"
+      "  always_ff @(posedge clk)\n"
+      "  if (rst) begin\n"
+      "    q <= 1'b0;\n"
+      "  end else begin\n"
+      "    q <= d;\n"
+      "  end\n"
+      "endmodule\n");
+  const auto blockedParent = fixture.tmpDir / "blocked_parent";
+  {
+    std::ofstream blocked(blockedParent);
+    blocked << "not a directory\n";
+  }
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: SEC\n"
+      "max_k: 4\n"
+      "log_file: " + (blockedParent / "sec.log").string() + "\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecContinuesWhenLogFilePathIsDirectory) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(\n"
+      "    input logic clk,\n"
+      "    input logic rst,\n"
+      "    input logic d,\n"
+      "    output logic q\n"
+      ");\n"
+      "  always_ff @(posedge clk)\n"
+      "  if (rst) begin\n"
+      "    q <= 1'b0;\n"
+      "  end else begin\n"
+      "    q <= d;\n"
+      "  end\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: SEC\n"
+      "max_k: 4\n"
+      "log_file: " + fixture.tmpDir.string() + "\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, CliSecVerificationAcceptedBeforeFormat) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
 
@@ -1756,6 +1920,68 @@ TEST(KeplerFormalCliTests, CliSecVerificationAcceptedBeforeFormat) {
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
   std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliExplicitLecVerificationAcceptedBeforeFormat) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-v",
+                   "LEC",
+                   "-verilog",
+                   fixture.design0Path.string(),
+                   fixture.design1Path.string()}),
+      EXIT_SUCCESS);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliMissingVerificationBeforeFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-v"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliInvalidVerificationBeforeFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-v", "BAD"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliMissingMaxKBeforeFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-k"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliInvalidMaxKBeforeFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-k", "-1"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliUnrecognizedOptionBeforeFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "--mystery"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliMissingInputFormatAfterPreOptionsFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-v", "SEC", "-k", "4"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliMissingVerificationAfterFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-verilog", "--verification"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliInvalidVerificationAfterFormatFails) {
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal", "-verilog", "--verification", "BAD"}),
+      EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliMissingMaxKAfterFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-verilog", "--max-k"}), EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliInvalidMaxKAfterFormatFails) {
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal", "-verilog", "--max-k", "oops"}),
+      EXIT_FAILURE);
 }
 
 TEST(KeplerFormalCliTests, CliLibertyFlagCollectsPaths) {
