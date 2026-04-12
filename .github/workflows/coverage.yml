@@ -80,11 +80,14 @@ jobs:
         ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_sec.yaml > tinyrocket_self_sec.out 2>&1
         grep "SEC proved equivalence at k = 1" tinyrocket_self_sec.out
 
-    - name: lcov
+    - name: Generate coverage report
       working-directory: ${{github.workspace}}/build
       run: |
-           lcov --directory . --capture --output-file coverage.info
-           lcov --remove coverage.info --output-file coverage.info '/usr/*' '*/test/*' '*/kepler-formal/thirdparty/*'
+           python3 ../tools/generate_coverage_report.py \
+             --build-dir . \
+             --root .. \
+             --output coverage.info \
+             --verbose
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4

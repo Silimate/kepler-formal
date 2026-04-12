@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <optional>
+
 #include "BoolExprCache.h"
 #include "DNL.h"
 #include "NLDB0.h"
@@ -37,6 +40,29 @@ class SequentialEquivalenceStrategyTests : public ::testing::Test {
     }
     KEPLER_FORMAL::BoolExprCache::destroy();
   }
+};
+
+class ScopedEnvVar {
+ public:
+  ScopedEnvVar(const char* name, const char* value)
+      : name_(name) {
+    if (const char* current = std::getenv(name_); current != nullptr) {
+      previousValue_ = current;
+    }
+    setenv(name_, value, 1);
+  }
+
+  ~ScopedEnvVar() {
+    if (previousValue_.has_value()) {
+      setenv(name_, previousValue_->c_str(), 1);
+    } else {
+      unsetenv(name_);
+    }
+  }
+
+ private:
+  const char* name_;
+  std::optional<std::string> previousValue_;
 };
 
 SignalKey makeSignalKey(const std::string& name) {
@@ -633,6 +659,211 @@ SNLDesign* createDffQnModel(NLLibrary* library) {
   return model;
 }
 
+SNLDesign* createNamedComplementSequentialModel(
+    NLLibrary* library,
+    const std::string& name,
+    const std::string& primaryPinName,
+    const std::string& complementPinName) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* data =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* primary = SNLScalarTerm::create(
+      model, SNLTerm::Direction::Output, NLName(primaryPinName));
+  auto* complement = SNLScalarTerm::create(
+      model, SNLTerm::Direction::Output, NLName(complementPinName));
+  SNLDesignModeling::addInputsToClockArcs({data}, clock);
+  SNLDesignModeling::addClockToOutputsArcs(clock, {primary, complement});
+  return model;
+}
+
+SNLDesign* createSetOnlySequentialModel(NLLibrary* library,
+                                        const std::string& name) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* data =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
+  auto* set =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("S"));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* output =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
+  SNLDesignModeling::addInputsToClockArcs({data, set}, clock);
+  SNLDesignModeling::addClockToOutputsArcs(clock, {output});
+  return model;
+}
+
+SNLDesign* createNoDataSequentialModel(NLLibrary* library,
+                                       const std::string& name) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* output =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
+  SNLDesignModeling::addClockToOutputsArcs(clock, {output});
+  return model;
+}
+
+SNLDesign* createNamedComplementSetSequentialModel(
+    NLLibrary* library,
+    const std::string& name,
+    const std::string& primaryPinName,
+    const std::string& complementPinName) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* data =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
+  auto* set =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("S"));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* primary = SNLScalarTerm::create(
+      model, SNLTerm::Direction::Output, NLName(primaryPinName));
+  auto* complement = SNLScalarTerm::create(
+      model, SNLTerm::Direction::Output, NLName(complementPinName));
+  SNLDesignModeling::addInputsToClockArcs({data, set}, clock);
+  SNLDesignModeling::addClockToOutputsArcs(clock, {primary, complement});
+  return model;
+}
+
+SNLDesign* createSequentialOutputPairTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel,
+    const std::string& primaryPinName,
+    const std::string& secondaryPinName) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topPrimary =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out_primary"));
+  auto* topSecondary = SNLScalarTerm::create(
+      top, SNLTerm::Direction::Output, NLName("out_secondary"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netPrimary = SNLScalarNet::create(top, NLName("net_primary"));
+  auto* netSecondary = SNLScalarNet::create(top, NLName("net_secondary"));
+
+  topIn->setNet(netIn);
+  topClock->setNet(netClock);
+  topPrimary->setNet(netPrimary);
+  topSecondary->setNet(netSecondary);
+
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("D")))->setNet(netIn);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName(primaryPinName)))->setNet(
+      netPrimary);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName(secondaryPinName)))->setNet(
+      netSecondary);
+
+  return top;
+}
+
+SNLDesign* createSetOnlySequentialTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topSet =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("set"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netSet = SNLScalarNet::create(top, NLName("net_set"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topSet->setNet(netSet);
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("D")))->setNet(netIn);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("S")))->setNet(netSet);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("Q")))->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createNoDataSequentialTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("Q")))->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createDffreTop(
+    NLLibrary* library,
+    const std::string& name) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topEnable =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("en"));
+  auto* topReset =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* ff = SNLInstance::create(top, NLDB0::getDFFRE(), NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netEnable = SNLScalarNet::create(top, NLName("net_en"));
+  auto* netReset = SNLScalarNet::create(top, NLName("net_rst"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topEnable->setNet(netEnable);
+  topReset->setNet(netReset);
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  ff->getInstTerm(NLDB0::getDFFREData())->setNet(netIn);
+  ff->getInstTerm(NLDB0::getDFFREEnable())->setNet(netEnable);
+  ff->getInstTerm(NLDB0::getDFFREReset())->setNet(netReset);
+  ff->getInstTerm(NLDB0::getDFFREClock())->setNet(netClock);
+  ff->getInstTerm(NLDB0::getDFFREOutput())->setNet(netOut);
+
+  return top;
+}
+
 SNLDesign* createComplementedOutputTop(
     NLLibrary* library,
     const std::string& name,
@@ -1121,6 +1352,64 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantBootstrapRecoversEqualitiesAfterMismatchedInitialValues) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+  const SignalKey shadow0 = makeSignalKey("shadow0");
+  const SignalKey shadow1 = makeSignalKey("shadow1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {state0, shadow0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(state0, 3);
+  model0.inputVarByKey.emplace(shadow0, 6);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.initialStateValueByKey.emplace(state0, false);
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
+  model0.nextStateExprByStateKey.emplace(shadow0, BoolExpr::Var(6));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {state1, shadow1};
+  model1.inputVarByKey.emplace(rst1, 4);
+  model1.inputVarByKey.emplace(state1, 5);
+  model1.inputVarByKey.emplace(shadow1, 7);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.initialStateValueByKey.emplace(state1, true);
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(4)));
+  model1.nextStateExprByStateKey.emplace(shadow1, BoolExpr::Var(7));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
+
+  ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, alignedInputs, candidateStates, true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  EXPECT_TRUE(invariant.initialStateCorrespondence.names.empty());
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
+  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state");
+  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
+  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
+  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
+  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
+  EXPECT_NE(stderrOutput.find("SEC diag: bootstrap step 1"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BoolExprRemapThrowsOnMissingVariableMapping) {
   auto* expr = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
 
@@ -1476,6 +1765,146 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSupportsGenericComplementedStateNames) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createNamedComplementSequentialModel(
+      primitives, "DFF_STATE_STATEN", "STATE", "STATEN");
+  auto* top = createSequentialOutputPairTop(
+      library, "top", model, "STATE", "STATEN");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  ASSERT_EQ(extracted.complementedStateRelations.size(), 1u);
+  EXPECT_EQ(
+      extracted.complementedStateRelations.front().primaryKey,
+      extracted.stateBits.front());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSupportsSetHighInitialState) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createSetOnlySequentialModel(primitives, "DFF_SET");
+  auto* top = createSetOnlySequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  ASSERT_EQ(extracted.stateBits.size(), 1u);
+  EXPECT_TRUE(extracted.initialStateValueByKey.at(extracted.stateBits.front()));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSupportsResetHighInitialState) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = createDffreTop(library, "top");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  ASSERT_EQ(extracted.stateBits.size(), 1u);
+  EXPECT_FALSE(extracted.initialStateValueByKey.at(extracted.stateBits.front()));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractRejectsNullTop) {
+  EXPECT_THROW(
+      static_cast<void>(SequentialDesignModel::extract(nullptr)),
+      std::invalid_argument);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractRejectsMissingUniverse) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top = createDffTop(library, "top", invModel, false, false);
+  NLUniverse::get()->destroy();
+
+  EXPECT_THROW(
+      static_cast<void>(SequentialDesignModel::extract(top)),
+      std::runtime_error);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractReportsUnsupportedSequentialWithoutDInput) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createNoDataSequentialModel(primitives, "SEQ_NO_D");
+  auto* top = createNoDataSequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_TRUE(extracted.hasUnsupportedFeatures());
+  EXPECT_FALSE(extracted.unsupportedReasons.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractMirrorsComplementedInitialStateValue) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createNamedComplementSetSequentialModel(
+      primitives, "DFF_STATE_SET", "STATE", "STATEN");
+  auto* top = createSequentialOutputPairTop(
+      library, "top", model, "STATE", "STATEN");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  ASSERT_EQ(extracted.stateBits.size(), 2u);
+  ASSERT_EQ(extracted.initialStateValueByKey.size(), 2u);
+  const auto& relation = extracted.complementedStateRelations.front();
+  EXPECT_TRUE(extracted.initialStateValueByKey.at(relation.primaryKey));
+  EXPECT_FALSE(extracted.initialStateValueByKey.at(relation.complementedKey));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractReportsUnsupportedNonComplementedStateOutput) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createNamedComplementSequentialModel(
+      primitives, "DFF_STATE_ALT", "STATE", "ALT");
+  auto* top = createSequentialOutputPairTop(
+      library, "top", model, "STATE", "ALT");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_TRUE(extracted.hasUnsupportedFeatures());
+  ASSERT_FALSE(extracted.unsupportedReasons.empty());
+  EXPECT_NE(
+      extracted.unsupportedReasons.front().find("multiple state outputs"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        MismatchedObservedOutputNamesAreReportedAsUnsupported) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -1529,6 +1958,92 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.bound, 2u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DifferentResultIncludesCounterexampleTracebackDetails) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createDffTop(library, "top0", invModel, false, false);
+  auto* top1 = createDffTop(library, "top1", invModel, true, false);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(3);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_NE(result.reason.find("Input trace:"), std::string::npos);
+  EXPECT_NE(
+      result.reason.find("Observed output mismatches at cycle"),
+      std::string::npos);
+  EXPECT_NE(
+      result.reason.find("Traceback for first differing point"),
+      std::string::npos);
+  EXPECT_NE(
+      result.reason.find("design0 cone to environment inputs"),
+      std::string::npos);
+  EXPECT_NE(result.reason.find("cone terms only in design1"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       UnsupportedReasonsFromBothDesignsAreJoined) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* unsupportedModel = createNamedComplementSequentialModel(
+      primitives, "DFF_STATE_ALT", "STATE", "ALT");
+  auto* top0 = createSequentialOutputPairTop(
+      library, "top0", unsupportedModel, "STATE", "ALT");
+  auto* top1 = createSequentialOutputPairTop(
+      library, "top1", unsupportedModel, "STATE", "ALT");
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(result.reason.find(" | "), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DiagnosticModePrintsStrategyAndExtractionProgress) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createDffTop(library, "top0", invModel, false, false);
+  auto* top1 = createDffTop(library, "top1", invModel, false, false);
+
+  ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(3);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_NE(stderrOutput.find("SEC diag: start run"), std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: extract(top0) collect begin"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: remapped next-state formulas"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: entering k-induction engine"),
+      std::string::npos);
+  EXPECT_NE(stdoutOutput.find("SEC diag: aligned_inputs="), std::string::npos);
+  EXPECT_NE(stdoutOutput.find("SEC diag: property_is_true="), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
