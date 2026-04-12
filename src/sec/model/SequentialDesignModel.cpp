@@ -871,4 +871,43 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   return model;
 }
 
+namespace detail {
+
+// Keep the branch-heavy sequential extraction helpers directly testable without
+// changing the production SEC flow.
+BoolExpr* buildNextStateExprForTest(
+    size_t stateTermID,
+    const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs,
+    const std::vector<size_t>& termDNLID2varID,
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
+  PendingTransition pending;
+  pending.stateTermID = stateTermID;
+  pending.pinTermIDs = pinTermIDs;
+  return buildNextStateExpr(pending, termDNLID2varID, outputExprByTerm);
+}
+
+std::optional<bool> detectInitialStateValueForTest(
+    const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs) {
+  PendingTransition pending;
+  pending.pinTermIDs = pinTermIDs;
+  return detectInitialStateValue(pending);
+}
+
+std::optional<bool> evaluateConstantUnderAssignmentsForTest(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& assignments) {
+  std::unordered_map<BoolExpr*, std::optional<bool>> memo;
+  return evaluateConstantUnderAssignments(expr, assignments, memo);
+}
+
+void inferSynthesizedResetInitialStateValuesForTest(SequentialDesignModel& model) {
+  inferSynthesizedResetInitialStateValues(model);
+}
+
+std::optional<bool> getResetAssertionValueForTest(const std::string& displayName) {
+  return getResetAssertionValue(displayName);
+}
+
+}  // namespace detail
+
 }  // namespace KEPLER_FORMAL::SEC

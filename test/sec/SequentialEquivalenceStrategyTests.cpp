@@ -31,6 +31,64 @@ using namespace naja::NL;
 using namespace KEPLER_FORMAL::SEC;
 using KEPLER_FORMAL::BoolExpr;
 
+namespace KEPLER_FORMAL::SEC::detail {
+
+BoolExpr* buildNextStateExprForTest(
+    size_t stateTermID,
+    const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs,
+    const std::vector<size_t>& termDNLID2varID,
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm);
+
+std::optional<bool> detectInitialStateValueForTest(
+    const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs);
+
+std::optional<bool> evaluateConstantUnderAssignmentsForTest(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& assignments);
+
+void inferSynthesizedResetInitialStateValuesForTest(SequentialDesignModel& model);
+
+std::optional<bool> getResetAssertionValueForTest(const std::string& displayName);
+
+std::unordered_map<SignalKey, bool, SignalKeyHash>
+deriveResetBootstrapStateValuesForTest(
+    const SequentialDesignModel& model,
+    size_t cycles);
+
+AlignedSignals filterStateEqualitiesByInitialValueForTest(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& candidateStates);
+
+std::string formatStringListForTest(const std::vector<std::string>& values,
+                                    size_t limit);
+
+std::string formatConeLevelsForTest(
+    const std::vector<std::vector<std::string>>& levels);
+
+std::string formatCounterexampleWitnessForTest(
+    const KInductionResult& result,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1);
+
+AlignedSignals alignSignalsByNameForTest(
+    const std::vector<SignalKey>& keys0,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames0,
+    const std::vector<SignalKey>& keys1,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames1,
+    const char* label);
+
+SignalKey getTerminalPathKeyForTest(
+    const naja::DNL::DNLTerminalFull& terminal);
+
+std::optional<naja::DNL::DNLID> findTermByKeyForTest(
+    naja::DNL::DNLFull* dnl,
+    const SignalKey& key);
+
+}  // namespace KEPLER_FORMAL::SEC::detail
+
 namespace {
 
 class SequentialEquivalenceStrategyTests : public ::testing::Test {
@@ -208,6 +266,72 @@ SNLDesign* createNamedInputDffTop(
     const std::string& inputName) {
   return createDffTop(
       library, name, invModel, false, false, inputName, "out", "ff0");
+}
+
+SNLDesign* createExtraOutputDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* invModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  auto* topExtra =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out_extra"));
+
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+  auto* extraInv = SNLInstance::create(top, invModel, NLName("inv_extra"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
+  auto* netExtra = SNLScalarNet::create(top, NLName("net_extra"));
+
+  topIn->setNet(netIn);
+  topClock->setNet(netClock);
+  topOut->setNet(netQ);
+  topExtra->setNet(netExtra);
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netIn);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
+  extraInv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netQ);
+  extraInv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netExtra);
+
+  return top;
+}
+
+SNLDesign* createExtraInputDffTop(
+    NLLibrary* library,
+    const std::string& name) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topExtra =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in_extra"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netExtra = SNLScalarNet::create(top, NLName("net_extra"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
+
+  topIn->setNet(netIn);
+  topExtra->setNet(netExtra);
+  topClock->setNet(netClock);
+  topOut->setNet(netQ);
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netIn);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
+
+  return top;
 }
 
 SNLDesign* createDffeTop(
@@ -867,6 +991,28 @@ SNLDesign* createNoDataSequentialTop(
   return top;
 }
 
+SNLDesign* createCombinationalInvTop(NLLibrary* library,
+                                     const std::string& name,
+                                     SNLDesign* invModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* inv = SNLInstance::create(top, invModel, NLName("inv0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topOut->setNet(netOut);
+  inv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netIn);
+  inv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netOut);
+
+  return top;
+}
+
 SNLDesign* createResetSetSequentialTop(
     NLLibrary* library,
     const std::string& name,
@@ -997,6 +1143,16 @@ SNLDesign* createComplementedOutputTop(
   }
 
   return top;
+}
+
+SignalKey findKeyByDisplayName(const SequentialDesignModel& model,
+                               const std::string& displayName) {
+  for (const auto& [key, currentName] : model.displayNameByKey) {
+    if (currentName == displayName) {
+      return key;
+    }
+  }
+  throw std::runtime_error("Missing display name in extracted model: " + displayName);
 }
 
 }  // namespace
@@ -1489,136 +1645,234 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(stderrOutput.find("SEC diag: bootstrap step 1"), std::string::npos);
 }
 
-// TEST_F(SequentialEquivalenceStrategyTests,
-//        ReachableStateInvariantFallsBackWhenBootstrapHasNoCandidates) {
-//   const SignalKey rst0 = makeSignalKey("rst0");
-//   const SignalKey rst1 = makeSignalKey("rst1");
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantFallsBackWhenBootstrapHasNoCandidates) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
 
-//   SequentialDesignModel model0;
-//   model0.environmentInputs = {rst0};
-//   model0.inputVarByKey.emplace(rst0, 2);
-//   model0.displayNameByKey.emplace(rst0, "rst");
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(state0, 4);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
 
-//   SequentialDesignModel model1;
-//   model1.environmentInputs = {rst1};
-//   model1.inputVarByKey.emplace(rst1, 3);
-//   model1.displayNameByKey.emplace(rst1, "rst");
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(state1, 5);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
 
-//   const auto invariant = buildReachableStateInvariant(
-//       model0, model1, AlignedSignals{}, AlignedSignals{});
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, AlignedSignals{}, AlignedSignals{});
 
-//   EXPECT_EQ(invariant.bootstrapCycles, 3u);
-//   EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-// }
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
+  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
+  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
+  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
+}
 
-// TEST_F(SequentialEquivalenceStrategyTests,
-//        ReachableStateInvariantFallsBackWhenOnlyOneSideHasResetAssignments) {
-//   const SignalKey rst0 = makeSignalKey("rst0");
-//   const SignalKey rst1 = makeSignalKey("rst1");
-//   const SignalKey state0 = makeSignalKey("state0");
-//   const SignalKey state1 = makeSignalKey("state1");
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantFallsBackWhenOnlyOneSideHasResetAssignments) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
 
-//   SequentialDesignModel model0;
-//   model0.environmentInputs = {rst0};
-//   model0.stateBits = {state0};
-//   model0.inputVarByKey.emplace(rst0, 2);
-//   model0.inputVarByKey.emplace(state0, 3);
-//   model0.displayNameByKey.emplace(rst0, "rst");
-//   model0.initialStateValueByKey.emplace(state0, false);
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(state0, 3);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.initialStateValueByKey.emplace(state0, false);
 
-//   SequentialDesignModel model1;
-//   model1.environmentInputs = {rst1};
-//   model1.stateBits = {state1};
-//   model1.inputVarByKey.emplace(state1, 4);
-//   model1.initialStateValueByKey.emplace(state1, false);
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(state1, 4);
+  model1.initialStateValueByKey.emplace(state1, false);
 
-//   AlignedSignals candidateStates;
-//   candidateStates.names = {"state"};
-//   candidateStates.keys0 = {state0};
-//   candidateStates.keys1 = {state1};
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
 
-//   const auto invariant = buildReachableStateInvariant(
-//       model0, model1, AlignedSignals{}, candidateStates);
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, AlignedSignals{}, candidateStates);
 
-//   EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-// }
+  EXPECT_EQ(invariant.bootstrapCycles, 0u);
+  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
+  EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state");
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
+  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state");
+}
 
-// TEST_F(SequentialEquivalenceStrategyTests,
-//        ReachableStateInvariantCoversBootstrapValuePropagationEdgeCases) {
-//   const SignalKey rst0 = makeSignalKey("rst0");
-//   const SignalKey rst1 = makeSignalKey("rst1");
-//   const SignalKey truth0 = makeSignalKey("truth0");
-//   const SignalKey truth1 = makeSignalKey("truth1");
-//   const SignalKey invalid0 = makeSignalKey("invalid0");
-//   const SignalKey invalid1 = makeSignalKey("invalid1");
-//   const SignalKey null0 = makeSignalKey("null0");
-//   const SignalKey null1 = makeSignalKey("null1");
-//   const SignalKey diff0 = makeSignalKey("diff0");
-//   const SignalKey diff1 = makeSignalKey("diff1");
-//   const SignalKey shadow0 = makeSignalKey("shadow0");
-//   const SignalKey shadow1 = makeSignalKey("shadow1");
-//   BoolExpr invalidExpr0;
-//   BoolExpr invalidExpr1;
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantCoversBootstrapValuePropagationEdgeCases) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey truth0 = makeSignalKey("truth0");
+  const SignalKey truth1 = makeSignalKey("truth1");
+  const SignalKey invalid0 = makeSignalKey("invalid0");
+  const SignalKey invalid1 = makeSignalKey("invalid1");
+  const SignalKey null0 = makeSignalKey("null0");
+  const SignalKey null1 = makeSignalKey("null1");
+  const SignalKey diff0 = makeSignalKey("diff0");
+  const SignalKey diff1 = makeSignalKey("diff1");
+  const SignalKey hidden0 = makeSignalKey("hidden0");
+  const SignalKey hidden1 = makeSignalKey("hidden1");
 
-//   SequentialDesignModel model0;
-//   model0.environmentInputs = {rst0, shadow0};
-//   model0.stateBits = {truth0, invalid0, null0, diff0};
-//   model0.inputVarByKey.emplace(rst0, 2);
-//   model0.inputVarByKey.emplace(truth0, 3);
-//   model0.inputVarByKey.emplace(invalid0, 4);
-//   model0.inputVarByKey.emplace(null0, 5);
-//   model0.inputVarByKey.emplace(diff0, 6);
-//   model0.displayNameByKey.emplace(rst0, "rst");
-//   model0.nextStateExprByStateKey.emplace(
-//       truth0,
-//       BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::createFalse()));
-//   model0.nextStateExprByStateKey.emplace(invalid0, &invalidExpr0);
-//   model0.nextStateExprByStateKey.emplace(null0, nullptr);
-//   model0.nextStateExprByStateKey.emplace(diff0, BoolExpr::Var(2));
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {truth0, invalid0, null0, diff0, hidden0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(truth0, 3);
+  model0.inputVarByKey.emplace(invalid0, 4);
+  model0.inputVarByKey.emplace(null0, 5);
+  model0.inputVarByKey.emplace(diff0, 6);
+  model0.inputVarByKey.emplace(hidden0, 7);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.nextStateExprByStateKey.emplace(
+      truth0,
+      BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::createFalse()));
+  model0.nextStateExprByStateKey.emplace(invalid0, BoolExpr::Var(7));
+  model0.nextStateExprByStateKey.emplace(null0, nullptr);
+  model0.nextStateExprByStateKey.emplace(diff0, BoolExpr::Var(2));
+  model0.nextStateExprByStateKey.emplace(hidden0, BoolExpr::Var(7));
+  model0.initialStateValueByKey.emplace(truth0, false);
+  model0.initialStateValueByKey.emplace(invalid0, false);
+  model0.initialStateValueByKey.emplace(null0, false);
+  model0.initialStateValueByKey.emplace(diff0, false);
 
-//   SequentialDesignModel model1;
-//   model1.environmentInputs = {rst1, shadow1};
-//   model1.stateBits = {truth1, invalid1, null1, diff1};
-//   model1.inputVarByKey.emplace(rst1, 10);
-//   model1.inputVarByKey.emplace(truth1, 11);
-//   model1.inputVarByKey.emplace(invalid1, 12);
-//   model1.inputVarByKey.emplace(null1, 13);
-//   model1.inputVarByKey.emplace(diff1, 14);
-//   model1.displayNameByKey.emplace(rst1, "rst");
-//   model1.nextStateExprByStateKey.emplace(
-//       truth1,
-//       BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::createFalse()));
-//   model1.nextStateExprByStateKey.emplace(invalid1, &invalidExpr1);
-//   model1.nextStateExprByStateKey.emplace(null1, nullptr);
-//   model1.nextStateExprByStateKey.emplace(diff1, BoolExpr::Not(BoolExpr::Var(10)));
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {truth1, invalid1, null1, diff1, hidden1};
+  model1.inputVarByKey.emplace(rst1, 10);
+  model1.inputVarByKey.emplace(truth1, 11);
+  model1.inputVarByKey.emplace(invalid1, 12);
+  model1.inputVarByKey.emplace(null1, 13);
+  model1.inputVarByKey.emplace(diff1, 14);
+  model1.inputVarByKey.emplace(hidden1, 15);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.nextStateExprByStateKey.emplace(
+      truth1,
+      BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::createFalse()));
+  model1.nextStateExprByStateKey.emplace(invalid1, BoolExpr::Var(15));
+  model1.nextStateExprByStateKey.emplace(null1, nullptr);
+  model1.nextStateExprByStateKey.emplace(diff1, BoolExpr::Not(BoolExpr::Var(10)));
+  model1.nextStateExprByStateKey.emplace(hidden1, BoolExpr::Var(15));
+  model1.initialStateValueByKey.emplace(truth1, true);
+  model1.initialStateValueByKey.emplace(invalid1, true);
+  model1.initialStateValueByKey.emplace(null1, true);
+  model1.initialStateValueByKey.emplace(diff1, true);
 
-//   AlignedSignals alignedInputs;
-//   alignedInputs.names = {"rst"};
-//   alignedInputs.keys0 = {rst0};
-//   alignedInputs.keys1 = {rst1};
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
 
-//   AlignedSignals candidateStates;
-//   candidateStates.names = {"truth", "invalid", "null", "diff"};
-//   candidateStates.keys0 = {truth0, invalid0, null0, diff0};
-//   candidateStates.keys1 = {truth1, invalid1, null1, diff1};
+  AlignedSignals candidateStates;
+  candidateStates.names = {"truth", "invalid", "null", "diff"};
+  candidateStates.keys0 = {truth0, invalid0, null0, diff0};
+  candidateStates.keys1 = {truth1, invalid1, null1, diff1};
 
-//   const auto invariant = buildReachableStateInvariant(
-//       model0, model1, alignedInputs, candidateStates);
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, alignedInputs, candidateStates);
 
-//   EXPECT_EQ(invariant.bootstrapCycles, 3u);
-//   EXPECT_TRUE(invariant.bootstrapValues0.at(truth0));
-//   EXPECT_TRUE(invariant.bootstrapValues1.at(truth1));
-//   EXPECT_TRUE(
-//       std::find(
-//           invariant.anchoredStateEqualities.names.begin(),
-//           invariant.anchoredStateEqualities.names.end(),
-//           "truth") != invariant.anchoredStateEqualities.names.end());
-//   EXPECT_TRUE(
-//       std::find(
-//           invariant.anchoredStateEqualities.names.begin(),
-//           invariant.anchoredStateEqualities.names.end(),
-//           "diff") == invariant.anchoredStateEqualities.names.end());
-// }
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  EXPECT_TRUE(invariant.initialStateCorrespondence.names.empty());
+  EXPECT_TRUE(invariant.bootstrapValues0.at(truth0));
+  EXPECT_TRUE(invariant.bootstrapValues1.at(truth1));
+  EXPECT_TRUE(invariant.bootstrapValues0.at(diff0));
+  EXPECT_FALSE(invariant.bootstrapValues1.at(diff1));
+  EXPECT_TRUE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "truth") != invariant.anchoredStateEqualities.names.end());
+  EXPECT_TRUE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "diff") == invariant.anchoredStateEqualities.names.end());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantBootstrapValuesEvaluateConstTrueXorAndInvalidExprStates) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey const0 = makeSignalKey("const0");
+  const SignalKey const1 = makeSignalKey("const1");
+  const SignalKey xor0 = makeSignalKey("xor0");
+  const SignalKey xor1 = makeSignalKey("xor1");
+  const SignalKey invalid0 = makeSignalKey("invalid0");
+  const SignalKey invalid1 = makeSignalKey("invalid1");
+  const SignalKey hidden0 = makeSignalKey("hidden0");
+  const SignalKey hidden1 = makeSignalKey("hidden1");
+  BoolExpr invalidExpr0;
+  BoolExpr invalidExpr1;
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {const0, xor0, invalid0, hidden0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(const0, 3);
+  model0.inputVarByKey.emplace(xor0, 4);
+  model0.inputVarByKey.emplace(invalid0, 5);
+  model0.inputVarByKey.emplace(hidden0, 6);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.initialStateValueByKey.emplace(const0, false);
+  model0.initialStateValueByKey.emplace(xor0, false);
+  model0.initialStateValueByKey.emplace(invalid0, false);
+  model0.nextStateExprByStateKey.emplace(const0, BoolExpr::createTrue());
+  model0.nextStateExprByStateKey.emplace(
+      xor0, BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::createFalse()));
+  model0.nextStateExprByStateKey.emplace(invalid0, &invalidExpr0);
+  model0.nextStateExprByStateKey.emplace(hidden0, BoolExpr::Var(6));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {const1, xor1, invalid1, hidden1};
+  model1.inputVarByKey.emplace(rst1, 10);
+  model1.inputVarByKey.emplace(const1, 11);
+  model1.inputVarByKey.emplace(xor1, 12);
+  model1.inputVarByKey.emplace(invalid1, 13);
+  model1.inputVarByKey.emplace(hidden1, 14);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.initialStateValueByKey.emplace(const1, false);
+  model1.initialStateValueByKey.emplace(xor1, false);
+  model1.initialStateValueByKey.emplace(invalid1, false);
+  model1.nextStateExprByStateKey.emplace(const1, BoolExpr::createTrue());
+  model1.nextStateExprByStateKey.emplace(
+      xor1, BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::createFalse()));
+  model1.nextStateExprByStateKey.emplace(invalid1, &invalidExpr1);
+  model1.nextStateExprByStateKey.emplace(hidden1, BoolExpr::Var(14));
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"const", "xor", "invalid"};
+  candidateStates.keys0 = {const0, xor0, invalid0};
+  candidateStates.keys1 = {const1, xor1, invalid1};
+
+  const auto invariant = buildReachableStateInvariant(
+      model0, model1, AlignedSignals{}, candidateStates);
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 3u);
+  EXPECT_TRUE(invariant.bootstrapValues0.at(const0));
+  EXPECT_TRUE(invariant.bootstrapValues1.at(const1));
+  EXPECT_TRUE(invariant.bootstrapValues0.at(xor0));
+  EXPECT_TRUE(invariant.bootstrapValues1.at(xor1));
+  EXPECT_EQ(invariant.bootstrapValues0.count(invalid0), 0u);
+  EXPECT_EQ(invariant.bootstrapValues1.count(invalid1), 0u);
+}
 
 TEST_F(SequentialEquivalenceStrategyTests,
        BoolExprRemapThrowsOnMissingVariableMapping) {
@@ -1783,6 +2037,38 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverHandlesActiveLowResetBootstrapInputs) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"rst_n", "in"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {2, 5};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{2, false}};
+  problem.bootstrapStateAssignments = {{3, false}, {4, false}};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4, 5};
+  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::Var(5)}};
+  problem.transitions1 = {{4, BoolExpr::createFalse()}};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2);
+
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
+  ASSERT_EQ(witness->inputTrace.size(), 2u);
+  // The reported witness trace is offset past the hidden bootstrap frame,
+  // so an active-low reset is already deasserted in the visible input trace.
+  EXPECT_TRUE(witness->inputTrace[0].assignments[0].value);
+  EXPECT_TRUE(witness->inputTrace[1].assignments[0].value);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverPartialInitWithoutStateRelationUsesObservationFallback) {
   KInductionProblem problem;
   problem.environmentInputNames = {"in"};
@@ -1935,6 +2221,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.allSymbols = {2, 3};
   problem.resetBootstrapCycles = 1;
   problem.bootstrapStateAssignments = {{2, false}, {3, true}};
+  problem.bootstrapStateEqualityPairs = {{2, 2}};
   problem.complementedStatePairs0 = {{2, 3}};
   problem.transitions0.emplace_back(2, BoolExpr::createFalse());
   problem.transitions0.emplace_back(3, BoolExpr::createTrue());
@@ -2064,6 +2351,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.allSymbols = {2, 3};
   problem.resetBootstrapCycles = 1;
   problem.bootstrapStateAssignments = {{2, false}, {3, true}};
+  problem.bootstrapStateEqualityPairs = {{2, 2}};
   problem.complementedStatePairs0 = {{2, 3}};
   problem.transitions0.emplace_back(2, BoolExpr::createFalse());
   problem.transitions0.emplace_back(3, BoolExpr::createTrue());
@@ -2243,6 +2531,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralStateInvariantReturnsEmptyWhenBothSidesHaveNoState) {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+
+  const auto aligned = inferStructurallyEquivalentStatePairs(
+      model0, model1, AlignedSignals{});
+
+  EXPECT_TRUE(aligned.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        StructuralStateInvariantHandlesNullNextStateExpressions) {
   const SignalKey null0 = makeSignalKey("null0");
   const SignalKey false0 = makeSignalKey("false0");
@@ -2292,6 +2591,24 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSkipsCombinationalInstancesWithoutStateOutputs) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top = createCombinationalInvTop(library, "top", invModel);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.stateBits.empty());
+  EXPECT_EQ(extracted.observedOutputs.size(), 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractSupportsSetHighInitialState) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -2310,6 +2627,34 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractPreservesSetHighControlSemantics) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createSetOnlySequentialModel(primitives, "DFF_SET");
+  auto* top = createSetOnlySequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+  const auto stateKey = extracted.stateBits.front();
+  const auto inKey = findKeyByDisplayName(extracted, "in[0]");
+  const auto setKey = findKeyByDisplayName(extracted, "set[0]");
+  auto* expr = extracted.nextStateExprByStateKey.at(stateKey);
+
+  EXPECT_TRUE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), false},
+       {extracted.inputVarByKey.at(setKey), true}}));
+  EXPECT_TRUE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), true},
+       {extracted.inputVarByKey.at(setKey), false}}));
+  EXPECT_FALSE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), false},
+       {extracted.inputVarByKey.at(setKey), false}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractSupportsResetHighInitialState) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -2322,6 +2667,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_FALSE(extracted.hasUnsupportedFeatures());
   ASSERT_EQ(extracted.stateBits.size(), 1u);
   EXPECT_FALSE(extracted.initialStateValueByKey.at(extracted.stateBits.front()));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractPreservesEnableAndResetControlSemantics) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = createDffreTop(library, "top");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+  const auto stateKey = extracted.stateBits.front();
+  const auto inKey = findKeyByDisplayName(extracted, "in[0]");
+  const auto enKey = findKeyByDisplayName(extracted, "en[0]");
+  const auto rstKey = findKeyByDisplayName(extracted, "rst[0]");
+  const size_t stateVar = extracted.inputVarByKey.at(stateKey);
+  auto* expr = extracted.nextStateExprByStateKey.at(stateKey);
+
+  EXPECT_FALSE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), true},
+       {extracted.inputVarByKey.at(enKey), true},
+       {extracted.inputVarByKey.at(rstKey), true},
+       {stateVar, true}}));
+  EXPECT_TRUE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), true},
+       {extracted.inputVarByKey.at(enKey), true},
+       {extracted.inputVarByKey.at(rstKey), false},
+       {stateVar, false}}));
+  EXPECT_TRUE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), false},
+       {extracted.inputVarByKey.at(enKey), false},
+       {extracted.inputVarByKey.at(rstKey), false},
+       {stateVar, true}}));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -2430,6 +2808,28 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractReportsUnsupportedQPlusUnrelatedStateOutput) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createNamedComplementSequentialModel(
+      primitives, "DFF_Q_ALT", "Q", "ALT");
+  auto* top = createSequentialOutputPairTop(
+      library, "top", model, "Q", "ALT");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_TRUE(extracted.hasUnsupportedFeatures());
+  ASSERT_FALSE(extracted.unsupportedReasons.empty());
+  EXPECT_NE(
+      extracted.unsupportedReasons.front().find("multiple state outputs"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractFindsPrimaryStateOutputWhenComplementAppearsFirst) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -2471,6 +2871,25 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       MismatchedObservedOutputCountsAreReportedAsUnsupported) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createNamedOutputDffTop(library, "top0", invModel, "out");
+  auto* top1 = createExtraOutputDffTop(library, "top1", invModel);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(result.reason.find("Mismatched observed output sets"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        MismatchedInputNamesAreReportedAsUnsupported) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -2481,6 +2900,27 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* invModel = createInvModel(primitives);
   auto* top0 = createNamedInputDffTop(library, "top0", invModel, "in0");
   auto* top1 = createNamedInputDffTop(library, "top1", invModel, "in1");
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(
+      result.reason.find("Mismatched environment input sets"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       MismatchedInputCountsAreReportedAsUnsupported) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createNamedInputDffTop(library, "top0", invModel, "in");
+  auto* top1 = createExtraInputDffTop(library, "top1");
 
   SequentialEquivalenceStrategy strategy(top0, top1);
   const auto result = strategy.run(1);
@@ -2507,24 +2947,24 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.bound, 2u);
 }
 
-// TEST_F(SequentialEquivalenceStrategyTests,
-//        ZeroBoundFallsBackToIc3ForEquivalentSequentialDesigns) {
-//   NLUniverse::create();
-//   auto* db = NLDB::create(NLUniverse::get());
-//   auto* primitives =
-//       NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-//   auto* library =
-//       NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-//   auto* invModel = createInvModel(primitives);
-//   auto* top0 = createDffTop(library, "top0", invModel, false, false);
-//   auto* top1 = createDffTop(library, "top1", invModel, false, false);
+TEST_F(SequentialEquivalenceStrategyTests,
+       ZeroBoundFallsBackToIc3ForEquivalentSequentialDesigns) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createDffTop(library, "top0", invModel, false, false);
+  auto* top1 = createDffTop(library, "top1", invModel, false, false);
 
-//   SequentialEquivalenceStrategy strategy(top0, top1);
-//   const auto result = strategy.run(0);
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(0);
 
-//   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-//   EXPECT_EQ(result.bound, 0u);
-// }
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 0u);
+}
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DifferentResultIncludesCounterexampleTracebackDetails) {
@@ -2676,4 +3116,388 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto withInvariantResult = withInvariant.run(1);
   EXPECT_EQ(withInvariantResult.status, KInductionStatus::Equivalent);
   EXPECT_EQ(withInvariantResult.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelDetailHelpersCoverNextStateAndInitErrors) {
+  const std::unordered_map<naja::DNL::DNLID, BoolExpr*> outputExprByTerm = {
+      {11, BoolExpr::Var(7)},
+      {12, BoolExpr::Var(8)},
+      {13, BoolExpr::Var(9)},
+  };
+
+  EXPECT_THROW(
+      detail::buildNextStateExprForTest(5, {{"D", 11}}, {2, 3}, outputExprByTerm),
+      std::runtime_error);
+  EXPECT_THROW(
+      detail::buildNextStateExprForTest(0, {{"D", 11}}, {1}, outputExprByTerm),
+      std::runtime_error);
+  EXPECT_THROW(
+      detail::buildNextStateExprForTest(0, {}, {2}, outputExprByTerm),
+      std::runtime_error);
+  EXPECT_THROW(
+      detail::buildNextStateExprForTest(
+          0, {{"D", 11}, {"R", 12}, {"S", 13}}, {2}, outputExprByTerm),
+      std::runtime_error);
+  auto* holdExpr = detail::buildNextStateExprForTest(
+      0, {{"D", 11}, {"E", 12}, {"RN", 13}}, {2}, outputExprByTerm);
+  EXPECT_FALSE(holdExpr->evaluate({{2, true}, {7, true}, {8, true}, {9, false}}));
+  EXPECT_TRUE(holdExpr->evaluate({{2, false}, {7, true}, {8, true}, {9, true}}));
+  EXPECT_TRUE(holdExpr->evaluate({{2, true}, {7, false}, {8, false}, {9, true}}));
+  auto* setExpr = detail::buildNextStateExprForTest(
+      0, {{"D", 11}, {"S", 12}}, {2}, outputExprByTerm);
+  EXPECT_TRUE(setExpr->evaluate({{2, false}, {7, false}, {8, true}}));
+  EXPECT_FALSE(setExpr->evaluate({{2, false}, {7, false}, {8, false}}));
+
+  EXPECT_EQ(
+      detail::detectInitialStateValueForTest({{"R", 11}}),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::detectInitialStateValueForTest({{"RN", 11}}),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::detectInitialStateValueForTest({{"S", 11}}),
+      std::optional<bool>(true));
+  EXPECT_EQ(detail::detectInitialStateValueForTest({}), std::nullopt);
+  EXPECT_THROW(
+      detail::detectInitialStateValueForTest({{"R", 11}, {"S", 12}}),
+      std::runtime_error);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelDetailResetInferenceAndReachableStateHelpersCoverBranches) {
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("rst[0]"),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("rst_n[0]"),
+      std::optional<bool>(false));
+  EXPECT_EQ(detail::getResetAssertionValueForTest("enable[0]"), std::nullopt);
+
+  const auto shared = BoolExpr::Not(BoolExpr::Var(3));
+  EXPECT_EQ(detail::evaluateConstantUnderAssignmentsForTest(nullptr, {}), std::nullopt);
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(BoolExpr::Var(1), {}),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(BoolExpr::Var(0), {}),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::And(shared, shared), {{3, false}}),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::And(BoolExpr::createFalse(), BoolExpr::Var(99)), {}),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, false}, {4, true}}),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, false}}),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, true}}),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::Or(BoolExpr::createTrue(), BoolExpr::Var(99)), {}),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::Or(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, false}}),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::Or(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, false}, {4, true}}),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::Or(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, false}, {4, false}}),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, false}}),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(
+          BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}}),
+      std::nullopt);
+  BoolExpr invalidExpr;
+  EXPECT_EQ(
+      detail::evaluateConstantUnderAssignmentsForTest(&invalidExpr, {}),
+      std::nullopt);
+
+  const auto rstKey = makeSignalKey("rst");
+  const auto stateAKey = makeSignalKey("state_a");
+  const auto stateBKey = makeSignalKey("state_b");
+  const auto stateAComplementKey = makeSignalKey("state_a_n");
+
+  SequentialDesignModel inferredModel;
+  inferredModel.environmentInputs = {rstKey};
+  inferredModel.stateBits = {stateAKey, stateBKey, stateAComplementKey};
+  inferredModel.displayNameByKey[rstKey] = "rst[0]";
+  inferredModel.inputVarByKey[rstKey] = 10;
+  inferredModel.inputVarByKey[stateAKey] = 2;
+  inferredModel.inputVarByKey[stateBKey] = 3;
+  inferredModel.inputVarByKey[stateAComplementKey] = 4;
+  inferredModel.nextStateExprByStateKey[stateAKey] = BoolExpr::Var(10);
+  inferredModel.nextStateExprByStateKey[stateBKey] =
+      BoolExpr::And(BoolExpr::Var(2), BoolExpr::createTrue());
+  inferredModel.nextStateExprByStateKey[stateAComplementKey] =
+      BoolExpr::Not(BoolExpr::Var(2));
+  inferredModel.complementedStateRelations.push_back(
+      {stateAKey, stateAComplementKey});
+
+  detail::inferSynthesizedResetInitialStateValuesForTest(inferredModel);
+  EXPECT_EQ(
+      inferredModel.initialStateValueByKey.at(stateAKey),
+      true);
+  EXPECT_EQ(
+      inferredModel.initialStateValueByKey.at(stateBKey),
+      true);
+  EXPECT_EQ(
+      inferredModel.initialStateValueByKey.at(stateAComplementKey),
+      false);
+
+  const auto missingDisplayResetKey = makeSignalKey("rst_missing_display");
+  const auto missingVarResetKey = makeSignalKey("rst_missing_var");
+  const auto nullStateKey = makeSignalKey("null_state");
+  const auto derivedStateKey = makeSignalKey("derived_state");
+  const auto partnerPrimaryKey = makeSignalKey("partner_primary");
+  const auto partnerComplementKey = makeSignalKey("partner_complement");
+
+  SequentialDesignModel edgeCaseModel;
+  edgeCaseModel.environmentInputs = {missingDisplayResetKey, missingVarResetKey, rstKey};
+  edgeCaseModel.stateBits = {
+      nullStateKey, derivedStateKey, partnerPrimaryKey, partnerComplementKey};
+  edgeCaseModel.displayNameByKey[missingVarResetKey] = "rst[0]";
+  edgeCaseModel.displayNameByKey[rstKey] = "rst[0]";
+  edgeCaseModel.inputVarByKey[missingDisplayResetKey] = 30;
+  edgeCaseModel.inputVarByKey[rstKey] = 31;
+  edgeCaseModel.inputVarByKey[nullStateKey] = 2;
+  edgeCaseModel.inputVarByKey[derivedStateKey] = 3;
+  edgeCaseModel.inputVarByKey[partnerPrimaryKey] = 4;
+  edgeCaseModel.inputVarByKey[partnerComplementKey] = 5;
+  auto* sharedResetVar = BoolExpr::Var(31);
+  edgeCaseModel.nextStateExprByStateKey[nullStateKey] = nullptr;
+  edgeCaseModel.nextStateExprByStateKey[derivedStateKey] = BoolExpr::And(
+      sharedResetVar, BoolExpr::Or(BoolExpr::Var(99), sharedResetVar));
+  edgeCaseModel.nextStateExprByStateKey[partnerPrimaryKey] = BoolExpr::createFalse();
+  edgeCaseModel.nextStateExprByStateKey[partnerComplementKey] = BoolExpr::createTrue();
+  edgeCaseModel.initialStateValueByKey[partnerPrimaryKey] = false;
+  edgeCaseModel.complementedStateRelations.push_back(
+      {partnerPrimaryKey, partnerComplementKey});
+
+  detail::inferSynthesizedResetInitialStateValuesForTest(edgeCaseModel);
+  EXPECT_TRUE(edgeCaseModel.initialStateValueByKey.at(derivedStateKey));
+  EXPECT_TRUE(edgeCaseModel.initialStateValueByKey.at(partnerComplementKey));
+
+  const auto dependencyKnownKey = makeSignalKey("dependency_known");
+  const auto dependencyDerivedKey = makeSignalKey("dependency_derived");
+  SequentialDesignModel dependencyModel;
+  dependencyModel.environmentInputs = {rstKey};
+  dependencyModel.stateBits = {dependencyKnownKey, dependencyDerivedKey};
+  dependencyModel.displayNameByKey[rstKey] = "rst[0]";
+  dependencyModel.inputVarByKey[rstKey] = 40;
+  dependencyModel.inputVarByKey[dependencyKnownKey] = 2;
+  dependencyModel.inputVarByKey[dependencyDerivedKey] = 3;
+  dependencyModel.initialStateValueByKey[dependencyKnownKey] = true;
+  auto* sharedStateExpr = BoolExpr::Var(2);
+  dependencyModel.nextStateExprByStateKey[dependencyKnownKey] = sharedStateExpr;
+  dependencyModel.nextStateExprByStateKey[dependencyDerivedKey] = BoolExpr::And(
+      sharedStateExpr,
+      BoolExpr::Or(BoolExpr::Var(99), sharedStateExpr));
+
+  detail::inferSynthesizedResetInitialStateValuesForTest(dependencyModel);
+  EXPECT_TRUE(dependencyModel.initialStateValueByKey.at(dependencyDerivedKey));
+
+  const auto derivedKey0 = makeSignalKey("derived0");
+  const auto derivedKey1 = makeSignalKey("derived1");
+  const auto xorKey = makeSignalKey("derived_xor");
+  SequentialDesignModel bootstrapModel0;
+  bootstrapModel0.environmentInputs = {rstKey};
+  bootstrapModel0.stateBits = {derivedKey0, derivedKey1, xorKey};
+  bootstrapModel0.displayNameByKey[rstKey] = "rst[0]";
+  bootstrapModel0.inputVarByKey[rstKey] = 20;
+  bootstrapModel0.inputVarByKey[derivedKey0] = 2;
+  bootstrapModel0.inputVarByKey[derivedKey1] = 3;
+  bootstrapModel0.inputVarByKey[xorKey] = 4;
+  bootstrapModel0.initialStateValueByKey[derivedKey0] = true;
+  bootstrapModel0.initialStateValueByKey[derivedKey1] = false;
+  bootstrapModel0.nextStateExprByStateKey[derivedKey0] = BoolExpr::Var(2);
+  bootstrapModel0.nextStateExprByStateKey[derivedKey1] = BoolExpr::Var(3);
+  bootstrapModel0.nextStateExprByStateKey[xorKey] =
+      BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::Var(3));
+
+  const auto bootstrapValues =
+      detail::deriveResetBootstrapStateValuesForTest(bootstrapModel0, 1);
+  EXPECT_EQ(bootstrapValues.at(xorKey), true);
+
+  SequentialDesignModel bootstrapModel1 = bootstrapModel0;
+  bootstrapModel1.initialStateValueByKey[derivedKey1] = true;
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state_a", "state_b"};
+  candidateStates.keys0 = {derivedKey0, derivedKey1};
+  candidateStates.keys1 = {derivedKey0, derivedKey1};
+  const auto anchoredStates = detail::filterStateEqualitiesByInitialValueForTest(
+      bootstrapModel0, bootstrapModel1, candidateStates);
+  ASSERT_EQ(anchoredStates.names.size(), 1u);
+  EXPECT_EQ(anchoredStates.names.front(), "state_a");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialEquivalenceStrategyDetailFormattingHelpersCoverFallbackPaths) {
+  EXPECT_EQ(detail::formatStringListForTest({}, 3), "<none>");
+  EXPECT_EQ(
+      detail::formatStringListForTest({"a", "b", "c"}, 2),
+      "a, b, ... +1 more");
+
+  EXPECT_NE(
+      detail::formatConeLevelsForTest({}).find("<no traced cone terms>"),
+      std::string::npos);
+
+  std::vector<std::vector<std::string>> levels;
+  for (size_t level = 0; level < 13; ++level) {
+    std::vector<std::string> levelTerms;
+    for (size_t term = 0; term < 13; ++term) {
+      levelTerms.push_back(
+          "term_" + std::to_string(level) + "_" + std::to_string(term));
+    }
+    levels.push_back(std::move(levelTerms));
+  }
+  const auto formattedLevels = detail::formatConeLevelsForTest(levels);
+  EXPECT_NE(formattedLevels.find("... +1 more trace steps"), std::string::npos);
+  EXPECT_NE(formattedLevels.find("... +1 more"), std::string::npos);
+
+  KInductionResult noWitnessResult;
+  EXPECT_TRUE(detail::formatCounterexampleWitnessForTest(
+                  noWitnessResult, {}, {}, nullptr, nullptr)
+                  .empty());
+
+  KInductionResult emptyTraceResult;
+  emptyTraceResult.witness = KInductionResult::CounterexampleWitness{
+      .badFrame = 2,
+      .inputTrace = {},
+      .outputMismatches = {{"ghost[0]", true, false}},
+  };
+  const auto emptyTraceText = detail::formatCounterexampleWitnessForTest(
+      emptyTraceResult, {}, {}, nullptr, nullptr);
+  EXPECT_NE(emptyTraceText.find("Input trace: <none>"), std::string::npos);
+  EXPECT_NE(emptyTraceText.find("Cone traceback unavailable:"), std::string::npos);
+
+  KInductionResult noEnvTraceResult;
+  noEnvTraceResult.witness = KInductionResult::CounterexampleWitness{
+      .badFrame = 1,
+      .inputTrace = {{{0, {}}}},
+      .outputMismatches = {{"ghost[0]", false, true}},
+  };
+  const auto noEnvTraceText = detail::formatCounterexampleWitnessForTest(
+      noEnvTraceResult, {}, {}, nullptr, nullptr);
+  EXPECT_NE(
+      noEnvTraceText.find("<no environment inputs>"),
+      std::string::npos);
+
+  KInductionResult noMismatchTraceResult;
+  noMismatchTraceResult.witness = KInductionResult::CounterexampleWitness{
+      .badFrame = 1,
+      .inputTrace = {{{0, {{"in[0]", true}}}}},
+      .outputMismatches = {},
+  };
+  const auto noMismatchTraceText = detail::formatCounterexampleWitnessForTest(
+      noMismatchTraceResult, {}, {}, nullptr, nullptr);
+  EXPECT_EQ(
+      noMismatchTraceText.find("Traceback for first differing point"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialEquivalenceStrategyDetailAlignmentAndLookupExposeErrors) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createDffTop(library, "top0", invModel, false, false);
+  auto* top1 = createDffTop(library, "top1", invModel, false, false);
+
+  const auto model0 = SequentialDesignModel::extract(top0);
+  const auto model1 = SequentialDesignModel::extract(top1);
+
+  KInductionResult missingSignalResult;
+  missingSignalResult.witness = KInductionResult::CounterexampleWitness{
+      .badFrame = 1,
+      .inputTrace = {{{0, {{"in[0]", true}}}}},
+      .outputMismatches = {{"ghost[0]", false, true}},
+  };
+  const auto missingSignalText = detail::formatCounterexampleWitnessForTest(
+      missingSignalResult, model0, model1, top0, top1);
+  EXPECT_NE(
+      missingSignalText.find("design0 could not resolve the differing SEC signal back into the DNL"),
+      std::string::npos);
+  EXPECT_NE(
+      missingSignalText.find("design1 could not resolve the differing SEC signal back into the DNL"),
+      std::string::npos);
+
+  KInductionResult topInputTraceResult;
+  topInputTraceResult.witness = KInductionResult::CounterexampleWitness{
+      .badFrame = 1,
+      .inputTrace = {{{0, {{"in[0]", true}}}}},
+      .outputMismatches = {{"in[0]", false, true}},
+  };
+  const auto topInputTraceText = detail::formatCounterexampleWitnessForTest(
+      topInputTraceResult, model0, model1, top0, top1);
+  EXPECT_NE(
+      topInputTraceText.find("Observed output mismatches at cycle 1:"),
+      std::string::npos);
+
+  const auto inputKey = makeSignalKey("in");
+  const auto outputKey = makeSignalKey("out");
+  std::unordered_map<SignalKey, std::string, SignalKeyHash> displayNames0 = {
+      {inputKey, "in[0]"},
+  };
+  std::unordered_map<SignalKey, std::string, SignalKeyHash> displayNames1 = {
+      {inputKey, "in[0]"},
+  };
+
+  EXPECT_THROW(
+      detail::alignSignalsByNameForTest(
+          {inputKey}, displayNames0, {outputKey}, displayNames1, "inputs"),
+      std::runtime_error);
+  EXPECT_THROW(
+      detail::alignSignalsByNameForTest(
+          {inputKey, inputKey}, displayNames0, {inputKey}, displayNames1, "inputs"),
+      std::runtime_error);
+
+  auto* universe = NLUniverse::get();
+  ASSERT_NE(universe, nullptr);
+  universe->setTopDesign(top0);
+  auto* dnl = naja::DNL::get();
+  ASSERT_NE(dnl, nullptr);
+
+  std::optional<naja::DNL::DNLID> outTermID;
+  for (naja::DNL::DNLID termID = 0; termID < dnl->getDNLTerms().size(); ++termID) {
+    const auto& term = dnl->getDNLTerminalFromID(termID);
+    if (term.isNull() || !term.isTopPort()) {
+      continue;
+    }
+    if (term.getSnlBitTerm()->getName().getString() == "out") {
+      outTermID = termID;
+      break;
+    }
+  }
+  ASSERT_TRUE(outTermID.has_value());
+  const auto outKey = detail::getTerminalPathKeyForTest(
+      dnl->getDNLTerminalFromID(*outTermID));
+  EXPECT_EQ(detail::findTermByKeyForTest(dnl, outKey), outTermID);
+
+  SignalKey missingKey = outKey;
+  ++missingKey.first.front();
+  EXPECT_FALSE(detail::findTermByKeyForTest(dnl, missingKey).has_value());
 }

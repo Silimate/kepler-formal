@@ -1600,6 +1600,36 @@ TEST(KeplerFormalCliTests, ConfigInvalidMaxKTokenFails) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, ConfigEmptyMaxKTokenFails) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: \"\"\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigOutOfRangeMaxKTokenFails) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 999999999999999999999999999999999999\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigMaxKWithoutSecFails) {
   const auto fixture = createEquivalentDesignFixture(
       "v",
@@ -1956,6 +1986,12 @@ TEST(KeplerFormalCliTests, CliInvalidMaxKBeforeFormatFails) {
   EXPECT_EQ(runWithArgs({"kepler-formal", "-k", "-1"}), EXIT_FAILURE);
 }
 
+TEST(KeplerFormalCliTests, CliOutOfRangeMaxKBeforeFormatFails) {
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal", "-k", "999999999999999999999999999999999999"}),
+      EXIT_FAILURE);
+}
+
 TEST(KeplerFormalCliTests, CliUnrecognizedOptionBeforeFormatFails) {
   EXPECT_EQ(runWithArgs({"kepler-formal", "--mystery"}), EXIT_FAILURE);
 }
@@ -1982,6 +2018,68 @@ TEST(KeplerFormalCliTests, CliInvalidMaxKAfterFormatFails) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal", "-verilog", "--max-k", "oops"}),
       EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliOutOfRangeMaxKAfterFormatFails) {
+  EXPECT_EQ(
+      runWithArgs(
+          {"kepler-formal", "-verilog", "--max-k", "999999999999999999999999999999999999"}),
+      EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(\n"
+      "    input logic clk,\n"
+      "    input logic rst,\n"
+      "    input logic d,\n"
+      "    output logic q\n"
+      ");\n"
+      "  always_ff @(posedge clk)\n"
+      "  if (rst) begin\n"
+      "    q <= 1'b0;\n"
+      "  end else begin\n"
+      "    q <= d;\n"
+      "  end\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: SEC\n"
+      "max_k: 0\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecUnsupportedMismatchFails) {
+  const auto fixture = createDesignFixture(
+      "v",
+      "module top(input a, output y);\n"
+      "  reg q;\n"
+      "  always @(*) q = a;\n"
+      "  assign y = q;\n"
+      "endmodule\n",
+      "module top(input a, output z);\n"
+      "  reg q;\n"
+      "  always @(*) q = a;\n"
+      "  assign z = q;\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "verification: SEC\n"
+      "max_k: 1\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
 }
 
 TEST(KeplerFormalCliTests, CliLibertyFlagCollectsPaths) {
