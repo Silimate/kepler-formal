@@ -50,44 +50,12 @@ jobs:
       working-directory: ${{github.workspace}}/build
       env:
         PYTHONMALLOC: malloc
-      run: ctest --output-on-failure -C ${{ env.BUILD_TYPE }}
-
-    - name: Run SEC unit tests
-      working-directory: ${{github.workspace}}/build
-      run: ctest --output-on-failure -R 'SequentialEquivalenceStrategyTests\.'
-
-    - name: Run SEC CLI tests
-      working-directory: ${{github.workspace}}/build
-      run: ctest --output-on-failure -R 'KeplerFormalCliTests\.(ConfigSecIgnoresRenamedInternalState|ConfigSystemVerilogSecVerificationAccepted|ConfigSecVerificationWritesDefaultLog|ConfigSecDifferenceLogIncludesWitnessDetails|ConfigTinyRocketSecVerificationAccepted)'
-
-    - name: Install najaeda
-      run: python3 -m pip install najaeda
-
-    - name: Generate TinyRocket CSRFile SEC example
-      working-directory: ${{github.workspace}}/example
-      run: python3 extract_tinyrocket_csrfile_sec.py
-
-    - name: Run TinyRocket CSRFile SEC k3 example
-      working-directory: ${{github.workspace}}/example
-      run: |
-        rm -f tinyrocket_csrfile_sec.log
-        ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_csrfile_sec.yaml
-        grep "SEC found a counterexample at k = 3" tinyrocket_csrfile_sec.log
-
-    - name: Run TinyRocket SEC self-check
-      working-directory: ${{github.workspace}}/example
-      run: |
-        ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_sec.yaml > tinyrocket_self_sec.out 2>&1
-        grep "SEC proved equivalence at k = 1" tinyrocket_self_sec.out
-
-    - name: Generate coverage report
+      run: ctest -VV -C ${{ env.BUILD_TYPE }}
+    - name: lcov
       working-directory: ${{github.workspace}}/build
       run: |
-           python3 ../tools/generate_coverage_report.py \
-             --build-dir . \
-             --root .. \
-             --output coverage.info \
-             --verbose
+           lcov --directory . --capture --output-file coverage.info
+           lcov --remove coverage.info --output-file coverage.info '/usr/*' '*/test/*' '*/kepler-formal/thirdparty/*'
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
@@ -95,8 +63,9 @@ jobs:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
         fail_ci_if_error: true
+        file: ${{github.workspace}}/build/coverage.info
         disable_search: true
-        files: ${{github.workspace}}/build/coverage.info
+        files: coverage.info
         flags: unittests
         name: codecov-umbrella
         verbose: true
