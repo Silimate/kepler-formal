@@ -9,9 +9,13 @@
 #include "NLUniverse.h"
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
+#include "SNLInstance.h"
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
+#include "common/BoolExprUtils.h"
+#include "kinduction/BaseCaseSolver.h"
 #include "kinduction/KInductionEngine.h"
+#include "kinduction/InductionStepSolver.h"
 #include "model/SequentialDesignModel.h"
 #include "proof/ExactInterpolationEngine.h"
 #include "proof/IC3Engine.h"
@@ -98,15 +102,17 @@ SNLDesign* createDffTop(
     SNLDesign* invModel,
     bool invertData,
     bool invertOutput,
-    const std::string& ffName = "ff0") {
+    const std::string& inputName,
+    const std::string& outputName,
+    const std::string& ffName) {
   auto* top =
       SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
   auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName(inputName));
   auto* topClock =
       SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
   auto* topOut =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName(outputName));
 
   auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName(ffName));
   SNLInstance* dataInv = nullptr;
@@ -145,6 +151,35 @@ SNLDesign* createDffTop(
   }
 
   return top;
+}
+
+SNLDesign* createDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* invModel,
+    bool invertData,
+    bool invertOutput,
+    const std::string& ffName = "ff0") {
+  return createDffTop(
+      library, name, invModel, invertData, invertOutput, "in", "out", ffName);
+}
+
+SNLDesign* createNamedOutputDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* invModel,
+    const std::string& outputName) {
+  return createDffTop(
+      library, name, invModel, false, false, "in", outputName, "ff0");
+}
+
+SNLDesign* createNamedInputDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* invModel,
+    const std::string& inputName) {
+  return createDffTop(
+      library, name, invModel, false, false, inputName, "out", "ff0");
 }
 
 SNLDesign* createDffeTop(
@@ -1086,6 +1121,109 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BoolExprRemapThrowsOnMissingVariableMapping) {
+  auto* expr = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+
+  EXPECT_THROW(
+      static_cast<void>(remapBoolExprVariables(expr, {{2, 10}})),
+      std::runtime_error);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BoolExprSubstitutionRewritesAssignedVariablesAndKeepsOthers) {
+  auto* expr = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Not(BoolExpr::Var(3)));
+  auto* substituted = substituteBoolExprVariables(expr, {{2, true}, {3, false}});
+
+  EXPECT_TRUE(substituted->evaluate({}));
+  EXPECT_EQ(substituted->getOp(), KEPLER_FORMAL::Op::VAR);
+  EXPECT_EQ(substituted->getId(), 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverFindsCombinationalCounterexampleAtFrameZero) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"in"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {2};
+  problem.allSymbols = {2};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Not(BoolExpr::Var(2))};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0);
+
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 0u);
+  ASSERT_EQ(witness->inputTrace.size(), 1u);
+  EXPECT_EQ(witness->inputTrace[0].frame, 0u);
+  ASSERT_EQ(witness->outputMismatches.size(), 1u);
+  EXPECT_EQ(witness->outputMismatches[0].signal, "out");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverObservationOnlyStartsSearchingAtFrameOne) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"in"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {2};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::Var(2)}};
+  problem.transitions1 = {{4, BoolExpr::createFalse()}};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
+  ASSERT_EQ(witness->inputTrace.size(), 2u);
+  EXPECT_EQ(witness->inputTrace.front().frame, 0u);
+  EXPECT_EQ(witness->inputTrace.back().frame, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverOffsetsWitnessAfterResetBootstrap) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"rst", "in"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {2, 5};
+  problem.resetBootstrapCycles = 2;
+  problem.resetBootstrapInputs = {{2, true}};
+  problem.bootstrapStateAssignments = {{3, false}, {4, false}};
+  problem.bootstrapStateEqualityPairs = {{3, 4}};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4, 5};
+  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::Var(5)}};
+  problem.transitions1 = {{4, BoolExpr::createFalse()}};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
+  ASSERT_EQ(witness->inputTrace.size(), 2u);
+  EXPECT_EQ(witness->inputTrace[0].frame, 0u);
+  ASSERT_EQ(witness->inputTrace[0].assignments.size(), 2u);
+  EXPECT_EQ(witness->inputTrace[0].assignments[0].signal, "rst");
+  EXPECT_FALSE(witness->inputTrace[0].assignments[0].value);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ExactInterpolationEngineDerivesOneStepReachableStateInvariant) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -1282,6 +1420,24 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       InductionStepSolverUsesExplicitInvariantWhenProvided) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.property = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+  problem.inductionProperty =
+      makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
+  problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
+
+  EXPECT_TRUE(
+      provesByInduction(problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SynthesizedResetInferencePropagatesThroughLongBootstrapPipeline) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -1317,6 +1473,62 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_FALSE(model.hasUnsupportedFeatures());
   EXPECT_EQ(model.initialStateValueByKey.size(), model.stateBits.size());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       MismatchedObservedOutputNamesAreReportedAsUnsupported) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createNamedOutputDffTop(library, "top0", invModel, "out0");
+  auto* top1 = createNamedOutputDffTop(library, "top1", invModel, "out1");
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(result.reason.find("Mismatched observed output sets"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       MismatchedInputNamesAreReportedAsUnsupported) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createNamedInputDffTop(library, "top0", invModel, "in0");
+  auto* top1 = createNamedInputDffTop(library, "top1", invModel, "in1");
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(
+      result.reason.find("Mismatched environment input sets"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       TooSmallBoundRemainsInconclusiveBeforeCounterexampleDepth) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
+  auto* top1 = createResetInitializedPipelineTop(library, "top1", true);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 2u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
