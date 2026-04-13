@@ -42,11 +42,13 @@ static void print_usage(const char* prog) {
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
       "[-v <LEC|SEC>] [-k <max-k>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] [-v <LEC|SEC>] [-k <max-k>] [--compact] "
+      "<file...> [--liberty <library-file>...] [-v <LEC|SEC>] [-k <max-k>] "
+      "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
       "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <LEC|SEC>] [-k <max-k>] "
-      "[--design1 <file...>] [--design2 <file...>] [--compact] "
+      "[--design1 <file...>] [--design2 <file...>] "
+      "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
       prog);
 }
@@ -203,6 +205,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "format",
       "verification",
       "max_k",
+      "sec_uncomputable_seq_as_boundary",
       "input_paths",
       "liberty_files",
       "py_tech_files",
@@ -510,6 +513,7 @@ int KeplerFormalMain(int argc, char** argv) {
   VerificationMode verificationMode = VerificationMode::LEC;
   size_t secMaxK = kDefaultSecMaxK;
   bool secMaxKExplicit = false;
+  bool secTreatUncomputableSeqAsBoundary = true;
 
   // Basic argument sanity
   if (argc < 2) {
@@ -531,6 +535,7 @@ int KeplerFormalMain(int argc, char** argv) {
   std::string dumpCnfPath;
 
   KEPLER_FORMAL::Config::setReportSkippedPOs(false);
+  KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(true);
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -585,6 +590,16 @@ int KeplerFormalMain(int argc, char** argv) {
             return EXIT_FAILURE;
           }
           secMaxKExplicit = true;
+        }
+
+        if (cfg["sec_uncomputable_seq_as_boundary"]) {
+          if (!cfg["sec_uncomputable_seq_as_boundary"].IsScalar()) {
+            SPDLOG_CRITICAL(
+                "sec_uncomputable_seq_as_boundary must be a scalar");
+            return EXIT_FAILURE;
+          }
+          secTreatUncomputableSeqAsBoundary =
+              cfg["sec_uncomputable_seq_as_boundary"].as<bool>();
         }
 
         // input_paths
@@ -717,6 +732,16 @@ int KeplerFormalMain(int argc, char** argv) {
         parseStart += 2;
         continue;
       }
+      if (arg == "--sec-uncomputable-seq-boundary") {
+        secTreatUncomputableSeqAsBoundary = true;
+        ++parseStart;
+        continue;
+      }
+      if (arg == "--no-sec-uncomputable-seq-boundary") {
+        secTreatUncomputableSeqAsBoundary = false;
+        ++parseStart;
+        continue;
+      }
       if (arg == "-naja_if") {
         inputFormatType = FormatType::NAJA_IF;
         ++parseStart;
@@ -773,6 +798,14 @@ int KeplerFormalMain(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         secMaxKExplicit = true;
+        continue;
+      }
+      if (arg == "--sec-uncomputable-seq-boundary") {
+        secTreatUncomputableSeqAsBoundary = true;
+        continue;
+      }
+      if (arg == "--no-sec-uncomputable-seq-boundary") {
+        secTreatUncomputableSeqAsBoundary = false;
         continue;
       }
       if (arg == "--design1") {
@@ -950,11 +983,17 @@ int KeplerFormalMain(int argc, char** argv) {
 
   auto solverType = KEPLER_FORMAL::Config::getSolverType();
   KEPLER_FORMAL::Config::setReportSkippedPOs(reportSkippedPOs);
+  KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(
+      secTreatUncomputableSeqAsBoundary);
   SPDLOG_INFO("Solver: {}",
               solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");
   SPDLOG_INFO("Verification: {}", verificationModeName(verificationMode));
   if (verificationMode == VerificationMode::SEC) {
     SPDLOG_INFO("SEC max_k: {}", secMaxK);
+    SPDLOG_INFO(
+        "SEC uncomputable sequentials: {}",
+        secTreatUncomputableSeqAsBoundary ? "boundary abstraction"
+                                          : "strict failure");
   }
   SPDLOG_INFO("Compact mode: {}", compactMode ? "enabled" : "disabled");
   SPDLOG_INFO("Skipped PO reports: {}", reportSkippedPOs ? "enabled" : "disabled");
@@ -1296,6 +1335,32 @@ int KeplerFormalMain(int argc, char** argv) {
     try {
       KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(top0, top1, solverType);
       const auto result = strategy.run(secMaxK);
+      if (result.totalOutputs != 0) {
+        SPDLOG_INFO(
+            "SEC output coverage: {:.2f}% ({}/{} covered/existing outputs).",
+            result.outputCoveragePercent(),
+            result.coveredOutputs,
+            result.totalOutputs);
+      }
+      if (!result.skippedObservedOutputs.empty()) {
+        std::ostringstream skippedOutputs;
+        for (const auto& skippedOutput : result.skippedObservedOutputs) {
+          skippedOutputs << "  - " << skippedOutput << "\n";
+        }
+        SPDLOG_INFO(
+            "SEC skipped observed outputs due to connectivity issues "
+            "(no-driver or multi-driver only):\n{}",
+            skippedOutputs.str());
+      }
+      if (!result.abstractedSequentialBoundaries.empty()) {
+        std::ostringstream abstractedBoundaries;
+        for (const auto& abstractedBoundary : result.abstractedSequentialBoundaries) {
+          abstractedBoundaries << "  - " << abstractedBoundary << "\n";
+        }
+        SPDLOG_INFO(
+            "SEC abstracted uncomputable sequential interfaces as boundaries:\n{}",
+            abstractedBoundaries.str());
+      }
       switch (result.status) {
         case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:
           SPDLOG_INFO("No difference was found. SEC proved equivalence at k = {}.", result.bound);

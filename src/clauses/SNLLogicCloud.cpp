@@ -1049,6 +1049,8 @@ void SNLLogicCloud::compute() {
         // proper error with names of all the drivers
         // throw an error and separate names by comma
         if (iso.getDrivers().size() > 1) {
+          skipReason_ = SkipReason::MultiDriver;
+          skipReasonText_ = "its iso has multiple drivers during cloud expansion";
           reportCloudSkippedRoot(&dnl_, seedOutputTerm_, input, DNLID_MAX,
                                  "its iso has multiple drivers during cloud expansion",
                                  kSkippedMultiDriverPOReport);
@@ -1057,6 +1059,8 @@ void SNLLogicCloud::compute() {
         }
       } else if (iso.getDrivers().empty()) {
         if (!iso.isConstant()) {
+          skipReason_ = SkipReason::NoDriver;
+          skipReasonText_ = "its iso has no drivers during cloud expansion";
           reportCloudSkippedRoot(&dnl_, seedOutputTerm_, input, DNLID_MAX,
                                  "its iso has no drivers during cloud expansion",
                                  kSkippedNoDriverPOReport);
@@ -1155,6 +1159,9 @@ void SNLLogicCloud::compute() {
         std::vector<DNLID> loopTerms;
         if (table_.findAncestorLoopForBorderLeaf(i, merges[i].second,
                                                  loopTerms)) {
+          skipReason_ = SkipReason::LogicalLoop;
+          skipReasonText_ =
+              "a logical loop was detected during cloud expansion";
           reportCloudSkippedRoot(
               &dnl_, seedOutputTerm_, currentInputs[i], merges[i].second,
               "a logical loop was detected during cloud expansion",

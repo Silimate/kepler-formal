@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <optional>
+#include <unordered_set>
 
 #include "BoolExprCache.h"
 #include "DNL.h"
@@ -12,6 +13,10 @@
 #include "NLUniverse.h"
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
+#include "SNLBusNet.h"
+#include "SNLBusNetBit.h"
+#include "SNLBusTerm.h"
+#include "SNLBusTermBit.h"
 #include "SNLInstance.h"
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
@@ -87,6 +92,12 @@ std::optional<naja::DNL::DNLID> findTermByKeyForTest(
     naja::DNL::DNLFull* dnl,
     const SignalKey& key);
 
+std::vector<naja::DNL::DNLID> selectRequiredBuilderOutputsForTest(
+    const std::vector<naja::DNL::DNLID>& collectedOutputs,
+    const std::unordered_set<naja::DNL::DNLID>& topOutputTerms,
+    const std::vector<naja::DNL::DNLID>& sequentialDependencyTerms,
+    const std::unordered_set<naja::DNL::DNLID>& prunedBuilderOutputTerms);
+
 }  // namespace KEPLER_FORMAL::SEC::detail
 
 namespace {
@@ -125,11 +136,35 @@ class ScopedEnvVar {
   std::optional<std::string> previousValue_;
 };
 
+class ScopedSecBoundaryAbstraction {
+ public:
+  explicit ScopedSecBoundaryAbstraction(bool enabled)
+      : previousValue_(
+            KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary()) {
+    KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(enabled);
+  }
+
+  ~ScopedSecBoundaryAbstraction() {
+    KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(previousValue_);
+  }
+
+ private:
+  bool previousValue_;
+};
+
 SignalKey makeSignalKey(const std::string& name) {
   SignalKey key;
   key.first.push_back(stableSignalKeyNameID(name));
   key.second.push_back(stableSignalKeyNameID(name));
   return key;
+}
+
+SNLDesignModeling::BitTerms collectBitTerms(SNLBusTerm* bus) {
+  SNLDesignModeling::BitTerms bits;
+  for (auto* bit : bus->getBits()) {
+    bits.push_back(bit);
+  }
+  return bits;
 }
 
 SNLDesign* createInvModel(NLLibrary* library) {
@@ -842,6 +877,21 @@ SNLDesign* createSetOnlySequentialModel(NLLibrary* library,
   return model;
 }
 
+SNLDesign* createBusSequentialModel(NLLibrary* library,
+                                    const std::string& name) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* data = SNLBusTerm::create(
+      model, SNLTerm::Direction::Input, 1, 0, NLName("D"));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* output = SNLBusTerm::create(
+      model, SNLTerm::Direction::Output, 1, 0, NLName("Q"));
+  SNLDesignModeling::addInputsToClockArcs(collectBitTerms(data), clock);
+  SNLDesignModeling::addClockToOutputsArcs(clock, collectBitTerms(output));
+  return model;
+}
+
 SNLDesign* createNoDataSequentialModel(NLLibrary* library,
                                        const std::string& name) {
   auto* model =
@@ -850,6 +900,23 @@ SNLDesign* createNoDataSequentialModel(NLLibrary* library,
       SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
   auto* output =
       SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
+  SNLDesignModeling::addClockToOutputsArcs(clock, {output});
+  return model;
+}
+
+SNLDesign* createExtraUpdatePinSequentialModel(NLLibrary* library,
+                                               const std::string& name) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* data =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
+  auto* address =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("A"));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
+  auto* output =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
+  SNLDesignModeling::addInputsToClockArcs({data, address}, clock);
   SNLDesignModeling::addClockToOutputsArcs(clock, {output});
   return model;
 }
@@ -967,6 +1034,82 @@ SNLDesign* createSetOnlySequentialTop(
   return top;
 }
 
+SNLDesign* createBusSequentialTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn = SNLBusTerm::create(
+      top, SNLTerm::Direction::Input, 1, 0, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut = SNLBusTerm::create(
+      top, SNLTerm::Direction::Output, 1, 0, NLName("out"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netIn = SNLBusNet::create(top, 1, 0, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netOut = SNLBusNet::create(top, 1, 0, NLName("net_out"));
+
+  topClock->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+
+  auto* modelData = sequentialModel->getBusTerm(NLName("D"));
+  auto* modelOutput = sequentialModel->getBusTerm(NLName("Q"));
+  for (int bit = 0; bit <= 1; ++bit) {
+    topIn->getBit(bit)->setNet(netIn->getBit(bit));
+    topOut->getBit(bit)->setNet(netOut->getBit(bit));
+    seq->getInstTerm(modelData->getBit(bit))->setNet(netIn->getBit(bit));
+    seq->getInstTerm(modelOutput->getBit(bit))->setNet(netOut->getBit(bit));
+  }
+
+  return top;
+}
+
+SNLDesign* createComplementedSetSequentialTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel,
+    const std::string& primaryPinName,
+    const std::string& complementPinName) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topSet =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("set"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topPrimary =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out_primary"));
+  auto* topSecondary = SNLScalarTerm::create(
+      top, SNLTerm::Direction::Output, NLName("out_secondary"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netSet = SNLScalarNet::create(top, NLName("net_set"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netPrimary = SNLScalarNet::create(top, NLName("net_primary"));
+  auto* netSecondary = SNLScalarNet::create(top, NLName("net_secondary"));
+
+  topIn->setNet(netIn);
+  topSet->setNet(netSet);
+  topClock->setNet(netClock);
+  topPrimary->setNet(netPrimary);
+  topSecondary->setNet(netSecondary);
+
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("D")))->setNet(netIn);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("S")))->setNet(netSet);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName(primaryPinName)))->setNet(
+      netPrimary);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName(complementPinName)))->setNet(
+      netSecondary);
+
+  return top;
+}
+
 SNLDesign* createNoDataSequentialTop(
     NLLibrary* library,
     const std::string& name,
@@ -984,6 +1127,147 @@ SNLDesign* createNoDataSequentialTop(
 
   topClock->setNet(netClock);
   topOut->setNet(netOut);
+
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("Q")))->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createExtraUpdatePinSequentialTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topAddr =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("addr"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netAddr = SNLScalarNet::create(top, NLName("net_addr"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topAddr->setNet(netAddr);
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("D")))->setNet(netIn);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("A")))->setNet(netAddr);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("Q")))->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createPartialCoverageNoDriverTop(
+    NLLibrary* library,
+    const std::string& name) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topGood =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("good"));
+  auto* topBad =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("bad"));
+
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netData = SNLScalarNet::create(top, NLName("net_data"));
+  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
+
+  topIn->setNet(netIn);
+  topClock->setNet(netClock);
+  topGood->setNet(netIn);
+  topBad->setNet(netQ);
+
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netData);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
+
+  return top;
+}
+
+SNLDesign* createPartialCoverageMultiDriverTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* invModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topInA =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in_a"));
+  auto* topInB =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in_b"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topGood =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("good"));
+  auto* topBad =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("bad"));
+
+  auto* inv0 = SNLInstance::create(top, invModel, NLName("inv0"));
+  auto* inv1 = SNLInstance::create(top, invModel, NLName("inv1"));
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+  auto* netInA = SNLScalarNet::create(top, NLName("net_in_a"));
+  auto* netInB = SNLScalarNet::create(top, NLName("net_in_b"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netMulti = SNLScalarNet::create(top, NLName("net_multi"));
+  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
+
+  topInA->setNet(netInA);
+  topInB->setNet(netInB);
+  topClock->setNet(netClock);
+  topGood->setNet(netInA);
+  topBad->setNet(netQ);
+
+  inv0->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netInA);
+  inv0->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netMulti);
+  inv1->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netInB);
+  inv1->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netMulti);
+
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netMulti);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
+
+  return top;
+}
+
+SNLDesign* createUnsupportedPrimitiveCoverageTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* sequentialModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topGood =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("good"));
+  auto* topBad =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("bad"));
+
+  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topClock->setNet(netClock);
+  topGood->setNet(netIn);
+  topBad->setNet(netOut);
 
   seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
   seq->getInstTerm(sequentialModel->getScalarTerm(NLName("Q")))->setNet(netOut);
@@ -2591,6 +2875,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractTracksVectorStateBitsPerOutputTerm) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createBusSequentialModel(primitives, "DFF_BUS");
+  auto* top = createBusSequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  ASSERT_EQ(extracted.stateBits.size(), 2u);
+
+  const auto in0Key = findKeyByDisplayName(extracted, "in[0]");
+  const auto in1Key = findKeyByDisplayName(extracted, "in[1]");
+  const auto q0Key = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  const auto q1Key = findKeyByDisplayName(extracted, "ff0.Q[1]");
+
+  auto* q0Expr = extracted.nextStateExprByStateKey.at(q0Key);
+  auto* q1Expr = extracted.nextStateExprByStateKey.at(q1Key);
+  EXPECT_TRUE(q0Expr->evaluate({{extracted.inputVarByKey.at(in0Key), true},
+                                {extracted.inputVarByKey.at(in1Key), false}}));
+  EXPECT_FALSE(q1Expr->evaluate({{extracted.inputVarByKey.at(in0Key), true},
+                                 {extracted.inputVarByKey.at(in1Key), false}}));
+  EXPECT_FALSE(q0Expr->evaluate({{extracted.inputVarByKey.at(in0Key), false},
+                                 {extracted.inputVarByKey.at(in1Key), true}}));
+  EXPECT_TRUE(q1Expr->evaluate({{extracted.inputVarByKey.at(in0Key), false},
+                                {extracted.inputVarByKey.at(in1Key), true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractSkipsCombinationalInstancesWithoutStateOutputs) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -2606,6 +2923,70 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_FALSE(extracted.hasUnsupportedFeatures());
   EXPECT_TRUE(extracted.stateBits.empty());
   EXPECT_EQ(extracted.observedOutputs.size(), 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractPropagatesNoDriverSkipsToStateAndOutputs) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = createPartialCoverageNoDriverTop(library, "top");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_EQ(extracted.totalObservedOutputCount(), 2u);
+  EXPECT_EQ(extracted.coveredObservedOutputCount(), 1u);
+  EXPECT_EQ(extracted.skippedObservedOutputs.size(), 1u);
+  EXPECT_EQ(extracted.skippedStateBits.size(), 1u);
+  EXPECT_NE(
+      std::find(
+          extracted.observedOutputs.begin(),
+          extracted.observedOutputs.end(),
+          findKeyByDisplayName(extracted, "good[0]")),
+      extracted.observedOutputs.end());
+  EXPECT_EQ(
+      extracted.skippedObservedOutputs.front(),
+      findKeyByDisplayName(extracted, "bad[0]"));
+  const auto badKey = findKeyByDisplayName(extracted, "bad[0]");
+  const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  ASSERT_NE(extracted.connectivitySkipInfoByKey.find(badKey),
+            extracted.connectivitySkipInfoByKey.end());
+  ASSERT_NE(extracted.connectivitySkipInfoByKey.find(stateKey),
+            extracted.connectivitySkipInfoByKey.end());
+  EXPECT_EQ(
+      extracted.connectivitySkipInfoByKey.at(stateKey).origin,
+      ConnectivitySkipOrigin::NoDriver);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractPropagatesMultiDriverSkipsToStateAndOutputs) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top = createPartialCoverageMultiDriverTop(library, "top", invModel);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_EQ(extracted.totalObservedOutputCount(), 2u);
+  EXPECT_EQ(extracted.coveredObservedOutputCount(), 1u);
+  EXPECT_EQ(extracted.skippedObservedOutputs.size(), 1u);
+  EXPECT_EQ(extracted.skippedStateBits.size(), 1u);
+  const auto badKey = findKeyByDisplayName(extracted, "bad[0]");
+  const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  ASSERT_NE(extracted.connectivitySkipInfoByKey.find(badKey),
+            extracted.connectivitySkipInfoByKey.end());
+  ASSERT_NE(extracted.connectivitySkipInfoByKey.find(stateKey),
+            extracted.connectivitySkipInfoByKey.end());
+  EXPECT_EQ(
+      extracted.connectivitySkipInfoByKey.at(stateKey).origin,
+      ConnectivitySkipOrigin::MultiDriver);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -2727,7 +3108,64 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractAbstractsUncomputableSequentialAsBoundaryByDefault) {
+  ScopedSecBoundaryAbstraction boundaryAbstraction(true);
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createNoDataSequentialModel(primitives, "SEQ_NO_D");
+  auto* top = createNoDataSequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.stateBits.empty());
+  EXPECT_NE(
+      std::find(
+          extracted.environmentInputs.begin(),
+          extracted.environmentInputs.end(),
+          findKeyByDisplayName(extracted, "ff0.Q[0]")),
+      extracted.environmentInputs.end());
+  EXPECT_NE(
+      std::find(
+          extracted.observedOutputs.begin(),
+          extracted.observedOutputs.end(),
+          findKeyByDisplayName(extracted, "ff0.CK[0]")),
+      extracted.observedOutputs.end());
+  ASSERT_EQ(extracted.abstractedSequentialBoundaries.size(), 1u);
+  EXPECT_NE(
+      extracted.abstractedSequentialBoundaries.front().find("ff0"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractAbstractsSequentialWithUnsupportedUpdatePinsAsBoundaryByDefault) {
+  ScopedSecBoundaryAbstraction boundaryAbstraction(true);
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createExtraUpdatePinSequentialModel(primitives, "SEQ_ADDR");
+  auto* top = createExtraUpdatePinSequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.stateBits.empty());
+  EXPECT_FALSE(extracted.abstractedSequentialBoundaries.empty());
+  EXPECT_NE(
+      extracted.abstractedSequentialBoundaries.front().find("update pin `A`"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractReportsUnsupportedSequentialWithoutDInput) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -2744,7 +3182,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractRejectsSequentialWithUnsupportedUpdatePinsInStrictMode) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createExtraUpdatePinSequentialModel(primitives, "SEQ_ADDR");
+  auto* top = createExtraUpdatePinSequentialTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_TRUE(extracted.hasUnsupportedFeatures());
+  ASSERT_FALSE(extracted.unsupportedReasons.empty());
+  EXPECT_NE(
+      extracted.unsupportedReasons.front().find("update pin `A`"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractRejectsMultipleControlStyles) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -2773,7 +3233,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
   auto* model = createNamedComplementSetSequentialModel(
       primitives, "DFF_STATE_SET", "STATE", "STATEN");
-  auto* top = createSequentialOutputPairTop(
+  auto* top = createComplementedSetSequentialTop(
       library, "top", model, "STATE", "STATEN");
 
   const auto extracted = SequentialDesignModel::extract(top);
@@ -2786,7 +3246,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelExtractReportsUnsupportedNonComplementedStateOutput) {
+       SequentialDesignModelExtractReportsSharedScalarDataForMultiOutputPrimitive) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -2803,12 +3264,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(extracted.hasUnsupportedFeatures());
   ASSERT_FALSE(extracted.unsupportedReasons.empty());
   EXPECT_NE(
-      extracted.unsupportedReasons.front().find("multiple state outputs"),
+      extracted.unsupportedReasons.front().find("multiple independent state outputs"),
       std::string::npos);
+  for (const auto& reason : extracted.unsupportedReasons) {
+    EXPECT_EQ(reason.find("Missing next-state relation"), std::string::npos);
+  }
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelExtractReportsUnsupportedQPlusUnrelatedStateOutput) {
+       SequentialDesignModelExtractReportsSharedScalarDataForQAndUnrelatedOutput) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -2825,7 +3290,41 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(extracted.hasUnsupportedFeatures());
   ASSERT_FALSE(extracted.unsupportedReasons.empty());
   EXPECT_NE(
-      extracted.unsupportedReasons.front().find("multiple state outputs"),
+      extracted.unsupportedReasons.front().find("multiple independent state outputs"),
+      std::string::npos);
+  for (const auto& reason : extracted.unsupportedReasons) {
+    EXPECT_EQ(reason.find("Missing next-state relation"), std::string::npos);
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractStopsBeforeConeBuildForUnsupportedPrimitiveInfo) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createNamedComplementSequentialModel(
+      primitives, "DFF_STATE_ALT", "STATE", "ALT");
+  auto* top = createSequentialOutputPairTop(
+      library, "top", model, "STATE", "ALT");
+
+  ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  const auto extracted = SequentialDesignModel::extract(top);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_TRUE(extracted.hasUnsupportedFeatures());
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: extract(top) collect begin"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: extract(top) early unsupported exit before build"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("SEC diag: extract(top) build begin"),
       std::string::npos);
 }
 
@@ -2997,6 +3496,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        UnsupportedReasonsFromBothDesignsAreJoined) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -3014,7 +3514,123 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.run(1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
-  EXPECT_NE(result.reason.find(" | "), std::string::npos);
+  EXPECT_FALSE(result.reason.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       StrategyStopsBeforeSecondExtractionAndProofOnUnsupportedPrimitiveInfo) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* unsupportedModel = createNamedComplementSequentialModel(
+      primitives, "DFF_STATE_ALT", "STATE", "ALT");
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createSequentialOutputPairTop(
+      library, "top0", unsupportedModel, "STATE", "ALT");
+  auto* top1 = createDffTop(library, "top1", invModel, false, false);
+
+  ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(stderrOutput.find("SEC diag: extracted design0"), std::string::npos);
+  EXPECT_EQ(stderrOutput.find("SEC diag: extracted design1"), std::string::npos);
+  EXPECT_EQ(stderrOutput.find("SEC diag: aligning inputs/outputs"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       EquivalentDesignsCanProveSecOnCoveredOutputsOnlyAfterNoDriverSkipping) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top0 = createPartialCoverageNoDriverTop(library, "top0");
+  auto* top1 = createPartialCoverageNoDriverTop(library, "top1");
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(result.skippedObservedOutputs.front().find("bad[0]"), std::string::npos);
+  EXPECT_NE(result.skippedObservedOutputs.front().find("no-driver"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       EquivalentDesignsCanProveSecOnCoveredOutputsOnlyAfterMultiDriverSkipping) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createPartialCoverageMultiDriverTop(library, "top0", invModel);
+  auto* top1 = createPartialCoverageMultiDriverTop(library, "top1", invModel);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(result.skippedObservedOutputs.front().find("bad[0]"), std::string::npos);
+  EXPECT_NE(result.skippedObservedOutputs.front().find("multi-driver"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       UnsupportedSequentialInterfacesCanBeAbstractedAsSecBoundariesByDefault) {
+  ScopedSecBoundaryAbstraction boundaryAbstraction(true);
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* unsupportedModel = createNoDataSequentialModel(primitives, "SEQ_NO_D");
+  auto* top0 =
+      createUnsupportedPrimitiveCoverageTop(library, "top0", unsupportedModel);
+  auto* top1 =
+      createUnsupportedPrimitiveCoverageTop(library, "top1", unsupportedModel);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_FALSE(result.abstractedSequentialBoundaries.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       UnsupportedPrimitiveInformationStillFailsEvenWithOtherCoveredOutputs) {
+  ScopedSecBoundaryAbstraction strictSequentialModeling(false);
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* unsupportedModel = createNoDataSequentialModel(primitives, "SEQ_NO_D");
+  auto* top0 =
+      createUnsupportedPrimitiveCoverageTop(library, "top0", unsupportedModel);
+  auto* top1 =
+      createUnsupportedPrimitiveCoverageTop(library, "top1", unsupportedModel);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_FALSE(result.reason.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -3166,6 +3782,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelDetailResetInferenceAndReachableStateHelpersCoverBranches) {
+  const auto requiredOutputs = detail::selectRequiredBuilderOutputsForTest(
+      {10, 11, 12, 13, 14},
+      {10, 14},
+      {12, 13, 13},
+      {14});
+  EXPECT_EQ(
+      requiredOutputs,
+      (std::vector<naja::DNL::DNLID>{10, 12, 13}));
+
   EXPECT_EQ(
       detail::getResetAssertionValueForTest("rst[0]"),
       std::optional<bool>(true));

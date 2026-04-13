@@ -151,6 +151,29 @@ std::vector<std::string> setDifference(const std::set<std::string>& lhs,
   return diff;
 }
 
+std::string describeConnectivitySkipOrigin(ConnectivitySkipOrigin origin) {
+  switch (origin) {
+    case ConnectivitySkipOrigin::NoDriver:
+      return "no-driver";
+    case ConnectivitySkipOrigin::MultiDriver:
+      return "multi-driver";
+  }
+  return "connectivity";  // LCOV_EXCL_LINE
+}
+
+std::string describeConnectivitySkipInfo(const ConnectivitySkipInfo& info) {
+  std::ostringstream oss;
+  oss << describeConnectivitySkipOrigin(info.origin) << " connectivity: "
+      << info.detail;
+  return oss.str();
+}
+
+struct OutputCoverageSelection {
+  AlignedSignals checkedOutputs;
+  std::vector<std::string> skippedOutputs;
+  size_t totalOutputs = 0;
+};
+
 struct ScopedDnlContext {
   explicit ScopedDnlContext(naja::NL::SNLDesign* top)
       : universe_(naja::NL::NLUniverse::get()),
@@ -546,6 +569,74 @@ AlignedSignals alignSignalsByName(
   return aligned;
 }
 
+OutputCoverageSelection selectCoveredObservedOutputs(
+    const AlignedSignals& allObservedOutputs,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1) {
+  OutputCoverageSelection selection;
+  selection.totalOutputs = allObservedOutputs.names.size();
+  selection.checkedOutputs.names.reserve(allObservedOutputs.names.size());
+  selection.checkedOutputs.keys0.reserve(allObservedOutputs.names.size());
+  selection.checkedOutputs.keys1.reserve(allObservedOutputs.names.size());
+
+  for (size_t i = 0; i < allObservedOutputs.names.size(); ++i) {
+    const auto& key0 = allObservedOutputs.keys0[i];
+    const auto& key1 = allObservedOutputs.keys1[i];
+    const auto& name = allObservedOutputs.names[i];
+
+    const auto skip0 = model0.connectivitySkipInfoByKey.find(key0);
+    const auto skip1 = model1.connectivitySkipInfoByKey.find(key1);
+    if (skip0 != model0.connectivitySkipInfoByKey.end() ||
+        skip1 != model1.connectivitySkipInfoByKey.end()) {
+      std::vector<std::string> reasons;
+      if (skip0 != model0.connectivitySkipInfoByKey.end()) {
+        reasons.push_back(
+            "design0 " + describeConnectivitySkipInfo(skip0->second));
+      }
+      if (skip1 != model1.connectivitySkipInfoByKey.end()) {
+        reasons.push_back(
+            "design1 " + describeConnectivitySkipInfo(skip1->second));
+      }
+      selection.skippedOutputs.push_back(
+          name + ": " + joinReasons(reasons));
+      continue;
+    }
+
+    if (model0.observedOutputExprByKey.find(key0) ==
+            model0.observedOutputExprByKey.end() ||
+        model1.observedOutputExprByKey.find(key1) ==
+            model1.observedOutputExprByKey.end()) {
+      throw std::runtime_error(
+          "Missing observed output expression for aligned SEC output `" +
+          name + "`");
+    }
+
+    selection.checkedOutputs.names.push_back(name);
+    selection.checkedOutputs.keys0.push_back(key0);
+    selection.checkedOutputs.keys1.push_back(key1);
+  }
+
+  return selection;
+}
+
+SequentialEquivalenceResult makeSecResult(
+    SequentialEquivalenceStatus status,
+    size_t bound,
+    std::string reason,
+    const OutputCoverageSelection& coverage,
+    std::vector<std::string> abstractedSequentialBoundaries = {}) {
+  SequentialEquivalenceResult result;
+  result.status = status;
+  result.bound = bound;
+  result.reason = std::move(reason);
+  result.coveredOutputs = coverage.checkedOutputs.names.size();
+  result.totalOutputs = coverage.totalOutputs;
+  result.skippedObservedOutputs = coverage.skippedOutputs;
+  result.abstractedSequentialBoundaries =
+      std::move(abstractedSequentialBoundaries);
+  return result;
+}
+
 template <typename MapT>
 void assignSymbols(const std::vector<SignalKey>& keys,
                    MapT& output,
@@ -598,10 +689,36 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     fprintf(stderr, "SEC diag: extracted design0\n");
     fflush(stderr);
   }
+  std::vector<std::string> abstractedSequentialBoundaries;
+  for (const auto& description : model0.abstractedSequentialBoundaries) {
+    abstractedSequentialBoundaries.push_back("design0 " + description);
+  }
+  if (model0.hasUnsupportedFeatures()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Unsupported,
+        0,
+        joinReasons(model0.unsupportedReasons),
+        OutputCoverageSelection{},
+        abstractedSequentialBoundaries);
+  }
   SequentialDesignModel model1 = SequentialDesignModel::extract(top1_);
   if (secDiagEnabled) {
     fprintf(stderr, "SEC diag: extracted design1\n");
     fflush(stderr);
+  }
+  abstractedSequentialBoundaries.reserve(
+      model0.abstractedSequentialBoundaries.size() +
+      model1.abstractedSequentialBoundaries.size());
+  for (const auto& description : model1.abstractedSequentialBoundaries) {
+    abstractedSequentialBoundaries.push_back("design1 " + description);
+  }
+  if (model1.hasUnsupportedFeatures()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Unsupported,
+        0,
+        joinReasons(model1.unsupportedReasons),
+        OutputCoverageSelection{},
+        abstractedSequentialBoundaries);
   }
 
   if (model0.hasUnsupportedFeatures() || model1.hasUnsupportedFeatures()) {
@@ -610,18 +727,21 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         reasons.end(),
         model1.unsupportedReasons.begin(),
         model1.unsupportedReasons.end());
-    return {
+    return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
         joinReasons(reasons),
-    };
+        OutputCoverageSelection{},
+        abstractedSequentialBoundaries);
   }
 
   // Step 2: SEC only makes sense when the observable interfaces align by the
   // user-visible term names, not by parser-local object IDs.
   AlignedSignals alignedInputs;
+  AlignedSignals alignedAllOutputs;
   AlignedSignals alignedOutputs;
   AlignedSignals inductiveStateEqualities;
+  OutputCoverageSelection outputCoverage;
   try {
     if (secDiagEnabled) {
       fprintf(stderr, "SEC diag: aligning inputs/outputs\n");
@@ -633,12 +753,44 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         model1.environmentInputs,
         model1.displayNameByKey,
         "environment input");
+    alignedAllOutputs = alignSignalsByName(
+        model0.allObservedOutputs,
+        model0.displayNameByKey,
+        model1.allObservedOutputs,
+        model1.displayNameByKey,
+        "observed output");
+    outputCoverage = selectCoveredObservedOutputs(
+        alignedAllOutputs, model0, model1);
+    alignedOutputs = outputCoverage.checkedOutputs;
+    if (alignedOutputs.names.empty()) {
+      return makeSecResult(
+          SequentialEquivalenceStatus::Unsupported,
+          0,
+          "No aligned observed outputs remain after skipping cones with no-driver or "
+          "multi-driver connectivity.",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    }
+    if (secDiagEnabled) {
+      fprintf(
+          stderr,
+          "SEC diag: checked_outputs=%zu total_outputs=%zu skipped=%zu\n",
+          alignedOutputs.names.size(),
+          outputCoverage.totalOutputs,
+          outputCoverage.skippedOutputs.size());
+      fflush(stderr);
+    }
     alignedOutputs = alignSignalsByName(
         model0.observedOutputs,
         model0.displayNameByKey,
         model1.observedOutputs,
         model1.displayNameByKey,
         "observed output");
+    if (alignedOutputs.names.size() != outputCoverage.checkedOutputs.names.size()) {
+      throw std::runtime_error(
+          "Internal SEC error: checked observed outputs and extractor-visible observed "
+          "outputs disagree after connectivity skipping");
+    }
     if (secDiagEnabled) {
       fprintf(stderr, "SEC diag: inferring inductive state equalities\n");
       fflush(stderr);
@@ -653,11 +805,12 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
       fflush(stderr);
     }
   } catch (const std::exception& e) {
-    return {
+    return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
         e.what(),
-    };
+        outputCoverage,
+        abstractedSequentialBoundaries);
   }
 
   if (secDiagEnabled) {
@@ -924,13 +1077,19 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   const auto result = engine.run(maxK);
   switch (result.status) {
     case KInductionStatus::Equivalent:
-      return {SequentialEquivalenceStatus::Equivalent, result.bound, ""};
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          result.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries);
     case KInductionStatus::Different:
-      return {
+      return makeSecResult(
           SequentialEquivalenceStatus::Different,
           result.bound,
           formatCounterexampleWitness(result, model0, model1, top0_, top1_),
-      };
+          outputCoverage,
+          abstractedSequentialBoundaries);
     case KInductionStatus::Inconclusive:
       break;
     default:
@@ -940,14 +1099,20 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   IC3Engine ic3Engine(problem, solverType_);
   const auto ic3Result = ic3Engine.run(maxK);
   if (ic3Result.status == IC3Status::Equivalent) {
-    return {SequentialEquivalenceStatus::Equivalent, ic3Result.bound, ""};
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        ic3Result.bound,
+        "",
+        outputCoverage,
+        abstractedSequentialBoundaries);
   }
 
-  return {
+  return makeSecResult(
       SequentialEquivalenceStatus::Inconclusive,
       result.bound,
       "Reached max_k without a proof or counterexample",
-  };
+      outputCoverage,
+      abstractedSequentialBoundaries);
 }
 
 namespace detail {

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "../../config/Config.h"
 
@@ -25,6 +26,18 @@ struct SequentialEquivalenceResult {
   SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Unsupported;
   size_t bound = 0;
   std::string reason;
+  size_t coveredOutputs = 0;
+  size_t totalOutputs = 0;
+  std::vector<std::string> skippedObservedOutputs;
+  std::vector<std::string> abstractedSequentialBoundaries;
+
+  double outputCoveragePercent() const {
+    if (totalOutputs == 0) {
+      return 0.0;
+    }
+    return (100.0 * static_cast<double>(coveredOutputs)) /
+           static_cast<double>(totalOutputs);
+  }
 };
 
 // Builds a combined SEC problem from two sequential designs and discharges it

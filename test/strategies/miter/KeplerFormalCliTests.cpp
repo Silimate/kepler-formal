@@ -268,6 +268,18 @@ struct ReportSkippedPOsGuard {
   bool oldValue_;
 };
 
+struct SecBoundaryAbstractionGuard {
+  SecBoundaryAbstractionGuard()
+      : oldValue_(
+            KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary()) {}
+
+  ~SecBoundaryAbstractionGuard() {
+    KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(oldValue_);
+  }
+
+  bool oldValue_;
+};
+
 struct CurrentPathGuard {
   CurrentPathGuard(): oldPath_(std::filesystem::current_path()) {}
 
@@ -655,6 +667,53 @@ SequentialNajaIfFixture createDifferentSequentialNajaIfFixture() {
   dumpDesign(fixture.design0IfPath, false);
   dumpDesign(fixture.design1IfPath, true);
 
+  return fixture;
+}
+
+SequentialNajaIfFixture createUncomputableSequentialNajaIfFixture() {
+  SequentialNajaIfFixture fixture;
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_seq_if_uncomputable");
+  fixture.design0IfPath = fixture.tmpDir / "design0.capnp";
+  fixture.design1IfPath = fixture.tmpDir / "design1.capnp";
+
+  const auto dumpDesign = [&](const std::filesystem::path& dumpPath) {
+    cleanupNajaTestState();
+    NLUniverse::create();
+    auto* db = NLDB::create(NLUniverse::get());
+    auto* designLibrary =
+        NLLibrary::create(db, NLLibrary::Type::Standard, NLName("DESIGN"));
+    auto* primitiveLibrary =
+        NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
+    auto* unsupportedModel =
+        SNLDesign::create(primitiveLibrary, SNLDesign::Type::Primitive, NLName("SEQ_NO_D"));
+    auto* clock =
+        SNLScalarTerm::create(unsupportedModel, SNLTerm::Direction::Input, NLName("CK"));
+    auto* output =
+        SNLScalarTerm::create(unsupportedModel, SNLTerm::Direction::Output, NLName("Q"));
+    SNLDesignModeling::addClockToOutputsArcs(clock, {output});
+
+    auto* top =
+        SNLDesign::create(designLibrary, SNLDesign::Type::Standard, NLName("top"));
+    auto* topClock =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+    auto* topOut =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+    auto* seq = SNLInstance::create(top, unsupportedModel, NLName("ff0"));
+    auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+    auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+    topClock->setNet(netClock);
+    topOut->setNet(netOut);
+    seq->getInstTerm(unsupportedModel->getScalarTerm(NLName("CK")))->setNet(netClock);
+    seq->getInstTerm(unsupportedModel->getScalarTerm(NLName("Q")))->setNet(netOut);
+
+    db->setTopDesign(top);
+    SNLCapnP::dump(db, dumpPath);
+    cleanupNajaTestState();
+  };
+
+  dumpDesign(fixture.design0IfPath);
+  dumpDesign(fixture.design1IfPath);
   return fixture;
 }
 
@@ -1648,6 +1707,7 @@ TEST(KeplerFormalCliTests, ConfigMaxKWithoutSecFails) {
 }
 
 TEST(KeplerFormalCliTests, ConfigSecVerificationAccepted) {
+  SecBoundaryAbstractionGuard boundaryGuard;
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
@@ -1657,6 +1717,43 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAccepted) {
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests,
+     ConfigSecAbstractsUncomputableSequentialBoundariesByDefault) {
+  SecBoundaryAbstractionGuard boundaryGuard;
+  const auto fixture = createUncomputableSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 2\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_TRUE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests,
+     ConfigSecCanDisableBoundaryAbstractionForUncomputableSequentials) {
+  SecBoundaryAbstractionGuard boundaryGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "max_k: 2\n"
+      "sec_uncomputable_seq_as_boundary: false\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -1741,6 +1838,53 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationWritesDefaultLog) {
     EXPECT_NE(contents.find("Verification: SEC"), std::string::npos);
     EXPECT_NE(contents.find("SEC proved equivalence at k = 1"), std::string::npos);
   }
+
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(\n"
+      "    input logic clk,\n"
+      "    input logic in,\n"
+      "    output logic good,\n"
+      "    output logic bad\n"
+      ");\n"
+      "  logic d;\n"
+      "  logic q;\n"
+      "  assign good = in;\n"
+      "  always_ff @(posedge clk) begin\n"
+      "    if (1'b0) begin\n"
+      "      q <= 1'b0;\n"
+      "    end else begin\n"
+      "      q <= d;\n"
+      "    end\n"
+      "  end\n"
+      "  assign bad = q;\n"
+      "endmodule\n");
+  const auto logPath = fixture.tmpDir / "sec_partial_coverage.log";
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: SEC\n"
+      "max_k: 2\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+
+  const auto contents = readFileContents(logPath);
+  EXPECT_NE(
+      contents.find("SEC output coverage: 50.00% (1/2 covered/existing outputs)."),
+      std::string::npos);
+  EXPECT_NE(
+      contents.find("SEC skipped observed outputs due to connectivity issues"),
+      std::string::npos);
+  EXPECT_NE(contents.find("bad[0]"), std::string::npos);
+  EXPECT_NE(contents.find("no-driver connectivity"), std::string::npos);
 
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
