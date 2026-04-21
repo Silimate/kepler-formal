@@ -15,6 +15,14 @@
 
 namespace KEPLER_FORMAL::SEC {
 
+// Overall structural-state matching algorithm:
+// 1. Put aligned SEC inputs into a shared abstract symbol space.
+// 2. Seed each state bit with coarse classes from init/complement information.
+// 3. Repeatedly fingerprint next-state functions under the current classes.
+// 4. Refine those classes to a fixed point.
+// 5. Pair states whose final structural fingerprints match across the designs.
+// 6. Use an ordered fast path only when every state already matches in order.
+
 namespace {
 
 using KEPLER_FORMAL::BoolExpr;
@@ -77,6 +85,9 @@ std::pair<LocalToAbstractVarMap, LocalToAbstractVarMap> buildAbstractTransitionM
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& alignedStates) {
+  // Matched SEC inputs and already-correlated state bits get the same abstract
+  // IDs on both sides. Everything else stays private so equivalence checks only
+  // identify what has really been aligned.
   LocalToAbstractVarMap abstractMap0;
   LocalToAbstractVarMap abstractMap1;
   size_t nextAbstractSymbol = 2;
@@ -281,6 +292,8 @@ std::vector<size_t> refineClasses(
     const SequentialDesignModel& model,
     const std::unordered_map<size_t, size_t>& inputClasses,
     const std::vector<size_t>& currentClasses) {
+  // Replace each state's current class by a finer signature that combines the
+  // previous class and the structure of its next-state expression.
   std::unordered_map<size_t, size_t> stateClasses;
   stateClasses.reserve(model.stateBits.size());
   for (size_t i = 0; i < model.stateBits.size(); ++i) {
@@ -410,6 +423,7 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
   const AlignedSignals orderedStates = buildOrderedStatePairs(model0, model1);
   if (!orderedStates.names.empty() &&
       areAllOrderedStatesEquivalent(model0, model1, alignedInputs, orderedStates)) {
+    // This fast path is purely structural: same order, same transition shape.
     return orderedStates;
   }
 
@@ -420,6 +434,8 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
   std::vector<size_t> classes1 = seedClasses(model1);
 
   while (true) {
+    // Fixed-point refinement: keep splitting classes until another pass no
+    // longer learns anything new from the transition structure.
     const std::vector<size_t> refined0 = refineClasses(model0, inputClasses0, classes0);
     const std::vector<size_t> refined1 = refineClasses(model1, inputClasses1, classes1);
     if (refined0 == classes0 && refined1 == classes1) {

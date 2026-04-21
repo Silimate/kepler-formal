@@ -7,7 +7,7 @@
 #include <optional>
 
 #include "../../config/Config.h"
-#include "kinduction/KInductionEngine.h"
+#include "engine/KInductionEngine.h"
 #include "kinduction/KInductionProblem.h"
 
 namespace KEPLER_FORMAL::SEC {

@@ -2,15 +2,17 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 add_library(kepler_sec STATIC
+    engine/ClassicKInductionEngine.cpp
+    engine/ExactInterpolationEngine.cpp
+    engine/IMCEngine.cpp
+    engine/KInductionEngine.cpp
+    engine/PDREngine.cpp
     common/BoolExprUtils.cpp
     model/SequentialDesignModel.cpp
-    proof/ExactInterpolationEngine.cpp
-    proof/IC3Engine.cpp
-    proof/PDREngine.cpp
+    proof/ProofEngineShared.cpp
     kinduction/BaseCaseSolver.cpp
     kinduction/InductionStepSolver.cpp
     kinduction/SatEncoding.cpp
-    kinduction/KInductionEngine.cpp
     strategy/ReachableStateInvariant.cpp
     strategy/StructuralStateInvariant.cpp
     strategy/SequentialEquivalenceStrategy.cpp

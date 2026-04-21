@@ -17,6 +17,8 @@ namespace KEPLER_FORMAL::SEC {
 
 enum class SecEngine {
   Legacy,
+  KInduction,
+  Imc,
   Pdr,
 };
 
@@ -46,9 +48,9 @@ struct SequentialEquivalenceResult {
 };
 
 // Builds a combined SEC problem from two sequential designs and discharges it
-// with the selected SEC proof engine. "Legacy" preserves the historical
-// k-induction/IC3 path, while "Pdr" routes the same extracted problem through
-// the newer clause-based engine.
+// with the selected SEC proof engine. "Legacy" preserves the historical hybrid
+// path, while KINDUCTION, IMC, and PDR expose distinct top-level engines over
+// the same extracted transition system.
 class SequentialEquivalenceStrategy {
  public:
   SequentialEquivalenceStrategy(

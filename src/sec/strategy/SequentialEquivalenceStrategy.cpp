@@ -19,17 +19,28 @@
 #include "DNL.h"
 #include "NLUniverse.h"
 #include "SNLPath.h"
+#include "engine/ClassicKInductionEngine.h"
+#include "engine/ExactInterpolationEngine.h"
+#include "engine/IMCEngine.h"
+#include "engine/KInductionEngine.h"
+#include "engine/PDREngine.h"
 #include "common/BoolExprUtils.h"
 #include "common/AlignedSignals.h"
-#include "kinduction/KInductionEngine.h"
 #include "model/SequentialDesignModel.h"
-#include "proof/ExactInterpolationEngine.h"
-#include "proof/IC3Engine.h"
-#include "proof/PDREngine.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/StructuralStateInvariant.h"
 
 namespace KEPLER_FORMAL::SEC {
+
+// Overall SEC strategy pipeline:
+// 1. Extract both designs into the normalized sequential model used by SEC.
+// 2. Align environment inputs and observed outputs by stable external names.
+// 3. Infer internal state correspondences structurally, not by register names.
+// 4. Build reset/init reachable-state strengthening for startup anchoring.
+// 5. Remap both designs into one shared SAT symbol space.
+// 6. Build the checked SEC property and the stronger proof invariant.
+// 7. Hand the combined transition system to the selected top-level engine and
+//    translate its result back into user-facing SEC diagnostics.
 
 namespace {
 
@@ -542,6 +553,8 @@ AlignedSignals alignSignalsByName(
     const std::vector<SignalKey>& keys1,
     const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames1,
     const char* label) {
+  // Inputs/outputs are part of the user-visible contract, so SEC requires an
+  // exact stable-key match before any proof engine is allowed to run.
   const auto byKey0 = buildKeyToNameMap(keys0, displayNames0, label);
   const auto byKey1 = buildKeyToNameMap(keys1, displayNames1, label);
   if (byKey0.size() != byKey1.size()) {
@@ -574,6 +587,8 @@ OutputCoverageSelection selectCoveredObservedOutputs(
     const AlignedSignals& allObservedOutputs,
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1) {
+  // Connectivity skips are the only SEC skips we allow here. Unsupported
+  // primitive semantics should already have stopped extraction earlier.
   OutputCoverageSelection selection;
   selection.totalOutputs = allObservedOutputs.names.size();
   selection.checkedOutputs.names.reserve(allObservedOutputs.names.size());
@@ -949,6 +964,9 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   }
   const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
       model0, model1, alignedInputs, inductiveStateEqualities, secDiagEnabled);
+  // Reachable-state strengthening tells SEC which state equalities are already
+  // justified at startup and which extra state values become known while reset
+  // is held asserted for the bootstrap window.
 
   const AlignedSignals& initialStateCorrespondence =
       reachableInvariant.initialStateCorrespondence;
@@ -1035,19 +1053,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   problem.inductionProperty = BoolExpr::simplify(inductionProperty);
   problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
 
-  ExactInterpolationEngine interpolationEngine(problem, solverType_);
-  if (auto interpolant =
-          interpolationEngine.deriveOneStepReachableStateInvariant();
-      interpolant.has_value()) {
-    // For small state spaces we can derive an exact state-only interpolant from
-    // Init /\ T versus bad@1. Conjoining it here gives k-induction a reachable
-    // one-step frontier instead of starting from only the raw SEC property.
-    problem.inductionProperty = BoolExpr::simplify(
-        BoolExpr::And(problem.inductionProperty, *interpolant));
-    problem.inductionBad =
-        BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
-  }
-
   problem.description = "SEC property with aligned observed outputs";
   if (secDiagEnabled) {
     fprintf(stderr, "SEC diag: built SEC and induction properties\n");
@@ -1075,7 +1080,13 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     fprintf(
         stderr,
         "SEC diag: entering %s\n",
-        secEngine_ == SecEngine::Pdr ? "pdr engine" : "k-induction engine");
+        secEngine_ == SecEngine::Pdr
+            ? "pdr engine"
+            : (secEngine_ == SecEngine::Imc
+                   ? "imc engine"
+                   : (secEngine_ == SecEngine::KInduction
+                          ? "classic k-induction engine"
+                          : "legacy engine")));
     fflush(stderr);
   }
 
@@ -1141,7 +1152,99 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     }
   }
 
-  KInductionEngine engine(problem, solverType_);
+  if (secEngine_ == SecEngine::KInduction) {
+    // Classic k-induction keeps the usual "search first, then prove" shape:
+    // find bounded counterexamples, then try to close the proof by induction.
+    ClassicKInductionEngine engine(problem, solverType_);
+    const auto result = engine.run(maxK);
+    switch (result.status) {
+      case ClassicKInductionStatus::Equivalent:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Equivalent,
+            result.bound,
+            "",
+            outputCoverage,
+            abstractedSequentialBoundaries);
+      case ClassicKInductionStatus::Different:
+        {
+          const KInductionResult witnessResult{
+              KInductionStatus::Different, result.bound, result.witness};
+        return makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            result.bound,
+            result.witness.has_value()
+                ? formatCounterexampleWitness(
+                      witnessResult, model0, model1, top0_, top1_)
+                : "Classic k-induction found a counterexample at k = " +
+                      std::to_string(result.bound),
+            outputCoverage,
+            abstractedSequentialBoundaries);
+        }
+      case ClassicKInductionStatus::Inconclusive:
+      default:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Inconclusive,
+            result.bound,
+            "Reached max_k without a proof or counterexample",
+            outputCoverage,
+            abstractedSequentialBoundaries);
+    }
+  }
+
+  if (secEngine_ == SecEngine::Imc) {
+    // IMC still uses the shared bounded counterexample path, but its proof side
+    // grows a reachable/interpolated frontier instead of using an induction
+    // step over increasing simple paths.
+    IMCEngine engine(problem, solverType_);
+    const auto result = engine.run(maxK);
+    switch (result.status) {
+      case IMCStatus::Equivalent:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Equivalent,
+            result.bound,
+            "",
+            outputCoverage,
+            abstractedSequentialBoundaries);
+      case IMCStatus::Different:
+        {
+          const KInductionResult witnessResult{
+              KInductionStatus::Different, result.bound, result.witness};
+        return makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            result.bound,
+            result.witness.has_value()
+                ? formatCounterexampleWitness(
+                      witnessResult, model0, model1, top0_, top1_)
+                : "IMC found a counterexample at k = " +
+                      std::to_string(result.bound),
+            outputCoverage,
+            abstractedSequentialBoundaries);
+        }
+      case IMCStatus::Inconclusive:
+      default:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Inconclusive,
+            result.bound,
+            "Reached max_k without a proof or counterexample",
+            outputCoverage,
+            abstractedSequentialBoundaries);
+    }
+  }
+
+  KInductionProblem legacyProblem = problem;
+  ExactInterpolationEngine interpolationEngine(legacyProblem, solverType_);
+  if (auto interpolant =
+          interpolationEngine.deriveOneStepReachableStateInvariant();
+      interpolant.has_value()) {
+    // Preserve the historical legacy behavior: it folds an exact small-state
+    // interpolant into the induction invariant before the proof engines run.
+    legacyProblem.inductionProperty = BoolExpr::simplify(
+        BoolExpr::And(legacyProblem.inductionProperty, *interpolant));
+    legacyProblem.inductionBad =
+        BoolExpr::simplify(BoolExpr::Not(legacyProblem.inductionProperty));
+  }
+
+  KInductionEngine engine(legacyProblem, solverType_);
   const auto result = engine.run(maxK);
   switch (result.status) {
     case KInductionStatus::Equivalent:
@@ -1162,17 +1265,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
       break;
     default:
       break;
-  }
-
-  IC3Engine ic3Engine(problem, solverType_);
-  const auto ic3Result = ic3Engine.run(maxK);
-  if (ic3Result.status == IC3Status::Equivalent) {
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        ic3Result.bound,
-        "",
-        outputCoverage,
-        abstractedSequentialBoundaries);
   }
 
   return makeSecResult(

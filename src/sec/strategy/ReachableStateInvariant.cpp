@@ -14,6 +14,15 @@
 
 namespace KEPLER_FORMAL::SEC {
 
+// Overall reachable-state strengthening algorithm:
+// 1. Discover any reset inputs and explicit initial-state information.
+// 2. Filter structural state pairs down to ones compatible with startup.
+// 3. If reset/bootstrap is available, specialize next-state logic under reset.
+// 4. Symbolically push known reset-state values forward for a few cycles.
+// 5. Keep only the state equalities that survive each bootstrap step.
+// 6. Return both the startup correspondence and the anchored equalities/value
+//    facts that later proof engines can rely on.
+
 namespace {
 
 bool isConstBoolExpr(BoolExpr* expr, bool value) {
@@ -47,6 +56,8 @@ std::optional<bool> getResetAssertionValue(const std::string& displayName) {
 
 std::unordered_map<size_t, bool> collectResetAssignments(
     const SequentialDesignModel& model) {
+  // Reset controls are identified from the aligned user-visible signal names
+  // and then converted into the local BoolExpr variable IDs used by the model.
   std::unordered_map<size_t, bool> assignments;
   for (const auto& key : model.environmentInputs) {
     const auto displayIt = model.displayNameByKey.find(key);
@@ -193,6 +204,8 @@ std::optional<bool> evaluateConstantUnderAssignments(
 std::unordered_map<SignalKey, bool, SignalKeyHash> deriveResetBootstrapStateValues(
     const SequentialDesignModel& model,
     size_t cycles) {
+  // This is a small symbolic reset simulation. We keep only states whose value
+  // becomes constant under the asserted-reset environment.
   const auto resetAssignments = collectResetAssignments(model);
   if (resetAssignments.empty() || cycles == 0) {
     return {};
@@ -231,6 +244,9 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     const AlignedSignals& candidateStates,
     size_t cycles,
     bool secDiagEnabled) {
+  // Push candidate state equalities through the reset-specialized next-state
+  // logic. A pair survives only if both sides either collapse to the same
+  // constant or stay structurally equivalent after each bootstrap step.
   if (cycles == 0 || candidateStates.names.empty()) {
     return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);
   }
@@ -388,6 +404,9 @@ ReachableStateInvariant buildReachableStateInvariant(
     const AlignedSignals& inductiveStateEqualities,
     bool secDiagEnabled) {
   ReachableStateInvariant invariant;
+  // First decide which startup model we have: explicit init, reset bootstrap,
+  // both, or neither. That determines how strong the frame-0 correspondence
+  // may safely be.
   const bool hasResetBootstrap = !collectResetAssignments(model0).empty() &&
       !collectResetAssignments(model1).empty();
 
@@ -397,6 +416,8 @@ ReachableStateInvariant buildReachableStateInvariant(
       model0, model1, inductiveStateEqualities);
 
   if (hasResetBootstrap) {
+    // Prefer the strongest already-justified correspondence. If none exists at
+    // frame 0, derive one by walking the reset window forward.
     if (!invariant.initialStateCorrespondence.names.empty()) {
       invariant.anchoredStateEqualities = invariant.initialStateCorrespondence;
     } else {
@@ -414,6 +435,8 @@ ReachableStateInvariant buildReachableStateInvariant(
     invariant.bootstrapValues1 =
         deriveResetBootstrapStateValues(model1, invariant.bootstrapCycles);
   } else if (hasExplicitInitialState(model0, model1)) {
+    // Without reset, we can only anchor the state pairs whose explicit init
+    // values agree on both sides.
     invariant.anchoredStateEqualities = filterStateEqualitiesByInitialValue(
         model0, model1, inductiveStateEqualities);
   }

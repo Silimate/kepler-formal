@@ -1764,6 +1764,38 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithPdrEngine) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithKInductionEngine) {
+  SecBoundaryAbstractionGuard boundaryGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "sec_engine: KINDUCTION\n"
+      "max_k: 4\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithImcEngine) {
+  SecBoundaryAbstractionGuard boundaryGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: SEC\n"
+      "sec_engine: IMC\n"
+      "max_k: 4\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests,
      ConfigSecAbstractsUncomputableSequentialBoundariesByDefault) {
   SecBoundaryAbstractionGuard boundaryGuard;
@@ -2150,6 +2182,42 @@ TEST(KeplerFormalCliTests, CliSecEngineAcceptedBeforeFormat) {
                    "4",
                    "--sec-engine",
                    "PDR",
+                   "-naja_if",
+                   fixture.design0IfPath.string(),
+                   fixture.design1IfPath.string()}),
+      EXIT_SUCCESS);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliKInductionSecEngineAcceptedBeforeFormat) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-v",
+                   "SEC",
+                   "-k",
+                   "4",
+                   "--sec-engine",
+                   "KINDUCTION",
+                   "-naja_if",
+                   fixture.design0IfPath.string(),
+                   fixture.design1IfPath.string()}),
+      EXIT_SUCCESS);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, CliImcSecEngineAcceptedBeforeFormat) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-v",
+                   "SEC",
+                   "-k",
+                   "4",
+                   "--sec-engine",
+                   "IMC",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
