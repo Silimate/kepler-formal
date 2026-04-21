@@ -6,6 +6,7 @@ add_library(kepler_sec STATIC
     model/SequentialDesignModel.cpp
     proof/ExactInterpolationEngine.cpp
     proof/IC3Engine.cpp
+    proof/PDREngine.cpp
     kinduction/BaseCaseSolver.cpp
     kinduction/InductionStepSolver.cpp
     kinduction/SatEncoding.cpp

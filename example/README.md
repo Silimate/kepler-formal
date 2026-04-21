@@ -29,6 +29,8 @@ python edit.py
 ../build/src/bin/kepler-formal --config test_config_verilog.yaml
 ../build/src/bin/kepler-formal --config test_config_verilog_sec.yaml
 ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_sec.yaml
+python edit_tinyrocket_output_buffers.py
+../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_buffered_sec.yaml
 python extract_tinyrocket_csrfile_sec.py
 ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_csrfile_sec.yaml
 ```
@@ -39,6 +41,12 @@ python extract_tinyrocket_csrfile_sec.py
 `test_config_verilog_tinyrocket_sec.yaml` keeps the original full-TinyRocket
 SEC self-compare setup for experimentation with the same Liberty files as the
 LEC example.
+
+`edit_tinyrocket_output_buffers.py` generates
+`tinyrocket_output_buffered.v`, which adds one combinational buffer on every
+top-level TinyRocket output bit. The matching
+`test_config_verilog_tinyrocket_buffered_sec.yaml` keeps behavior identical
+while making the SEC pair structurally different.
 
 `test_config_verilog_tinyrocket_csrfile_sec.yaml` extracts `CSRFile` from
 `tinyrocket.v` with Najaeda and then runs a TinyRocket-derived SEC example that

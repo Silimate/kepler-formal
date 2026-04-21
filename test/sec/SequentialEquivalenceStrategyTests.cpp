@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdlib>
 #include <optional>
 #include <unordered_set>
@@ -28,6 +29,7 @@
 #include "model/SequentialDesignModel.h"
 #include "proof/ExactInterpolationEngine.h"
 #include "proof/IC3Engine.h"
+#include "proof/PDREngine.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 #include "strategy/StructuralStateInvariant.h"
@@ -1459,6 +1461,29 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalent) {
   EXPECT_EQ(result.bound, 1u);
 }
 
+TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithPdrEngine) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library = NLLibrary::create(db, NLName("LIB"));
+  auto* primitives = NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
+  auto* invModel = createInvModel(primitives);
+
+  auto* top0 =
+      createDffTop(library, "top0", invModel, false, false, "in", "out", "ff0");
+  auto* top1 =
+      createDffTop(library, "top1", invModel, false, false, "in", "out", "ff1");
+
+  SequentialEquivalenceStrategy strategy(
+      top0,
+      top1,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr);
+  const auto result = strategy.run(2);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_LE(result.bound, 1u);
+}
+
 TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObservation) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -2685,6 +2710,172 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, IC3Status::Different);
   EXPECT_GE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineProvesEquivalentSmallTransitionSystem) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_LE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFindsReachableBadState) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineReturnsInconclusiveWithoutInitialConstraint) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineReturnsInconclusiveWhenFrameBudgetIsZero) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesBootstrapAssignmentsAndComplementedStatePairs) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.allSymbols = {2, 3};
+  problem.resetBootstrapCycles = 1;
+  problem.bootstrapStateAssignments = {{2, false}, {3, true}};
+  problem.bootstrapStateEqualityPairs = {{2, 2}};
+  problem.complementedStatePairs0 = {{2, 3}};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(3, BoolExpr::createTrue());
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrStrategyProvesRenamedResetInitializedPipelineWithinThreeFrames) {
+  const auto state2 = [](size_t symbol0, size_t symbol1, size_t value) {
+    BoolExpr* expr = (value & 0x1U) != 0U ? BoolExpr::Var(symbol0)
+                                          : BoolExpr::Not(BoolExpr::Var(symbol0));
+    expr = BoolExpr::And(
+        expr,
+        (value & 0x2U) != 0U ? BoolExpr::Var(symbol1) : BoolExpr::Not(BoolExpr::Var(symbol1)));
+    return expr;
+  };
+
+  const auto buildNextBitExpr = [&](size_t symbol0,
+                                    size_t symbol1,
+                                    const std::array<size_t, 4>& encoding,
+                                    size_t bitIndex) {
+    BoolExpr* expr = BoolExpr::createFalse();
+    for (size_t logicalState = 0; logicalState < 4; ++logicalState) {
+      const size_t nextLogicalState = logicalState < 3 ? logicalState + 1 : 3;
+      if (((encoding[nextLogicalState] >> bitIndex) & 0x1U) == 0U) {
+        continue;
+      }
+      expr = BoolExpr::Or(expr, state2(symbol0, symbol1, encoding[logicalState]));
+    }
+    return BoolExpr::simplify(expr);
+  };
+
+  // This is a pure output-only SEC/PDR case with no imported strengthening:
+  // both machines follow the same four-state chain 00 -> 01 -> 10 -> 11,
+  // and the only observed output goes high in the terminal state 11. PDR
+  // needs three frames before adjacent frames converge on the fact that the
+  // two outputs always rise in lockstep from the shared initial state.
+  const std::array<size_t, 4> encoding = {0, 1, 2, 3};
+
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.state1Symbols = {4, 5};
+  problem.allSymbols = {2, 3, 4, 5};
+  problem.transitions0.emplace_back(2, buildNextBitExpr(2, 3, encoding, 0));
+  problem.transitions0.emplace_back(3, buildNextBitExpr(2, 3, encoding, 1));
+  problem.transitions1.emplace_back(4, buildNextBitExpr(4, 5, encoding, 0));
+  problem.transitions1.emplace_back(5, buildNextBitExpr(4, 5, encoding, 1));
+  problem.initialCondition = BoolExpr::And(state2(2, 3, 0), state2(4, 5, 0));
+  problem.initializedStateCount = 4;
+  problem.totalStateCount = 4;
+  problem.observedOutputExprs0 = {state2(2, 3, 3)};
+  problem.observedOutputExprs1 = {state2(4, 5, 3)};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0.front(), problem.observedOutputExprs1.front());
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto resultAtTwo = engine.run(2);
+  const auto resultAtThree = engine.run(3);
+
+  EXPECT_EQ(resultAtTwo.status, PDRStatus::Inconclusive);
+  EXPECT_EQ(resultAtTwo.bound, 2u);
+  EXPECT_EQ(resultAtThree.status, PDRStatus::Equivalent);
+  EXPECT_EQ(resultAtThree.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -5,6 +5,7 @@ cc_library(
     srcs = [
         "proof/ExactInterpolationEngine.cpp",
         "proof/IC3Engine.cpp",
+        "proof/PDREngine.cpp",
         "strategy/ReachableStateInvariant.cpp",
         "strategy/StructuralStateInvariant.cpp",
         "common/BoolExprUtils.cpp",
@@ -27,6 +28,7 @@ cc_library(
         "model/SequentialDesignModel.h",
         "proof/ExactInterpolationEngine.h",
         "proof/IC3Engine.h",
+        "proof/PDREngine.h",
         "strategy/ReachableStateInvariant.h",
         "strategy/StructuralStateInvariant.h",
         "strategy/SequentialEquivalenceStrategy.h",

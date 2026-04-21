@@ -40,13 +40,13 @@
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
-      "[-v <LEC|SEC>] [-k <max-k>] <netlist1> <netlist2> [<library-file>...] | "
+      "[-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|PDR>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] [-v <LEC|SEC>] [-k <max-k>] "
+      "<file...> [--liberty <library-file>...] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|PDR>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
-      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <LEC|SEC>] [-k <max-k>] "
+      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|PDR>] "
       "[--design1 <file...>] [--design2 <file...>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
@@ -108,6 +108,34 @@ static const char* verificationModeName(VerificationMode mode) {
     case VerificationMode::LEC:
     default:
       return "LEC";
+  }
+}
+
+static bool parseSecEngineToken(const std::string& token,
+                                KEPLER_FORMAL::SEC::SecEngine& engine,
+                                std::string& error) {
+  // Keep the binary-level selector intentionally small for now so the
+  // user-facing SEC modes stay explicit and predictable.
+  const std::string normalized = toUpperCopy(token);
+  if (normalized == "LEGACY") {
+    engine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
+    return true;
+  }
+  if (normalized == "PDR") {
+    engine = KEPLER_FORMAL::SEC::SecEngine::Pdr;
+    return true;
+  }
+  error = "expected LEGACY or PDR, got `" + token + "`";
+  return false;
+}
+
+static const char* secEngineName(KEPLER_FORMAL::SEC::SecEngine engine) {
+  switch (engine) {
+    case KEPLER_FORMAL::SEC::SecEngine::Pdr:
+      return "PDR";
+    case KEPLER_FORMAL::SEC::SecEngine::Legacy:
+    default:
+      return "LEGACY";
   }
 }
 
@@ -205,6 +233,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "format",
       "verification",
       "max_k",
+      "sec_engine",
       "sec_uncomputable_seq_as_boundary",
       "input_paths",
       "liberty_files",
@@ -511,6 +540,8 @@ int KeplerFormalMain(int argc, char** argv) {
   std::vector<std::string> pythonFiles;
   std::string logLevel = "info";
   VerificationMode verificationMode = VerificationMode::LEC;
+  KEPLER_FORMAL::SEC::SecEngine secEngine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
+  bool secEngineExplicit = false;
   size_t secMaxK = kDefaultSecMaxK;
   bool secMaxKExplicit = false;
   bool secTreatUncomputableSeqAsBoundary = true;
@@ -590,6 +621,20 @@ int KeplerFormalMain(int argc, char** argv) {
             return EXIT_FAILURE;
           }
           secMaxKExplicit = true;
+        }
+
+        if (cfg["sec_engine"]) {
+          if (!cfg["sec_engine"].IsScalar()) {
+            SPDLOG_CRITICAL("sec_engine must be a scalar");
+            return EXIT_FAILURE;
+          }
+          std::string secEngineError;
+          if (!parseSecEngineToken(
+                  cfg["sec_engine"].as<std::string>(), secEngine, secEngineError)) {
+            SPDLOG_CRITICAL("Invalid sec_engine in config: {}", secEngineError);
+            return EXIT_FAILURE;
+          }
+          secEngineExplicit = true;
         }
 
         if (cfg["sec_uncomputable_seq_as_boundary"]) {
@@ -732,6 +777,20 @@ int KeplerFormalMain(int argc, char** argv) {
         parseStart += 2;
         continue;
       }
+      if (arg == "--sec-engine") {
+        if (parseStart + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing SEC engine after {}", arg);
+          return EXIT_FAILURE;
+        }
+        std::string secEngineError;
+        if (!parseSecEngineToken(argv[parseStart + 1], secEngine, secEngineError)) {
+          SPDLOG_CRITICAL("Invalid SEC engine: {}", secEngineError);
+          return EXIT_FAILURE;
+        }
+        secEngineExplicit = true;
+        parseStart += 2;
+        continue;
+      }
       if (arg == "--sec-uncomputable-seq-boundary") {
         secTreatUncomputableSeqAsBoundary = true;
         ++parseStart;
@@ -798,6 +857,19 @@ int KeplerFormalMain(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         secMaxKExplicit = true;
+        continue;
+      }
+      if (arg == "--sec-engine") {
+        if (i + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing SEC engine after {}", arg);
+          return EXIT_FAILURE;
+        }
+        std::string secEngineError;
+        if (!parseSecEngineToken(argv[++i], secEngine, secEngineError)) {
+          SPDLOG_CRITICAL("Invalid SEC engine: {}", secEngineError);
+          return EXIT_FAILURE;
+        }
+        secEngineExplicit = true;
         continue;
       }
       if (arg == "--sec-uncomputable-seq-boundary") {
@@ -938,6 +1010,10 @@ int KeplerFormalMain(int argc, char** argv) {
     SPDLOG_CRITICAL("max_k/-k is only supported with SEC verification");
     return EXIT_FAILURE;
   }
+  if (verificationMode == VerificationMode::LEC && secEngineExplicit) {
+    SPDLOG_CRITICAL("sec_engine/--sec-engine is only supported with SEC verification");
+    return EXIT_FAILURE;
+  }
   if (verificationMode == VerificationMode::SEC) {
     if (compactMode) {
       SPDLOG_CRITICAL("SEC verification does not support compact mode");
@@ -990,6 +1066,7 @@ int KeplerFormalMain(int argc, char** argv) {
   SPDLOG_INFO("Verification: {}", verificationModeName(verificationMode));
   if (verificationMode == VerificationMode::SEC) {
     SPDLOG_INFO("SEC max_k: {}", secMaxK);
+    SPDLOG_INFO("SEC engine: {}", secEngineName(secEngine));
     SPDLOG_INFO(
         "SEC uncomputable sequentials: {}",
         secTreatUncomputableSeqAsBoundary ? "boundary abstraction"
@@ -1333,7 +1410,8 @@ int KeplerFormalMain(int argc, char** argv) {
   // --------------------------------------------------------------------------
   if (verificationMode == VerificationMode::SEC) {
     try {
-      KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(top0, top1, solverType);
+      KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
+          top0, top1, solverType, secEngine);
       const auto result = strategy.run(secMaxK);
       if (result.totalOutputs != 0) {
         SPDLOG_INFO(

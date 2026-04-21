@@ -25,6 +25,7 @@
 #include "model/SequentialDesignModel.h"
 #include "proof/ExactInterpolationEngine.h"
 #include "proof/IC3Engine.h"
+#include "proof/PDREngine.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/StructuralStateInvariant.h"
 
@@ -673,8 +674,9 @@ std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
 SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
-    KEPLER_FORMAL::Config::SolverType solverType)
-    : top0_(top0), top1_(top1), solverType_(solverType) {}
+    KEPLER_FORMAL::Config::SolverType solverType,
+    SecEngine secEngine)
+    : top0_(top0), top1_(top1), solverType_(solverType), secEngine_(secEngine) {}
 
 SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) const {
   const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
@@ -1068,11 +1070,77 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     fflush(stdout);
   }
 
-  // Step 7: hand the combined transition system to the k-induction solver.
+  // Step 7: hand the combined transition system to the selected proof engine.
   if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: entering k-induction engine\n");
+    fprintf(
+        stderr,
+        "SEC diag: entering %s\n",
+        secEngine_ == SecEngine::Pdr ? "pdr engine" : "k-induction engine");
     fflush(stderr);
   }
+
+  if (secEngine_ == SecEngine::Pdr) {
+    // Reuse the existing base-case machinery so the new PDR path keeps the
+    // same user-facing counterexample reporting for k=0 and combinational SEC.
+    KInductionEngine baseline(problem, solverType_);
+    const auto baselineResult = baseline.run(0);
+    switch (baselineResult.status) {
+      case KInductionStatus::Equivalent:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Equivalent,
+            baselineResult.bound,
+            "",
+            outputCoverage,
+            abstractedSequentialBoundaries);
+      case KInductionStatus::Different:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            baselineResult.bound,
+            formatCounterexampleWitness(baselineResult, model0, model1, top0_, top1_),
+            outputCoverage,
+            abstractedSequentialBoundaries);
+      case KInductionStatus::Inconclusive:
+      default:
+        break;
+    }
+
+    PDREngine pdrEngine(problem, solverType_);
+    const auto pdrResult = pdrEngine.run(maxK);
+    switch (pdrResult.status) {
+      case PDRStatus::Equivalent:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Equivalent,
+            pdrResult.bound,
+            "",
+            outputCoverage,
+            abstractedSequentialBoundaries);
+      case PDRStatus::Different: {
+        // PDR proves reachability depth, but the legacy base-case solver already
+        // knows how to reconstruct the concrete SEC witness and traceback.
+        KInductionEngine witnessEngine(problem, solverType_);
+        const auto witnessResult = witnessEngine.run(pdrResult.bound);
+        const std::string details =
+            witnessResult.status == KInductionStatus::Different
+                ? formatCounterexampleWitness(witnessResult, model0, model1, top0_, top1_)
+                : "PDR found a counterexample at k = " + std::to_string(pdrResult.bound);
+        return makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            pdrResult.bound,
+            details,
+            outputCoverage,
+            abstractedSequentialBoundaries);
+      }
+      case PDRStatus::Inconclusive:
+      default:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Inconclusive,
+            pdrResult.bound,
+            "Reached max_k without a proof or counterexample",
+            outputCoverage,
+            abstractedSequentialBoundaries);
+    }
+  }
+
   KInductionEngine engine(problem, solverType_);
   const auto result = engine.run(maxK);
   switch (result.status) {
