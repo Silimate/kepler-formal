@@ -1,12 +1,12 @@
 // Copyright 2024-2026 keplertech.io
 // SPDX-License-Identifier: GPL-3.0-only
 
-#include "engine/IMCEngine.h"
+#include "imc/IMCEngine.h"
 
 #include <vector>
 
 #include "kinduction/BaseCaseSolver.h"
-#include "engine/ExactInterpolationEngine.h"
+#include "imc/ExactInterpolantSynthesizer.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/ProofEngineShared.h"
 
@@ -166,9 +166,9 @@ IMCResult IMCEngine::run(size_t maxK) const {
     // is affordable.
     sharedStrengthening =
         selectValidatedStrengtheningInvariant(problem_, initFormula, solverType_);
-    ExactInterpolationEngine interpolationEngine(problem_, solverType_);
+    ExactInterpolantSynthesizer interpolantSynthesizer(problem_, solverType_);
     if (auto interpolant =
-            interpolationEngine.deriveOneStepReachableStateInvariant();
+            interpolantSynthesizer.deriveOneStepReachableStateInvariant();
         interpolant.has_value()) {
       sharedStrengthening =
           sharedStrengthening == nullptr

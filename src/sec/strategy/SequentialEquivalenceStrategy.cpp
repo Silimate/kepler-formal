@@ -19,14 +19,13 @@
 #include "DNL.h"
 #include "NLUniverse.h"
 #include "SNLPath.h"
-#include "engine/ClassicKInductionEngine.h"
-#include "engine/ExactInterpolationEngine.h"
-#include "engine/IMCEngine.h"
-#include "engine/KInductionEngine.h"
-#include "engine/PDREngine.h"
 #include "common/BoolExprUtils.h"
 #include "common/AlignedSignals.h"
+#include "imc/ExactInterpolantSynthesizer.h"
+#include "imc/IMCEngine.h"
+#include "kinduction/KInductionEngine.h"
 #include "model/SequentialDesignModel.h"
+#include "pdr/PDREngine.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/StructuralStateInvariant.h"
 
@@ -1155,32 +1154,30 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   if (secEngine_ == SecEngine::KInduction) {
     // Classic k-induction keeps the usual "search first, then prove" shape:
     // find bounded counterexamples, then try to close the proof by induction.
-    ClassicKInductionEngine engine(problem, solverType_);
+    KInductionEngine engine(problem, solverType_);
     const auto result = engine.run(maxK);
     switch (result.status) {
-      case ClassicKInductionStatus::Equivalent:
+      case KInductionStatus::Equivalent:
         return makeSecResult(
             SequentialEquivalenceStatus::Equivalent,
             result.bound,
             "",
             outputCoverage,
             abstractedSequentialBoundaries);
-      case ClassicKInductionStatus::Different:
+      case KInductionStatus::Different:
         {
-          const KInductionResult witnessResult{
-              KInductionStatus::Different, result.bound, result.witness};
         return makeSecResult(
             SequentialEquivalenceStatus::Different,
             result.bound,
             result.witness.has_value()
                 ? formatCounterexampleWitness(
-                      witnessResult, model0, model1, top0_, top1_)
+                      result, model0, model1, top0_, top1_)
                 : "Classic k-induction found a counterexample at k = " +
                       std::to_string(result.bound),
             outputCoverage,
             abstractedSequentialBoundaries);
         }
-      case ClassicKInductionStatus::Inconclusive:
+      case KInductionStatus::Inconclusive:
       default:
         return makeSecResult(
             SequentialEquivalenceStatus::Inconclusive,
@@ -1232,9 +1229,9 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   }
 
   KInductionProblem legacyProblem = problem;
-  ExactInterpolationEngine interpolationEngine(legacyProblem, solverType_);
+  ExactInterpolantSynthesizer interpolantSynthesizer(legacyProblem, solverType_);
   if (auto interpolant =
-          interpolationEngine.deriveOneStepReachableStateInvariant();
+          interpolantSynthesizer.deriveOneStepReachableStateInvariant();
       interpolant.has_value()) {
     // Preserve the historical legacy behavior: it folds an exact small-state
     // interpolant into the induction invariant before the proof engines run.

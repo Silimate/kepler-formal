@@ -1,7 +1,7 @@
 // Copyright 2024-2026 keplertech.io
 // SPDX-License-Identifier: GPL-3.0-only
 
-#include "engine/PDREngine.h"
+#include "pdr/PDREngine.h"
 
 #include <algorithm>
 #include <optional>
@@ -542,16 +542,42 @@ PDRResult PDREngine::run(size_t maxFrames) const {
     return {PDRStatus::Inconclusive, 0};
   }
 
-  // If the strategy already synthesized and validated a strong inductive
-  // invariant, PDR is allowed to accept it immediately.
-  BoolExpr* frameInvariant =
-      selectValidatedStrengtheningInvariant(problem_, initFormula, solverType_);
-  if (frameInvariant != nullptr &&
-      isInductiveInvariant(problem_, frameInvariant, solverType_) &&
-      invariantExcludesBadStates(problem_, frameInvariant, solverType_)) {
-    // If the strategy already synthesized a sound inductive strengthening, the
-    // new engine can accept that proof immediately instead of rediscovering it.
-    return {PDRStatus::Equivalent, 1};
+  // Before entering the clause loop, try any reusable proof candidates the SEC
+  // strategy already built. A candidate is only safe to inject into every PDR
+  // frame once it is known to be inductive; otherwise it would over-constrain
+  // the search and could hide a real counterexample.
+  BoolExpr* frameInvariant = nullptr;
+  const auto tryProofCandidate = [&](BoolExpr* candidate) -> std::optional<PDRResult> {
+    if (candidate == nullptr ||
+        !initialFrontierImplies(initFormula, candidate, solverType_) ||
+        !isInductiveInvariant(problem_, candidate, solverType_)) {
+      return std::nullopt;
+    }
+
+    if (invariantExcludesBadStates(problem_, candidate, solverType_)) {
+      // If the strategy already synthesized a sound inductive strengthening, the
+      // new engine can accept that proof immediately instead of rediscovering it.
+      return PDRResult{PDRStatus::Equivalent, 1};
+    }
+
+    // Otherwise the candidate is a safe frame fact, even if it is not by
+    // itself enough to prove the full SEC property.
+    if (frameInvariant == nullptr) {
+      frameInvariant = candidate;
+    }
+    return std::nullopt;
+  };
+
+  if (const auto proof = tryProofCandidate(
+          selectValidatedStrengtheningInvariant(problem_, initFormula, solverType_));
+      proof.has_value()) {
+    return *proof;
+  }
+
+  // Keep PDR aligned with IMC: if the plain SEC property is already inductive
+  // from the startup frontier, there is no reason to spend time blocking cubes.
+  if (const auto proof = tryProofCandidate(problem_.property); proof.has_value()) {
+    return *proof;
   }
 
   std::vector<FrameClauses> frames(1);

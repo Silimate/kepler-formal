@@ -286,6 +286,70 @@ std::vector<naja::DNL::DNLID> selectRequiredBuilderOutputs(
   return filteredOutputs;
 }
 
+struct MaterializedBuilderOutputs {
+  std::vector<naja::DNL::DNLID> inputs;
+  std::vector<naja::DNL::DNLID> outputs;
+  std::vector<size_t> termDNLID2varID;
+  std::unordered_map<naja::DNL::DNLID, BoolExpr*> outputExprByTerm;
+  std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo> skippedOutputsByTerm;
+};
+
+MaterializedBuilderOutputs materializeBuilderOutputs(
+    const std::vector<naja::DNL::DNLID>& requestedOutputs,
+    bool secDiagEnabled,
+    const char* topName,
+    const char* phaseLabel) {
+  MaterializedBuilderOutputs result;
+
+  KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
+  builder.collect();
+  std::unordered_set<naja::DNL::DNLID> collectedOutputSet(
+      builder.getOutputs().begin(), builder.getOutputs().end());
+  std::vector<naja::DNL::DNLID> filteredOutputs;
+  filteredOutputs.reserve(requestedOutputs.size());
+  for (const auto outputTermID : requestedOutputs) {
+    if (collectedOutputSet.find(outputTermID) != collectedOutputSet.end()) {
+      filteredOutputs.push_back(outputTermID);
+    }
+  }
+  builder.setOutputs(filteredOutputs);
+
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) %s begin outputs=%zu\n",
+        topName,
+        phaseLabel,
+        filteredOutputs.size());
+    fflush(stderr);
+  }
+  builder.build();
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) %s end outputs=%zu\n",
+        topName,
+        phaseLabel,
+        filteredOutputs.size());
+    fflush(stderr);
+  }
+
+  result.inputs = builder.getInputs();
+  result.outputs = builder.getOutputs();
+  result.termDNLID2varID = builder.getTermDNLID2VarID();
+  result.skippedOutputsByTerm = builder.getSkippedOutputs();
+  const auto& outputExprs = builder.getPOs();
+  for (size_t i = 0; i < result.outputs.size(); ++i) {
+    BoolExpr* expr = outputExprs[i];
+    if (expr == nullptr || !expr->isValid()) {
+      continue;
+    }
+    result.outputExprByTerm.emplace(result.outputs[i], expr);
+  }
+
+  return result;
+}
+
 std::optional<size_t> findSkippedStateDependency(
     BoolExpr* expr,
     const std::unordered_set<size_t>& skippedStateVars,
@@ -763,9 +827,22 @@ void inferSynthesizedResetInitialStateValues(SequentialDesignModel& model) {
         substituteBoolExprVariables(
             nextStateIt->second, resetAssignments, resetSubstitutionMemo));
   }
-  constexpr size_t kMaxResetSpecializedExprNodesForInitInference = 200000;
+  // Synthesized reset inference is only a proof-strengthening heuristic. Cap
+  // the specialized DAG size aggressively so large SoCs do not spend most of
+  // SEC extraction time trying to derive explicit reset values for every
+  // register when the proof can proceed without them.
+  constexpr size_t kMaxResetSpecializedExprNodesForInitInference = 50000;
   const size_t resetSpecializedExprNodes =
       countUniqueExprNodes(resetSpecializedNextStateByKey);
+  if (std::getenv("KEPLER_SEC_DIAG") != nullptr) {
+    fprintf(
+        stderr,
+        "SEC diag: reset-specialized next-state nodes=%zu limit=%zu states=%zu\n",
+        resetSpecializedExprNodes,
+        kMaxResetSpecializedExprNodesForInitInference,
+        model.stateBits.size());
+    fflush(stderr);
+  }
   if (resetSpecializedExprNodes >
       kMaxResetSpecializedExprNodesForInitInference) {
     if (std::getenv("KEPLER_SEC_DIAG") != nullptr) {
@@ -1185,26 +1262,38 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     return model;
   }
 
-  std::unordered_set<naja::DNL::DNLID> topOutputTerms;
-  topOutputTerms.reserve(topOutputKeyByTerm.size());
+  std::vector<naja::DNL::DNLID> initialObservedTerms;
+  initialObservedTerms.reserve(
+      topOutputKeyByTerm.size() + abstractedBoundaryObservedTerms.size());
+  std::unordered_set<naja::DNL::DNLID> initialObservedTermSet;
   for (const auto& [termID, _] : topOutputKeyByTerm) {
-    topOutputTerms.insert(termID);
+    if (initialObservedTermSet.insert(termID).second) {
+      initialObservedTerms.push_back(termID);
+    }
   }
-  const auto sequentialDependencyTerms =
-      collectRequiredSequentialOutputTerms(pendingTransitions);
-  builder.setOutputs(selectRequiredBuilderOutputs(
-      builder.getOutputs(),
-      topOutputTerms,
-      sequentialDependencyTerms,
-      prunedBuilderOutputTerms));
+  for (const auto& [termID, _] : abstractedBoundaryObservedTerms) {
+    if (initialObservedTermSet.insert(termID).second) {
+      initialObservedTerms.push_back(termID);
+    }
+  }
+  std::unordered_set<naja::DNL::DNLID> collectedOutputSet(
+      builder.getOutputs().begin(), builder.getOutputs().end());
+  std::vector<naja::DNL::DNLID> initialMaterializedOutputs;
+  initialMaterializedOutputs.reserve(initialObservedTerms.size());
+  for (const auto outputTermID : initialObservedTerms) {
+    if (collectedOutputSet.find(outputTermID) != collectedOutputSet.end()) {
+      initialMaterializedOutputs.push_back(outputTermID);
+    }
+  }
+  builder.setOutputs(initialMaterializedOutputs);
   if (secDiagEnabled) {
     fprintf(
         stderr,
-        "SEC diag: extract(%s) abstracted_boundaries=%zu pruned_builder_outputs=%zu remaining_outputs=%zu\n",
+        "SEC diag: extract(%s) abstracted_boundaries=%zu pruned_builder_outputs=%zu initial_observed_outputs=%zu\n",
         top->getName().getString().c_str(),
         model.abstractedSequentialBoundaries.size(),
         prunedBuilderOutputTerms.size(),
-        builder.getOutputs().size());
+        initialMaterializedOutputs.size());
     fflush(stderr);
   }
 
@@ -1272,7 +1361,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   std::unordered_map<naja::DNL::DNLID, BoolExpr*> outputExprByTerm;
   const auto& outputTerms = builder.getOutputs();
   const auto& outputExprs = builder.getPOs();
-  const auto& skippedOutputsByTerm = builder.getSkippedOutputs();
+  auto skippedOutputsByTerm = builder.getSkippedOutputs();
   // Keep only the valid formulas produced by the clause builder. Invalid
   // clouds are classified below either as skippable connectivity gaps or as
   // hard unsupported logic (for example, logical loops).
@@ -1285,6 +1374,24 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   }
 
   for (const auto& [termID, key] : abstractedBoundaryObservedTerms) {
+    if (const auto exprIt = outputExprByTerm.find(termID);
+        exprIt != outputExprByTerm.end()) {
+      model.observedOutputExprByKey.emplace(key, exprIt->second);
+      continue;
+    }
+    if (const auto skippedIt = skippedOutputsByTerm.find(termID);
+        skippedIt != skippedOutputsByTerm.end()) {
+      if (auto skipInfo = getConnectivitySkipInfo(skippedIt->second);
+          skipInfo.has_value()) {
+        model.connectivitySkipInfoByKey.emplace(key, *skipInfo);
+        continue;
+      }
+      model.unsupportedReasons.push_back(
+          "Unsupported SEC boundary output `" + model.displayNameByKey.at(key) +
+          "`: " + skippedIt->second.detail);
+      continue;
+    }
+
     const auto built = buildObservedExprForTerm(
         termID,
         outputExprByTerm,
@@ -1372,7 +1479,95 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
           }
         }
       };
-  for (const auto& pending : pendingTransitions) {
+  std::unordered_map<size_t, SignalKey> requiredStateKeyByVarID;
+  requiredStateKeyByVarID.reserve(model.stateBits.size());
+  for (const auto& key : model.stateBits) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt == model.inputVarByKey.end()) {
+      continue;
+    }
+    requiredStateKeyByVarID.emplace(varIt->second, key);
+  }
+
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> pendingIndexByStateKey;
+  pendingIndexByStateKey.reserve(pendingTransitions.size() * 2);
+  for (size_t pendingIndex = 0; pendingIndex < pendingTransitions.size(); ++pendingIndex) {
+    const auto& pending = pendingTransitions[pendingIndex];
+    pendingIndexByStateKey.emplace(pending.stateKey, pendingIndex);
+    for (const auto& complementedKey : pending.complementedStateKeys) {
+      pendingIndexByStateKey.emplace(complementedKey, pendingIndex);
+    }
+  }
+
+  std::unordered_set<SignalKey, SignalKeyHash> requiredStateKeys;
+  std::unordered_set<size_t> requiredPendingIndexes;
+  std::unordered_set<naja::DNL::DNLID> materializedOutputTerms(
+      outputTerms.begin(), outputTerms.end());
+  std::deque<size_t> pendingWorkQueue;
+  auto enqueueRequiredStateKey = [&](const SignalKey& key) {
+    requiredStateKeys.insert(key);
+    const auto pendingIt = pendingIndexByStateKey.find(key);
+    if (pendingIt != pendingIndexByStateKey.end() &&
+        requiredPendingIndexes.insert(pendingIt->second).second) {
+      pendingWorkQueue.push_back(pendingIt->second);
+    }
+  };
+  auto enqueueStateDependenciesFromExpr = [&](BoolExpr* expr) {
+    if (expr == nullptr || !expr->isValid()) {
+      return;
+    }
+    for (const auto symbol : expr->getSupportVars()) {
+      const auto stateIt = requiredStateKeyByVarID.find(symbol);
+      if (stateIt == requiredStateKeyByVarID.end()) {
+        continue;
+      }
+      enqueueRequiredStateKey(stateIt->second);
+    }
+  };
+
+  for (const auto& [_, expr] : model.observedOutputExprByKey) {
+    enqueueStateDependenciesFromExpr(expr);
+  }
+
+  while (!pendingWorkQueue.empty()) {
+    std::vector<size_t> batchPendingIndexes;
+    std::vector<naja::DNL::DNLID> batchOutputTerms;
+    while (!pendingWorkQueue.empty()) {
+      const size_t pendingIndex = pendingWorkQueue.front();
+      pendingWorkQueue.pop_front();
+      batchPendingIndexes.push_back(pendingIndex);
+
+      const auto& pending = pendingTransitions[pendingIndex];
+      requiredStateKeys.insert(pending.stateKey);
+      for (const auto& complementedKey : pending.complementedStateKeys) {
+        requiredStateKeys.insert(complementedKey);
+      }
+
+      for (const auto& [_, candidates] : pending.pinTermIDs) {
+        for (const auto& candidate : candidates) {
+          if (materializedOutputTerms.insert(candidate.termID).second) {
+            batchOutputTerms.push_back(candidate.termID);
+          }
+        }
+      }
+    }
+
+    if (!batchOutputTerms.empty()) {
+      const auto dependencyOutputs = materializeBuilderOutputs(
+          batchOutputTerms,
+          secDiagEnabled,
+          top->getName().getString().c_str(),
+          "dependency build");
+      for (const auto& [termID, expr] : dependencyOutputs.outputExprByTerm) {
+        outputExprByTerm.emplace(termID, expr);
+      }
+      for (const auto& [termID, info] : dependencyOutputs.skippedOutputsByTerm) {
+        skippedOutputsByTerm.emplace(termID, info);
+      }
+    }
+
+    for (const auto pendingIndex : batchPendingIndexes) {
+      const auto& pending = pendingTransitions[pendingIndex];
     std::optional<ConnectivitySkipInfo> skippedPinInfo;
     for (const auto& [pinName, _] : pending.pinTermIDs) {
       const auto resolvedPinTermID = resolvePendingPinTermID(pending, pinName.c_str());
@@ -1447,6 +1642,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
             complementedKey,
             BoolExpr::Not(nextStateExpr));
       }
+      enqueueStateDependenciesFromExpr(nextStateExpr);
     } catch (const std::exception& e) {
       if (abstractUncomputableSequentialBoundaries) {
         recordLateAbstractedInstanceBoundary(
@@ -1463,6 +1659,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
       }
     }
   next_pending_transition:;
+    }
   }
   if (secDiagEnabled) {
     fprintf(
@@ -1473,6 +1670,25 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
         model.initialStateValueByKey.size());
     fflush(stderr);
   }
+
+  model.stateBits.erase(
+      std::remove_if(
+          model.stateBits.begin(),
+          model.stateBits.end(),
+          [&](const SignalKey& key) {
+            return requiredStateKeys.find(key) == requiredStateKeys.end();
+          }),
+      model.stateBits.end());
+  model.complementedStateRelations.erase(
+      std::remove_if(
+          model.complementedStateRelations.begin(),
+          model.complementedStateRelations.end(),
+          [&](const ComplementedStateRelation& relation) {
+            return requiredStateKeys.find(relation.primaryKey) == requiredStateKeys.end() ||
+                   requiredStateKeys.find(relation.complementedKey) ==
+                       requiredStateKeys.end();
+          }),
+      model.complementedStateRelations.end());
 
   for (const auto& key : lateAbstractedBoundaryStateKeys) {
     model.nextStateExprByStateKey.erase(key);
@@ -1509,6 +1725,23 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     if (std::find(model.allObservedOutputs.begin(), model.allObservedOutputs.end(), key) ==
         model.allObservedOutputs.end()) {
       model.allObservedOutputs.push_back(key);
+    }
+    if (const auto exprIt = outputExprByTerm.find(termID);
+        exprIt != outputExprByTerm.end()) {
+      model.observedOutputExprByKey.emplace(key, exprIt->second);
+      continue;
+    }
+    if (const auto skippedIt = skippedOutputsByTerm.find(termID);
+        skippedIt != skippedOutputsByTerm.end()) {
+      if (auto skipInfo = getConnectivitySkipInfo(skippedIt->second);
+          skipInfo.has_value()) {
+        model.connectivitySkipInfoByKey.emplace(key, *skipInfo);
+        continue;
+      }
+      model.unsupportedReasons.push_back(
+          "Unsupported SEC boundary output `" + model.displayNameByKey.at(key) +
+          "`: " + skippedIt->second.detail);
+      continue;
     }
     const auto built = buildObservedExprForTerm(
         termID,

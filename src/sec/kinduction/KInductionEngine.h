@@ -45,8 +45,8 @@ struct KInductionResult {
   std::optional<CounterexampleWitness> witness;
 };
 
-// Runs the standard k-induction loop for the SEC problem: a BMC-style base
-// search for counterexamples plus an induction step over simple paths.
+// Top-level k-induction strategy for SEC: a BMC-style base search for concrete
+// counterexamples plus an induction step over simple paths.
 class KInductionEngine {
  public:
   KInductionEngine(const KInductionProblem& problem,

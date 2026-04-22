@@ -1,7 +1,7 @@
 // Copyright 2024-2026 keplertech.io
 // SPDX-License-Identifier: GPL-3.0-only
 
-#include "engine/KInductionEngine.h"
+#include "kinduction/KInductionEngine.h"
 
 #include "kinduction/BaseCaseSolver.h"
 #include "kinduction/InductionStepSolver.h"

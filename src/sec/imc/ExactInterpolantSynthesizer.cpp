@@ -1,7 +1,7 @@
 // Copyright 2024-2026 keplertech.io
 // SPDX-License-Identifier: GPL-3.0-only
 
-#include "engine/ExactInterpolationEngine.h"
+#include "imc/ExactInterpolantSynthesizer.h"
 
 #include <vector>
 
@@ -68,12 +68,12 @@ BoolExpr* computeExactInterpolant(
 
 }  // namespace
 
-ExactInterpolationEngine::ExactInterpolationEngine(
+ExactInterpolantSynthesizer::ExactInterpolantSynthesizer(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType)
     : problem_(problem), solverType_(solverType) {}
 
-std::optional<BoolExpr*> ExactInterpolationEngine::deriveOneStepReachableStateInvariant(
+std::optional<BoolExpr*> ExactInterpolantSynthesizer::deriveOneStepReachableStateInvariant(
     size_t maxSharedStateBits) const {
   const std::vector<size_t> combinedStateSymbols = problem_.combinedStateSymbols();
   if (combinedStateSymbols.empty() || combinedStateSymbols.size() > maxSharedStateBits) {

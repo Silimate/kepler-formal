@@ -19,8 +19,7 @@ struct PDRResult {
   size_t bound = 0;
 };
 
-// A clause-based Property Directed Reachability engine for SEC. It offers a
-// dedicated proof path alongside the explicit k-induction and IMC engines and
+// Top-level clause-based Property Directed Reachability strategy for SEC. It
 // follows the classic proof-obligation/blocking loop over the already-built
 // SEC transition system.
 class PDREngine {

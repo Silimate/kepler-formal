@@ -11,13 +11,14 @@
 
 namespace KEPLER_FORMAL::SEC {
 
-// A small-state exact interpolant engine used to strengthen SEC induction.
-// It enumerates shared-state valuations exactly, so it is only enabled for
-// compact transition systems where the symbolic support stays manageable.
-class ExactInterpolationEngine {
+// A small-state exact interpolant helper used by IMC and the legacy SEC flow
+// to strengthen induction. It enumerates shared-state valuations exactly, so
+// it is only enabled for compact transition systems where the symbolic support
+// stays manageable.
+class ExactInterpolantSynthesizer {
  public:
-  ExactInterpolationEngine(const KInductionProblem& problem,
-                           KEPLER_FORMAL::Config::SolverType solverType);
+  ExactInterpolantSynthesizer(const KInductionProblem& problem,
+                              KEPLER_FORMAL::Config::SolverType solverType);
 
   std::optional<BoolExpr*> deriveOneStepReachableStateInvariant(
       size_t maxSharedStateBits = 12) const;
