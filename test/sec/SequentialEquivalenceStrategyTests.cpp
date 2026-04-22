@@ -22,11 +22,10 @@
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
 #include "common/BoolExprUtils.h"
-#include "engine/ClassicKInductionEngine.h"
-#include "engine/ExactInterpolationEngine.h"
-#include "engine/IMCEngine.h"
-#include "engine/KInductionEngine.h"
-#include "engine/PDREngine.h"
+#include "imc/ExactInterpolantSynthesizer.h"
+#include "imc/IMCEngine.h"
+#include "kinduction/KInductionEngine.h"
+#include "pdr/PDREngine.h"
 #include "kinduction/BaseCaseSolver.h"
 #include "kinduction/SatEncoding.h"
 #include "kinduction/InductionStepSolver.h"
@@ -1562,7 +1561,7 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithP
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       IdenticalDffDesignsAreEquivalentWithClassicKInductionEngine) {
+       IdenticalDffDesignsAreEquivalentWithKInductionEngine) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* library = NLLibrary::create(db, NLName("LIB"));
@@ -2557,7 +2556,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ExactInterpolationEngineDerivesOneStepReachableStateInvariant) {
+       ExactInterpolantSynthesizerDerivesOneStepReachableStateInvariant) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
   problem.allSymbols = {2, 3};
@@ -2571,7 +2570,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  ExactInterpolationEngine engine(
+  ExactInterpolantSynthesizer engine(
       problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto interpolant = engine.deriveOneStepReachableStateInvariant(4);
 
@@ -2581,7 +2580,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ExactInterpolationEngineReturnsNulloptWhenStateBudgetIsExceeded) {
+       ExactInterpolantSynthesizerReturnsNulloptWhenStateBudgetIsExceeded) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
   problem.allSymbols = {2, 3};
@@ -2596,7 +2595,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  ExactInterpolationEngine engine(
+  ExactInterpolantSynthesizer engine(
       problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto interpolant = engine.deriveOneStepReachableStateInvariant(1);
 
@@ -2604,7 +2603,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ExactInterpolationEngineReturnsNulloptWhenBadIsReachableInOneStep) {
+       ExactInterpolantSynthesizerReturnsNulloptWhenBadIsReachableInOneStep) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
   problem.allSymbols = {2};
@@ -2617,7 +2616,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  ExactInterpolationEngine engine(
+  ExactInterpolantSynthesizer engine(
       problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto interpolant = engine.deriveOneStepReachableStateInvariant(4);
 
@@ -2625,7 +2624,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ExactInterpolationEngineRejectsNonInductiveInterpolant) {
+       ExactInterpolantSynthesizerRejectsNonInductiveInterpolant) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
   problem.allSymbols = {2, 3};
@@ -2640,7 +2639,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  ExactInterpolationEngine engine(
+  ExactInterpolantSynthesizer engine(
       problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto interpolant = engine.deriveOneStepReachableStateInvariant(4);
 
@@ -2648,7 +2647,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ExactInterpolationEngineUsesBootstrapAssignmentsAndComplementedStatePairs) {
+       ExactInterpolantSynthesizerUsesBootstrapAssignmentsAndComplementedStatePairs) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
   problem.allSymbols = {2, 3};
@@ -2663,7 +2662,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  ExactInterpolationEngine engine(
+  ExactInterpolantSynthesizer engine(
       problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto interpolant = engine.deriveOneStepReachableStateInvariant(4);
 
@@ -2734,7 +2733,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineReturnsInconclusiveWhenFrameBudgetIsZero) {
+       PDREngineStillAcceptsImmediateProofWhenFrameBudgetIsZero) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
   problem.allSymbols = {2};
@@ -2750,8 +2749,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(0);
 
-  EXPECT_EQ(result.status, PDRStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -2777,6 +2776,54 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDoesNotReuseNonInductiveStrengtheningAsFrameInvariant) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.allSymbols = {2, 3};
+  problem.initialCondition =
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(2)), BoolExpr::Not(BoolExpr::Var(3)));
+  problem.initializedStateCount = 2;
+  problem.totalStateCount = 2;
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(3, BoolExpr::Var(2));
+  problem.bad = BoolExpr::Var(3);
+  problem.property = BoolExpr::Not(problem.bad);
+  // Init implies !x, but it is not inductive: x becomes true in the next step.
+  // Reusing it as a frame fact would incorrectly hide the real bad state 11.
+  problem.inductionProperty = BoolExpr::Not(BoolExpr::Var(2));
+  problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 2u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesPropertyAsFallbackImmediateProof) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  // This strengthening is not implied by Init, so PDR must fall back to the
+  // checked SEC property instead of dropping straight into the full clause loop.
+  problem.inductionProperty = BoolExpr::Var(2);
+  problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineProvesEquivalentExactlyAtThreeFrames) {
   const auto problem = buildLinearChainSecProblem(4);
 
@@ -2788,7 +2835,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ClassicKInductionEngineProvesEquivalentSmallTransitionSystem) {
+       KInductionEngineProvesEquivalentSmallTransitionSystem) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
   problem.allSymbols = {2};
@@ -2801,16 +2848,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  ClassicKInductionEngine engine(
-      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
 
-  EXPECT_EQ(result.status, ClassicKInductionStatus::Equivalent);
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
   EXPECT_LE(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ClassicKInductionEngineFindsReachableBadState) {
+       KInductionEngineFindsReachableBadState) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
   problem.allSymbols = {2};
@@ -2823,38 +2869,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  ClassicKInductionEngine engine(
-      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
 
-  EXPECT_EQ(result.status, ClassicKInductionStatus::Different);
+  EXPECT_EQ(result.status, KInductionStatus::Different);
   ASSERT_TRUE(result.witness.has_value());
   EXPECT_EQ(result.bound, 1u);
   EXPECT_EQ(result.witness->badFrame, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ClassicKInductionEngineProvesEquivalentExactlyAtThreeFrames) {
-  const auto problem = buildLinearChainSecProblem(4);
-
-  ClassicKInductionEngine engine(
-      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(3);
-
-  EXPECT_EQ(result.status, ClassicKInductionStatus::Equivalent);
-  EXPECT_EQ(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ClassicKInductionEngineRemainsInconclusiveAtFourFramesWhenFiveAreNeeded) {
-  const auto problem = buildLinearChainSecProblem(6);
-
-  ClassicKInductionEngine engine(
-      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(4);
-
-  EXPECT_EQ(result.status, ClassicKInductionStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 4u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

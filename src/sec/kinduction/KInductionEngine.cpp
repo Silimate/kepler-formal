@@ -38,7 +38,6 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
   // when a later output divergence exists even though a small-k induction step
   // happens to be too coarse to expose it yet.
   for (size_t k = 1; k <= maxK; ++k) {
-    printf("Checking k=%zu...\n", k);
     if (auto witness = findBaseCounterexample(k); witness.has_value()) {
       return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
     }
