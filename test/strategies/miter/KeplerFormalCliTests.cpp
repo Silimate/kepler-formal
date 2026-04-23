@@ -2072,7 +2072,8 @@ TEST(KeplerFormalCliTests, ConfigSecRejectsCnfExport) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
-TEST(KeplerFormalCliTests, ConfigSecRejectsSkippedPoReporting) {
+TEST(KeplerFormalCliTests, ConfigSecAcceptsSkippedPoReporting) {
+  ReportSkippedPOsGuard reportGuard;
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
@@ -2082,7 +2083,8 @@ TEST(KeplerFormalCliTests, ConfigSecRejectsSkippedPoReporting) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_TRUE(KEPLER_FORMAL::Config::getReportSkippedPOs());
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }

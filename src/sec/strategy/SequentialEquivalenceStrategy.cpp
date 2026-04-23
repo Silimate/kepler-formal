@@ -168,6 +168,8 @@ std::string describeConnectivitySkipOrigin(ConnectivitySkipOrigin origin) {
       return "no-driver";
     case ConnectivitySkipOrigin::MultiDriver:
       return "multi-driver";
+    case ConnectivitySkipOrigin::LogicalLoop:
+      return "logical-loop";
   }
   return "connectivity";  // LCOV_EXCL_LINE
 }
@@ -782,8 +784,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
       return makeSecResult(
           SequentialEquivalenceStatus::Unsupported,
           0,
-          "No aligned observed outputs remain after skipping cones with no-driver or "
-          "multi-driver connectivity.",
+          "No aligned observed outputs remain after skipping cones with no-driver, "
+          "multi-driver, or logical-loop connectivity.",
           outputCoverage,
           abstractedSequentialBoundaries);
     }

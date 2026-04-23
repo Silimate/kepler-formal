@@ -24,6 +24,7 @@ struct ComplementedStateRelation {
 enum class ConnectivitySkipOrigin {
   NoDriver,
   MultiDriver,
+  LogicalLoop,
 };
 
 struct ConnectivitySkipInfo {

@@ -1322,6 +1322,53 @@ SNLDesign* createPartialCoverageMultiDriverTop(
   return top;
 }
 
+SNLDesign* createPartialCoverageLogicalLoopTop(
+    NLLibrary* library,
+    const std::string& name) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topSel =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("sel"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topGood =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("good"));
+  auto* topBad =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("bad"));
+
+  auto* assign = SNLInstance::create(top, NLDB0::getAssign(), NLName("assign0"));
+  auto* mux = SNLInstance::create(top, NLDB0::getMux2(), NLName("mux0"));
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netSel = SNLScalarNet::create(top, NLName("net_sel"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netLoopSeed = SNLScalarNet::create(top, NLName("net_loop_seed"));
+  auto* netLoopIn = SNLScalarNet::create(top, NLName("net_loop_in"));
+  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
+
+  topIn->setNet(netIn);
+  topSel->setNet(netSel);
+  topClock->setNet(netClock);
+  topGood->setNet(netIn);
+  topBad->setNet(netQ);
+
+  assign->getInstTerm(NLDB0::getAssignInput())->setNet(netLoopIn);
+  assign->getInstTerm(NLDB0::getAssignOutput())->setNet(netLoopSeed);
+
+  mux->getInstTerm(NLDB0::getMux2InputA()->getBit(0))->setNet(netLoopSeed);
+  mux->getInstTerm(NLDB0::getMux2InputB()->getBit(0))->setNet(netIn);
+  mux->getInstTerm(NLDB0::getMux2Select())->setNet(netSel);
+  mux->getInstTerm(NLDB0::getMux2Output()->getBit(0))->setNet(netLoopIn);
+
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netLoopSeed);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
+
+  return top;
+}
+
 SNLDesign* createUnsupportedPrimitiveCoverageTop(
     NLLibrary* library,
     const std::string& name,
@@ -3302,6 +3349,32 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractPropagatesLogicalLoopSkipsToStateAndOutputs) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = createPartialCoverageLogicalLoopTop(library, "top");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_EQ(extracted.totalObservedOutputCount(), 2u);
+  EXPECT_EQ(extracted.coveredObservedOutputCount(), 1u);
+  EXPECT_EQ(extracted.skippedObservedOutputs.size(), 1u);
+  EXPECT_EQ(extracted.skippedStateBits.size(), 1u);
+  const auto badKey = findKeyByDisplayName(extracted, "bad[0]");
+  const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  ASSERT_NE(extracted.connectivitySkipInfoByKey.find(badKey),
+            extracted.connectivitySkipInfoByKey.end());
+  ASSERT_NE(extracted.connectivitySkipInfoByKey.find(stateKey),
+            extracted.connectivitySkipInfoByKey.end());
+  EXPECT_EQ(
+      extracted.connectivitySkipInfoByKey.at(stateKey).origin,
+      ConnectivitySkipOrigin::LogicalLoop);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractSupportsSetHighInitialState) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -3898,6 +3971,28 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
   EXPECT_NE(result.skippedObservedOutputs.front().find("bad[0]"), std::string::npos);
   EXPECT_NE(result.skippedObservedOutputs.front().find("multi-driver"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       EquivalentDesignsCanProveSecOnCoveredOutputsOnlyAfterLogicalLoopSkipping) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top0 = createPartialCoverageLogicalLoopTop(library, "top0");
+  auto* top1 = createPartialCoverageLogicalLoopTop(library, "top1");
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(result.skippedObservedOutputs.front().find("bad[0]"), std::string::npos);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("logical-loop"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

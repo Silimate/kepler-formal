@@ -82,6 +82,8 @@ std::string describeConnectivitySkipOrigin(ConnectivitySkipOrigin origin) {
       return "no-driver";
     case ConnectivitySkipOrigin::MultiDriver:
       return "multi-driver";
+    case ConnectivitySkipOrigin::LogicalLoop:
+      return "logical-loop";
   }
   return "connectivity";  // LCOV_EXCL_LINE
 }
@@ -94,6 +96,8 @@ std::optional<ConnectivitySkipInfo> getConnectivitySkipInfo(
     case BuilderSkippedOutputReason::MultiDriver:
       return ConnectivitySkipInfo{ConnectivitySkipOrigin::MultiDriver, info.detail};
     case BuilderSkippedOutputReason::LogicalLoop:
+      return ConnectivitySkipInfo{
+          ConnectivitySkipOrigin::LogicalLoop, info.detail};
     case BuilderSkippedOutputReason::None:
     default:
       return std::nullopt;
@@ -164,8 +168,8 @@ BuiltObservedExpr buildObservedExprForTerm(
             ConnectivitySkipOrigin::MultiDriver, cloud.getSkipReasonText()};
         break;
       case KEPLER_FORMAL::SNLLogicCloud::SkipReason::LogicalLoop:
-        localResult.unsupportedReason =
-            "logical loop: " + cloud.getSkipReasonText();
+        localResult.connectivitySkip = ConnectivitySkipInfo{
+            ConnectivitySkipOrigin::LogicalLoop, cloud.getSkipReasonText()};
         break;
       case KEPLER_FORMAL::SNLLogicCloud::SkipReason::None:
       default:
@@ -181,8 +185,9 @@ BuiltObservedExpr buildObservedExprForTerm(
                               naja::DNL::DNLID currentTermID) -> BuiltObservedExpr {
     BuiltObservedExpr localResult;
     if (!visitedTerms.insert(currentTermID).second) {
-      localResult.unsupportedReason =
-          "logical loop while rebuilding a SEC boundary";
+      localResult.connectivitySkip = ConnectivitySkipInfo{
+          ConnectivitySkipOrigin::LogicalLoop,
+          "a logical loop was detected while rebuilding a SEC boundary"};
       return localResult;
     }
 
@@ -1363,8 +1368,8 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   const auto& outputExprs = builder.getPOs();
   auto skippedOutputsByTerm = builder.getSkippedOutputs();
   // Keep only the valid formulas produced by the clause builder. Invalid
-  // clouds are classified below either as skippable connectivity gaps or as
-  // hard unsupported logic (for example, logical loops).
+  // clouds are classified below either as skippable SEC gaps or as hard
+  // unsupported logic.
   for (size_t i = 0; i < outputTerms.size(); ++i) {
     BoolExpr* expr = outputExprs[i];
     if (expr == nullptr || !expr->isValid()) {

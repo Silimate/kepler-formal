@@ -1040,10 +1040,6 @@ int KeplerFormalMain(int argc, char** argv) {
       SPDLOG_CRITICAL("SEC verification does not support CNF export");
       return EXIT_FAILURE;
     }
-    if (reportSkippedPOs) {
-      SPDLOG_CRITICAL("SEC verification does not support skipped PO reporting");
-      return EXIT_FAILURE;
-    }
   }
   for (const auto& libraryFile : libertyFiles) {
     if (isPythonLoaderPath(libraryFile)) {
@@ -1440,7 +1436,7 @@ int KeplerFormalMain(int argc, char** argv) {
         }
         SPDLOG_INFO(
             "SEC skipped observed outputs due to connectivity issues "
-            "(no-driver or multi-driver only):\n{}",
+            "(no-driver, multi-driver, or logical-loop):\n{}",
             skippedOutputs.str());
       }
       if (!result.abstractedSequentialBoundaries.empty()) {
