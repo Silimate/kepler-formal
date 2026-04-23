@@ -707,6 +707,8 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesReportsSkippedNoDriverPO) {
   EXPECT_NE(content.find("floating_net_1"), std::string::npos);
   EXPECT_NE(content.find("report_prop_a="), std::string::npos);
   EXPECT_NE(content.find("report_prop_b="), std::string::npos);
+  EXPECT_NE(content.find("model=PASS0"), std::string::npos);
+  EXPECT_NE(content.find("direction=Input"), std::string::npos);
   EXPECT_NE(content.find("See first encounter of iso="), std::string::npos);
   EXPECT_EQ(countSubstringOccurrences(content, "Skipping PO "), 4u);
 }
@@ -785,6 +787,9 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesReportsSkippedMultiDriverPO) {
   EXPECT_NE(content.find("its iso has multiple drivers"), std::string::npos);
   EXPECT_NE(content.find("LOGIC0"), std::string::npos);
   EXPECT_NE(content.find("LOGIC1"), std::string::npos);
+  EXPECT_NE(content.find("model=top"), std::string::npos);
+  EXPECT_NE(content.find("direction=Output"), std::string::npos);
+  EXPECT_NE(content.find("direction=Input"), std::string::npos);
   EXPECT_EQ(content.find("complex_nets"), std::string::npos);
   EXPECT_EQ(content.find("report_prop_a="), std::string::npos);
   EXPECT_EQ(content.find("report_prop_b="), std::string::npos);
@@ -1809,7 +1814,10 @@ TEST_F(MiterTests, InternalPOAssignCycleIsSkippedAndReported) {
   const std::string content = buffer.str();
   EXPECT_NE(content.find("logical loop"), std::string::npos);
   EXPECT_NE(content.find("loop_terms"), std::string::npos);
+  EXPECT_NE(content.find("model="), std::string::npos);
   EXPECT_NE(content.find("D0"), std::string::npos);
+  EXPECT_NE(content.find("direction=Output"), std::string::npos);
+  EXPECT_NE(content.find("direction=Input"), std::string::npos);
 }
 
 // 1. create a circuit of 2 inputs that drives and AND gate that drives top output

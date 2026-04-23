@@ -51,13 +51,36 @@ BuildPrimaryOutputClauses::PathKey getTerminalPathKey(const DNLTerminalFull& ter
   return {std::move(pathIDs), std::move(objectIDs)};
 }
 
+const char* getSnlDirectionName(SNLBitTerm::Direction direction) {
+  switch (direction) {
+    case SNLBitTerm::Direction::Undefined:
+      return "Undefined";
+    case SNLBitTerm::Direction::Input:
+      return "Input";
+    case SNLBitTerm::Direction::Output:
+      return "Output";
+    case SNLBitTerm::Direction::InOut:
+      return "InOut";
+  }
+  return "Unknown";  // LCOV_EXCL_LINE
+}
+
+std::string getSnlModelName(const DNLTerminalFull& term) {
+  const auto* design = term.getSnlBitTerm()->getDesign();
+  return design ? design->getName().getString() : "<unknown>";
+}
+
 void appendTerminalName(std::ostream& out, const DNLTerminalFull& term) {
   const auto path = term.getDNLInstance().getPath().getPathNames();
   for (size_t i = 0; i < path.size(); ++i) {
     out << path[i].getString() << ".";
   }
   out << term.getSnlBitTerm()->getName().getString()
-      << term.getSnlBitTerm()->getBit();
+      << term.getSnlBitTerm()->getBit()
+      << " (model=" << getSnlModelName(term)
+      << ", direction="
+      << getSnlDirectionName(term.getSnlBitTerm()->getDirection())
+      << ")";
 }
 
 bool shouldReportSkippedPOs() {
@@ -146,7 +169,11 @@ void appendIsoTermName(std::ostream& out, const DNLFull* dnl, DNLID termID) {
     out << path[i].getString() << ".";
   }
   out << term.getSnlBitTerm()->getName().getString()
-      << term.getSnlBitTerm()->getBit();
+      << term.getSnlBitTerm()->getBit()
+      << " (model=" << getSnlModelName(term)
+      << ", direction="
+      << getSnlDirectionName(term.getSnlBitTerm()->getDirection())
+      << ")";
 }
 
 void appendNetReport(std::ostream& out, const SNLBitNet* net) {

@@ -120,6 +120,25 @@ void recordSkippedPOReportEvent(const SkippedPOReportEvent& event) {
   events.emplace_back(event);
 }
 
+const char* getSnlDirectionName(naja::NL::SNLBitTerm::Direction direction) {
+  switch (direction) {
+    case naja::NL::SNLBitTerm::Direction::Undefined:
+      return "Undefined";
+    case naja::NL::SNLBitTerm::Direction::Input:
+      return "Input";
+    case naja::NL::SNLBitTerm::Direction::Output:
+      return "Output";
+    case naja::NL::SNLBitTerm::Direction::InOut:
+      return "InOut";
+  }
+  return "Unknown";  // LCOV_EXCL_LINE
+}
+
+std::string getSnlModelName(const DNLTerminalFull& term) {
+  const auto* design = term.getSnlBitTerm()->getDesign();
+  return design ? design->getName().getString() : "<unknown>";
+}
+
 	void appendCloudTermName(std::ostream& out, const DNLFull* dnl, DNLID termID) {
 	  if (termID == DNLID_MAX) {
 	    out << "<invalid>"; // LCOV_EXCL_LINE
@@ -135,6 +154,10 @@ void recordSkippedPOReportEvent(const SkippedPOReportEvent& event) {
   }
   out << term.getSnlBitTerm()->getName().getString()
       << term.getSnlBitTerm()->getBit()
+      << " (model=" << getSnlModelName(term)
+      << ", direction="
+      << getSnlDirectionName(term.getSnlBitTerm()->getDirection())
+      << ")"
       << " (term_id=" << termID
       << ", iso=" << term.getIsoID() << ")";
 }
