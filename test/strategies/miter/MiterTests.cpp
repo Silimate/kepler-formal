@@ -787,7 +787,7 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesReportsSkippedMultiDriverPO) {
   EXPECT_NE(content.find("its iso has multiple drivers"), std::string::npos);
   EXPECT_NE(content.find("LOGIC0"), std::string::npos);
   EXPECT_NE(content.find("LOGIC1"), std::string::npos);
-  EXPECT_NE(content.find("model=top"), std::string::npos);
+  EXPECT_NE(content.find("model=PASS1"), std::string::npos);
   EXPECT_NE(content.find("direction=Output"), std::string::npos);
   EXPECT_NE(content.find("direction=Input"), std::string::npos);
   EXPECT_EQ(content.find("complex_nets"), std::string::npos);
