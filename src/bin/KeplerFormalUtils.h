@@ -5,5 +5,5 @@
 
 #include <string>
 
-// Exposed for tests and for consistent filename handling.
+// Shared helper for consistent filename handling.
 std::string sanitizeFileToken(const std::string& input);

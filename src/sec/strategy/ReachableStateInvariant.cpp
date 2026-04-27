@@ -444,22 +444,4 @@ ReachableStateInvariant buildReachableStateInvariant(
   return invariant;
 }
 
-namespace detail {
-
-std::unordered_map<SignalKey, bool, SignalKeyHash>
-deriveResetBootstrapStateValuesForTest(
-    const SequentialDesignModel& model,
-    size_t cycles) {
-  return deriveResetBootstrapStateValues(model, cycles);
-}
-
-AlignedSignals filterStateEqualitiesByInitialValueForTest(
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    const AlignedSignals& candidateStates) {
-  return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);
-}
-
-}  // namespace detail
-
 }  // namespace KEPLER_FORMAL::SEC

@@ -3,10 +3,20 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdlib>
+#include <deque>
+#include <limits>
+#include <map>
 #include <optional>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "BoolExprCache.h"
 #include "DNL.h"
@@ -14,6 +24,7 @@
 #include "NLUniverse.h"
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
+#include "SNLPath.h"
 #include "SNLBusNet.h"
 #include "SNLBusNetBit.h"
 #include "SNLBusTerm.h"
@@ -40,65 +51,1087 @@ using KEPLER_FORMAL::BoolExpr;
 
 namespace KEPLER_FORMAL::SEC::detail {
 
+namespace {
+
+struct PendingPinTermForTest {
+  naja::DNL::DNLID termID = naja::DNL::DNLID_MAX;
+  naja::NL::NLID::Bit bit = 0;
+};
+
+struct PendingTransitionForTest {
+  naja::DNL::DNLID stateTermID = naja::DNL::DNLID_MAX;
+  naja::NL::NLID::Bit stateBit = 0;
+  size_t independentStateOutputCount = 0;
+  std::unordered_map<std::string, std::vector<PendingPinTermForTest>> pinTermIDs;
+};
+
+struct ConeTraceForTest {
+  std::vector<std::vector<std::string>> levels;
+  std::set<std::string> allTerms;
+};
+
+struct ConeDiffReportForTest {
+  ConeTraceForTest trace;
+  std::string error;
+};
+
+struct ScopedDnlContextForTest {
+  explicit ScopedDnlContextForTest(naja::NL::SNLDesign* top)
+      : universe_(naja::NL::NLUniverse::get()),
+        previousTop_(universe_ ? universe_->getTopDesign() : nullptr) {
+    if (universe_ == nullptr) {
+      throw std::runtime_error("NLUniverse not created for SEC cone tracing");
+    }
+
+    naja::DNL::destroy();
+    universe_->setTopDesign(top);
+    dnl_ = naja::DNL::get();
+  }
+
+  ~ScopedDnlContextForTest() {
+    naja::DNL::destroy();
+    if (universe_ != nullptr && previousTop_ != nullptr) {
+      universe_->setTopDesign(previousTop_);
+    }
+  }
+
+  naja::DNL::DNLFull* dnl() const {
+    return dnl_;
+  }
+
+ private:
+  naja::NL::NLUniverse* universe_ = nullptr;
+  naja::NL::SNLDesign* previousTop_ = nullptr;
+  naja::DNL::DNLFull* dnl_ = nullptr;
+};
+
+std::string formatBoolValueForTest(bool value) {
+  return value ? "1" : "0";
+}
+
+std::string normalizePinNameForTest(const std::string& name) {
+  std::string normalized = name;
+  for (char& ch : normalized) {
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  }
+  return normalized;
+}
+
+std::string normalizeSignalBaseNameForTest(const std::string& name) {
+  std::string base = name;
+  const auto bracket = base.find('[');
+  if (bracket != std::string::npos) {
+    base = base.substr(0, bracket);
+  }
+  return normalizePinNameForTest(base);
+}
+
+std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
+    const std::string& displayName);
+
+std::optional<naja::DNL::DNLID> resolvePendingPinTermIDForTest(
+    const PendingTransitionForTest& pending,
+    const char* pinName) {
+  const auto pinIt = pending.pinTermIDs.find(pinName);
+  if (pinIt == pending.pinTermIDs.end()) {
+    return std::nullopt;
+  }
+
+  const auto& candidates = pinIt->second;
+  if (candidates.empty()) {
+    return std::nullopt;
+  }
+
+  if (candidates.size() > 1) {
+    for (const auto& candidate : candidates) {
+      if (candidate.bit == pending.stateBit) {
+        return candidate.termID;
+      }
+    }
+    throw std::runtime_error(
+        "Missing bit-matched sequential pin `" + std::string(pinName) + "`");
+  }
+
+  const bool isDataPin = std::string(pinName) == "D";
+  if (isDataPin && pending.independentStateOutputCount > 1) {
+    throw std::runtime_error(
+        "Shared scalar D input cannot define multiple independent state outputs");
+  }
+
+  return candidates.front().termID;
+}
+
+BoolExpr* getRequiredOutputExprForTest(
+    const PendingTransitionForTest& pending,
+    const char* pinName,
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
+  const auto resolvedTermID = resolvePendingPinTermIDForTest(pending, pinName);
+  if (!resolvedTermID.has_value()) {
+    return nullptr;
+  }
+  const auto exprIt = outputExprByTerm.find(*resolvedTermID);
+  if (exprIt == outputExprByTerm.end()) {
+    throw std::runtime_error(
+        "Missing combinational expression for sequential pin `" +
+        std::string(pinName) + "`");
+  }
+  return exprIt->second;
+}
+
+std::optional<bool> evaluateConstantUnderAssignmentsImplForTest(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& assignments,
+    std::unordered_map<BoolExpr*, std::optional<bool>>& memo) {
+  if (expr == nullptr) {
+    return std::nullopt;
+  }
+  if (const auto it = memo.find(expr); it != memo.end()) {
+    return it->second;
+  }
+
+  std::optional<bool> value;
+  switch (expr->getOp()) {
+    case Op::VAR:
+      if (expr->getId() < 2) {
+        value = expr->getId() == 1;
+      } else if (const auto it = assignments.find(expr->getId());
+                 it != assignments.end()) {
+        value = it->second;
+      }
+      break;
+    case Op::NOT: {
+      const auto operand = evaluateConstantUnderAssignmentsImplForTest(
+          expr->getLeft(), assignments, memo);
+      if (operand.has_value()) {
+        value = !*operand;
+      }
+      break;
+    }
+    case Op::AND: {
+      const auto lhs = evaluateConstantUnderAssignmentsImplForTest(
+          expr->getLeft(), assignments, memo);
+      if (lhs.has_value() && !*lhs) {
+        value = false;
+        break;
+      }
+      const auto rhs = evaluateConstantUnderAssignmentsImplForTest(
+          expr->getRight(), assignments, memo);
+      if (rhs.has_value() && !*rhs) {
+        value = false;
+      } else if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs && *rhs;
+      }
+      break;
+    }
+    case Op::OR: {
+      const auto lhs = evaluateConstantUnderAssignmentsImplForTest(
+          expr->getLeft(), assignments, memo);
+      if (lhs.has_value() && *lhs) {
+        value = true;
+        break;
+      }
+      const auto rhs = evaluateConstantUnderAssignmentsImplForTest(
+          expr->getRight(), assignments, memo);
+      if (rhs.has_value() && *rhs) {
+        value = true;
+      } else if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs || *rhs;
+      }
+      break;
+    }
+    case Op::XOR: {
+      const auto lhs = evaluateConstantUnderAssignmentsImplForTest(
+          expr->getLeft(), assignments, memo);
+      const auto rhs = evaluateConstantUnderAssignmentsImplForTest(
+          expr->getRight(), assignments, memo);
+      if (lhs.has_value() && rhs.has_value()) {
+        value = *lhs != *rhs;
+      }
+      break;
+    }
+    case Op::NONE:
+    default:
+      break;
+  }
+
+  memo.emplace(expr, value);
+  return value;
+}
+
+std::unordered_map<size_t, bool> collectResetAssignmentsForTest(
+    const SequentialDesignModel& model) {
+  std::unordered_map<size_t, bool> assignments;
+  for (const auto& key : model.environmentInputs) {
+    const auto displayIt = model.displayNameByKey.find(key);
+    const auto varIt = model.inputVarByKey.find(key);
+    if (displayIt == model.displayNameByKey.end() ||
+        varIt == model.inputVarByKey.end()) {
+      continue;
+    }
+    const auto assertedValue =
+        getResetAssertionValueFromDisplayNameForTest(displayIt->second);
+    if (!assertedValue.has_value()) {
+      continue;
+    }
+    assignments.emplace(varIt->second, *assertedValue);
+  }
+  return assignments;
+}
+
+std::vector<std::string> setDifferenceForTest(const std::set<std::string>& lhs,
+                                              const std::set<std::string>& rhs) {
+  std::vector<std::string> diff;
+  std::set_difference(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), std::back_inserter(diff));
+  return diff;
+}
+
+std::string describeMismatchedNamesForTest(const std::vector<std::string>& lhs,
+                                           const std::vector<std::string>& rhs,
+                                           const char* label) {
+  std::ostringstream oss;
+  oss << "Mismatched " << label << " sets";
+  if (!lhs.empty()) {
+    oss << " lhs=[";
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (i) {
+        oss << ", ";
+      }
+      oss << lhs[i];
+    }
+    oss << "]";
+  }
+  if (!rhs.empty()) {
+    oss << " rhs=[";
+    for (size_t i = 0; i < rhs.size(); ++i) {
+      if (i) {
+        oss << ", ";
+      }
+      oss << rhs[i];
+    }
+    oss << "]";
+  }
+  return oss.str();
+}
+
+std::map<SignalKey, std::string, SignalKeyLess> buildKeyToNameMapForTest(
+    const std::vector<SignalKey>& keys,
+    const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames,
+    const char* label) {
+  std::map<SignalKey, std::string, SignalKeyLess> byKey;
+  for (const auto& key : keys) {
+    const auto nameIt = displayNames.find(key);
+    if (nameIt == displayNames.end()) {
+      throw std::runtime_error(
+          std::string("Missing display name for SEC ") + label);
+    }
+    const auto [_, inserted] = byKey.emplace(key, nameIt->second);
+    if (!inserted) {
+      throw std::runtime_error(
+          std::string("Duplicate SEC ") + label + " key `" +
+          signalKeyToString(key) + "`");
+    }
+  }
+  return byKey;
+}
+
+std::vector<std::string> sortedNamesForTest(
+    const std::map<SignalKey, std::string, SignalKeyLess>& byKey) {
+  std::vector<std::string> names;
+  names.reserve(byKey.size());
+  for (const auto& [_, name] : byKey) {
+    names.push_back(name);
+  }
+  return names;
+}
+
+std::optional<naja::DNL::DNLID> findTermByDisplayNameForTest(
+    naja::DNL::DNLFull* dnl,
+    const std::string& signalName);
+
+std::string getTerminalDisplayNameForTest(
+    const naja::DNL::DNLTerminalFull& terminal);
+
+std::vector<naja::DNL::DNLID> resolveTermsByKeyForTest(
+    naja::DNL::DNLFull* dnl,
+    const std::vector<SignalKey>& keys);
+
+std::string formatConeTermForTest(naja::DNL::DNLFull* dnl,
+                                  naja::DNL::DNLID termID);
+
+ConeTraceForTest buildConeTraceForTest(
+    naja::DNL::DNLFull* dnl,
+    naja::DNL::DNLID seedTermID,
+    const std::vector<naja::DNL::DNLID>& environmentInputs);
+
+std::string formatConeTracebackForTest(
+    const KInductionResult::CounterexampleWitness& witness,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1);
+
+}  // namespace
+
 BoolExpr* buildNextStateExprForTest(
     size_t stateTermID,
     const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs,
     const std::vector<size_t>& termDNLID2varID,
-    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm);
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
+  PendingTransitionForTest pending;
+  pending.stateTermID = stateTermID;
+  pending.independentStateOutputCount = 1;
+  for (const auto& [pinName, termID] : pinTermIDs) {
+    pending.pinTermIDs[pinName].push_back({termID, 0});
+  }
+
+  if (pending.stateTermID >= termDNLID2varID.size()) {
+    throw std::runtime_error("Sequential state term is out of range");
+  }
+
+  const size_t stateVarID = termDNLID2varID[pending.stateTermID];
+  if (stateVarID < 2) {
+    throw std::runtime_error("Sequential state bit was mapped to a constant");
+  }
+
+  BoolExpr* data = getRequiredOutputExprForTest(pending, "D", outputExprByTerm);
+  if (data == nullptr) {
+    throw std::runtime_error("Unsupported sequential primitive without D input");
+  }
+
+  BoolExpr* current = BoolExpr::Var(stateVarID);
+  BoolExpr* next = data;
+
+  if (BoolExpr* enable = getRequiredOutputExprForTest(pending, "E", outputExprByTerm)) {
+    next = BoolExpr::Or(
+        BoolExpr::And(enable, data),
+        BoolExpr::And(BoolExpr::Not(enable), current));
+  }
+
+  const BoolExpr* resetHigh =
+      getRequiredOutputExprForTest(pending, "R", outputExprByTerm);
+  const BoolExpr* resetLow =
+      getRequiredOutputExprForTest(pending, "RN", outputExprByTerm);
+  const BoolExpr* setHigh =
+      getRequiredOutputExprForTest(pending, "S", outputExprByTerm);
+
+  int controlKinds = 0;
+  controlKinds += resetHigh != nullptr ? 1 : 0;
+  controlKinds += resetLow != nullptr ? 1 : 0;
+  controlKinds += setHigh != nullptr ? 1 : 0;
+  if (controlKinds > 1) {
+    throw std::runtime_error(
+        "Unsupported sequential primitive with multiple control styles");
+  }
+
+  if (resetHigh) {
+    next = BoolExpr::And(BoolExpr::Not(const_cast<BoolExpr*>(resetHigh)), next);
+  } else if (resetLow) {
+    next = BoolExpr::And(const_cast<BoolExpr*>(resetLow), next);
+  } else if (setHigh) {
+    next = BoolExpr::Or(
+        const_cast<BoolExpr*>(setHigh),
+        BoolExpr::And(BoolExpr::Not(const_cast<BoolExpr*>(setHigh)), next));
+  }
+
+  return next;
+}
 
 std::optional<bool> detectInitialStateValueForTest(
-    const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs);
+    const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs) {
+  PendingTransitionForTest pending;
+  pending.independentStateOutputCount = 1;
+  for (const auto& [pinName, termID] : pinTermIDs) {
+    pending.pinTermIDs[pinName].push_back({termID, 0});
+  }
+
+  const bool hasResetHigh = resolvePendingPinTermIDForTest(pending, "R").has_value();
+  const bool hasResetLow = resolvePendingPinTermIDForTest(pending, "RN").has_value();
+  const bool hasSetHigh = resolvePendingPinTermIDForTest(pending, "S").has_value();
+
+  int controlKinds = 0;
+  controlKinds += hasResetHigh ? 1 : 0;
+  controlKinds += hasResetLow ? 1 : 0;
+  controlKinds += hasSetHigh ? 1 : 0;
+  if (controlKinds > 1) {
+    throw std::runtime_error(
+        "Unsupported sequential primitive with multiple control styles");
+  }
+
+  if (hasResetHigh || hasResetLow) {
+    return false;
+  }
+  if (hasSetHigh) {
+    return true;
+  }
+  return std::nullopt;
+}
 
 std::optional<bool> evaluateConstantUnderAssignmentsForTest(
     BoolExpr* expr,
-    const std::unordered_map<size_t, bool>& assignments);
+    const std::unordered_map<size_t, bool>& assignments) {
+  std::unordered_map<BoolExpr*, std::optional<bool>> memo;
+  return evaluateConstantUnderAssignmentsImplForTest(expr, assignments, memo);
+}
 
-void inferSynthesizedResetInitialStateValuesForTest(SequentialDesignModel& model);
+void inferSynthesizedResetInitialStateValuesForTest(SequentialDesignModel& model) {
+  const auto resetAssignments = collectResetAssignmentsForTest(model);
+  if (resetAssignments.empty()) {
+    return;
+  }
 
-std::optional<bool> getResetAssertionValueForTest(const std::string& displayName);
+  auto countUniqueExprNodes =
+      [](const std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash>& exprByKey) {
+        std::unordered_set<BoolExpr*> visited;
+        std::vector<BoolExpr*> stack;
+        for (const auto& [_, root] : exprByKey) {
+          if (root != nullptr) {
+            stack.push_back(root);
+          }
+        }
+
+        while (!stack.empty()) {
+          BoolExpr* current = stack.back();
+          stack.pop_back();
+          if (current == nullptr || !visited.insert(current).second) {
+            continue;
+          }
+          if (current->getLeft() != nullptr) {
+            stack.push_back(current->getLeft());
+          }
+          if (current->getRight() != nullptr) {
+            stack.push_back(current->getRight());
+          }
+        }
+        return visited.size();
+      };
+
+  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> resetSpecializedNextStateByKey;
+  resetSpecializedNextStateByKey.reserve(model.stateBits.size());
+  std::unordered_map<BoolExpr*, BoolExpr*> resetSubstitutionMemo;
+  for (const auto& key : model.stateBits) {
+    const auto nextStateIt = model.nextStateExprByStateKey.find(key);
+    if (nextStateIt == model.nextStateExprByStateKey.end()) {
+      continue;
+    }
+    resetSpecializedNextStateByKey.emplace(
+        key,
+        substituteBoolExprVariables(
+            nextStateIt->second, resetAssignments, resetSubstitutionMemo));
+  }
+
+  constexpr size_t kMaxResetSpecializedExprNodesForInitInference = 50000;
+  if (countUniqueExprNodes(resetSpecializedNextStateByKey) >
+      kMaxResetSpecializedExprNodesForInitInference) {
+    return;
+  }
+
+  auto collectReferencedStateVars = [](BoolExpr* expr) {
+    std::unordered_set<size_t> referencedVars;
+    if (expr == nullptr) {
+      return referencedVars;
+    }
+
+    std::vector<BoolExpr*> stack = {expr};
+    std::unordered_set<BoolExpr*> visited;
+    while (!stack.empty()) {
+      BoolExpr* current = stack.back();
+      stack.pop_back();
+      if (current == nullptr || !visited.insert(current).second) {
+        continue;
+      }
+      if (current->getOp() == Op::VAR) {
+        if (current->getId() >= 2) {
+          referencedVars.insert(current->getId());
+        }
+        continue;
+      }
+      if (current->getLeft() != nullptr) {
+        stack.push_back(current->getLeft());
+      }
+      if (current->getRight() != nullptr) {
+        stack.push_back(current->getRight());
+      }
+    }
+    return referencedVars;
+  };
+
+  std::unordered_map<size_t, SignalKey> stateKeyByVar;
+  std::unordered_map<size_t, std::vector<SignalKey>> dependentStatesByVar;
+  stateKeyByVar.reserve(model.stateBits.size());
+  dependentStatesByVar.reserve(model.stateBits.size());
+  for (const auto& key : model.stateBits) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      stateKeyByVar.emplace(varIt->second, key);
+    }
+  }
+  for (const auto& key : model.stateBits) {
+    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
+    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
+      continue;
+    }
+    const auto referencedVars = collectReferencedStateVars(nextStateIt->second);
+    for (const auto referencedVar : referencedVars) {
+      if (stateKeyByVar.find(referencedVar) == stateKeyByVar.end()) {
+        continue;
+      }
+      dependentStatesByVar[referencedVar].push_back(key);
+    }
+  }
+
+  std::unordered_map<SignalKey, SignalKey, SignalKeyHash> complementedPartnerByKey;
+  complementedPartnerByKey.reserve(model.complementedStateRelations.size() * 2);
+  for (const auto& relation : model.complementedStateRelations) {
+    complementedPartnerByKey.emplace(relation.primaryKey, relation.complementedKey);
+    complementedPartnerByKey.emplace(relation.complementedKey, relation.primaryKey);
+  }
+
+  std::unordered_map<size_t, bool> assignments = resetAssignments;
+  for (const auto& [key, value] : model.initialStateValueByKey) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      assignments.emplace(varIt->second, value);
+    }
+  }
+
+  std::deque<SignalKey> workQueue(model.stateBits.begin(), model.stateBits.end());
+  auto recordKnownState = [&](const SignalKey& key, bool value) {
+    const auto [it, inserted] = model.initialStateValueByKey.emplace(key, value);
+    if (!inserted) {
+      return;
+    }
+
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      assignments[varIt->second] = value;
+      const auto dependentIt = dependentStatesByVar.find(varIt->second);
+      if (dependentIt != dependentStatesByVar.end()) {
+        workQueue.insert(
+            workQueue.end(),
+            dependentIt->second.begin(),
+            dependentIt->second.end());
+      }
+    }
+
+    const auto partnerIt = complementedPartnerByKey.find(key);
+    if (partnerIt != complementedPartnerByKey.end() &&
+        model.initialStateValueByKey.find(partnerIt->second) ==
+            model.initialStateValueByKey.end()) {
+      workQueue.push_back(partnerIt->second);
+    }
+  };
+
+  while (!workQueue.empty()) {
+    const SignalKey key = workQueue.front();
+    workQueue.pop_front();
+
+    if (model.initialStateValueByKey.find(key) != model.initialStateValueByKey.end()) {
+      const auto partnerIt = complementedPartnerByKey.find(key);
+      if (partnerIt != complementedPartnerByKey.end() &&
+          model.initialStateValueByKey.find(partnerIt->second) ==
+              model.initialStateValueByKey.end()) {
+        recordKnownState(partnerIt->second, !model.initialStateValueByKey.at(key));
+      }
+      continue;
+    }
+
+    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
+    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
+      continue;
+    }
+
+    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
+    const auto resetValue = evaluateConstantUnderAssignmentsImplForTest(
+        nextStateIt->second, assignments, memo);
+    if (resetValue.has_value()) {
+      recordKnownState(key, *resetValue);
+    }
+  }
+}
+
+std::optional<bool> getResetAssertionValueForTest(const std::string& displayName) {
+  return getResetAssertionValueFromDisplayNameForTest(displayName);
+}
+
+namespace {
+
+std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
+    const std::string& displayName) {
+  const std::string normalized = normalizeSignalBaseNameForTest(displayName);
+  if (normalized == "RESET" || normalized == "RST") {
+    return true;
+  }
+  if (normalized == "RESET_N" || normalized == "RESETN" ||
+      normalized == "RST_N" || normalized == "RSTN") {
+    return false;
+  }
+  return std::nullopt;
+}
+ 
+}  // namespace
 
 std::unordered_map<SignalKey, bool, SignalKeyHash>
 deriveResetBootstrapStateValuesForTest(
     const SequentialDesignModel& model,
-    size_t cycles);
+    size_t cycles) {
+  const auto resetAssignments = collectResetAssignmentsForTest(model);
+  if (resetAssignments.empty() || cycles == 0) {
+    return {};
+  }
+
+  std::unordered_map<SignalKey, bool, SignalKeyHash> knownStates =
+      model.initialStateValueByKey;
+  for (size_t step = 0; step < cycles; ++step) {
+    std::unordered_map<size_t, bool> assignments = resetAssignments;
+    for (const auto& [key, value] : knownStates) {
+      const auto varIt = model.inputVarByKey.find(key);
+      if (varIt != model.inputVarByKey.end()) {
+        assignments.emplace(varIt->second, value);
+      }
+    }
+
+    std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownStates;
+    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
+    for (const auto& key : model.stateBits) {
+      const auto value = evaluateConstantUnderAssignmentsImplForTest(
+          model.nextStateExprByStateKey.at(key), assignments, memo);
+      if (value.has_value()) {
+        nextKnownStates.emplace(key, *value);
+      }
+    }
+    knownStates = std::move(nextKnownStates);
+  }
+
+  return knownStates;
+}
 
 AlignedSignals filterStateEqualitiesByInitialValueForTest(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
-    const AlignedSignals& candidateStates);
+    const AlignedSignals& candidateStates) {
+  AlignedSignals anchoredStates;
+  for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+    const auto initial0 = model0.initialStateValueByKey.find(candidateStates.keys0[i]);
+    const auto initial1 = model1.initialStateValueByKey.find(candidateStates.keys1[i]);
+    if (initial0 == model0.initialStateValueByKey.end() ||
+        initial1 == model1.initialStateValueByKey.end() ||
+        initial0->second != initial1->second) {
+      continue;
+    }
+
+    anchoredStates.names.push_back(candidateStates.names[i]);
+    anchoredStates.keys0.push_back(candidateStates.keys0[i]);
+    anchoredStates.keys1.push_back(candidateStates.keys1[i]);
+  }
+  return anchoredStates;
+}
 
 std::string formatStringListForTest(const std::vector<std::string>& values,
-                                    size_t limit);
+                                    size_t limit) {
+  if (values.empty()) {
+    return "<none>";
+  }
+
+  std::ostringstream oss;
+  const size_t printed = std::min(values.size(), limit);
+  for (size_t i = 0; i < printed; ++i) {
+    if (i) {
+      oss << ", ";
+    }
+    oss << values[i];
+  }
+  if (values.size() > printed) {
+    oss << ", ... +" << (values.size() - printed) << " more";
+  }
+  return oss.str();
+}
 
 std::string formatConeLevelsForTest(
-    const std::vector<std::vector<std::string>>& levels);
+    const std::vector<std::vector<std::string>>& levels) {
+  constexpr size_t kMaxLevels = 12;
+  constexpr size_t kMaxTermsPerLevel = 12;
+
+  if (levels.empty()) {
+    return "    <no traced cone terms>\n";
+  }
+
+  std::ostringstream oss;
+  const size_t printedLevels = std::min(levels.size(), kMaxLevels);
+  for (size_t level = 0; level < printedLevels; ++level) {
+    oss << "    step " << level << ": "
+        << formatStringListForTest(levels[level], kMaxTermsPerLevel) << "\n";
+  }
+  if (levels.size() > printedLevels) {
+    oss << "    ... +" << (levels.size() - printedLevels)
+        << " more trace steps\n";
+  }
+  return oss.str();
+}
 
 std::string formatCounterexampleWitnessForTest(
     const KInductionResult& result,
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
     naja::NL::SNLDesign* top0,
-    naja::NL::SNLDesign* top1);
+    naja::NL::SNLDesign* top1) {
+  if (!result.witness.has_value()) {
+    return "";
+  }
+
+  const auto& witness = *result.witness;
+  std::ostringstream oss;
+  oss << "Counterexample reaches the first bad frame at cycle "
+      << witness.badFrame << ".\n";
+
+  if (witness.inputTrace.empty()) {
+    oss << "Input trace: <none>\n";
+  } else {
+    oss << "Input trace:\n";
+    for (const auto& frame : witness.inputTrace) {
+      oss << "  cycle " << frame.frame << ": ";
+      if (frame.assignments.empty()) {
+        oss << "<no environment inputs>";
+      } else {
+        for (size_t i = 0; i < frame.assignments.size(); ++i) {
+          if (i) {
+            oss << ", ";
+          }
+          oss << frame.assignments[i].signal << "="
+              << formatBoolValueForTest(frame.assignments[i].value);
+        }
+      }
+      oss << "\n";
+    }
+  }
+
+  if (!witness.outputMismatches.empty()) {
+    oss << "Observed output mismatches at cycle " << witness.badFrame << ":\n";
+    for (const auto& mismatch : witness.outputMismatches) {
+      oss << "  " << mismatch.signal << ": design0="
+          << formatBoolValueForTest(mismatch.design0Value)
+          << ", design1=" << formatBoolValueForTest(mismatch.design1Value) << "\n";
+    }
+  }
+
+  oss << formatConeTracebackForTest(witness, model0, model1, top0, top1);
+  return oss.str();
+}
 
 AlignedSignals alignSignalsByNameForTest(
     const std::vector<SignalKey>& keys0,
     const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames0,
     const std::vector<SignalKey>& keys1,
     const std::unordered_map<SignalKey, std::string, SignalKeyHash>& displayNames1,
-    const char* label);
+    const char* label) {
+  const auto byKey0 = buildKeyToNameMapForTest(keys0, displayNames0, label);
+  const auto byKey1 = buildKeyToNameMapForTest(keys1, displayNames1, label);
+  if (byKey0.size() != byKey1.size()) {
+    throw std::runtime_error(describeMismatchedNamesForTest(
+        sortedNamesForTest(byKey0), sortedNamesForTest(byKey1), label));
+  }
+
+  auto it0 = byKey0.begin();
+  auto it1 = byKey1.begin();
+  for (; it0 != byKey0.end() && it1 != byKey1.end(); ++it0, ++it1) {
+    if (it0->first != it1->first) {
+      throw std::runtime_error(describeMismatchedNamesForTest(
+          sortedNamesForTest(byKey0), sortedNamesForTest(byKey1), label));
+    }
+  }
+
+  AlignedSignals aligned;
+  aligned.names.reserve(byKey0.size());
+  aligned.keys0.reserve(byKey0.size());
+  aligned.keys1.reserve(byKey0.size());
+  for (const auto& [key, displayName] : byKey0) {
+    aligned.names.push_back(displayName);
+    aligned.keys0.push_back(key);
+    aligned.keys1.push_back(key);
+  }
+  return aligned;
+}
 
 SignalKey getTerminalPathKeyForTest(
-    const naja::DNL::DNLTerminalFull& terminal);
+    const naja::DNL::DNLTerminalFull& terminal) {
+  SignalKey key;
+  const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
+  key.first.reserve(pathNames.size() + 1);
+  for (const auto& name : pathNames) {
+    key.first.push_back(stableSignalKeyNameID(name.getString()));
+  }
+  key.first.push_back(
+      stableSignalKeyNameID(terminal.getSnlBitTerm()->getName().getString()));
+  key.second.push_back(
+      static_cast<naja::NL::NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit()));
+  return key;
+}
 
 std::optional<naja::DNL::DNLID> findTermByKeyForTest(
     naja::DNL::DNLFull* dnl,
-    const SignalKey& key);
+    const SignalKey& key) {
+  for (naja::DNL::DNLID termID = 0; termID < dnl->getDNLTerms().size(); ++termID) {
+    const auto& term = dnl->getDNLTerminalFromID(termID);
+    if (term.isNull()) {
+      continue;
+    }
+    if (getTerminalPathKeyForTest(term) == key) {
+      return termID;
+    }
+  }
+  return std::nullopt;
+}
 
 std::vector<naja::DNL::DNLID> selectRequiredBuilderOutputsForTest(
     const std::vector<naja::DNL::DNLID>& collectedOutputs,
     const std::unordered_set<naja::DNL::DNLID>& topOutputTerms,
     const std::vector<naja::DNL::DNLID>& sequentialDependencyTerms,
-    const std::unordered_set<naja::DNL::DNLID>& prunedBuilderOutputTerms);
+    const std::unordered_set<naja::DNL::DNLID>& prunedBuilderOutputTerms) {
+  const std::unordered_set<naja::DNL::DNLID> sequentialDependencySet(
+      sequentialDependencyTerms.begin(), sequentialDependencyTerms.end());
+  std::vector<naja::DNL::DNLID> filteredOutputs;
+  filteredOutputs.reserve(collectedOutputs.size());
+
+  for (const auto outputTermID : collectedOutputs) {
+    if (prunedBuilderOutputTerms.find(outputTermID) !=
+        prunedBuilderOutputTerms.end()) {
+      continue;
+    }
+    if (topOutputTerms.find(outputTermID) != topOutputTerms.end() ||
+        sequentialDependencySet.find(outputTermID) != sequentialDependencySet.end()) {
+      filteredOutputs.push_back(outputTermID);
+    }
+  }
+
+  return filteredOutputs;
+}
+
+namespace {
+
+std::string getTerminalDisplayNameForTest(
+    const naja::DNL::DNLTerminalFull& terminal) {
+  std::ostringstream oss;
+  const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
+  for (const auto& name : pathNames) {
+    oss << name.getString() << ".";
+  }
+  oss << terminal.getSnlBitTerm()->getName().getString() << "["
+      << terminal.getSnlBitTerm()->getBit() << "]";
+  return oss.str();
+}
+
+std::optional<naja::DNL::DNLID> findTermByDisplayNameForTest(
+    naja::DNL::DNLFull* dnl,
+    const std::string& signalName) {
+  for (naja::DNL::DNLID termID = 0; termID < dnl->getDNLTerms().size(); ++termID) {
+    const auto& term = dnl->getDNLTerminalFromID(termID);
+    if (term.isNull()) {
+      continue;
+    }
+    if (getTerminalDisplayNameForTest(term) == signalName) {
+      return termID;
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<naja::DNL::DNLID> resolveTermsByKeyForTest(
+    naja::DNL::DNLFull* dnl,
+    const std::vector<SignalKey>& keys) {
+  std::vector<naja::DNL::DNLID> resolved;
+  resolved.reserve(keys.size());
+  for (const auto& key : keys) {
+    if (auto termID = findTermByKeyForTest(dnl, key); termID.has_value()) {
+      resolved.push_back(*termID);
+    }
+  }
+  return resolved;
+}
+
+std::string formatConeTermForTest(naja::DNL::DNLFull* dnl,
+                                  naja::DNL::DNLID termID) {
+  const auto& term = dnl->getDNLTerminalFromID(termID);
+  if (term.isNull()) {
+    return "<null>";
+  }
+  if (term.getIsoID() == naja::DNL::DNLID_MAX) {
+    return getTerminalDisplayNameForTest(term);
+  }
+
+  const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID());
+  if (iso.isConstant0()) {
+    return "Constant 0";
+  }
+  if (iso.isConstant1()) {
+    return "Constant 1";
+  }
+  return getTerminalDisplayNameForTest(term);
+}
+
+ConeTraceForTest buildConeTraceForTest(
+    naja::DNL::DNLFull* dnl,
+    naja::DNL::DNLID seedTermID,
+    const std::vector<naja::DNL::DNLID>& environmentInputs) {
+  ConeTraceForTest trace;
+  std::vector<bool> isEnvironmentInput(dnl->getDNLTerms().size(), false);
+  for (const auto termID : environmentInputs) {
+    if (termID < isEnvironmentInput.size()) {
+      isEnvironmentInput[termID] = true;
+    }
+  }
+
+  const auto seedIsoID = dnl->getDNLTerminalFromID(seedTermID).getIsoID();
+  if (seedIsoID == naja::DNL::DNLID_MAX) {
+    return trace;
+  }
+
+  std::vector<naja::DNL::DNLID> currentIsos = {seedIsoID};
+  std::unordered_set<naja::DNL::DNLID> visitedIsos;
+  while (!currentIsos.empty()) {
+    std::set<std::string> levelTerms;
+    std::vector<naja::DNL::DNLID> nextIsos;
+
+    for (const auto isoID : currentIsos) {
+      if (isoID == naja::DNL::DNLID_MAX || !visitedIsos.insert(isoID).second) {
+        continue;
+      }
+
+      const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(isoID);
+      if (iso.isConstant0()) {
+        levelTerms.insert("Constant 0");
+        continue;
+      }
+      if (iso.isConstant1()) {
+        levelTerms.insert("Constant 1");
+        continue;
+      }
+
+      for (const auto driver : iso.getDrivers()) {
+        if (driver == naja::DNL::DNLID_MAX) {
+          continue;
+        }
+
+        const auto& driverTerm = dnl->getDNLTerminalFromID(driver);
+        if (driverTerm.isNull()) {
+          continue;
+        }
+
+        levelTerms.insert(formatConeTermForTest(dnl, driver));
+        if (driver < isEnvironmentInput.size() && isEnvironmentInput[driver]) {
+          continue;
+        }
+
+        const auto& inst = driverTerm.getDNLInstance();
+        for (naja::DNL::DNLID termID = inst.getTermIndexes().first;
+             termID != naja::DNL::DNLID_MAX && termID <= inst.getTermIndexes().second;
+             ++termID) {
+          const auto& term = dnl->getDNLTerminalFromID(termID);
+          if (term.isNull()) {
+            continue;
+          }
+          if (term.getSnlBitTerm()->getDirection() ==
+              naja::NL::SNLBitTerm::Direction::Output) {
+            continue;
+          }
+          if (term.getIsoID() != naja::DNL::DNLID_MAX) {
+            nextIsos.push_back(term.getIsoID());
+          }
+        }
+      }
+    }
+
+    if (!levelTerms.empty()) {
+      std::vector<std::string> orderedTerms(levelTerms.begin(), levelTerms.end());
+      trace.allTerms.insert(orderedTerms.begin(), orderedTerms.end());
+      trace.levels.push_back(std::move(orderedTerms));
+    }
+
+    std::sort(nextIsos.begin(), nextIsos.end());
+    nextIsos.erase(std::unique(nextIsos.begin(), nextIsos.end()), nextIsos.end());
+    currentIsos = std::move(nextIsos);
+  }
+
+  return trace;
+}
+
+ConeDiffReportForTest buildConeDiffReportForTest(
+    naja::NL::SNLDesign* top,
+    const std::string& differenceSignal,
+    const std::vector<SignalKey>& environmentInputs) {
+  ConeDiffReportForTest report;
+  ScopedDnlContextForTest dnlContext(top);
+  auto* dnl = dnlContext.dnl();
+
+  const auto seedTermID = findTermByDisplayNameForTest(dnl, differenceSignal);
+  if (!seedTermID.has_value()) {
+    report.error =
+        "could not resolve the differing SEC signal back into the DNL";
+    return report;
+  }
+
+  report.trace = buildConeTraceForTest(
+      dnl, *seedTermID, resolveTermsByKeyForTest(dnl, environmentInputs));
+  return report;
+}
+
+std::string formatConeTracebackForTest(
+    const KInductionResult::CounterexampleWitness& witness,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1) {
+  if (witness.outputMismatches.empty()) {
+    return "";
+  }
+  const auto& differencePoint = witness.outputMismatches.front();
+
+  std::ostringstream oss;
+  oss << "Traceback for first differing point `" << differencePoint.signal
+      << "` at cycle " << witness.badFrame << ":\n";
+
+  try {
+    const auto report0 = buildConeDiffReportForTest(
+        top0, differencePoint.signal, model0.environmentInputs);
+    const auto report1 = buildConeDiffReportForTest(
+        top1, differencePoint.signal, model1.environmentInputs);
+
+    if (!report0.error.empty() || !report1.error.empty()) {
+      oss << "  Cone traceback unavailable: ";
+      if (!report0.error.empty()) {
+        oss << "design0 " << report0.error;
+      }
+      if (!report0.error.empty() && !report1.error.empty()) {
+        oss << "; ";
+      }
+      if (!report1.error.empty()) {
+        oss << "design1 " << report1.error;
+      }
+      oss << "\n";
+      return oss.str();
+    }
+
+    oss << "  design0 cone to environment inputs:\n"
+        << formatConeLevelsForTest(report0.trace.levels);
+    oss << "  design1 cone to environment inputs:\n"
+        << formatConeLevelsForTest(report1.trace.levels);
+
+    constexpr size_t kMaxDiffTerms = 20;
+    const auto onlyInDesign0 =
+        setDifferenceForTest(report0.trace.allTerms, report1.trace.allTerms);
+    const auto onlyInDesign1 =
+        setDifferenceForTest(report1.trace.allTerms, report0.trace.allTerms);
+    oss << "  cone terms only in design0: "
+        << formatStringListForTest(onlyInDesign0, kMaxDiffTerms) << "\n";
+    oss << "  cone terms only in design1: "
+        << formatStringListForTest(onlyInDesign1, kMaxDiffTerms) << "\n";
+  } catch (const std::exception& e) {
+    oss << "  Cone traceback unavailable: " << e.what() << "\n";
+  }
+
+  return oss.str();
+}
+
+}  // namespace
 
 }  // namespace KEPLER_FORMAL::SEC::detail
 
