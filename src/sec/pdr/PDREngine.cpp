@@ -508,10 +508,16 @@ void propagateClauses(const KInductionProblem& problem,
   for (size_t level = 1; level <= maxLevel; ++level) {
     const auto snapshot = frames[level].clauses;
     for (const auto& clause : snapshot) {
+      // Only propagate clauses that are not already known to hold on the next frame,
+      // otherwise we would be doing redundant work and risking over-blocking by
+      // adding the same clause again after generalization.
       if (frameHasSubsumingClause(frames[level + 1], clause)) {
         continue;
       }
       const StateCube violatingCube = cubeFromClauseNegation(clause);
+      // A clause is only safe to propagate if it does not block a real bad path, so check
+      // whether any predecessor of the negated cube survives in the current frame. If not, the
+      // clause can be added to the next frame without risking over-blocking.
       if (!findPredecessorCube(
                problem,
                solverType,
@@ -621,8 +627,11 @@ PDRResult PDREngine::run(size_t maxFrames) const {
     }
 
     // Phase 2: create the next frame, seed it with already-known startup
-    // facts, and then try to push learned clauses forward.
+    // facts
     frames.emplace_back(FrameClauses{seedClauses});
+    // and then try to push learned clauses forward.
+    // We push in order to reach covergence and the condition is that that 
+    // the clause is not preventing an actual bad path
     propagateClauses(
         problem_, solverType_, initFormula, frameInvariant, frames, level);
 
