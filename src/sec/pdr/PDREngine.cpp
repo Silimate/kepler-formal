@@ -534,6 +534,61 @@ void propagateClauses(const KInductionProblem& problem,
   }
 }
 
+std::optional<PDRResult> tryImmediatePdrProofCandidate(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    BoolExpr* initFormula,
+    BoolExpr* candidate,
+    BoolExpr*& frameInvariant) {
+  if (candidate == nullptr ||
+      !initialFrontierImplies(initFormula, candidate, solverType) ||
+      !isInductiveInvariant(problem, candidate, solverType)) {
+    return std::nullopt;
+  }
+
+  if (invariantExcludesBadStates(problem, candidate, solverType)) {
+    // If the strategy already synthesized a sound inductive strengthening, the
+    // new engine can accept that proof immediately instead of rediscovering it.
+    return PDRResult{PDRStatus::Equivalent, 1};
+  }
+
+  // Otherwise the candidate is a safe frame fact, even if it is not by itself
+  // enough to prove the full SEC property.
+  if (frameInvariant == nullptr) {
+    frameInvariant = candidate;
+  }
+  return std::nullopt;
+}
+
+std::optional<PDRResult> runPdrImmediateChecks(const KInductionProblem& problem,
+                                               KEPLER_FORMAL::Config::SolverType solverType,
+                                               BoolExpr* initFormula,
+                                               BoolExpr*& frameInvariant) {
+  // Before entering the clause loop, try any reusable proof candidates the SEC
+  // strategy already built. A candidate is only safe to inject into every PDR
+  // frame once it is known to be inductive; otherwise it would over-constrain
+  // the search and could hide a real counterexample.
+  if (const auto proof = tryImmediatePdrProofCandidate(
+          problem,
+          solverType,
+          initFormula,
+          selectValidatedStrengtheningInvariant(problem, initFormula, solverType),
+          frameInvariant);
+      proof.has_value()) {
+    return proof;
+  }
+
+  // Keep PDR aligned with IMC: if the plain SEC property is already inductive
+  // from the startup frontier, there is no reason to spend time blocking cubes.
+  if (const auto proof = tryImmediatePdrProofCandidate(
+          problem, solverType, initFormula, problem.property, frameInvariant);
+      proof.has_value()) {
+    return proof;
+  }
+
+  return std::nullopt;
+}
+
 }  // namespace
 
 PDREngine::PDREngine(const KInductionProblem& problem,
@@ -548,41 +603,10 @@ PDRResult PDREngine::run(size_t maxFrames) const {
     return {PDRStatus::Inconclusive, 0};
   }
 
-  // Before entering the clause loop, try any reusable proof candidates the SEC
-  // strategy already built. A candidate is only safe to inject into every PDR
-  // frame once it is known to be inductive; otherwise it would over-constrain
-  // the search and could hide a real counterexample.
   BoolExpr* frameInvariant = nullptr;
-  const auto tryProofCandidate = [&](BoolExpr* candidate) -> std::optional<PDRResult> {
-    if (candidate == nullptr ||
-        !initialFrontierImplies(initFormula, candidate, solverType_) ||
-        !isInductiveInvariant(problem_, candidate, solverType_)) {
-      return std::nullopt;
-    }
-
-    if (invariantExcludesBadStates(problem_, candidate, solverType_)) {
-      // If the strategy already synthesized a sound inductive strengthening, the
-      // new engine can accept that proof immediately instead of rediscovering it.
-      return PDRResult{PDRStatus::Equivalent, 1};
-    }
-
-    // Otherwise the candidate is a safe frame fact, even if it is not by
-    // itself enough to prove the full SEC property.
-    if (frameInvariant == nullptr) {
-      frameInvariant = candidate;
-    }
-    return std::nullopt;
-  };
-
-  if (const auto proof = tryProofCandidate(
-          selectValidatedStrengtheningInvariant(problem_, initFormula, solverType_));
+  if (const auto proof =
+          runPdrImmediateChecks(problem_, solverType_, initFormula, frameInvariant);
       proof.has_value()) {
-    return *proof;
-  }
-
-  // Keep PDR aligned with IMC: if the plain SEC property is already inductive
-  // from the startup frontier, there is no reason to spend time blocking cubes.
-  if (const auto proof = tryProofCandidate(problem_.property); proof.has_value()) {
     return *proof;
   }
 

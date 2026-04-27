@@ -187,6 +187,28 @@ struct OutputCoverageSelection {
   size_t totalOutputs = 0;
 };
 
+struct AlignedSecInterface {
+  AlignedSignals inputs;
+  AlignedSignals outputs;
+  AlignedSignals inductiveStateEqualities;
+  OutputCoverageSelection outputCoverage;
+};
+
+struct SharedSecSymbolSpace {
+  KInductionProblem problem;
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> inputSymbols0;
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> inputSymbols1;
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> state0Symbols;
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> state1Symbols;
+  std::unordered_map<size_t, size_t> localToCombined0;
+  std::unordered_map<size_t, size_t> localToCombined1;
+};
+
+struct RemappedSecExpressions {
+  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> next0;
+  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> next1;
+};
+
 struct ScopedDnlContext {
   explicit ScopedDnlContext(naja::NL::SNLDesign* top)
       : universe_(naja::NL::NLUniverse::get()),
@@ -658,6 +680,578 @@ template <typename MapT>
 void assignSymbols(const std::vector<SignalKey>& keys,
                    MapT& output,
                    std::vector<size_t>& allSymbols,
+                   size_t& nextSymbol);
+
+std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
+    const SequentialDesignModel& model,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& inputSymbols,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& stateSymbols);
+
+void logSecDiagLine(bool secDiagEnabled, const char* message) {
+  if (!secDiagEnabled) {
+    return;
+  }
+  fprintf(stderr, "%s\n", message);
+  fflush(stderr);
+}
+
+void appendAbstractedSequentialBoundaries(
+    const SequentialDesignModel& model,
+    const char* designPrefix,
+    std::vector<std::string>& abstractedSequentialBoundaries) {
+  abstractedSequentialBoundaries.reserve(
+      abstractedSequentialBoundaries.size() +
+      model.abstractedSequentialBoundaries.size());
+  for (const auto& description : model.abstractedSequentialBoundaries) {
+    abstractedSequentialBoundaries.push_back(
+        std::string(designPrefix) + " " + description);
+  }
+}
+
+SequentialDesignModel extractSecDesign(naja::NL::SNLDesign* top,
+                                       const char* extractedMessage,
+                                       bool secDiagEnabled) {
+  SequentialDesignModel model = SequentialDesignModel::extract(top);
+  logSecDiagLine(secDiagEnabled, extractedMessage);
+  return model;
+}
+
+AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
+                                      const SequentialDesignModel& model1,
+                                      bool secDiagEnabled) {
+  AlignedSecInterface aligned;
+  logSecDiagLine(secDiagEnabled, "SEC diag: aligning inputs/outputs");
+
+  aligned.inputs = alignSignalsByName(
+      model0.environmentInputs,
+      model0.displayNameByKey,
+      model1.environmentInputs,
+      model1.displayNameByKey,
+      "environment input");
+  const auto alignedAllOutputs = alignSignalsByName(
+      model0.allObservedOutputs,
+      model0.displayNameByKey,
+      model1.allObservedOutputs,
+      model1.displayNameByKey,
+      "observed output");
+  aligned.outputCoverage =
+      selectCoveredObservedOutputs(alignedAllOutputs, model0, model1);
+  aligned.outputs = aligned.outputCoverage.checkedOutputs;
+  if (aligned.outputs.names.empty()) {
+    return aligned;
+  }
+
+  if (secDiagEnabled) {
+    fprintf(
+        stderr,
+        "SEC diag: checked_outputs=%zu total_outputs=%zu skipped=%zu\n",
+        aligned.outputs.names.size(),
+        aligned.outputCoverage.totalOutputs,
+        aligned.outputCoverage.skippedOutputs.size());
+    fflush(stderr);
+  }
+
+  aligned.outputs = alignSignalsByName(
+      model0.observedOutputs,
+      model0.displayNameByKey,
+      model1.observedOutputs,
+      model1.displayNameByKey,
+      "observed output");
+  if (aligned.outputs.names.size() != aligned.outputCoverage.checkedOutputs.names.size()) {
+    throw std::runtime_error(
+        "Internal SEC error: checked observed outputs and extractor-visible observed "
+        "outputs disagree after connectivity skipping");
+  }
+
+  logSecDiagLine(secDiagEnabled, "SEC diag: inferring inductive state equalities");
+  aligned.inductiveStateEqualities = inferStructurallyEquivalentStatePairs(
+      model0, model1, aligned.inputs);
+  logSecDiagLine(secDiagEnabled, "SEC diag: inferred inductive state equalities");
+  return aligned;
+}
+
+SharedSecSymbolSpace buildSharedSecSymbolSpace(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs) {
+  SharedSecSymbolSpace symbolSpace;
+  symbolSpace.problem.environmentInputNames = alignedInputs.names;
+  symbolSpace.problem.observedOutputNames = alignedOutputs.names;
+
+  size_t nextSymbol = 2;
+  assignSymbols(
+      model0.stateBits,
+      symbolSpace.state0Symbols,
+      symbolSpace.problem.allSymbols,
+      nextSymbol);
+  assignSymbols(
+      model1.stateBits,
+      symbolSpace.state1Symbols,
+      symbolSpace.problem.allSymbols,
+      nextSymbol);
+
+  for (size_t i = 0; i < alignedInputs.names.size(); ++i) {
+    const size_t symbol = nextSymbol++;
+    symbolSpace.inputSymbols0.emplace(alignedInputs.keys0[i], symbol);
+    symbolSpace.inputSymbols1.emplace(alignedInputs.keys1[i], symbol);
+    symbolSpace.problem.allSymbols.push_back(symbol);
+    symbolSpace.problem.inputSymbols.push_back(symbol);
+    if (auto assertedValue = getResetAssertionValue(alignedInputs.names[i]);
+        assertedValue.has_value()) {
+      symbolSpace.problem.resetBootstrapInputs.emplace_back(symbol, *assertedValue);
+    }
+  }
+
+  for (const auto& key : model0.stateBits) {
+    symbolSpace.problem.state0Symbols.push_back(symbolSpace.state0Symbols.at(key));
+  }
+  for (const auto& key : model1.stateBits) {
+    symbolSpace.problem.state1Symbols.push_back(symbolSpace.state1Symbols.at(key));
+  }
+
+  for (const auto& relation : model0.complementedStateRelations) {
+    if (symbolSpace.state0Symbols.find(relation.primaryKey) !=
+            symbolSpace.state0Symbols.end() &&
+        symbolSpace.state0Symbols.find(relation.complementedKey) !=
+            symbolSpace.state0Symbols.end()) {
+      symbolSpace.problem.complementedStatePairs0.emplace_back(
+          symbolSpace.state0Symbols.at(relation.primaryKey),
+          symbolSpace.state0Symbols.at(relation.complementedKey));
+    }
+  }
+  for (const auto& relation : model1.complementedStateRelations) {
+    if (symbolSpace.state1Symbols.find(relation.primaryKey) !=
+            symbolSpace.state1Symbols.end() &&
+        symbolSpace.state1Symbols.find(relation.complementedKey) !=
+            symbolSpace.state1Symbols.end()) {
+      symbolSpace.problem.complementedStatePairs1.emplace_back(
+          symbolSpace.state1Symbols.at(relation.primaryKey),
+          symbolSpace.state1Symbols.at(relation.complementedKey));
+    }
+  }
+
+  symbolSpace.localToCombined0 = buildLocalToCombinedMap(
+      model0, symbolSpace.inputSymbols0, symbolSpace.state0Symbols);
+  symbolSpace.localToCombined1 = buildLocalToCombinedMap(
+      model1, symbolSpace.inputSymbols1, symbolSpace.state1Symbols);
+  return symbolSpace;
+}
+
+RemappedSecExpressions remapSecExpressions(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedOutputs,
+    const SharedSecSymbolSpace& symbolSpace,
+    KInductionProblem& problem,
+    bool secDiagEnabled) {
+  RemappedSecExpressions remapped;
+  std::unordered_map<BoolExpr*, BoolExpr*> remapMemo0;
+  std::unordered_map<BoolExpr*, BoolExpr*> remapMemo1;
+
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto& key0 = alignedOutputs.keys0[i];
+    const auto& key1 = alignedOutputs.keys1[i];
+    const auto remappedOutput0 = remapBoolExprVariables(
+        model0.observedOutputExprByKey.at(key0),
+        symbolSpace.localToCombined0,
+        remapMemo0);
+    const auto remappedOutput1 = remapBoolExprVariables(
+        model1.observedOutputExprByKey.at(key1),
+        symbolSpace.localToCombined1,
+        remapMemo1);
+    problem.observedOutputExprs0.push_back(remappedOutput0);
+    problem.observedOutputExprs1.push_back(remappedOutput1);
+  }
+  logSecDiagLine(secDiagEnabled, "SEC diag: remapped observed outputs");
+
+  for (const auto& key : model0.stateBits) {
+    remapped.next0.emplace(
+        key,
+        remapBoolExprVariables(
+            model0.nextStateExprByStateKey.at(key),
+            symbolSpace.localToCombined0,
+            remapMemo0));
+  }
+  for (const auto& key : model1.stateBits) {
+    remapped.next1.emplace(
+        key,
+        remapBoolExprVariables(
+            model1.nextStateExprByStateKey.at(key),
+            symbolSpace.localToCombined1,
+            remapMemo1));
+  }
+  logSecDiagLine(secDiagEnabled, "SEC diag: remapped next-state formulas");
+  return remapped;
+}
+
+void applyInitialStateAssignments(
+    const std::unordered_map<SignalKey, bool, SignalKeyHash>& initialValues,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& stateSymbols,
+    BoolExpr*& initialCondition,
+    KInductionProblem& problem) {
+  for (const auto& [key, value] : initialValues) {
+    const auto symbolIt = stateSymbols.find(key);
+    if (symbolIt == stateSymbols.end()) {
+      continue;
+    }
+    BoolExpr* literal = BoolExpr::Var(symbolIt->second);
+    initialCondition = BoolExpr::And(
+        initialCondition, value ? literal : BoolExpr::Not(literal));
+    ++problem.initializedStateCount;
+  }
+}
+
+ReachableStateInvariant integrateReachableStateInvariant(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& inductiveStateEqualities,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
+    KInductionProblem& problem,
+    bool secDiagEnabled) {
+  BoolExpr* initialCondition = BoolExpr::createTrue();
+  applyInitialStateAssignments(
+      model0.initialStateValueByKey, state0Symbols, initialCondition, problem);
+  applyInitialStateAssignments(
+      model1.initialStateValueByKey, state1Symbols, initialCondition, problem);
+  problem.totalStateCount =
+      problem.state0Symbols.size() + problem.state1Symbols.size();
+  if (problem.hasExplicitInitialState()) {
+    problem.initialCondition = BoolExpr::simplify(initialCondition);
+  }
+
+  const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
+      model0, model1, alignedInputs, inductiveStateEqualities, secDiagEnabled);
+  for (size_t i = 0; i < reachableInvariant.initialStateCorrespondence.names.size(); ++i) {
+    problem.initialStateEqualityPairs.emplace_back(
+        state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]),
+        state1Symbols.at(reachableInvariant.initialStateCorrespondence.keys1[i]));
+  }
+
+  for (const auto& [key, value] : reachableInvariant.bootstrapValues0) {
+    if (state0Symbols.find(key) != state0Symbols.end()) {
+      problem.bootstrapStateAssignments.emplace_back(state0Symbols.at(key), value);
+    }
+  }
+  for (const auto& [key, value] : reachableInvariant.bootstrapValues1) {
+    if (state1Symbols.find(key) != state1Symbols.end()) {
+      problem.bootstrapStateAssignments.emplace_back(state1Symbols.at(key), value);
+    }
+  }
+
+  problem.resetBootstrapCycles = reachableInvariant.bootstrapCycles;
+  for (size_t i = 0; i < reachableInvariant.anchoredStateEqualities.names.size(); ++i) {
+    problem.inductiveStateEqualityPairs.emplace_back(
+        state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
+        state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
+    if (!problem.resetBootstrapInputs.empty()) {
+      problem.bootstrapStateEqualityPairs.emplace_back(
+          state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
+          state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
+    }
+  }
+  return reachableInvariant;
+}
+
+void buildSecPropertiesAndTransitions(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    const ReachableStateInvariant& reachableInvariant,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
+    const RemappedSecExpressions& remapped,
+    KInductionProblem& problem,
+    bool secDiagEnabled) {
+  const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
+      model0,
+      model1,
+      alignedInputs,
+      reachableInvariant.anchoredStateEqualities);
+  logSecDiagLine(secDiagEnabled, "SEC diag: built abstract transition maps");
+
+  for (const auto& key : model0.stateBits) {
+    problem.transitions0.emplace_back(state0Symbols.at(key), remapped.next0.at(key));
+  }
+  for (const auto& key : model1.stateBits) {
+    problem.transitions1.emplace_back(state1Symbols.at(key), remapped.next1.at(key));
+  }
+
+  BoolExpr* property = BoolExpr::createTrue();
+  BoolExpr* inductionProperty = BoolExpr::createTrue();
+  for (size_t i = 0; i < reachableInvariant.anchoredStateEqualities.names.size(); ++i) {
+    inductionProperty = BoolExpr::And(
+        inductionProperty,
+        makeEqualityExpr(
+            BoolExpr::Var(
+                state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i])),
+            BoolExpr::Var(
+                state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]))));
+  }
+
+  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
+    const auto outputEquality = makeEqualityExpr(
+        problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]);
+    property = BoolExpr::And(property, outputEquality);
+
+    const auto& key0 = alignedOutputs.keys0[i];
+    const auto& key1 = alignedOutputs.keys1[i];
+    if (areEquivalentUnderAbstractMaps(
+            model0.observedOutputExprByKey.at(key0),
+            model1.observedOutputExprByKey.at(key1),
+            abstractOutputMap0,
+            abstractOutputMap1)) {
+      continue;
+    }
+    inductionProperty = BoolExpr::And(inductionProperty, outputEquality);
+  }
+
+  problem.property = BoolExpr::simplify(property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = BoolExpr::simplify(inductionProperty);
+  problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
+  problem.description = "SEC property with aligned observed outputs";
+  logSecDiagLine(secDiagEnabled, "SEC diag: built SEC and induction properties");
+
+  if (secDiagEnabled) {
+    printf(
+        "SEC diag: property_is_true=%d induction_property_is_true=%d "
+        "bad_is_false=%d induction_bad_is_false=%d reset_bootstrap_inputs=%zu "
+        "bootstrap_cycles=%zu bootstrap_equalities=%zu inductive_equalities=%zu\n",
+        problem.property == BoolExpr::createTrue(),
+        problem.inductionProperty == BoolExpr::createTrue(),
+        problem.bad == BoolExpr::createFalse(),
+        problem.inductionBad == BoolExpr::createFalse(),
+        problem.resetBootstrapInputs.size(),
+        problem.resetBootstrapCycles,
+        problem.bootstrapStateEqualityPairs.size(),
+        problem.inductiveStateEqualityPairs.size());
+    fflush(stdout);
+  }
+}
+
+const char* describeSecEngine(SecEngine secEngine) {
+  switch (secEngine) {
+    case SecEngine::Pdr:
+      return "pdr engine";
+    case SecEngine::Imc:
+      return "imc engine";
+    case SecEngine::KInduction:
+      return "classic k-induction engine";
+    case SecEngine::Legacy:
+    default:
+      return "legacy engine";
+  }
+}
+
+SequentialEquivalenceResult runPdrSecEngine(
+    const KInductionProblem& problem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries) {
+  KInductionEngine baseline(problem, solverType);
+  const auto baselineResult = baseline.run(0);
+  switch (baselineResult.status) {
+    case KInductionStatus::Equivalent:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          baselineResult.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case KInductionStatus::Different:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          baselineResult.bound,
+          formatCounterexampleWitness(baselineResult, model0, model1, top0, top1),
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case KInductionStatus::Inconclusive:
+    default:
+      break;
+  }
+
+  PDREngine pdrEngine(problem, solverType);
+  const auto pdrResult = pdrEngine.run(maxK);
+  switch (pdrResult.status) {
+    case PDRStatus::Equivalent:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          pdrResult.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case PDRStatus::Different: {
+      KInductionEngine witnessEngine(problem, solverType);
+      const auto witnessResult = witnessEngine.run(pdrResult.bound);
+      const std::string details =
+          witnessResult.status == KInductionStatus::Different
+              ? formatCounterexampleWitness(witnessResult, model0, model1, top0, top1)
+              : "PDR found a counterexample at k = " +
+                    std::to_string(pdrResult.bound);
+      return makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          pdrResult.bound,
+          details,
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    }
+    case PDRStatus::Inconclusive:
+    default:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Inconclusive,
+          pdrResult.bound,
+          "Reached max_k without a proof or counterexample",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+  }
+}
+
+SequentialEquivalenceResult runKInductionSecEngine(
+    const KInductionProblem& problem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries) {
+  KInductionEngine engine(problem, solverType);
+  const auto result = engine.run(maxK);
+  switch (result.status) {
+    case KInductionStatus::Equivalent:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          result.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case KInductionStatus::Different:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          result.bound,
+          result.witness.has_value()
+              ? formatCounterexampleWitness(result, model0, model1, top0, top1)
+              : "Classic k-induction found a counterexample at k = " +
+                    std::to_string(result.bound),
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case KInductionStatus::Inconclusive:
+    default:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Inconclusive,
+          result.bound,
+          "Reached max_k without a proof or counterexample",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+  }
+}
+
+SequentialEquivalenceResult runImcSecEngine(
+    const KInductionProblem& problem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries) {
+  IMCEngine engine(problem, solverType);
+  const auto result = engine.run(maxK);
+  switch (result.status) {
+    case IMCStatus::Equivalent:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          result.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case IMCStatus::Different: {
+      const KInductionResult witnessResult{
+          KInductionStatus::Different, result.bound, result.witness};
+      return makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          result.bound,
+          result.witness.has_value()
+              ? formatCounterexampleWitness(witnessResult, model0, model1, top0, top1)
+              : "IMC found a counterexample at k = " +
+                    std::to_string(result.bound),
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    }
+    case IMCStatus::Inconclusive:
+    default:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Inconclusive,
+          result.bound,
+          "Reached max_k without a proof or counterexample",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+  }
+}
+
+SequentialEquivalenceResult runLegacySecEngine(
+    KInductionProblem problem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries) {
+  ExactInterpolantSynthesizer interpolantSynthesizer(problem, solverType);
+  if (auto interpolant =
+          interpolantSynthesizer.deriveOneStepReachableStateInvariant();
+      interpolant.has_value()) {
+    problem.inductionProperty = BoolExpr::simplify(
+        BoolExpr::And(problem.inductionProperty, *interpolant));
+    problem.inductionBad =
+        BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
+  }
+
+  KInductionEngine engine(problem, solverType);
+  const auto result = engine.run(maxK);
+  switch (result.status) {
+    case KInductionStatus::Equivalent:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          result.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case KInductionStatus::Different:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          result.bound,
+          formatCounterexampleWitness(result, model0, model1, top0, top1),
+          outputCoverage,
+          abstractedSequentialBoundaries);
+    case KInductionStatus::Inconclusive:
+    default:
+      return makeSecResult(
+          SequentialEquivalenceStatus::Inconclusive,
+          result.bound,
+          "Reached max_k without a proof or counterexample",
+          outputCoverage,
+          abstractedSequentialBoundaries);
+  }
+}
+
+template <typename MapT>
+void assignSymbols(const std::vector<SignalKey>& keys,
+                   MapT& output,
+                   std::vector<size_t>& allSymbols,
                    size_t& nextSymbol) {
   for (const auto& key : keys) {
     output.emplace(key, nextSymbol);
@@ -696,21 +1290,16 @@ SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
 
 SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) const {
   const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
-  if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: start run\n");
-    fflush(stderr);
-  }
+  logSecDiagLine(secDiagEnabled, "SEC diag: start run");
 
-  // Step 1: extract both tops into the same normalized SEC representation.
-  SequentialDesignModel model0 = SequentialDesignModel::extract(top0_);
-  if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: extracted design0\n");
-    fflush(stderr);
-  }
+  // Phase 1: extract both designs into the normalized SEC model used by every
+  // downstream engine. If either side cannot be modeled soundly, stop before we
+  // spend time aligning interfaces or building proof problems.
   std::vector<std::string> abstractedSequentialBoundaries;
-  for (const auto& description : model0.abstractedSequentialBoundaries) {
-    abstractedSequentialBoundaries.push_back("design0 " + description);
-  }
+  const auto model0 =
+      extractSecDesign(top0_, "SEC diag: extracted design0", secDiagEnabled);
+  appendAbstractedSequentialBoundaries(
+      model0, "design0", abstractedSequentialBoundaries);
   if (model0.hasUnsupportedFeatures()) {
     return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
@@ -719,17 +1308,10 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         OutputCoverageSelection{},
         abstractedSequentialBoundaries);
   }
-  SequentialDesignModel model1 = SequentialDesignModel::extract(top1_);
-  if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: extracted design1\n");
-    fflush(stderr);
-  }
-  abstractedSequentialBoundaries.reserve(
-      model0.abstractedSequentialBoundaries.size() +
-      model1.abstractedSequentialBoundaries.size());
-  for (const auto& description : model1.abstractedSequentialBoundaries) {
-    abstractedSequentialBoundaries.push_back("design1 " + description);
-  }
+  const auto model1 =
+      extractSecDesign(top1_, "SEC diag: extracted design1", secDiagEnabled);
+  appendAbstractedSequentialBoundaries(
+      model1, "design1", abstractedSequentialBoundaries);
   if (model1.hasUnsupportedFeatures()) {
     return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
@@ -739,95 +1321,26 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         abstractedSequentialBoundaries);
   }
 
-  if (model0.hasUnsupportedFeatures() || model1.hasUnsupportedFeatures()) {
-    std::vector<std::string> reasons = model0.unsupportedReasons;
-    reasons.insert(
-        reasons.end(),
-        model1.unsupportedReasons.begin(),
-        model1.unsupportedReasons.end());
-    return makeSecResult(
-        SequentialEquivalenceStatus::Unsupported,
-        0,
-        joinReasons(reasons),
-        OutputCoverageSelection{},
-        abstractedSequentialBoundaries);
-  }
-
-  // Step 2: SEC only makes sense when the observable interfaces align by the
-  // user-visible term names, not by parser-local object IDs.
-  AlignedSignals alignedInputs;
-  AlignedSignals alignedAllOutputs;
-  AlignedSignals alignedOutputs;
-  AlignedSignals inductiveStateEqualities;
-  OutputCoverageSelection outputCoverage;
+  // Phase 2: align the externally visible SEC interface, then drop any outputs
+  // whose cones were already classified as skipped by extraction.
+  AlignedSecInterface aligned;
   try {
-    if (secDiagEnabled) {
-      fprintf(stderr, "SEC diag: aligning inputs/outputs\n");
-      fflush(stderr);
-    }
-    alignedInputs = alignSignalsByName(
-        model0.environmentInputs,
-        model0.displayNameByKey,
-        model1.environmentInputs,
-        model1.displayNameByKey,
-        "environment input");
-    alignedAllOutputs = alignSignalsByName(
-        model0.allObservedOutputs,
-        model0.displayNameByKey,
-        model1.allObservedOutputs,
-        model1.displayNameByKey,
-        "observed output");
-    outputCoverage = selectCoveredObservedOutputs(
-        alignedAllOutputs, model0, model1);
-    alignedOutputs = outputCoverage.checkedOutputs;
-    if (alignedOutputs.names.empty()) {
-      return makeSecResult(
-          SequentialEquivalenceStatus::Unsupported,
-          0,
-          "No aligned observed outputs remain after skipping cones with no-driver, "
-          "multi-driver, or logical-loop connectivity.",
-          outputCoverage,
-          abstractedSequentialBoundaries);
-    }
-    if (secDiagEnabled) {
-      fprintf(
-          stderr,
-          "SEC diag: checked_outputs=%zu total_outputs=%zu skipped=%zu\n",
-          alignedOutputs.names.size(),
-          outputCoverage.totalOutputs,
-          outputCoverage.skippedOutputs.size());
-      fflush(stderr);
-    }
-    alignedOutputs = alignSignalsByName(
-        model0.observedOutputs,
-        model0.displayNameByKey,
-        model1.observedOutputs,
-        model1.displayNameByKey,
-        "observed output");
-    if (alignedOutputs.names.size() != outputCoverage.checkedOutputs.names.size()) {
-      throw std::runtime_error(
-          "Internal SEC error: checked observed outputs and extractor-visible observed "
-          "outputs disagree after connectivity skipping");
-    }
-    if (secDiagEnabled) {
-      fprintf(stderr, "SEC diag: inferring inductive state equalities\n");
-      fflush(stderr);
-    }
-    // Internal-state correspondence must be inferred from the transition
-    // structure itself. Matching register names is not strong enough for SEC:
-    // equivalent RTL can rename or retime state freely.
-    inductiveStateEqualities = inferStructurallyEquivalentStatePairs(
-        model0, model1, alignedInputs);
-    if (secDiagEnabled) {
-      fprintf(stderr, "SEC diag: inferred inductive state equalities\n");
-      fflush(stderr);
-    }
+    aligned = alignSecInterface(model0, model1, secDiagEnabled);
   } catch (const std::exception& e) {
     return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
         e.what(),
-        outputCoverage,
+        aligned.outputCoverage,
+        abstractedSequentialBoundaries);
+  }
+  if (aligned.outputs.names.empty()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Unsupported,
+        0,
+        "No aligned observed outputs remain after skipping cones with no-driver, "
+        "multi-driver, or logical-loop connectivity.",
+        aligned.outputCoverage,
         abstractedSequentialBoundaries);
   }
 
@@ -835,443 +1348,102 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
     printf(
         "SEC diag: aligned_inputs=%zu aligned_outputs=%zu inductive_state_equalities=%zu "
         "state_bits0=%zu state_bits1=%zu\n",
-        alignedInputs.names.size(),
-        alignedOutputs.names.size(),
-        inductiveStateEqualities.names.size(),
+        aligned.inputs.names.size(),
+        aligned.outputs.names.size(),
+        aligned.inductiveStateEqualities.names.size(),
         model0.stateBits.size(),
         model1.stateBits.size());
-  }
-
-  KInductionProblem problem;
-  problem.environmentInputNames = alignedInputs.names;
-  problem.observedOutputNames = alignedOutputs.names;
-
-  // Step 3: create the shared symbol space used by the combined SAT problem.
-  // Inputs are shared, while each design keeps its own private state vector.
-  std::unordered_map<SignalKey, size_t, SignalKeyHash> inputSymbols0;
-  std::unordered_map<SignalKey, size_t, SignalKeyHash> inputSymbols1;
-  std::unordered_map<SignalKey, size_t, SignalKeyHash> state0Symbols;
-  std::unordered_map<SignalKey, size_t, SignalKeyHash> state1Symbols;
-  size_t nextSymbol = 2;
-
-  assignSymbols(model0.stateBits, state0Symbols, problem.allSymbols, nextSymbol);
-  assignSymbols(model1.stateBits, state1Symbols, problem.allSymbols, nextSymbol);
-
-  for (size_t i = 0; i < alignedInputs.names.size(); ++i) {
-    const size_t symbol = nextSymbol++;
-    inputSymbols0.emplace(alignedInputs.keys0[i], symbol);
-    inputSymbols1.emplace(alignedInputs.keys1[i], symbol);
-    problem.allSymbols.push_back(symbol);
-    problem.inputSymbols.push_back(symbol);
-    if (auto assertedValue = getResetAssertionValue(alignedInputs.names[i]);
-        assertedValue.has_value()) {
-      problem.resetBootstrapInputs.emplace_back(symbol, *assertedValue);
-    }
-  }
-  for (const auto& key : model0.stateBits) {
-    problem.state0Symbols.push_back(state0Symbols.at(key));
-  }
-  for (const auto& key : model1.stateBits) {
-    problem.state1Symbols.push_back(state1Symbols.at(key));
-  }
-  for (const auto& relation : model0.complementedStateRelations) {
-    if (state0Symbols.find(relation.primaryKey) != state0Symbols.end() &&
-        state0Symbols.find(relation.complementedKey) != state0Symbols.end()) {
-      problem.complementedStatePairs0.emplace_back(
-          state0Symbols.at(relation.primaryKey),
-          state0Symbols.at(relation.complementedKey));
-    }
-  }
-  for (const auto& relation : model1.complementedStateRelations) {
-    if (state1Symbols.find(relation.primaryKey) != state1Symbols.end() &&
-        state1Symbols.find(relation.complementedKey) != state1Symbols.end()) {
-      problem.complementedStatePairs1.emplace_back(
-          state1Symbols.at(relation.primaryKey),
-          state1Symbols.at(relation.complementedKey));
-    }
-  }
-
-  const auto localToCombined0 =
-      buildLocalToCombinedMap(model0, inputSymbols0, state0Symbols);
-  const auto localToCombined1 =
-      buildLocalToCombinedMap(model1, inputSymbols1, state1Symbols);
-
-  std::unordered_map<BoolExpr*, BoolExpr*> remapMemo0;
-  std::unordered_map<BoolExpr*, BoolExpr*> remapMemo1;
-  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> remappedOutputs0;
-  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> remappedOutputs1;
-  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> remappedNext0;
-  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> remappedNext1;
-
-  // Step 4: rewrite both designs' formulas into that shared symbol space.
-  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
-    const auto& key0 = alignedOutputs.keys0[i];
-    const auto& key1 = alignedOutputs.keys1[i];
-    remappedOutputs0.emplace(
-        key0,
-        remapBoolExprVariables(
-            model0.observedOutputExprByKey.at(key0), localToCombined0, remapMemo0));
-    remappedOutputs1.emplace(
-        key1,
-        remapBoolExprVariables(
-            model1.observedOutputExprByKey.at(key1), localToCombined1, remapMemo1));
-    problem.observedOutputExprs0.push_back(remappedOutputs0.at(key0));
-    problem.observedOutputExprs1.push_back(remappedOutputs1.at(key1));
-  }
-  if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: remapped observed outputs\n");
-    fflush(stderr);
-  }
-
-  for (const auto& key : model0.stateBits) {
-    remappedNext0.emplace(
-        key,
-        remapBoolExprVariables(
-            model0.nextStateExprByStateKey.at(key), localToCombined0, remapMemo0));
-  }
-  for (const auto& key : model1.stateBits) {
-    remappedNext1.emplace(
-        key,
-        remapBoolExprVariables(
-            model1.nextStateExprByStateKey.at(key), localToCombined1, remapMemo1));
-  }
-  if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: remapped next-state formulas\n");
-    fflush(stderr);
-  }
-
-  // Step 5: if reset/init data is available, build the explicit frame-0 state
-  // constraint before we hand the problem to k-induction.
-  BoolExpr* initialCondition = BoolExpr::createTrue();
-  auto addInitialStateAssignments =
-      [&](const std::unordered_map<SignalKey, bool, SignalKeyHash>& initialValues,
-          const std::unordered_map<SignalKey, size_t, SignalKeyHash>& stateSymbols) {
-        for (const auto& [key, value] : initialValues) {
-          const auto symbolIt = stateSymbols.find(key);
-          if (symbolIt == stateSymbols.end()) {
-            continue;
-          }
-          BoolExpr* literal = BoolExpr::Var(symbolIt->second);
-          initialCondition = BoolExpr::And(
-              initialCondition, value ? literal : BoolExpr::Not(literal));
-          ++problem.initializedStateCount;
-        }
-      };
-  addInitialStateAssignments(model0.initialStateValueByKey, state0Symbols);
-  addInitialStateAssignments(model1.initialStateValueByKey, state1Symbols);
-  problem.totalStateCount = problem.state0Symbols.size() + problem.state1Symbols.size();
-  if (problem.hasExplicitInitialState()) {
-    problem.initialCondition = BoolExpr::simplify(initialCondition);
-  }
-  const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
-      model0, model1, alignedInputs, inductiveStateEqualities, secDiagEnabled);
-  // Reachable-state strengthening tells SEC which state equalities are already
-  // justified at startup and which extra state values become known while reset
-  // is held asserted for the bootstrap window.
-
-  const AlignedSignals& initialStateCorrespondence =
-      reachableInvariant.initialStateCorrespondence;
-  for (size_t i = 0; i < initialStateCorrespondence.names.size(); ++i) {
-    problem.initialStateEqualityPairs.emplace_back(
-        state0Symbols.at(initialStateCorrespondence.keys0[i]),
-        state1Symbols.at(initialStateCorrespondence.keys1[i]));
-  }
-
-  const AlignedSignals& anchoredStateEqualities =
-      reachableInvariant.anchoredStateEqualities;
-  for (const auto& [key, value] : reachableInvariant.bootstrapValues0) {
-    if (state0Symbols.find(key) != state0Symbols.end()) {
-      problem.bootstrapStateAssignments.emplace_back(state0Symbols.at(key), value);
-    }
-  }
-  for (const auto& [key, value] : reachableInvariant.bootstrapValues1) {
-    if (state1Symbols.find(key) != state1Symbols.end()) {
-      problem.bootstrapStateAssignments.emplace_back(state1Symbols.at(key), value);
-    }
-  }
-  problem.resetBootstrapCycles = reachableInvariant.bootstrapCycles;
-  for (size_t i = 0; i < anchoredStateEqualities.names.size(); ++i) {
-    problem.inductiveStateEqualityPairs.emplace_back(
-        state0Symbols.at(anchoredStateEqualities.keys0[i]),
-        state1Symbols.at(anchoredStateEqualities.keys1[i]));
-    if (!problem.resetBootstrapInputs.empty()) {
-      problem.bootstrapStateEqualityPairs.emplace_back(
-          state0Symbols.at(anchoredStateEqualities.keys0[i]),
-          state1Symbols.at(anchoredStateEqualities.keys1[i]));
-    }
-  }
-
-  const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
-      model0, model1, alignedInputs, anchoredStateEqualities);
-  if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: built abstract transition maps\n");
-    fflush(stderr);
-  }
-
-  // Step 6: build the SEC proof obligations. The checked SEC property remains
-  // pure observed-output equality, while induction uses a stronger invariant
-  // made of the anchored internal-state equalities plus any remaining output
-  // obligations not already implied by that state correspondence.
-  BoolExpr* property = BoolExpr::createTrue();
-  for (const auto& key : model0.stateBits) {
-    problem.transitions0.emplace_back(state0Symbols.at(key), remappedNext0.at(key));
-  }
-  for (const auto& key : model1.stateBits) {
-    problem.transitions1.emplace_back(state1Symbols.at(key), remappedNext1.at(key));
-  }
-
-  // Keep the SEC property honest: the base case always checks every observed
-  // output, while the induction step uses a stronger invariant whose state
-  // equalities are explicit BoolExpr clauses instead of out-of-band SAT
-  // assumptions.
-  BoolExpr* inductionProperty = BoolExpr::createTrue();
-  for (size_t i = 0; i < anchoredStateEqualities.names.size(); ++i) {
-    inductionProperty = BoolExpr::And(
-        inductionProperty,
-        makeEqualityExpr(
-            BoolExpr::Var(state0Symbols.at(anchoredStateEqualities.keys0[i])),
-            BoolExpr::Var(state1Symbols.at(anchoredStateEqualities.keys1[i]))));
-  }
-  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
-    const auto outputEquality = makeEqualityExpr(
-        problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]);
-    property = BoolExpr::And(property, outputEquality);
-
-    const auto& key0 = alignedOutputs.keys0[i];
-    const auto& key1 = alignedOutputs.keys1[i];
-    if (areEquivalentUnderAbstractMaps(
-            model0.observedOutputExprByKey.at(key0),
-            model1.observedOutputExprByKey.at(key1),
-            abstractOutputMap0,
-            abstractOutputMap1)) {
-      continue;
-    }
-    inductionProperty = BoolExpr::And(inductionProperty, outputEquality);
-  }
-
-  problem.property = BoolExpr::simplify(property);
-  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
-  problem.inductionProperty = BoolExpr::simplify(inductionProperty);
-  problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
-
-  problem.description = "SEC property with aligned observed outputs";
-  if (secDiagEnabled) {
-    fprintf(stderr, "SEC diag: built SEC and induction properties\n");
-    fflush(stderr);
-  }
-
-  if (secDiagEnabled) {
-    printf(
-        "SEC diag: property_is_true=%d induction_property_is_true=%d "
-        "bad_is_false=%d induction_bad_is_false=%d reset_bootstrap_inputs=%zu "
-        "bootstrap_cycles=%zu bootstrap_equalities=%zu inductive_equalities=%zu\n",
-        problem.property == BoolExpr::createTrue(),
-        problem.inductionProperty == BoolExpr::createTrue(),
-        problem.bad == BoolExpr::createFalse(),
-        problem.inductionBad == BoolExpr::createFalse(),
-        problem.resetBootstrapInputs.size(),
-        problem.resetBootstrapCycles,
-        problem.bootstrapStateEqualityPairs.size(),
-        problem.inductiveStateEqualityPairs.size());
     fflush(stdout);
   }
 
-  // Step 7: hand the combined transition system to the selected proof engine.
+  // Phase 3: rewrite both designs into one shared symbol space, strengthen the
+  // startup frontier with reset/bootstrap facts, and build the final SEC
+  // property plus the induction-friendly variant that some engines consume.
+  SharedSecSymbolSpace symbolSpace = buildSharedSecSymbolSpace(
+      model0, model1, aligned.inputs, aligned.outputs);
+  const auto remapped = remapSecExpressions(
+      model0,
+      model1,
+      aligned.outputs,
+      symbolSpace,
+      symbolSpace.problem,
+      secDiagEnabled);
+  const auto reachableInvariant = integrateReachableStateInvariant(
+      model0,
+      model1,
+      aligned.inputs,
+      aligned.inductiveStateEqualities,
+      symbolSpace.state0Symbols,
+      symbolSpace.state1Symbols,
+      symbolSpace.problem,
+      secDiagEnabled);
+  buildSecPropertiesAndTransitions(
+      model0,
+      model1,
+      aligned.inputs,
+      aligned.outputs,
+      reachableInvariant,
+      symbolSpace.state0Symbols,
+      symbolSpace.state1Symbols,
+      remapped,
+      symbolSpace.problem,
+      secDiagEnabled);
+
+  // Phase 4: hand the fully normalized SEC transition system to the requested
+  // top-level engine. From here on, every engine sees the same problem and only
+  // differs in how it searches for proofs or counterexamples.
   if (secDiagEnabled) {
-    fprintf(
-        stderr,
-        "SEC diag: entering %s\n",
-        secEngine_ == SecEngine::Pdr
-            ? "pdr engine"
-            : (secEngine_ == SecEngine::Imc
-                   ? "imc engine"
-                   : (secEngine_ == SecEngine::KInduction
-                          ? "classic k-induction engine"
-                          : "legacy engine")));
+    fprintf(stderr, "SEC diag: entering %s\n", describeSecEngine(secEngine_));
     fflush(stderr);
   }
 
-  if (secEngine_ == SecEngine::Pdr) {
-    // Reuse the existing base-case machinery so the new PDR path keeps the
-    // same user-facing counterexample reporting for k=0 and combinational SEC.
-    KInductionEngine baseline(problem, solverType_);
-    const auto baselineResult = baseline.run(0);
-    switch (baselineResult.status) {
-      case KInductionStatus::Equivalent:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Equivalent,
-            baselineResult.bound,
-            "",
-            outputCoverage,
-            abstractedSequentialBoundaries);
-      case KInductionStatus::Different:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Different,
-            baselineResult.bound,
-            formatCounterexampleWitness(baselineResult, model0, model1, top0_, top1_),
-            outputCoverage,
-            abstractedSequentialBoundaries);
-      case KInductionStatus::Inconclusive:
-      default:
-        break;
-    }
-
-    PDREngine pdrEngine(problem, solverType_);
-    const auto pdrResult = pdrEngine.run(maxK);
-    switch (pdrResult.status) {
-      case PDRStatus::Equivalent:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Equivalent,
-            pdrResult.bound,
-            "",
-            outputCoverage,
-            abstractedSequentialBoundaries);
-      case PDRStatus::Different: {
-        // PDR proves reachability depth, but the legacy base-case solver already
-        // knows how to reconstruct the concrete SEC witness and traceback.
-        KInductionEngine witnessEngine(problem, solverType_);
-        const auto witnessResult = witnessEngine.run(pdrResult.bound);
-        const std::string details =
-            witnessResult.status == KInductionStatus::Different
-                ? formatCounterexampleWitness(witnessResult, model0, model1, top0_, top1_)
-                : "PDR found a counterexample at k = " + std::to_string(pdrResult.bound);
-        return makeSecResult(
-            SequentialEquivalenceStatus::Different,
-            pdrResult.bound,
-            details,
-            outputCoverage,
-            abstractedSequentialBoundaries);
-      }
-      case PDRStatus::Inconclusive:
-      default:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Inconclusive,
-            pdrResult.bound,
-            "Reached max_k without a proof or counterexample",
-            outputCoverage,
-            abstractedSequentialBoundaries);
-    }
-  }
-
-  if (secEngine_ == SecEngine::KInduction) {
-    // Classic k-induction keeps the usual "search first, then prove" shape:
-    // find bounded counterexamples, then try to close the proof by induction.
-    KInductionEngine engine(problem, solverType_);
-    const auto result = engine.run(maxK);
-    switch (result.status) {
-      case KInductionStatus::Equivalent:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Equivalent,
-            result.bound,
-            "",
-            outputCoverage,
-            abstractedSequentialBoundaries);
-      case KInductionStatus::Different:
-        {
-        return makeSecResult(
-            SequentialEquivalenceStatus::Different,
-            result.bound,
-            result.witness.has_value()
-                ? formatCounterexampleWitness(
-                      result, model0, model1, top0_, top1_)
-                : "Classic k-induction found a counterexample at k = " +
-                      std::to_string(result.bound),
-            outputCoverage,
-            abstractedSequentialBoundaries);
-        }
-      case KInductionStatus::Inconclusive:
-      default:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Inconclusive,
-            result.bound,
-            "Reached max_k without a proof or counterexample",
-            outputCoverage,
-            abstractedSequentialBoundaries);
-    }
-  }
-
-  if (secEngine_ == SecEngine::Imc) {
-    // IMC still uses the shared bounded counterexample path, but its proof side
-    // grows a reachable/interpolated frontier instead of using an induction
-    // step over increasing simple paths.
-    IMCEngine engine(problem, solverType_);
-    const auto result = engine.run(maxK);
-    switch (result.status) {
-      case IMCStatus::Equivalent:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Equivalent,
-            result.bound,
-            "",
-            outputCoverage,
-            abstractedSequentialBoundaries);
-      case IMCStatus::Different:
-        {
-          const KInductionResult witnessResult{
-              KInductionStatus::Different, result.bound, result.witness};
-        return makeSecResult(
-            SequentialEquivalenceStatus::Different,
-            result.bound,
-            result.witness.has_value()
-                ? formatCounterexampleWitness(
-                      witnessResult, model0, model1, top0_, top1_)
-                : "IMC found a counterexample at k = " +
-                      std::to_string(result.bound),
-            outputCoverage,
-            abstractedSequentialBoundaries);
-        }
-      case IMCStatus::Inconclusive:
-      default:
-        return makeSecResult(
-            SequentialEquivalenceStatus::Inconclusive,
-            result.bound,
-            "Reached max_k without a proof or counterexample",
-            outputCoverage,
-            abstractedSequentialBoundaries);
-    }
-  }
-
-  KInductionProblem legacyProblem = problem;
-  ExactInterpolantSynthesizer interpolantSynthesizer(legacyProblem, solverType_);
-  if (auto interpolant =
-          interpolantSynthesizer.deriveOneStepReachableStateInvariant();
-      interpolant.has_value()) {
-    // Preserve the historical legacy behavior: it folds an exact small-state
-    // interpolant into the induction invariant before the proof engines run.
-    legacyProblem.inductionProperty = BoolExpr::simplify(
-        BoolExpr::And(legacyProblem.inductionProperty, *interpolant));
-    legacyProblem.inductionBad =
-        BoolExpr::simplify(BoolExpr::Not(legacyProblem.inductionProperty));
-  }
-
-  KInductionEngine engine(legacyProblem, solverType_);
-  const auto result = engine.run(maxK);
-  switch (result.status) {
-    case KInductionStatus::Equivalent:
-      return makeSecResult(
-          SequentialEquivalenceStatus::Equivalent,
-          result.bound,
-          "",
-          outputCoverage,
+  switch (secEngine_) {
+    case SecEngine::Pdr:
+      return runPdrSecEngine(
+          symbolSpace.problem,
+          maxK,
+          solverType_,
+          model0,
+          model1,
+          top0_,
+          top1_,
+          aligned.outputCoverage,
           abstractedSequentialBoundaries);
-    case KInductionStatus::Different:
-      return makeSecResult(
-          SequentialEquivalenceStatus::Different,
-          result.bound,
-          formatCounterexampleWitness(result, model0, model1, top0_, top1_),
-          outputCoverage,
+    case SecEngine::KInduction:
+      return runKInductionSecEngine(
+          symbolSpace.problem,
+          maxK,
+          solverType_,
+          model0,
+          model1,
+          top0_,
+          top1_,
+          aligned.outputCoverage,
           abstractedSequentialBoundaries);
-    case KInductionStatus::Inconclusive:
-      break;
+    case SecEngine::Imc:
+      return runImcSecEngine(
+          symbolSpace.problem,
+          maxK,
+          solverType_,
+          model0,
+          model1,
+          top0_,
+          top1_,
+          aligned.outputCoverage,
+          abstractedSequentialBoundaries);
+    case SecEngine::Legacy:
     default:
-      break;
+      return runLegacySecEngine(
+          symbolSpace.problem,
+          maxK,
+          solverType_,
+          model0,
+          model1,
+          top0_,
+          top1_,
+          aligned.outputCoverage,
+          abstractedSequentialBoundaries);
   }
-
-  return makeSecResult(
-      SequentialEquivalenceStatus::Inconclusive,
-      result.bound,
-      "Reached max_k without a proof or counterexample",
-      outputCoverage,
-      abstractedSequentialBoundaries);
 }
 
 }  // namespace KEPLER_FORMAL::SEC

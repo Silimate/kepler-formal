@@ -140,6 +140,49 @@ BoolExpr* buildExactReachableStateInvariant(const KInductionProblem& problem,
   return BoolExpr::simplify(reachable);
 }
 
+BoolExpr* buildInitialImcStrengthening(const KInductionProblem& problem,
+                                       KEPLER_FORMAL::Config::SolverType solverType,
+                                       BoolExpr* initFormula) {
+  if (initFormula == nullptr) {
+    return nullptr;
+  }
+
+  // Reuse any already validated SEC strengthening and then sharpen it with the
+  // exact one-step interpolant when that derivation is affordable.
+  BoolExpr* sharedStrengthening =
+      selectValidatedStrengtheningInvariant(problem, initFormula, solverType);
+  ExactInterpolantSynthesizer interpolantSynthesizer(problem, solverType);
+  if (auto interpolant =
+          interpolantSynthesizer.deriveOneStepReachableStateInvariant();
+      interpolant.has_value()) {
+    sharedStrengthening =
+        sharedStrengthening == nullptr
+            ? *interpolant
+            : BoolExpr::simplify(BoolExpr::And(sharedStrengthening, *interpolant));
+  }
+  return sharedStrengthening == nullptr ? problem.property : sharedStrengthening;
+}
+
+bool provesImcInvariant(const KInductionProblem& problem,
+                        KEPLER_FORMAL::Config::SolverType solverType,
+                        BoolExpr* initFormula,
+                        BoolExpr* invariant) {
+  return invariant != nullptr &&
+         initialFrontierImplies(initFormula, invariant, solverType) &&
+         isInductiveInvariant(problem, invariant, solverType) &&
+         invariantExcludesBadStates(problem, invariant, solverType);
+}
+
+std::optional<IMCResult> findImcCounterexample(const KInductionProblem& problem,
+                                               KEPLER_FORMAL::Config::SolverType solverType,
+                                               size_t depth) {
+  if (auto witness = findBaseCounterexample(problem, solverType, depth);
+      witness.has_value()) {
+    return IMCResult{IMCStatus::Different, witness->badFrame, std::move(witness)};
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 IMCEngine::IMCEngine(const KInductionProblem& problem,
@@ -149,8 +192,9 @@ IMCEngine::IMCEngine(const KInductionProblem& problem,
 IMCResult IMCEngine::run(size_t maxK) const {
   // Keep counterexample discovery on the same bounded base-case machinery as
   // the rest of SEC so witnesses and reported cycles stay consistent.
-  if (auto witness = findBaseCounterexample(problem_, solverType_, 0); witness.has_value()) {
-    return {IMCStatus::Different, witness->badFrame, std::move(witness)};
+  if (const auto counterexample = findImcCounterexample(problem_, solverType_, 0);
+      counterexample.has_value()) {
+    return *counterexample;
   }
 
   if (problem_.combinedStateSymbols().empty()) {
@@ -158,43 +202,23 @@ IMCResult IMCEngine::run(size_t maxK) const {
   }
 
   BoolExpr* initFormula = buildProofInitFormula(problem_);
-  BoolExpr* sharedStrengthening = nullptr;
-  if (initFormula != nullptr) {
-    // Start from any validated shared strengthening the strategy already built
-    // from reset/bootstrap and aligned state structure, then let interpolation
-    // sharpen it with a reachable one-step frontier when that exact derivation
-    // is affordable.
-    sharedStrengthening =
-        selectValidatedStrengtheningInvariant(problem_, initFormula, solverType_);
-    ExactInterpolantSynthesizer interpolantSynthesizer(problem_, solverType_);
-    if (auto interpolant =
-            interpolantSynthesizer.deriveOneStepReachableStateInvariant();
-        interpolant.has_value()) {
-      sharedStrengthening =
-          sharedStrengthening == nullptr
-              ? *interpolant
-              : BoolExpr::simplify(BoolExpr::And(sharedStrengthening, *interpolant));
-    }
-    if (sharedStrengthening == nullptr) {
-      sharedStrengthening = problem_.property;
-    }
-
+  const BoolExpr* sharedStrengthening =
+      buildInitialImcStrengthening(problem_, solverType_, initFormula);
+  if (initFormula != nullptr &&
+      provesImcInvariant(problem_, solverType_, initFormula,
+                         const_cast<BoolExpr*>(sharedStrengthening))) {
     // Before spending time on deeper frontiers, see whether the startup
     // strengthening is already a complete inductive proof.
-    if (initialFrontierImplies(initFormula, sharedStrengthening, solverType_) &&
-        isInductiveInvariant(problem_, sharedStrengthening, solverType_) &&
-        invariantExcludesBadStates(problem_, sharedStrengthening, solverType_)) {
-      return {IMCStatus::Equivalent, 1};
-    }
+    return {IMCStatus::Equivalent, 1};
   }
 
   for (size_t k = 1; k <= maxK; ++k) {
     // IMC keeps counterexample discovery and proof growth in lockstep by depth:
     // first rule out a real bug at k, then try to turn the reachable frontier
     // up to k into an inductive invariant.
-    if (auto witness = findBaseCounterexample(problem_, solverType_, k);
-        witness.has_value()) {
-      return {IMCStatus::Different, witness->badFrame, std::move(witness)};
+    if (const auto counterexample = findImcCounterexample(problem_, solverType_, k);
+        counterexample.has_value()) {
+      return *counterexample;
     }
 
     if (initFormula == nullptr) {
@@ -213,11 +237,10 @@ IMCResult IMCEngine::run(size_t maxK) const {
     BoolExpr* proofInvariant =
         sharedStrengthening == nullptr
             ? frontierInvariant
-            : BoolExpr::simplify(BoolExpr::And(frontierInvariant, sharedStrengthening));
+            : BoolExpr::simplify(
+                  BoolExpr::And(frontierInvariant, const_cast<BoolExpr*>(sharedStrengthening)));
 
-    if (initialFrontierImplies(initFormula, proofInvariant, solverType_) &&
-        isInductiveInvariant(problem_, proofInvariant, solverType_) &&
-        invariantExcludesBadStates(problem_, proofInvariant, solverType_)) {
+    if (provesImcInvariant(problem_, solverType_, initFormula, proofInvariant)) {
       return {IMCStatus::Equivalent, k};
     }
   }
