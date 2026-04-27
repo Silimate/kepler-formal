@@ -70,145 +70,50 @@ cmake .. \
 
 ### Bazel (experimental)
 
-Bazel build support is available alongside CMake. It uses [bzlmod](https://bazel.build/external/overview#bzlmod) (MODULE.bazel) and pulls most dependencies from the [Bazel Central Registry](https://registry.bazel.build/).
-
-```bash
-git clone --recurse-submodules https://github.com/keplertech/kepler-formal.git
-cd kepler-formal
-bazel build //src/bin:kepler-formal
-```
-
-Run tests:
-
-```bash
-bazel test //test/...
-```
-
-**Dependency strategy:**
-- **BCR**: yaml-cpp, googletest, zlib, spdlog, oneTBB (pulled automatically by Bazel)
-- **Native BUILD files**: kissat and glucose SAT solvers (simple C/C++ libraries)
-- **rules_foreign_cc** (cmake wrapper): naja (too complex for native BUILD files — uses flex/bison codegen, Cap'n Proto, nested submodules)
-- **System packages still required**: Boost headers, Cap'n Proto, Python3 (used by naja's cmake build inside the rules_foreign_cc sandbox)
-
-### Future work: bazel-orfs integration
-
-Once kepler-formal is fully buildable with Bazel, it can be consumed directly by [bazel-orfs](https://github.com/The-OpenROAD-Project/bazel-orfs) as a proper Bazel dependency instead of the current `$PATH`-based wrapper ([bazel-orfs#523](https://github.com/The-OpenROAD-Project/bazel-orfs/pull/523)). This enables:
-
-- **`bazel_dep` or `git_override`** in bazel-orfs MODULE.bazel to pin kepler-formal to a specific version or commit
-- **Hermetic LEC tests** in bazel-orfs CI without requiring a pre-installed kepler-formal binary
-- **Remote caching** of kepler-formal build artifacts shared across bazel-orfs users
-- **Eventual BCR publication** of kepler-formal as a first-class Bazel module
+Bazel build notes, dependency details, release flow, and the BCR publication roadmap are tracked in [docs/bcr-roadmap.md](docs/bcr-roadmap.md).
 
 ## Usage
 
+The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/flags-spec.md).
+
+### Binary Flags
+
 ```bash
-# Classic (single file per design)
-build/src/bin/kepler-formal [-v <LEC|SEC>] [-k <max-k>] <-verilog/-naja_if> [--verilog_preprocessing] [--compact] [--report-skipped-pos] <netlist1> <netlist2> [<library-file>...]
+# Single file per design
+build/src/bin/kepler-formal <-verilog/-naja_if> [options] <design1> <design2> [<library-file>...]
 
-# Multi-file Verilog designs
-build/src/bin/kepler-formal [-v <LEC|SEC>] [-k <max-k>] -verilog [--verilog_preprocessing] --design1 <file...> --design2 <file...> \
+# Multi-file Verilog
+build/src/bin/kepler-formal -verilog [options] --design1 <file...> --design2 <file...> \
   [--liberty <library-file>...] [--compact] [--report-skipped-pos]
-
-# Through yaml config file
-build/src/bin/kepler-formal --config <yaml file>
 ```
 
-`--verilog_preprocessing` is also accepted as `--verilog-preprocessing`.
+| Flag | Meaning |
+| --- | --- |
+| `--help`, `-h` | Print usage. |
+| `--config <file>`, `-c <file>` | Load a YAML config. If present, the YAML file takes precedence over the rest of the CLI. |
+| `--design1 <file...>` | Explicit source list for design 1 in multi-file Verilog mode. |
+| `--design2 <file...>` | Explicit source list for design 2 in multi-file Verilog mode. |
+| `--liberty <file...>`, `--lib <file...>` | Liberty library files. |
+| `--verilog_preprocessing` | Enable preprocessing for Verilog inputs. |
 
-Experimental SystemVerilog notes are tracked in [docs/systemverilog/README.md](docs/systemverilog/README.md). That flow is still ongoing work and is not part of the stable top-level interface yet.
+### YAML Configuration File
 
-### Supported formats
+```bash
+# YAML config
+build/src/bin/kepler-formal --config <file.yaml>
+```
 
-- CLI:
-  - `-verilog`
-  - `-naja_if`
-- YAML `format`:
-  - `verilog`
-  - `naja_if`
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `format` | string | `verilog`, `v`, or `naja_if`. Defaults to `verilog` if omitted. |
+| `input_paths` | list | Required. Either `[design0, design1]` or `[[design0_file...], [design1_file...]]`. The nested form is for multi-file Verilog. |
+| `liberty_files` | list[string] | Liberty libraries loaded through `SNLLibertyConstructor`. |
+| `py_tech_files` | list[string] | Python primitive loaders loaded through `SNLPyLoader`. |
+| `verilog_preprocessing` | bool | Enable preprocessing for Verilog inputs. |
+| `solver` | string | `kissat` or `glucose`. Defaults to `kissat`. |
+| `log_file` | string | Path for the miter log file. Default logs are `miter_log_<n>.txt` in the current working directory. |
 
-### Verification mode
-
-Verification mode defaults to `LEC`.
-
-Select it with either:
-
-- CLI: `-v LEC` or `-v SEC`
-- YAML: `verification: LEC` or `verification: SEC`
-
-`SEC` also accepts a k-induction bound:
-
-- CLI: `-k <max-k>`
-- YAML: `max_k: <integer>`
-
-`max_k` is only valid with `SEC`.
-
-Current SEC semantics:
-
-- compares the observed outputs of the two designs
-- does not require internal register/state names to match across the designs
-- still relies on the current output-only k-induction model in the binary, so
-  it does not yet encode a full reset/init relation
-
-Current SEC limitations in the binary:
-
-- `compact_mode` is not supported
-- `use_scopes` and `clean_scopes` are not supported
-- `cnf_export` / `dump_cnf` are not supported
-- `report_skipped_pos` is not supported
-
-### Library files
-
-Liberty inputs continue to use the existing `--liberty` CLI flag and `liberty_files` YAML field.
-
-These entries are loaded as Liberty without suffix checks.
-
-Python tech loaders are supported only through YAML `py_tech_files`.
-
-Behavior:
-
-- `--liberty` and `liberty_files` entries are loaded through `SNLLibertyConstructor`
-- `py_tech_files` entries are loaded through `SNLPyLoader`
-
-### Optional compact mode
-
-Compact mode is disabled by default.
-
-Enable it with either:
-
-- CLI: `--compact`
-- YAML: `compact_mode: true`
-
-Behavior:
-
-- the full miter is still checked normally
-- if the miter is SAT, Kepler-Formal stops after the whole-design `DIFFERENT` result
-- per-PO analysis is skipped in that SAT case
-
-### Optional skipped-PO reports
-
-Skipped-PO reporting is disabled by default.
-
-Enable it with either:
-
-- CLI: `--report-skipped-pos`
-- YAML: `report_skipped_pos: true`
-
-When enabled, Kepler-Formal may emit the following files in the current working directory:
-
-- `skipped_multi_driver_pos.txt`
-- `skipped_no_driver_pos.txt`
-- `skipped_logical_loop_pos.txt`
-
-These reports are generated only for skipped POs, for example when a PO is ignored because it is driven by multiple drivers, has no driver, or closes a logical loop during cloud expansion.
-
-### YAML Input Paths
-
-The YAML `input_paths` field accepts either:
-
-- A flat list of two files (one per design), or
-- A nested list with one list of files per design (multi-file Verilog).
-
-Example:
+Yaml file example:
 
 ```yaml
 format: verilog
@@ -220,16 +125,13 @@ liberty_files:
   - library_file0.lib
   - library_file1.lib
 py_tech_files:
-  - primitives.py              # Optional: Python tech loaders are YAML-only
-max_k: 32                     # Optional: SEC only
+  - primitives.py             # Optional: Python tech loaders are YAML-only
 verilog_preprocessing: true   # Optional: enables Verilog preprocessor
-compact_mode: true            # Optional: skips per-PO analysis after a SAT whole-miter result
-report_skipped_pos: true      # Optional: writes skipped PO reports, default is false
 ```
 
-## Example 
+## Examples 
 
-https://github.com/keplertech/kepler-formal/tree/main/example
+See [example tests](example)
 
 ## Contact
 
