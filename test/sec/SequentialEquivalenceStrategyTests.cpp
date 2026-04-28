@@ -5096,6 +5096,41 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       EquivalentDffDesignsReportTopBoundarySurface) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top0 = createDffTop(library, "top0", invModel, false, false);
+  auto* top1 = createDffTop(library, "top1", invModel, false, false);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  auto hasRole = [&](const char* design, const char* signal, const char* role) {
+    return std::any_of(
+        result.extractedBoundaryReports.begin(),
+        result.extractedBoundaryReports.end(),
+        [&](const ExtractedBoundaryReportEntry& entry) {
+          return entry.design == design && entry.signal == signal &&
+                 std::find(entry.roles.begin(), entry.roles.end(), role) !=
+                     entry.roles.end();
+        });
+  };
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_TRUE(hasRole("design0", "clk[0]", "top_input"));
+  EXPECT_TRUE(hasRole("design0", "in[0]", "top_input"));
+  EXPECT_TRUE(hasRole("design0", "out[0]", "top_output"));
+  EXPECT_TRUE(hasRole("design1", "clk[0]", "top_input"));
+  EXPECT_TRUE(hasRole("design1", "in[0]", "top_input"));
+  EXPECT_TRUE(hasRole("design1", "out[0]", "top_output"));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        UnsupportedSequentialInterfacesCanBeAbstractedAsSecBoundariesByDefault) {
   ScopedSecBoundaryAbstraction boundaryAbstraction(true);
   NLUniverse::create();
@@ -5113,8 +5148,31 @@ TEST_F(SequentialEquivalenceStrategyTests,
   SequentialEquivalenceStrategy strategy(top0, top1);
   const auto result = strategy.run(2);
 
+  auto hasRole = [&](const char* design, const char* signal, const char* role) {
+    return std::any_of(
+        result.extractedBoundaryReports.begin(),
+        result.extractedBoundaryReports.end(),
+        [&](const ExtractedBoundaryReportEntry& entry) {
+          return entry.design == design && entry.signal == signal &&
+                 std::find(entry.roles.begin(), entry.roles.end(), role) !=
+                     entry.roles.end();
+        });
+  };
+
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_FALSE(result.abstractedSequentialBoundaries.empty());
+  EXPECT_TRUE(hasRole("design0", "clk[0]", "top_input"));
+  EXPECT_TRUE(hasRole("design0", "in[0]", "top_input"));
+  EXPECT_TRUE(hasRole("design0", "good[0]", "top_output"));
+  EXPECT_TRUE(hasRole("design0", "bad[0]", "top_output"));
+  EXPECT_TRUE(hasRole("design0", "ff0.Q[0]", "internal_boundary_input"));
+  EXPECT_TRUE(hasRole("design0", "ff0.CK[0]", "internal_boundary_output"));
+  EXPECT_TRUE(hasRole("design0", "ff0.Q[0]", "abstracted_boundary_state"));
+  EXPECT_TRUE(hasRole("design0", "ff0.CK[0]", "abstracted_boundary_observed"));
+  EXPECT_TRUE(hasRole("design1", "ff0.Q[0]", "internal_boundary_input"));
+  EXPECT_TRUE(hasRole("design1", "ff0.CK[0]", "internal_boundary_output"));
+  EXPECT_TRUE(hasRole("design1", "ff0.Q[0]", "abstracted_boundary_state"));
+  EXPECT_TRUE(hasRole("design1", "ff0.CK[0]", "abstracted_boundary_observed"));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

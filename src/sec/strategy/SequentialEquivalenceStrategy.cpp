@@ -181,6 +181,21 @@ std::string describeConnectivitySkipInfo(const ConnectivitySkipInfo& info) {
   return oss.str();
 }
 
+std::string describeSecSignalKey(const SequentialDesignModel& model,
+                                 const SignalKey& key) {
+  if (const auto it = model.displayNameByKey.find(key);
+      it != model.displayNameByKey.end()) {
+    return it->second;
+  }
+  return signalKeyToString(key);
+}
+
+void appendUniqueRole(std::vector<std::string>& roles, const char* role) {
+  if (std::find(roles.begin(), roles.end(), role) == roles.end()) {
+    roles.push_back(role);
+  }
+}
+
 struct OutputCoverageSelection {
   AlignedSignals checkedOutputs;
   std::vector<std::string> skippedOutputs;
@@ -663,7 +678,8 @@ SequentialEquivalenceResult makeSecResult(
     size_t bound,
     std::string reason,
     const OutputCoverageSelection& coverage,
-    std::vector<std::string> abstractedSequentialBoundaries = {}) {
+    std::vector<std::string> abstractedSequentialBoundaries = {},
+    std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports = {}) {
   SequentialEquivalenceResult result;
   result.status = status;
   result.bound = bound;
@@ -673,6 +689,7 @@ SequentialEquivalenceResult makeSecResult(
   result.skippedObservedOutputs = coverage.skippedOutputs;
   result.abstractedSequentialBoundaries =
       std::move(abstractedSequentialBoundaries);
+  result.extractedBoundaryReports = std::move(extractedBoundaryReports);
   return result;
 }
 
@@ -705,6 +722,59 @@ void appendAbstractedSequentialBoundaries(
   for (const auto& description : model.abstractedSequentialBoundaries) {
     abstractedSequentialBoundaries.push_back(
         std::string(designPrefix) + " " + description);
+  }
+}
+
+void appendExtractedBoundaryReports(
+    const SequentialDesignModel& model,
+    const char* designPrefix,
+    std::vector<ExtractedBoundaryReportEntry>& reports) {
+  std::map<std::string, ExtractedBoundaryReportEntry> reportsBySignal;
+
+  auto ensureEntry = [&](const SignalKey& key) -> ExtractedBoundaryReportEntry& {
+    const auto signal = describeSecSignalKey(model, key);
+    auto [it, _] = reportsBySignal.try_emplace(signal);
+    it->second.design = designPrefix;
+    it->second.signal = signal;
+    if (const auto skipIt = model.connectivitySkipInfoByKey.find(key);
+        skipIt != model.connectivitySkipInfoByKey.end()) {
+      it->second.connectivitySkip = describeConnectivitySkipInfo(skipIt->second);
+    }
+    return it->second;
+  };
+
+  auto addRole = [&](const SignalKey& key, const char* role) {
+    auto& entry = ensureEntry(key);
+    appendUniqueRole(entry.roles, role);
+  };
+
+  // The extracted SEC boundary surface consists of the original top interface
+  // plus any extra internal terminals introduced when an uncomputable
+  // sequential block is abstracted as a boundary.
+  for (const auto& key : model.topInputKeys) {
+    addRole(key, "top_input");
+  }
+  for (const auto& key : model.topOutputKeys) {
+    addRole(key, "top_output");
+  }
+  for (const auto& key : model.internalBoundaryInputKeys) {
+    addRole(key, "internal_boundary_input");
+  }
+  for (const auto& key : model.internalBoundaryOutputKeys) {
+    addRole(key, "internal_boundary_output");
+  }
+  for (const auto& detail : model.abstractedSequentialBoundaryDetails) {
+    for (const auto& key : detail.stateKeys) {
+      addRole(key, "abstracted_boundary_state");
+    }
+    for (const auto& key : detail.observedKeys) {
+      addRole(key, "abstracted_boundary_observed");
+    }
+  }
+
+  reports.reserve(reports.size() + reportsBySignal.size());
+  for (auto& [_, entry] : reportsBySignal) {
+    reports.push_back(std::move(entry));
   }
 }
 
@@ -1056,7 +1126,8 @@ SequentialEquivalenceResult runPdrSecEngine(
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
     const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries) {
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
   KInductionEngine baseline(problem, solverType);
   const auto baselineResult = baseline.run(0);
   switch (baselineResult.status) {
@@ -1066,14 +1137,16 @@ SequentialEquivalenceResult runPdrSecEngine(
           baselineResult.bound,
           "",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Different:
       return makeSecResult(
           SequentialEquivalenceStatus::Different,
           baselineResult.bound,
           formatCounterexampleWitness(baselineResult, model0, model1, top0, top1),
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Inconclusive:
     default:
       break;
@@ -1088,7 +1161,8 @@ SequentialEquivalenceResult runPdrSecEngine(
           pdrResult.bound,
           "",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case PDRStatus::Different: {
       KInductionEngine witnessEngine(problem, solverType);
       const auto witnessResult = witnessEngine.run(pdrResult.bound);
@@ -1102,7 +1176,8 @@ SequentialEquivalenceResult runPdrSecEngine(
           pdrResult.bound,
           details,
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     }
     case PDRStatus::Inconclusive:
     default:
@@ -1111,7 +1186,8 @@ SequentialEquivalenceResult runPdrSecEngine(
           pdrResult.bound,
           "Reached max_k without a proof or counterexample",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
   }
 }
 
@@ -1124,7 +1200,8 @@ SequentialEquivalenceResult runKInductionSecEngine(
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
     const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries) {
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
   KInductionEngine engine(problem, solverType);
   const auto result = engine.run(maxK);
   switch (result.status) {
@@ -1134,7 +1211,8 @@ SequentialEquivalenceResult runKInductionSecEngine(
           result.bound,
           "",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Different:
       return makeSecResult(
           SequentialEquivalenceStatus::Different,
@@ -1144,7 +1222,8 @@ SequentialEquivalenceResult runKInductionSecEngine(
               : "Classic k-induction found a counterexample at k = " +
                     std::to_string(result.bound),
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Inconclusive:
     default:
       return makeSecResult(
@@ -1152,7 +1231,8 @@ SequentialEquivalenceResult runKInductionSecEngine(
           result.bound,
           "Reached max_k without a proof or counterexample",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
   }
 }
 
@@ -1165,7 +1245,8 @@ SequentialEquivalenceResult runImcSecEngine(
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
     const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries) {
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
   IMCEngine engine(problem, solverType);
   const auto result = engine.run(maxK);
   switch (result.status) {
@@ -1175,7 +1256,8 @@ SequentialEquivalenceResult runImcSecEngine(
           result.bound,
           "",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case IMCStatus::Different: {
       const KInductionResult witnessResult{
           KInductionStatus::Different, result.bound, result.witness};
@@ -1187,7 +1269,8 @@ SequentialEquivalenceResult runImcSecEngine(
               : "IMC found a counterexample at k = " +
                     std::to_string(result.bound),
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     }
     case IMCStatus::Inconclusive:
     default:
@@ -1196,7 +1279,8 @@ SequentialEquivalenceResult runImcSecEngine(
           result.bound,
           "Reached max_k without a proof or counterexample",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
   }
 }
 
@@ -1209,7 +1293,8 @@ SequentialEquivalenceResult runLegacySecEngine(
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
     const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries) {
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
   ExactInterpolantSynthesizer interpolantSynthesizer(problem, solverType);
   if (auto interpolant =
           interpolantSynthesizer.deriveOneStepReachableStateInvariant();
@@ -1229,14 +1314,16 @@ SequentialEquivalenceResult runLegacySecEngine(
           result.bound,
           "",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Different:
       return makeSecResult(
           SequentialEquivalenceStatus::Different,
           result.bound,
           formatCounterexampleWitness(result, model0, model1, top0, top1),
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Inconclusive:
     default:
       return makeSecResult(
@@ -1244,7 +1331,8 @@ SequentialEquivalenceResult runLegacySecEngine(
           result.bound,
           "Reached max_k without a proof or counterexample",
           outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
   }
 }
 
@@ -1296,29 +1384,34 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   // downstream engine. If either side cannot be modeled soundly, stop before we
   // spend time aligning interfaces or building proof problems.
   std::vector<std::string> abstractedSequentialBoundaries;
+  std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports;
   const auto model0 =
       extractSecDesign(top0_, "SEC diag: extracted design0", secDiagEnabled);
   appendAbstractedSequentialBoundaries(
       model0, "design0", abstractedSequentialBoundaries);
+  appendExtractedBoundaryReports(model0, "design0", extractedBoundaryReports);
   if (model0.hasUnsupportedFeatures()) {
     return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
         joinReasons(model0.unsupportedReasons),
         OutputCoverageSelection{},
-        abstractedSequentialBoundaries);
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
   const auto model1 =
       extractSecDesign(top1_, "SEC diag: extracted design1", secDiagEnabled);
   appendAbstractedSequentialBoundaries(
       model1, "design1", abstractedSequentialBoundaries);
+  appendExtractedBoundaryReports(model1, "design1", extractedBoundaryReports);
   if (model1.hasUnsupportedFeatures()) {
     return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
         joinReasons(model1.unsupportedReasons),
         OutputCoverageSelection{},
-        abstractedSequentialBoundaries);
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
 
   // Phase 2: align the externally visible SEC interface, then drop any outputs
@@ -1332,7 +1425,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         0,
         e.what(),
         aligned.outputCoverage,
-        abstractedSequentialBoundaries);
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
   if (aligned.outputs.names.empty()) {
     return makeSecResult(
@@ -1341,7 +1435,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         "No aligned observed outputs remain after skipping cones with no-driver, "
         "multi-driver, or logical-loop connectivity.",
         aligned.outputCoverage,
-        abstractedSequentialBoundaries);
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
 
   if (secDiagEnabled) {
@@ -1408,7 +1503,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
           top0_,
           top1_,
           aligned.outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case SecEngine::KInduction:
       return runKInductionSecEngine(
           symbolSpace.problem,
@@ -1419,7 +1515,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
           top0_,
           top1_,
           aligned.outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case SecEngine::Imc:
       return runImcSecEngine(
           symbolSpace.problem,
@@ -1430,7 +1527,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
           top0_,
           top1_,
           aligned.outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case SecEngine::Legacy:
     default:
       return runLegacySecEngine(
@@ -1442,7 +1540,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
           top0_,
           top1_,
           aligned.outputCoverage,
-          abstractedSequentialBoundaries);
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
   }
 }
 

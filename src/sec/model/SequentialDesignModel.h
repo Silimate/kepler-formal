@@ -32,12 +32,22 @@ struct ConnectivitySkipInfo {
   std::string detail;
 };
 
+struct AbstractedSequentialBoundaryDetail {
+  std::string instancePath;
+  std::vector<SignalKey> stateKeys;
+  std::vector<SignalKey> observedKeys;
+};
+
 // Normalized view of a sequential design after extracting the interface we
 // need for SEC: environment inputs, current-state bits, observed outputs, and
 // the Boolean formulas that describe outputs and next-state updates.
 struct SequentialDesignModel {
   std::vector<SignalKey> environmentInputs;
   std::vector<SignalKey> stateBits;
+  std::vector<SignalKey> topInputKeys;
+  std::vector<SignalKey> topOutputKeys;
+  std::vector<SignalKey> internalBoundaryInputKeys;
+  std::vector<SignalKey> internalBoundaryOutputKeys;
   std::vector<SignalKey> allObservedOutputs;
   std::vector<SignalKey> observedOutputs;
   std::vector<SignalKey> skippedStateBits;
@@ -51,6 +61,8 @@ struct SequentialDesignModel {
       connectivitySkipInfoByKey;
   std::vector<ComplementedStateRelation> complementedStateRelations;
   std::vector<std::string> abstractedSequentialBoundaries;
+  std::vector<AbstractedSequentialBoundaryDetail>
+      abstractedSequentialBoundaryDetails;
   std::vector<std::string> unsupportedReasons;
 
   // Extract the model from the given top design. Unsupported sequential

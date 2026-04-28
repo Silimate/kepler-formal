@@ -29,6 +29,13 @@ enum class SequentialEquivalenceStatus {
   Unsupported,
 };
 
+struct ExtractedBoundaryReportEntry {
+  std::string design;
+  std::string signal;
+  std::vector<std::string> roles;
+  std::string connectivitySkip;
+};
+
 struct SequentialEquivalenceResult {
   SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Unsupported;
   size_t bound = 0;
@@ -37,6 +44,7 @@ struct SequentialEquivalenceResult {
   size_t totalOutputs = 0;
   std::vector<std::string> skippedObservedOutputs;
   std::vector<std::string> abstractedSequentialBoundaries;
+  std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports;
 
   double outputCoveragePercent() const {
     if (totalOutputs == 0) {

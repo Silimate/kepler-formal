@@ -35,7 +35,10 @@
 #include "SNLUtils.h"
 #include "ScopeExtraction.h"
 #include "Config.h"
+#include "KeplerFormalUtils.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
+
+static const char* kExtractedBoundariesReport = "extracted_boundaries.txt";
 
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
@@ -297,6 +300,45 @@ std::string sanitizeFileToken(const std::string& input) {
     out = "scope";
   }
   return out;
+}
+
+namespace {
+
+std::string formatStringList(const std::vector<std::string>& values) {
+  std::ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i) {
+      oss << ", ";
+    }
+    oss << values[i];
+  }
+  oss << "]";
+  return oss.str();
+}
+
+}  // namespace
+
+void writeExtractedBoundaryReport(
+    const std::filesystem::path& reportPath,
+    const std::vector<KEPLER_FORMAL::SEC::ExtractedBoundaryReportEntry>& reports) {
+  if (reports.empty()) {
+    return;
+  }
+
+  std::ofstream report(reportPath, std::ios::trunc);
+  for (size_t i = 0; i < reports.size(); ++i) {
+    const auto& entry = reports[i];
+    report << "- design: " << entry.design << "\n";
+    report << "  signal: " << entry.signal << "\n";
+    report << "  roles: " << formatStringList(entry.roles) << "\n";
+    if (!entry.connectivitySkip.empty()) {
+      report << "  connectivity_skip: " << entry.connectivitySkip << "\n";
+    }
+    if (i + 1 != reports.size()) {
+      report << "\n";
+    }
+  }
 }
 
 struct DesignInputs {
@@ -1447,6 +1489,10 @@ int KeplerFormalMain(int argc, char** argv) {
         SPDLOG_INFO(
             "SEC abstracted uncomputable sequential interfaces as boundaries:\n{}",
             abstractedBoundaries.str());
+      }
+      if (reportSkippedPOs) {
+        writeExtractedBoundaryReport(
+            kExtractedBoundariesReport, result.extractedBoundaryReports);
       }
       switch (result.status) {
         case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:

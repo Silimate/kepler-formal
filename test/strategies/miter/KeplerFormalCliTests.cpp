@@ -2089,6 +2089,35 @@ TEST(KeplerFormalCliTests, ConfigSecAcceptsSkippedPoReporting) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, WriteExtractedBoundaryReportFormatsEntries) {
+  const auto tempDir = makeUniqueTempDir("kepler_formal_cli_extracted_boundaries");
+  const auto reportPath = tempDir / "extracted_boundaries.txt";
+
+  std::vector<KEPLER_FORMAL::SEC::ExtractedBoundaryReportEntry> reports = {
+      {.design = "design0", .signal = "clk[0]", .roles = {"top_input"}},
+      {.design = "design0",
+       .signal = "bad[0]",
+       .roles = {"top_output", "internal_boundary_output", "abstracted_boundary_observed"},
+       .connectivitySkip = "logical-loop connectivity: cycle"}};
+
+  writeExtractedBoundaryReport(reportPath, reports);
+
+  const auto content = readFileContents(reportPath);
+  EXPECT_NE(content.find("design: design0"), std::string::npos);
+  EXPECT_NE(content.find("signal: clk[0]"), std::string::npos);
+  EXPECT_NE(content.find("roles: [top_input]"), std::string::npos);
+  EXPECT_NE(content.find("signal: bad[0]"), std::string::npos);
+  EXPECT_NE(
+      content.find(
+          "roles: [top_output, internal_boundary_output, abstracted_boundary_observed]"),
+      std::string::npos);
+  EXPECT_NE(
+      content.find("connectivity_skip: logical-loop connectivity: cycle"),
+      std::string::npos);
+
+  std::filesystem::remove_all(tempDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",

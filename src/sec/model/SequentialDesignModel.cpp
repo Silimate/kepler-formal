@@ -72,6 +72,18 @@ struct SequentialInstanceScan {
   InstanceBoundaryInfo boundaryInfo;
 };
 
+AbstractedSequentialBoundaryDetail makeAbstractedBoundaryDetail(
+    const InstanceBoundaryInfo& info) {
+  AbstractedSequentialBoundaryDetail detail;
+  detail.instancePath = info.instancePath;
+  detail.stateKeys = info.stateKeys;
+  detail.observedKeys.reserve(info.observedTerms.size());
+  for (const auto& observedTerm : info.observedTerms) {
+    detail.observedKeys.push_back(observedTerm.key);
+  }
+  return detail;
+}
+
 struct BuiltObservedExpr {
   BoolExpr* expr = nullptr;
   std::optional<ConnectivitySkipInfo> connectivitySkip;
@@ -1003,6 +1015,9 @@ struct ExtractContext {
   std::unordered_map<naja::DNL::DNLID, SignalKey> inputKeyByTerm;
   std::unordered_map<naja::DNL::DNLID, SignalKey> outputKeyByTerm;
   std::unordered_map<naja::DNL::DNLID, SignalKey> topOutputKeyByTerm;
+  std::set<SignalKey, SignalKeyLess> topInputKeys;
+  std::set<SignalKey, SignalKeyLess> topOutputKeys;
+  std::set<SignalKey, SignalKeyLess> internalBoundaryOutputKeys;
   std::set<SignalKey, SignalKeyLess> environmentInputs;
   std::set<SignalKey, SignalKeyLess> stateBits;
   std::set<SignalKey, SignalKeyLess> allObservedOutputs;
@@ -1039,18 +1054,21 @@ void collectInitialBuilderBoundary(ExtractContext& ctx) {
   ctx.dnl = naja::DNL::get();
 }
 
-void collectTopObservedOutputs(ExtractContext& ctx, SequentialDesignModel& model) {
+void collectTopInterfaceTerms(ExtractContext& ctx, SequentialDesignModel& model) {
   const auto topInstance = ctx.dnl->getTop();
   for (naja::DNL::DNLID termID = topInstance.getTermIndexes().first;
        termID != naja::DNL::DNLID_MAX && termID <= topInstance.getTermIndexes().second;
        ++termID) {
     const auto& term = ctx.dnl->getDNLTerminalFromID(termID);
-    if (term.getSnlBitTerm()->getDirection() == naja::NL::SNLBitTerm::Direction::Input) {
+    SignalKey key = getTerminalPathKey(term);
+    model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
+    if (term.getSnlBitTerm()->getDirection() ==
+        naja::NL::SNLBitTerm::Direction::Input) {
+      ctx.topInputKeys.insert(key);
       continue;
     }
-    SignalKey key = getTerminalPathKey(term);
+    ctx.topOutputKeys.insert(key);
     ctx.topOutputKeyByTerm.emplace(termID, key);
-    model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
     ctx.allObservedOutputs.insert(key);
   }
 }
@@ -1076,6 +1094,10 @@ void classifyBuilderBoundaryTerms(ExtractContext& ctx, SequentialDesignModel& mo
     SignalKey key = getTerminalPathKey(term);
     ctx.outputKeyByTerm.emplace(outputTermID, key);
     model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
+    if (ctx.topOutputKeys.find(key) == ctx.topOutputKeys.end() &&
+        !isSequentialNextStateInput(term)) {
+      ctx.internalBoundaryOutputKeys.insert(key);
+    }
   }
 }
 
@@ -1157,6 +1179,8 @@ void appendPendingTransitionsForInstance(
     model.abstractedSequentialBoundaries.push_back(
         "Abstracted uncomputable sequential instance `" + info.instancePath +
         "` as a SEC boundary: " + reason);
+    model.abstractedSequentialBoundaryDetails.push_back(
+        makeAbstractedBoundaryDetail(info));
 
     for (const auto& key : info.stateKeys) {
       ctx.abstractedBoundaryStateKeys.insert(key);
@@ -1327,7 +1351,16 @@ void publishNormalizedBoundary(ExtractContext& ctx, SequentialDesignModel& model
     ctx.environmentInputs.insert(key);
   }
 
+  model.topInputKeys.assign(ctx.topInputKeys.begin(), ctx.topInputKeys.end());
+  model.topOutputKeys.assign(ctx.topOutputKeys.begin(), ctx.topOutputKeys.end());
   model.environmentInputs.assign(ctx.environmentInputs.begin(), ctx.environmentInputs.end());
+  for (const auto& key : ctx.environmentInputs) {
+    if (ctx.topInputKeys.find(key) == ctx.topInputKeys.end()) {
+      model.internalBoundaryInputKeys.push_back(key);
+    }
+  }
+  model.internalBoundaryOutputKeys.assign(
+      ctx.internalBoundaryOutputKeys.begin(), ctx.internalBoundaryOutputKeys.end());
   model.stateBits.assign(ctx.stateBits.begin(), ctx.stateBits.end());
   model.allObservedOutputs.assign(ctx.allObservedOutputs.begin(), ctx.allObservedOutputs.end());
   if (ctx.secDiagEnabled) {
@@ -1482,6 +1515,8 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
         model.abstractedSequentialBoundaries.push_back(
             "Abstracted uncomputable sequential instance `" +
             info.instancePath + "` as a SEC boundary: " + reason);
+        model.abstractedSequentialBoundaryDetails.push_back(
+            makeAbstractedBoundaryDetail(info));
         for (const auto& key : info.stateKeys) {
           artifacts.lateAbstractedBoundaryStateKeys.insert(key);
         }
@@ -1986,7 +2021,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   // and scan leaf sequentials so the later formula build knows what it must
   // reconstruct.
   collectInitialBuilderBoundary(ctx);
-  collectTopObservedOutputs(ctx, model);
+  collectTopInterfaceTerms(ctx, model);
   classifyBuilderBoundaryTerms(ctx, model);
   collectSequentialTransitions(ctx, model);
 
