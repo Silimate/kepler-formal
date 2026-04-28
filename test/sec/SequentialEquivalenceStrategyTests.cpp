@@ -33,6 +33,7 @@
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
 #include "common/BoolExprUtils.h"
+#include "common/ProofProblemDebug.h"
 #include "imc/ExactInterpolantSynthesizer.h"
 #include "imc/IMCEngine.h"
 #include "kinduction/KInductionEngine.h"
@@ -1265,6 +1266,30 @@ KInductionProblem buildLinearChainSecProblem(size_t logicalStateCount) {
   problem.property = makeEqualityExpr(
       problem.observedOutputExprs0.front(), problem.observedOutputExprs1.front());
   problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  return problem;
+}
+
+KInductionProblem buildDocumentedBooleanPdrCounterexampleProblem() {
+  KInductionProblem problem;
+  problem.description = "documented Boolean PDR counterexample miter";
+  problem.environmentInputNames = {"in"};
+  problem.observedOutputNames = {"q_miter"};
+  problem.inputSymbols = {4};
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3, 4};
+  problem.initialCondition =
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(2)), BoolExpr::Not(BoolExpr::Var(3)));
+  problem.initializedStateCount = 2;
+  problem.totalStateCount = 2;
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
+  problem.transitions0.emplace_back(2, BoolExpr::Not(BoolExpr::Var(2)));
+  problem.transitions1.emplace_back(3, BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)));
+  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
+  problem.bad = BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::Var(3));
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
   return problem;
@@ -3794,6 +3819,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFindsOneStepCounterexampleForDocumentedBooleanMiter) {
+  const auto problem = buildDocumentedBooleanPdrCounterexampleProblem();
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDoesNotConvergeAtFourFramesWithoutInitialConstraint) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -3912,6 +3948,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_EQ(result.bound, 3u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDebugFormattingPrintsDocumentedBooleanMiterProblemAndFrames) {
+  const auto problem = buildDocumentedBooleanPdrCounterexampleProblem();
+
+  const std::string formattedProblem = formatKInductionProblemForDebug(problem);
+  EXPECT_NE(formattedProblem.find("description: documented Boolean PDR counterexample miter"),
+            std::string::npos);
+  EXPECT_NE(formattedProblem.find("state0_symbols: [x2]"), std::string::npos);
+  EXPECT_NE(formattedProblem.find("state1_symbols: [x3]"), std::string::npos);
+  EXPECT_NE(formattedProblem.find("input_symbols: [x4]"), std::string::npos);
+  EXPECT_NE(formattedProblem.find("transition_formula:"), std::string::npos);
+  EXPECT_NE(formattedProblem.find("x2' = ~x2"), std::string::npos);
+  EXPECT_NE(formattedProblem.find("x3' = x3 AND x4"), std::string::npos);
+  EXPECT_NE(formattedProblem.find("bad: x2 XOR x3"), std::string::npos);
+
+  const ScopedEnvVar secPdrTrace("KEPLER_SEC_PDR_TRACE", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_NE(stderrOutput.find("SEC PDR trace: problem"), std::string::npos);
+  EXPECT_NE(stderrOutput.find("transition_formula:"), std::string::npos);
+  EXPECT_NE(stderrOutput.find("SEC PDR trace: seeded_frames"), std::string::npos);
+  EXPECT_NE(stderrOutput.find("F[1]"), std::string::npos);
+  EXPECT_NE(stderrOutput.find("SEC PDR trace: bad_cube@F1"), std::string::npos);
+  EXPECT_NE(stderrOutput.find("{x2=1, x3=0}"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

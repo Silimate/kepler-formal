@@ -4,11 +4,16 @@
 #include "pdr/PDREngine.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <optional>
+#include <sstream>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "common/ProofProblemDebug.h"
+#include "common/SecDiag.h"
 #include "proof/ProofEngineShared.h"
 #include "kinduction/SatEncoding.h"
 
@@ -534,6 +539,84 @@ void propagateClauses(const KInductionProblem& problem,
   }
 }
 
+bool isSecPdrTraceEnabled() {
+  return std::getenv("KEPLER_SEC_PDR_TRACE") != nullptr;
+}
+
+std::string formatSymbolForPdrTrace(size_t symbol) {
+  if (symbol == 0) {
+    return "FALSE";
+  }
+  if (symbol == 1) {
+    return "TRUE";
+  }
+  return "x" + std::to_string(symbol);
+}
+
+std::string formatCubeForPdrTrace(const StateCube& cube) {
+  std::ostringstream oss;
+  oss << "{";
+  for (size_t i = 0; i < cube.size(); ++i) {
+    if (i != 0) {
+      oss << ", ";
+    }
+    oss << formatSymbolForPdrTrace(cube[i].symbol) << "=" << (cube[i].value ? "1" : "0");
+  }
+  oss << "}";
+  return oss.str();
+}
+
+std::string formatClauseForPdrTrace(const StateClause& clause) {
+  std::ostringstream oss;
+  oss << "(";
+  for (size_t i = 0; i < clause.size(); ++i) {
+    if (i != 0) {
+      oss << " OR ";
+    }
+    if (!clause[i].positive) {
+      oss << "!";
+    }
+    oss << formatSymbolForPdrTrace(clause[i].symbol);
+  }
+  oss << ")";
+  return oss.str();
+}
+
+std::string formatFramesForPdrTrace(const std::vector<FrameClauses>& frames) {
+  std::ostringstream oss;
+  for (size_t level = 0; level < frames.size(); ++level) {
+    oss << "  F[" << level << "]: ";
+    if (level == 0) {
+      oss << "Init";
+    }
+    oss << "\n";
+    if (frames[level].clauses.empty()) {
+      oss << "    <empty>\n";
+      continue;
+    }
+    for (const auto& clause : frames[level].clauses) {
+      oss << "    " << formatClauseForPdrTrace(clause) << "\n";
+    }
+  }
+  return oss.str();
+}
+
+void emitPdrTrace(std::string_view label, const std::string& body) {
+  if (!isSecPdrTraceEnabled()) {
+    return;
+  }
+  emitSecDiag("SEC PDR trace: ", label, "\n", body);
+}
+
+void emitPdrTraceProblem(const KInductionProblem& problem) {
+  emitPdrTrace("problem", formatKInductionProblemForDebug(problem));
+}
+
+void emitPdrTraceFrames(std::string_view label,
+                        const std::vector<FrameClauses>& frames) {
+  emitPdrTrace(label, formatFramesForPdrTrace(frames));
+}
+
 std::optional<PDRResult> tryImmediatePdrProofCandidate(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -598,6 +681,7 @@ PDREngine::PDREngine(const KInductionProblem& problem,
 PDRResult PDREngine::run(size_t maxFrames) const {
   // Build the SEC startup frontier once so every frame query shares the same
   // interpretation of reset/bootstrap and frame-0 equality constraints.
+  emitPdrTraceProblem(problem_);
   BoolExpr* initFormula = buildProofInitFormula(problem_);
   if (initFormula == nullptr) {
     return {PDRStatus::Inconclusive, 0};
@@ -611,12 +695,14 @@ PDRResult PDREngine::run(size_t maxFrames) const {
   }
 
   std::vector<FrameClauses> frames(1);
+  emitPdrTraceFrames("initial_frames", frames);
 
   // Before growing any frame sequence, check whether Init itself already
   // contains a bad state.
   if (auto badCube = findBadCube(
           problem_, solverType_, initFormula, frameInvariant, frames, 0);
       badCube.has_value()) {
+    emitPdrTrace("bad_cube@F0", formatCubeForPdrTrace(*badCube));
     return {PDRStatus::Different, 0};
   }
 
@@ -626,6 +712,7 @@ PDRResult PDREngine::run(size_t maxFrames) const {
 
   const auto seedClauses = buildSeedClauses(problem_, solverType_, initFormula);
   frames.emplace_back(FrameClauses{seedClauses});
+  emitPdrTraceFrames("seeded_frames", frames);
   for (size_t level = 1; level <= maxFrames; ++level) {
     // Phase 1: exhaust the proof obligations created by bad states that still
     // survive in the current frontier.
@@ -636,6 +723,8 @@ PDRResult PDREngine::run(size_t maxFrames) const {
       if (!badCube.has_value()) {
         break;
       }
+      emitPdrTrace(("bad_cube@F" + std::to_string(level)).c_str(),
+                   formatCubeForPdrTrace(*badCube));
       size_t badFrame = level;
       if (!blockProofObligations(
               problem_,
@@ -646,8 +735,10 @@ PDRResult PDREngine::run(size_t maxFrames) const {
               *badCube,
               level,
               badFrame)) {
+        emitPdrTraceFrames("frames_before_counterexample", frames);
         return {PDRStatus::Different, badFrame};
       }
+      emitPdrTraceFrames("frames_after_blocking", frames);
     }
 
     // Phase 2: create the next frame, seed it with already-known startup
@@ -658,11 +749,15 @@ PDRResult PDREngine::run(size_t maxFrames) const {
     // the clause is not preventing an actual bad path
     propagateClauses(
         problem_, solverType_, initFormula, frameInvariant, frames, level);
+    emitPdrTraceFrames(("frames_after_propagation@F" + std::to_string(level)).c_str(),
+                       frames);
 
     // Phase 3: convergence means F[i] == F[i+1], so the frame has become an
     // inductive invariant and the SEC property is proved.
     for (size_t convergenceLevel = 1; convergenceLevel <= level; ++convergenceLevel) {
       if (framesConverged(frames[convergenceLevel], frames[convergenceLevel + 1])) {
+        emitPdrTraceFrames(
+            ("frames_converged@F" + std::to_string(convergenceLevel)).c_str(), frames);
         return {PDRStatus::Equivalent, convergenceLevel};
       }
     }
