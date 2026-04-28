@@ -12,6 +12,6 @@
 // Shared helper for consistent filename handling.
 std::string sanitizeFileToken(const std::string& input);
 
-void writeExtractedBoundaryReport(
+void writeBoundaryTermsReport(
     const std::filesystem::path& reportPath,
     const std::vector<KEPLER_FORMAL::SEC::ExtractedBoundaryReportEntry>& reports);

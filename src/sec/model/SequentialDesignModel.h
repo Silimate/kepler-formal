@@ -46,6 +46,8 @@ struct SequentialDesignModel {
   std::vector<SignalKey> stateBits;
   std::vector<SignalKey> topInputKeys;
   std::vector<SignalKey> topOutputKeys;
+  // Opaque internal cut points introduced by the clause builder for leaves
+  // that are neither modeled sequentially nor reconstructed combinationally.
   std::vector<SignalKey> internalBoundaryInputKeys;
   std::vector<SignalKey> internalBoundaryOutputKeys;
   std::vector<SignalKey> allObservedOutputs;

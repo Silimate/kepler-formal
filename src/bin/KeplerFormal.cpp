@@ -38,7 +38,7 @@
 #include "KeplerFormalUtils.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 
-static const char* kExtractedBoundariesReport = "extracted_boundaries.txt";
+static const char* kBoundaryTermsReport = "boundary_terms.txt";
 
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
@@ -319,7 +319,7 @@ std::string formatStringList(const std::vector<std::string>& values) {
 
 }  // namespace
 
-void writeExtractedBoundaryReport(
+void writeBoundaryTermsReport(
     const std::filesystem::path& reportPath,
     const std::vector<KEPLER_FORMAL::SEC::ExtractedBoundaryReportEntry>& reports) {
   if (reports.empty()) {
@@ -327,6 +327,13 @@ void writeExtractedBoundaryReport(
   }
 
   std::ofstream report(reportPath, std::ios::trunc);
+  report << "# SEC boundary terms report\n";
+  report << "# Categories:\n";
+  report << "# - top_input / top_output: original top-level interface terms.\n";
+  report << "# - opaque_internal_input / opaque_internal_output: internal leaf cut points\n";
+  report << "#   that SEC could not reconstruct combinationally and did not model as sequential.\n";
+  report << "# - abstracted_sequential_state / abstracted_sequential_observed: interface terms\n";
+  report << "#   exposed when an uncomputable sequential instance is abstracted as a SEC boundary.\n\n";
   for (size_t i = 0; i < reports.size(); ++i) {
     const auto& entry = reports[i];
     report << "- design: " << entry.design << "\n";
@@ -1491,8 +1498,8 @@ int KeplerFormalMain(int argc, char** argv) {
             abstractedBoundaries.str());
       }
       if (reportSkippedPOs) {
-        writeExtractedBoundaryReport(
-            kExtractedBoundariesReport, result.extractedBoundaryReports);
+        writeBoundaryTermsReport(
+            kBoundaryTermsReport, result.extractedBoundaryReports);
       }
       switch (result.status) {
         case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:

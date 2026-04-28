@@ -7,3 +7,5 @@ input_paths:
   - seq_design1.sv
 log_level: info
 solver: kissat
+report_skipped_pos: true
+

@@ -1353,6 +1353,14 @@ SNLDesign* createOr2Model(NLLibrary* library) {
   return model;
 }
 
+SNLDesign* createOpaqueLeafModel(NLLibrary* library) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("OPAQUE"));
+  SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("A"));
+  SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Y"));
+  return model;
+}
+
 SNLDesign* createDffTop(
     NLLibrary* library,
     const std::string& name,
@@ -1406,6 +1414,29 @@ SNLDesign* createDffTop(
   } else {
     topOut->setNet(netQ);
   }
+
+  return top;
+}
+
+SNLDesign* createOpaqueBoundaryTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* opaqueModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* opaque = SNLInstance::create(top, opaqueModel, NLName("opaque0"));
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topOut->setNet(netOut);
+  opaque->getInstTerm(opaqueModel->getScalarTerm(NLName("A")))->setNet(netIn);
+  opaque->getInstTerm(opaqueModel->getScalarTerm(NLName("Y")))->setNet(netOut);
 
   return top;
 }
@@ -5131,6 +5162,41 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       EquivalentOpaqueLeafDesignsReportOpaqueInternalBoundaryTerms) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* opaqueModel = createOpaqueLeafModel(primitives);
+  auto* top0 = createOpaqueBoundaryTop(library, "top0", opaqueModel);
+  auto* top1 = createOpaqueBoundaryTop(library, "top1", opaqueModel);
+
+  SequentialEquivalenceStrategy strategy(top0, top1);
+  const auto result = strategy.run(2);
+
+  auto hasRole = [&](const char* design, const char* signal, const char* role) {
+    return std::any_of(
+        result.extractedBoundaryReports.begin(),
+        result.extractedBoundaryReports.end(),
+        [&](const ExtractedBoundaryReportEntry& entry) {
+          return entry.design == design && entry.signal == signal &&
+                 std::find(entry.roles.begin(), entry.roles.end(), role) !=
+                     entry.roles.end();
+        });
+  };
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_TRUE(hasRole("design0", "in[0]", "top_input"));
+  EXPECT_TRUE(hasRole("design0", "out[0]", "top_output"));
+  EXPECT_TRUE(hasRole("design0", "opaque0.Y[0]", "opaque_internal_input"));
+  EXPECT_TRUE(hasRole("design0", "opaque0.A[0]", "opaque_internal_output"));
+  EXPECT_TRUE(hasRole("design1", "opaque0.Y[0]", "opaque_internal_input"));
+  EXPECT_TRUE(hasRole("design1", "opaque0.A[0]", "opaque_internal_output"));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        UnsupportedSequentialInterfacesCanBeAbstractedAsSecBoundariesByDefault) {
   ScopedSecBoundaryAbstraction boundaryAbstraction(true);
   NLUniverse::create();
@@ -5165,14 +5231,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(hasRole("design0", "in[0]", "top_input"));
   EXPECT_TRUE(hasRole("design0", "good[0]", "top_output"));
   EXPECT_TRUE(hasRole("design0", "bad[0]", "top_output"));
-  EXPECT_TRUE(hasRole("design0", "ff0.Q[0]", "internal_boundary_input"));
-  EXPECT_TRUE(hasRole("design0", "ff0.CK[0]", "internal_boundary_output"));
-  EXPECT_TRUE(hasRole("design0", "ff0.Q[0]", "abstracted_boundary_state"));
-  EXPECT_TRUE(hasRole("design0", "ff0.CK[0]", "abstracted_boundary_observed"));
-  EXPECT_TRUE(hasRole("design1", "ff0.Q[0]", "internal_boundary_input"));
-  EXPECT_TRUE(hasRole("design1", "ff0.CK[0]", "internal_boundary_output"));
-  EXPECT_TRUE(hasRole("design1", "ff0.Q[0]", "abstracted_boundary_state"));
-  EXPECT_TRUE(hasRole("design1", "ff0.CK[0]", "abstracted_boundary_observed"));
+  EXPECT_FALSE(hasRole("design0", "ff0.Q[0]", "opaque_internal_input"));
+  EXPECT_FALSE(hasRole("design0", "ff0.CK[0]", "opaque_internal_output"));
+  EXPECT_TRUE(hasRole("design0", "ff0.Q[0]", "abstracted_sequential_state"));
+  EXPECT_TRUE(hasRole("design0", "ff0.CK[0]", "abstracted_sequential_observed"));
+  EXPECT_FALSE(hasRole("design1", "ff0.Q[0]", "opaque_internal_input"));
+  EXPECT_FALSE(hasRole("design1", "ff0.CK[0]", "opaque_internal_output"));
+  EXPECT_TRUE(hasRole("design1", "ff0.Q[0]", "abstracted_sequential_state"));
+  EXPECT_TRUE(hasRole("design1", "ff0.CK[0]", "abstracted_sequential_observed"));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

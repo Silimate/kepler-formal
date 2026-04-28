@@ -748,9 +748,11 @@ void appendExtractedBoundaryReports(
     appendUniqueRole(entry.roles, role);
   };
 
-  // The extracted SEC boundary surface consists of the original top interface
-  // plus any extra internal terminals introduced when an uncomputable
-  // sequential block is abstracted as a boundary.
+  // Boundary terms are the full exposed SEC cut surface:
+  // - the original top interface
+  // - opaque internal cut points from leaves SEC cannot model combinationally
+  //   and does not recognize as sequential
+  // - the interface exposed when an uncomputable sequential is abstracted
   for (const auto& key : model.topInputKeys) {
     addRole(key, "top_input");
   }
@@ -758,17 +760,17 @@ void appendExtractedBoundaryReports(
     addRole(key, "top_output");
   }
   for (const auto& key : model.internalBoundaryInputKeys) {
-    addRole(key, "internal_boundary_input");
+    addRole(key, "opaque_internal_input");
   }
   for (const auto& key : model.internalBoundaryOutputKeys) {
-    addRole(key, "internal_boundary_output");
+    addRole(key, "opaque_internal_output");
   }
   for (const auto& detail : model.abstractedSequentialBoundaryDetails) {
     for (const auto& key : detail.stateKeys) {
-      addRole(key, "abstracted_boundary_state");
+      addRole(key, "abstracted_sequential_state");
     }
     for (const auto& key : detail.observedKeys) {
-      addRole(key, "abstracted_boundary_observed");
+      addRole(key, "abstracted_sequential_observed");
     }
   }
 

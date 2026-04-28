@@ -1017,6 +1017,7 @@ struct ExtractContext {
   std::unordered_map<naja::DNL::DNLID, SignalKey> topOutputKeyByTerm;
   std::set<SignalKey, SignalKeyLess> topInputKeys;
   std::set<SignalKey, SignalKeyLess> topOutputKeys;
+  std::set<SignalKey, SignalKeyLess> internalBoundaryInputKeys;
   std::set<SignalKey, SignalKeyLess> internalBoundaryOutputKeys;
   std::set<SignalKey, SignalKeyLess> environmentInputs;
   std::set<SignalKey, SignalKeyLess> stateBits;
@@ -1028,6 +1029,7 @@ struct ExtractContext {
   std::unordered_set<SignalKey, SignalKeyHash> unsupportedStateBits;
   std::vector<PendingTransition> pendingTransitions;
   std::vector<InstanceBoundaryInfo> instanceBoundaryInfos;
+  std::unordered_map<naja::DNL::DNLID, bool> sequentialInstanceCache;
 };
 
 void collectInitialBuilderBoundary(ExtractContext& ctx) {
@@ -1073,6 +1075,34 @@ void collectTopInterfaceTerms(ExtractContext& ctx, SequentialDesignModel& model)
   }
 }
 
+bool isSequentialInstanceTerm(ExtractContext& ctx,
+                              const naja::DNL::DNLTerminalFull& term) {
+  const auto& instance = term.getDNLInstance();
+  const auto instanceID = instance.getID();
+  if (const auto cached = ctx.sequentialInstanceCache.find(instanceID);
+      cached != ctx.sequentialInstanceCache.end()) {
+    return cached->second;
+  }
+
+  bool isSequentialInstance = false;
+  for (naja::DNL::DNLID termID = instance.getTermIndexes().first;
+       termID != naja::DNL::DNLID_MAX && termID <= instance.getTermIndexes().second;
+       ++termID) {
+    const auto& instanceTerm = ctx.dnl->getDNLTerminalFromID(termID);
+    if (instanceTerm.isNull()) {
+      continue;
+    }
+    if (isSequentialStateOutput(instanceTerm) ||
+        isSequentialNextStateInput(instanceTerm)) {
+      isSequentialInstance = true;
+      break;
+    }
+  }
+
+  ctx.sequentialInstanceCache.emplace(instanceID, isSequentialInstance);
+  return isSequentialInstance;
+}
+
 void classifyBuilderBoundaryTerms(ExtractContext& ctx, SequentialDesignModel& model) {
   // The miter builder already exposes sequential outputs as "inputs" and
   // sequential next-state pins as "outputs"; we normalize those into SEC's
@@ -1086,6 +1116,9 @@ void classifyBuilderBoundaryTerms(ExtractContext& ctx, SequentialDesignModel& mo
       ctx.stateBits.insert(key);
     } else {
       ctx.environmentInputs.insert(key);
+      if (!term.isTopPort() && !isSequentialInstanceTerm(ctx, term)) {
+        ctx.internalBoundaryInputKeys.insert(key);
+      }
     }
   }
 
@@ -1095,7 +1128,7 @@ void classifyBuilderBoundaryTerms(ExtractContext& ctx, SequentialDesignModel& mo
     ctx.outputKeyByTerm.emplace(outputTermID, key);
     model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
     if (ctx.topOutputKeys.find(key) == ctx.topOutputKeys.end() &&
-        !isSequentialNextStateInput(term)) {
+        !isSequentialInstanceTerm(ctx, term)) {
       ctx.internalBoundaryOutputKeys.insert(key);
     }
   }
@@ -1354,11 +1387,8 @@ void publishNormalizedBoundary(ExtractContext& ctx, SequentialDesignModel& model
   model.topInputKeys.assign(ctx.topInputKeys.begin(), ctx.topInputKeys.end());
   model.topOutputKeys.assign(ctx.topOutputKeys.begin(), ctx.topOutputKeys.end());
   model.environmentInputs.assign(ctx.environmentInputs.begin(), ctx.environmentInputs.end());
-  for (const auto& key : ctx.environmentInputs) {
-    if (ctx.topInputKeys.find(key) == ctx.topInputKeys.end()) {
-      model.internalBoundaryInputKeys.push_back(key);
-    }
-  }
+  model.internalBoundaryInputKeys.assign(
+      ctx.internalBoundaryInputKeys.begin(), ctx.internalBoundaryInputKeys.end());
   model.internalBoundaryOutputKeys.assign(
       ctx.internalBoundaryOutputKeys.begin(), ctx.internalBoundaryOutputKeys.end());
   model.stateBits.assign(ctx.stateBits.begin(), ctx.stateBits.end());
