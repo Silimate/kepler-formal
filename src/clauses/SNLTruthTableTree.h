@@ -97,9 +97,13 @@ public:
       size_t borderIndex,
       naja::DNL::DNLID termid,
       std::vector<naja::DNL::DNLID>& loopTerms) const;
+  bool hasTableTerm(naja::DNL::DNLID termid) const;
+  bool willCloneTableTermForBorderLeaf(size_t borderIndex,
+                                       naja::DNL::DNLID termid) const;
 
   // allocateNode guarantees id assignment before publishing node in nodes_
   uint32_t allocateNode(std::shared_ptr<Node>& np);
+  uint32_t allocateFreshNode(std::shared_ptr<Node>& np);
 
   // finalize repairs and validates the tree; must be called once after build and before traversal
   // It will remap children/parent ids to canonical ids and throw on unresolved references

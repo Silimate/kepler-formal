@@ -220,6 +220,43 @@ const SNLTruthTable& SNLTruthTableTree::Node::getTruthTable() const {
 
 static std::shared_ptr<SNLTruthTableTree::Node> nullNodePtr = nullptr;
 
+namespace {
+
+bool isNodeOnParentPath(const SNLTruthTableTree& tree,
+                        uint32_t startId,
+                        uint32_t candidateId) {
+  if (startId == SNLTruthTableTree::kInvalidId ||
+      candidateId == SNLTruthTableTree::kInvalidId) {
+    return false;
+  }
+
+  std::vector<uint32_t> pending;
+  std::unordered_set<uint32_t> visited;
+  pending.emplace_back(startId);
+  while (!pending.empty()) {
+    const uint32_t nodeId = pending.back();
+    pending.pop_back();
+    if (nodeId == SNLTruthTableTree::kInvalidId ||
+        !visited.insert(nodeId).second) {
+      continue;
+    }
+    if (nodeId == candidateId) {
+      return true;
+    }
+
+    const auto& nodeSp = tree.nodeFromId(nodeId);
+    if (!nodeSp) {
+      continue; // LCOV_EXCL_LINE
+    }
+    for (const auto parentId : nodeSp->parentIds) {
+      pending.emplace_back(parentId);
+    }
+  }
+  return false;
+}
+
+} // namespace
+
 //----------------------------------------------------------------------
 // nodeFromId helper
 //----------------------------------------------------------------------
@@ -338,6 +375,20 @@ uint32_t SNLTruthTableTree::allocateNode(std::shared_ptr<Node>& np) {
   if (np->type == Node::Type::Table) {
     termid2nodeid_[np->data.termid] = id;
   }
+  return id;
+}
+
+uint32_t SNLTruthTableTree::allocateFreshNode(std::shared_ptr<Node>& np) {
+  if (!np) {
+    // LCOV_EXCL_START
+    throw std::invalid_argument("allocateFreshNode: null");
+    // LCOV_EXCL_STOP
+  }
+
+  const uint32_t id = static_cast<uint32_t>(nodes_.size()) + kIdOffset;
+  np->nodeID = id;
+  np->tree = this;
+  nodes_.emplace_back(np);
   return id;
 }
 
@@ -537,6 +588,24 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
   return true;
 }
 
+bool SNLTruthTableTree::hasTableTerm(naja::DNL::DNLID termid) const {
+  return termid2nodeid_.find(termid) != termid2nodeid_.end();
+}
+
+bool SNLTruthTableTree::willCloneTableTermForBorderLeaf(
+    size_t borderIndex,
+    naja::DNL::DNLID termid) const {
+  if (borderIndex >= borderLeaves_.size()) {
+    return false;
+  }
+  const auto termIt = termid2nodeid_.find(termid);
+  if (termIt == termid2nodeid_.end()) {
+    return false;
+  }
+  return isNodeOnParentPath(*this, borderLeaves_[borderIndex].parentId,
+                            termIt->second);
+}
+
 //----------------------------------------------------------------------
 // concatBody
 //----------------------------------------------------------------------
@@ -563,48 +632,60 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
 
   uint32_t arity = 1;
   std::shared_ptr<Node> newNodeSp;
+  bool forceFreshTableNode = false;
   if (instid != naja::DNL::DNLID_MAX) {
     newNodeSp = std::make_shared<Node>(this, instid, termid, Node::Type::Table);
     const auto& tbl = newNodeSp->getTruthTable();
     arity = tbl.size();
     auto iter = termid2nodeid_.find(termid);
     if (iter != termid2nodeid_.end()) {
-      DEBUG_LOG(
-          "###@@@@concat: node for termid %zu %s %s already exists, reusing\n",
-          termid,
-          naja::DNL::get()
-              ->getDNLTerminalFromID(termid)
-              .getSnlBitTerm()
-              ->getName()
-              .getString()
-              .c_str(),
-          naja::DNL::get()
-              ->getDNLTerminalFromID(termid)
-              .getDNLInstance()
-              .getSNLModel()
-              ->getName()
-              .getString()
-              .c_str());
-      // node exist, just connect it to the new parent, but leave the child
-      // connections intact
-      newNodeSp = nodeFromId(iter->second);
-      assert(newNodeSp->type == Node::Type::Table);
-      newNodeSp->parentIds.emplace_back(parentId);
-      parentSp->childrenIds[leaf.childPos] = newNodeSp->nodeID;
-      // assert at least one child for newNodeSp
-      if (newNodeSp->childrenIds.size() == 0) {
-        // LCOV_EXCL_START
-        throw std::logic_error("concat: existing node has no children");
-        // LCOV_EXCL_STOP
+      if (willCloneTableTermForBorderLeaf(borderIndex, termid)) {
+        // This term is already on the path from the current leaf to the root.
+        // Reusing the canonical node here would make the tree cyclic even when
+        // the netlist path is only a transparent alias of the same expression.
+        // Clone the table node for this occurrence and keep the canonical map
+        // pointing at the original node for ordinary reconvergence elsewhere.
+        forceFreshTableNode = true;
+      } else {
+        DEBUG_LOG(
+            "###@@@@concat: node for termid %zu %s %s already exists, "
+            "reusing\n",
+            termid,
+            naja::DNL::get()
+                ->getDNLTerminalFromID(termid)
+                .getSnlBitTerm()
+                ->getName()
+                .getString()
+                .c_str(),
+            naja::DNL::get()
+                ->getDNLTerminalFromID(termid)
+                .getDNLInstance()
+                .getSNLModel()
+                ->getName()
+                .getString()
+                .c_str());
+        // node exist, just connect it to the new parent, but leave the child
+        // connections intact
+        newNodeSp = nodeFromId(iter->second);
+        assert(newNodeSp->type == Node::Type::Table);
+        newNodeSp->parentIds.emplace_back(parentId);
+        parentSp->childrenIds[leaf.childPos] = newNodeSp->nodeID;
+        // assert at least one child for newNodeSp
+        if (newNodeSp->childrenIds.size() == 0) {
+          // LCOV_EXCL_START
+          throw std::logic_error("concat: existing node has no children");
+          // LCOV_EXCL_STOP
+        }
+        return *newNodeSp;
       }
-      return *newNodeSp;
     }
   } else {
     arity = 1;
     newNodeSp = std::make_shared<Node>(this, instid, termid, Node::Type::P);
   }
 
-  uint32_t newNodeId = allocateNode(newNodeSp);
+  uint32_t newNodeId = forceFreshTableNode ? allocateFreshNode(newNodeSp)
+                                           : allocateNode(newNodeSp);
 
   // Connecting children, skipped if node already existed
 

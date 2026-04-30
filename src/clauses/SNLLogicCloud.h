@@ -17,9 +17,13 @@ class SNLLogicCloud {
 
   SNLLogicCloud(naja::DNL::DNLID seedOutputTerm,
                 const std::vector<bool>& PIs,
-                const std::vector<bool>& POs)
+                const std::vector<bool>& POs,
+                bool allowInternalLogicalLoopFrontier = false,
+                bool allowInternalNoDriverFrontier = false)
       : seedOutputTerm_(seedOutputTerm), dnl_(*naja::DNL::get()),
-        PIs_(PIs), POs_(POs) {
+        PIs_(PIs), POs_(POs),
+        allowInternalLogicalLoopFrontier_(allowInternalLogicalLoopFrontier),
+        allowInternalNoDriverFrontier_(allowInternalNoDriverFrontier) {
   }
   void compute();
   static void flushSkippedPOReports();
@@ -59,6 +63,12 @@ class SNLLogicCloud {
   const naja::DNL::DNLFull& dnl_;
   const std::vector<bool>& PIs_;
   const std::vector<bool>& POs_;
+  // These switches are intentionally opt-in. Normal top-output expansion must
+  // keep reporting no-driver and logical-loop cones as skipped outputs, while
+  // SEC can request an internal dependency root and cut that one problematic
+  // leaf as an opaque frontier input for structured-memory modeling.
+  bool allowInternalLogicalLoopFrontier_ = false;
+  bool allowInternalNoDriverFrontier_ = false;
   SkipReason skipReason_ = SkipReason::None;
   std::string skipReasonText_;
 };

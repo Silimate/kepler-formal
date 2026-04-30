@@ -8,6 +8,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -24,6 +26,8 @@
 #include "NLUniverse.h"
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
+#include "SNLLibertyConstructor.h"
+#include "SNLSVConstructor.h"
 #include "SNLPath.h"
 #include "SNLBusNet.h"
 #include "SNLBusNetBit.h"
@@ -42,6 +46,7 @@
 #include "kinduction/SatEncoding.h"
 #include "kinduction/InductionStepSolver.h"
 #include "model/SequentialDesignModel.h"
+#include "BuildPrimaryOutputClauses.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 #include "strategy/StructuralStateInvariant.h"
@@ -936,6 +941,254 @@ std::optional<naja::DNL::DNLID> findTermByDisplayNameForTest(
   return std::nullopt;
 }
 
+std::optional<naja::DNL::DNLID> findBuildableOutputRootForTest(
+    naja::DNL::DNLFull* dnl,
+    naja::DNL::DNLID requestedTermID,
+    std::vector<std::string>* chain = nullptr) {
+  std::unordered_set<naja::DNL::DNLID> visitedTerms;
+  naja::DNL::DNLID currentTermID = requestedTermID;
+  while (currentTermID != naja::DNL::DNLID_MAX &&
+         visitedTerms.insert(currentTermID).second) {
+    const auto& currentTerm = dnl->getDNLTerminalFromID(currentTermID);
+    if (currentTerm.isNull()) {
+      return std::nullopt;
+    }
+    if (chain != nullptr) {
+      chain->push_back(getTerminalDisplayNameForTest(currentTerm));
+    }
+    if (currentTerm.isTopPort() &&
+        currentTerm.getSnlBitTerm()->getDirection() !=
+            naja::NL::SNLBitTerm::Direction::Output) {
+      return currentTermID;
+    }
+    if (currentTerm.getSnlBitTerm()->getDirection() ==
+        naja::NL::SNLBitTerm::Direction::Output) {
+      const auto& inst = currentTerm.getDNLInstance();
+      auto* model = inst.getSNLModel();
+      if (model != nullptr && naja::NL::NLDB0::isAssign(model)) {
+        std::optional<naja::DNL::DNLID> passthroughDriver;
+        for (auto* inputBitTerm :
+             naja::NL::SNLDesignModeling::getCombinatorialInputs(
+                 const_cast<naja::NL::SNLBitTerm*>(currentTerm.getSnlBitTerm()))) {
+          if (inputBitTerm == nullptr ||
+              inputBitTerm->getDirection() ==
+                  naja::NL::SNLBitTerm::Direction::Output) {
+            continue;
+          }
+          const auto& inputTerm = inst.getTerminalFromBitTerm(inputBitTerm);
+          if (inputTerm.isNull() || inputTerm.getIsoID() == naja::DNL::DNLID_MAX) {
+            passthroughDriver.reset();
+            break;
+          }
+          const auto& iso =
+              dnl->getDNLIsoDB().getIsoFromIsoIDconst(inputTerm.getIsoID());
+          if (iso.isConstant() || iso.getDrivers().size() != 1) {
+            passthroughDriver.reset();
+            break;
+          }
+          if (passthroughDriver.has_value()) {
+            passthroughDriver.reset();
+            break;
+          }
+          passthroughDriver = iso.getDrivers().front();
+        }
+        if (passthroughDriver.has_value()) {
+          currentTermID = *passthroughDriver;
+          continue;
+        }
+      }
+      return currentTermID;
+    }
+
+    const auto isoID = currentTerm.getIsoID();
+    if (isoID == naja::DNL::DNLID_MAX) {
+      return std::nullopt;
+    }
+    const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(isoID);
+    if (iso.isConstant() || iso.getDrivers().size() != 1) {
+      return std::nullopt;
+    }
+    currentTermID = iso.getDrivers().front();
+  }
+  return std::nullopt;
+}
+
+struct BuilderOutputProbeForTest {
+  std::optional<naja::DNL::DNLID> normalizedRoot;
+  std::string normalizedRootName;
+  std::string normalizedRootModelName;
+  bool hasBuiltExpr = false;
+  bool hasSkip = false;
+  std::string skipDetail;
+  std::vector<std::string> normalizationChain;
+  std::vector<std::string> rootSupportTerms;
+  std::vector<std::string> rootCombinationalInputs;
+  std::vector<std::string> driverSpine;
+};
+
+BuilderOutputProbeForTest probeRequestedBuilderOutputForTest(
+    naja::DNL::DNLFull* dnl,
+    naja::DNL::DNLID requestedTermID) {
+  BuilderOutputProbeForTest probe;
+  probe.normalizedRoot =
+      findBuildableOutputRootForTest(dnl, requestedTermID, &probe.normalizationChain);
+  if (!probe.normalizedRoot.has_value()) {
+    return probe;
+  }
+  probe.normalizedRootName =
+      getTerminalDisplayNameForTest(dnl->getDNLTerminalFromID(*probe.normalizedRoot));
+  const auto& rootTerm = dnl->getDNLTerminalFromID(*probe.normalizedRoot);
+  const auto& rootInst = rootTerm.getDNLInstance();
+  probe.normalizedRootModelName = rootInst.getSNLModel()->getName().getString();
+  for (naja::DNL::DNLID termID = rootInst.getTermIndexes().first;
+       termID <= rootInst.getTermIndexes().second; ++termID) {
+    const auto& term = dnl->getDNLTerminalFromID(termID);
+    if (term.isNull() || term.getSnlBitTerm()->getDirection() ==
+                             naja::NL::SNLBitTerm::Direction::Output) {
+      continue;
+    }
+    std::ostringstream support;
+    support << getTerminalDisplayNameForTest(term);
+    if (term.getIsoID() == naja::DNL::DNLID_MAX) {
+      support << " iso=<invalid>";
+    } else {
+      const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID());
+      support << " iso=" << iso.getIsoID()
+              << " drivers=" << iso.getDrivers().size()
+              << " readers=" << iso.getReaders().size()
+              << " const0=" << (iso.isConstant0() ? "true" : "false")
+              << " const1=" << (iso.isConstant1() ? "true" : "false")
+              << " driver_terms=[";
+      for (size_t index = 0; index < iso.getDrivers().size(); ++index) {
+        if (index != 0) {
+          support << ", ";
+        }
+        const auto& driverTerm = dnl->getDNLTerminalFromID(iso.getDrivers()[index]);
+        support << getTerminalDisplayNameForTest(driverTerm)
+                << "{dir="
+                << static_cast<int>(driverTerm.getSnlBitTerm()->getDirection())
+                << ",model="
+                << driverTerm.getDNLInstance().getSNLModel()->getName().getString()
+                << "}";
+      }
+      support << "]";
+    }
+    probe.rootSupportTerms.push_back(support.str());
+  }
+  for (auto* bitTerm :
+       naja::NL::SNLDesignModeling::getCombinatorialInputs(rootTerm.getSnlBitTerm())) {
+    if (bitTerm == nullptr) {
+      continue;
+    }
+    const auto& inputTerm = rootInst.getTerminalFromBitTerm(bitTerm);
+    if (inputTerm.isNull()) {
+      continue;
+    }
+    std::ostringstream support;
+    support << getTerminalDisplayNameForTest(inputTerm);
+    if (inputTerm.getIsoID() == naja::DNL::DNLID_MAX) {
+      support << " iso=<invalid>";
+    } else {
+      const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(inputTerm.getIsoID());
+      support << " iso=" << iso.getIsoID()
+              << " drivers=" << iso.getDrivers().size()
+              << " readers=" << iso.getReaders().size()
+              << " const0=" << (iso.isConstant0() ? "true" : "false")
+              << " const1=" << (iso.isConstant1() ? "true" : "false")
+              << " driver_terms=[";
+      for (size_t index = 0; index < iso.getDrivers().size(); ++index) {
+        if (index != 0) {
+          support << ", ";
+        }
+        const auto& driverTerm = dnl->getDNLTerminalFromID(iso.getDrivers()[index]);
+        support << getTerminalDisplayNameForTest(driverTerm)
+                << "{dir="
+                << static_cast<int>(driverTerm.getSnlBitTerm()->getDirection())
+                << ",model="
+                << driverTerm.getDNLInstance().getSNLModel()->getName().getString()
+                << "}";
+      }
+      support << "]";
+    }
+    probe.rootCombinationalInputs.push_back(support.str());
+  }
+  {
+    std::unordered_set<naja::DNL::DNLID> visited;
+    naja::DNL::DNLID currentTermID = *probe.normalizedRoot;
+    while (visited.insert(currentTermID).second) {
+      const auto& currentTerm = dnl->getDNLTerminalFromID(currentTermID);
+      std::ostringstream step;
+      step << getTerminalDisplayNameForTest(currentTerm)
+           << "{model="
+           << currentTerm.getDNLInstance().getSNLModel()->getName().getString()
+           << "}";
+      probe.driverSpine.push_back(step.str());
+
+      std::optional<naja::DNL::DNLID> nextDriver;
+      bool ambiguousNext = false;
+      const auto& currentInst = currentTerm.getDNLInstance();
+      for (auto* bitTerm : naja::NL::SNLDesignModeling::getCombinatorialInputs(
+               const_cast<naja::NL::SNLBitTerm*>(currentTerm.getSnlBitTerm()))) {
+        if (bitTerm == nullptr ||
+            bitTerm->getDirection() ==
+                naja::NL::SNLBitTerm::Direction::Output) {
+          continue;
+        }
+        const auto& inputTerm = currentInst.getTerminalFromBitTerm(bitTerm);
+        if (inputTerm.isNull() || inputTerm.getIsoID() == naja::DNL::DNLID_MAX) {
+          ambiguousNext = true;
+          nextDriver.reset();
+          break;
+        }
+        const auto& iso =
+            dnl->getDNLIsoDB().getIsoFromIsoIDconst(inputTerm.getIsoID());
+        if (iso.isConstant()) {
+          continue;
+        }
+        if (iso.getDrivers().size() != 1) {
+          ambiguousNext = true;
+          nextDriver.reset();
+          break;
+        }
+        if (nextDriver.has_value()) {
+          ambiguousNext = true;
+          nextDriver.reset();
+          break;
+        }
+        nextDriver = iso.getDrivers().front();
+      }
+      if (ambiguousNext || !nextDriver.has_value()) {
+        break;
+      }
+      currentTermID = *nextDriver;
+    }
+  }
+
+  KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
+  builder.collect();
+  builder.setAllowInternalLogicalLoopFrontier(true);
+  builder.setAllowInternalNoDriverFrontier(true);
+  builder.setOutputs({*probe.normalizedRoot});
+  builder.build();
+
+  const auto& outputs = builder.getOutputs();
+  const auto& exprs = builder.getPOs();
+  for (size_t index = 0; index < outputs.size(); ++index) {
+    if (outputs[index] != *probe.normalizedRoot) {
+      continue;
+    }
+    probe.hasBuiltExpr =
+        exprs[index] != nullptr && exprs[index]->isValid();
+    break;
+  }
+  if (const auto skippedIt = builder.getSkippedOutputs().find(*probe.normalizedRoot);
+      skippedIt != builder.getSkippedOutputs().end()) {
+    probe.hasSkip = true;
+    probe.skipDetail = skippedIt->second.detail;
+  }
+  return probe;
+}
+
 std::vector<naja::DNL::DNLID> resolveTermsByKeyForTest(
     naja::DNL::DNLFull* dnl,
     const std::vector<SignalKey>& keys) {
@@ -1359,6 +1612,554 @@ SNLDesign* createOpaqueLeafModel(NLLibrary* library) {
   SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("A"));
   SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Y"));
   return model;
+}
+
+SNLDesign* createSinglePortMemoryModel(
+    NLLibrary* library,
+    const std::string& name) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
+  auto* clock =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CLK"));
+  auto* chipEnable =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CE"));
+  auto* writeEnable =
+      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("WE"));
+  auto* address =
+      SNLBusTerm::create(model, SNLTerm::Direction::Input, 1, 0, NLName("ADDR"));
+  auto* writeData =
+      SNLBusTerm::create(model, SNLTerm::Direction::Input, 3, 0, NLName("WDATA"));
+  auto* writeMask =
+      SNLBusTerm::create(model, SNLTerm::Direction::Input, 3, 0, NLName("WMASK"));
+  auto* readData =
+      SNLBusTerm::create(model, SNLTerm::Direction::Output, 3, 0, NLName("RDATA"));
+
+  SNLDesignModeling::BitTerms readDataBits;
+  SNLDesignModeling::BitTerms readAddressBits;
+  SNLDesignModeling::BitTerms writeDataBits;
+  SNLDesignModeling::BitTerms writeMaskBits;
+  for (int bit = 0; bit <= 3; ++bit) {
+    readDataBits.push_back(readData->getBit(bit));
+    writeDataBits.push_back(writeData->getBit(bit));
+    writeMaskBits.push_back(writeMask->getBit(bit));
+    if (bit <= 1) {
+      readAddressBits.push_back(address->getBit(bit));
+    }
+  }
+  SNLDesignModeling::addClockToOutputsArcs(clock, readDataBits);
+  SNLDesignModeling::addInputsToClockArcs(
+      {address->getBit(0),
+       address->getBit(1),
+       writeData->getBit(0),
+       writeData->getBit(1),
+       writeData->getBit(2),
+       writeData->getBit(3),
+       writeMask->getBit(0),
+       writeMask->getBit(1),
+       writeMask->getBit(2),
+       writeMask->getBit(3),
+       chipEnable,
+       writeEnable},
+      clock);
+  SNLDesignModeling::addCombinatorialArcs(readAddressBits, readDataBits);
+
+  SNLDesignModeling::MemoryInterface interface;
+  interface.width = 4;
+  interface.depth = 4;
+  interface.abits = 2;
+  interface.clock = clock;
+  interface.readPorts.push_back(
+      {.address = {address->getBit(0), address->getBit(1)},
+       .data = {readData->getBit(0),
+                readData->getBit(1),
+                readData->getBit(2),
+                readData->getBit(3)}});
+  interface.writePorts.push_back(
+      {.address = {address->getBit(0), address->getBit(1)},
+       .data = {writeData->getBit(0),
+                writeData->getBit(1),
+                writeData->getBit(2),
+                writeData->getBit(3)},
+       .mask = {writeMask->getBit(0),
+                writeMask->getBit(1),
+                writeMask->getBit(2),
+                writeMask->getBit(3)},
+       .enables = {chipEnable, writeEnable}});
+  SNLDesignModeling::setMemoryInterface(model, interface);
+  return model;
+}
+
+SNLDesign* createSinglePortMemoryTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* memoryModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topChipEnable =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("ce"));
+  auto* topWriteEnable =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("we"));
+  auto* topAddress =
+      SNLBusTerm::create(top, SNLTerm::Direction::Input, 1, 0, NLName("addr"));
+  auto* topWriteData =
+      SNLBusTerm::create(top, SNLTerm::Direction::Input, 3, 0, NLName("wdata"));
+  auto* topWriteMask =
+      SNLBusTerm::create(top, SNLTerm::Direction::Input, 3, 0, NLName("wmask"));
+  auto* topOut =
+      SNLBusTerm::create(top, SNLTerm::Direction::Output, 3, 0, NLName("out"));
+
+  auto* memory = SNLInstance::create(top, memoryModel, NLName("mem0"));
+  auto* clockNet = SNLScalarNet::create(top, NLName("clk_net"));
+  auto* chipEnableNet = SNLScalarNet::create(top, NLName("ce_net"));
+  auto* writeEnableNet = SNLScalarNet::create(top, NLName("we_net"));
+  auto* addressNet = SNLBusNet::create(top, 1, 0, NLName("addr_net"));
+  auto* writeDataNet = SNLBusNet::create(top, 3, 0, NLName("wdata_net"));
+  auto* writeMaskNet = SNLBusNet::create(top, 3, 0, NLName("wmask_net"));
+  auto* outNet = SNLBusNet::create(top, 3, 0, NLName("out_net"));
+
+  topClock->setNet(clockNet);
+  topChipEnable->setNet(chipEnableNet);
+  topWriteEnable->setNet(writeEnableNet);
+  memory->getInstTerm(memoryModel->getScalarTerm(NLName("CLK")))->setNet(clockNet);
+  memory->getInstTerm(memoryModel->getScalarTerm(NLName("CE")))->setNet(chipEnableNet);
+  memory->getInstTerm(memoryModel->getScalarTerm(NLName("WE")))->setNet(writeEnableNet);
+
+  auto* modelAddress = memoryModel->getBusTerm(NLName("ADDR"));
+  auto* modelWriteData = memoryModel->getBusTerm(NLName("WDATA"));
+  auto* modelWriteMask = memoryModel->getBusTerm(NLName("WMASK"));
+  auto* modelReadData = memoryModel->getBusTerm(NLName("RDATA"));
+  for (int bit = 0; bit <= 1; ++bit) {
+    topAddress->getBit(bit)->setNet(addressNet->getBit(bit));
+    memory->getInstTerm(modelAddress->getBit(bit))->setNet(addressNet->getBit(bit));
+  }
+  for (int bit = 0; bit <= 3; ++bit) {
+    topWriteData->getBit(bit)->setNet(writeDataNet->getBit(bit));
+    topWriteMask->getBit(bit)->setNet(writeMaskNet->getBit(bit));
+    topOut->getBit(bit)->setNet(outNet->getBit(bit));
+    memory->getInstTerm(modelWriteData->getBit(bit))->setNet(writeDataNet->getBit(bit));
+    memory->getInstTerm(modelWriteMask->getBit(bit))->setNet(writeMaskNet->getBit(bit));
+    memory->getInstTerm(modelReadData->getBit(bit))->setNet(outNet->getBit(bit));
+  }
+
+  return top;
+}
+
+std::filesystem::path repoRootForSecTests() {
+  return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+}
+
+struct Cva6SourceContextForSecTests {
+  std::filesystem::path cva6RepoDir;
+  std::filesystem::path hpdcacheDir;
+  std::string targetCfg;
+};
+
+std::optional<Cva6SourceContextForSecTests> resolveCva6SourceContextForSecTests() {
+  const char* cva6RepoDirEnv = std::getenv("CVA6_REPO_DIR");
+  const char* hpdcacheDirEnv = std::getenv("HPDCACHE_DIR");
+  const char* targetCfgEnv = std::getenv("TARGET_CFG");
+
+  std::filesystem::path cva6RepoDir;
+  if (cva6RepoDirEnv != nullptr && *cva6RepoDirEnv != '\0') {
+    cva6RepoDir = cva6RepoDirEnv;
+  } else {
+    const auto fallbackRepoDir = std::filesystem::path("/Users/noamcohen/dev/CVA6/cva6");
+    if (std::filesystem::exists(fallbackRepoDir)) {
+      cva6RepoDir = fallbackRepoDir;
+    }
+  }
+  if (cva6RepoDir.empty() || !std::filesystem::exists(cva6RepoDir)) {
+    return std::nullopt;
+  }
+
+  std::filesystem::path hpdcacheDir;
+  if (hpdcacheDirEnv != nullptr && *hpdcacheDirEnv != '\0') {
+    hpdcacheDir = hpdcacheDirEnv;
+  } else {
+    const auto fallbackHpdcacheDir =
+        cva6RepoDir / "core" / "cache_subsystem" / "hpdcache";
+    if (std::filesystem::exists(fallbackHpdcacheDir)) {
+      hpdcacheDir = fallbackHpdcacheDir;
+    }
+  }
+  if (hpdcacheDir.empty() || !std::filesystem::exists(hpdcacheDir)) {
+    return std::nullopt;
+  }
+
+  std::string targetCfg = "cv64a6_imafdc_sv39";
+  if (targetCfgEnv != nullptr && *targetCfgEnv != '\0') {
+    targetCfg = targetCfgEnv;
+  }
+
+  return Cva6SourceContextForSecTests{
+      std::move(cva6RepoDir), std::move(hpdcacheDir), std::move(targetCfg)};
+}
+
+std::string substituteCva6FlistVariablesForSecTests(
+    std::string text,
+    const Cva6SourceContextForSecTests& context) {
+  const std::array<std::pair<std::string_view, std::string>, 3> substitutions{{
+      {"${CVA6_REPO_DIR}", context.cva6RepoDir.string()},
+      {"${HPDCACHE_DIR}", context.hpdcacheDir.string()},
+      {"${TARGET_CFG}", context.targetCfg},
+  }};
+
+  for (const auto& [needle, replacement] : substitutions) {
+    size_t pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+      text.replace(pos, needle.size(), replacement);
+      pos += replacement.size();
+    }
+  }
+  return text;
+}
+
+void collectExpandedSlangArgsFromCommandFileForSecTests(
+    const std::filesystem::path& commandFile,
+    const Cva6SourceContextForSecTests& context,
+    std::unordered_set<std::string>& visitedFiles,
+    std::vector<std::string>& args) {
+  const auto normalizedPath = std::filesystem::weakly_canonical(commandFile);
+  if (!visitedFiles.insert(normalizedPath.string()).second) {
+    return;
+  }
+
+  std::ifstream input(normalizedPath);
+  ASSERT_TRUE(input.good()) << "Failed to read command file: " << normalizedPath.string();
+
+  std::string line;
+  while (std::getline(input, line)) {
+    line = substituteCva6FlistVariablesForSecTests(line, context);
+    const auto commentPos = line.find("//");
+    if (commentPos != std::string::npos) {
+      line.erase(commentPos);
+    }
+    const auto first = line.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+      continue;
+    }
+    const auto last = line.find_last_not_of(" \t\r\n");
+    line = line.substr(first, last - first + 1);
+    if (line.empty()) {
+      continue;
+    }
+
+    if (line.rfind("-F ", 0) == 0 || line.rfind("-f ", 0) == 0) {
+      const auto nestedPath = normalizedPath.parent_path() / line.substr(3);
+      collectExpandedSlangArgsFromCommandFileForSecTests(
+          nestedPath, context, visitedFiles, args);
+      continue;
+    }
+    args.push_back(std::move(line));
+  }
+}
+
+SNLSVConstructor::Paths buildExpandedCva6SlangArgsForSecTests(
+    const Cva6SourceContextForSecTests& context,
+    const std::string& topName,
+    const std::vector<std::filesystem::path>& extraSources = {}) {
+  const auto flistPath = context.cva6RepoDir / "core" / "Flist.cva6";
+  std::unordered_set<std::string> visitedFiles;
+  std::vector<std::string> args;
+  collectExpandedSlangArgsFromCommandFileForSecTests(
+      flistPath, context, visitedFiles, args);
+  for (const auto& extraSource : extraSources) {
+    args.push_back(extraSource.string());
+  }
+  args.push_back("--top");
+  args.push_back(topName);
+
+  SNLSVConstructor::Paths paths;
+  paths.reserve(args.size());
+  for (const auto& arg : args) {
+    paths.emplace_back(arg);
+  }
+  return paths;
+}
+
+SNLDesign* loadLibertyMemoryModel(
+    NLLibrary* primitivesLibrary,
+    const std::string& libertyFileName,
+    const std::string& cellName) {
+  SNLLibertyConstructor constructor(primitivesLibrary);
+  constructor.construct(repoRootForSecTests() / "example" / libertyFileName);
+  auto* model = primitivesLibrary->getSNLDesign(NLName(cellName));
+  if (model == nullptr) {
+    throw std::runtime_error("Failed to load Liberty memory model `" + cellName + "`");
+  }
+  return model;
+}
+
+SNLDesign* loadSystemVerilogTopFromSource(
+    NLLibrary* designLibrary,
+    const std::string& moduleName,
+    const std::string& sourceText) {
+  const auto svDir =
+      std::filesystem::temp_directory_path() / ("sec_sv_" + moduleName);
+  std::filesystem::remove_all(svDir);
+  std::filesystem::create_directories(svDir);
+
+  const auto svPath = svDir / (moduleName + ".sv");
+  std::ofstream svFile(svPath);
+  if (!svFile.good()) {
+    throw std::runtime_error(
+        "Failed to create temporary SystemVerilog source `" +
+        svPath.string() + "`");
+  }
+  svFile << sourceText;
+  svFile.close();
+
+  SNLSVConstructor constructor(designLibrary);
+  constructor.construct(svPath);
+  auto* top = designLibrary->getSNLDesign(NLName(moduleName));
+  if (top == nullptr) {
+    throw std::runtime_error(
+        "Failed to construct SystemVerilog top `" + moduleName + "`");
+  }
+  return top;
+}
+
+SNLDesign* loadSystemVerilogTopFromPaths(
+    NLLibrary* designLibrary,
+    const std::string& moduleName,
+    const SNLSVConstructor::Paths& paths) {
+  SNLSVConstructor constructor(designLibrary);
+  constructor.construct(paths);
+  auto* top = designLibrary->getSNLDesign(NLName(moduleName));
+  if (top == nullptr) {
+    throw std::runtime_error(
+        "Failed to construct SystemVerilog top `" + moduleName + "`");
+  }
+  return top;
+}
+
+SNLDesign* loadRealCva6PerfCountersTargetConfigTopForSecTests(
+    NLLibrary* designLibrary,
+    const Cva6SourceContextForSecTests& context,
+    const std::string& moduleName) {
+  const auto svDir = std::filesystem::temp_directory_path() / moduleName;
+  std::filesystem::remove_all(svDir);
+  std::filesystem::create_directories(svDir);
+  const auto wrapperPath = svDir / (moduleName + ".sv");
+  std::ofstream wrapperFile(wrapperPath);
+  if (!wrapperFile.good()) {
+    throw std::runtime_error(
+        "Failed to create SEC CVA6 wrapper `" + wrapperPath.string() + "`");
+  }
+  wrapperFile
+      << R"(module )"
+      << moduleName
+      << R"(
+  import ariane_pkg::*;
+  import cva6_config_pkg::*;
+#(
+  parameter config_pkg::cva6_cfg_t CVA6Cfg =
+      build_config_pkg::build_config(cva6_cfg)
+) ();
+  localparam type branchpredict_sbe_t = struct packed {
+    cf_t                     cf;
+    logic [CVA6Cfg.VLEN-1:0] predict_address;
+  };
+
+  localparam type exception_t = struct packed {
+    logic [CVA6Cfg.XLEN-1:0]  cause;
+    logic [CVA6Cfg.XLEN-1:0]  tval;
+    logic [CVA6Cfg.GPLEN-1:0] tval2;
+    logic [31:0]              tinst;
+    logic                     gva;
+    logic                     valid;
+  };
+
+  localparam type bp_resolve_t = struct packed {
+    logic                    valid;
+    logic [CVA6Cfg.VLEN-1:0] pc;
+    logic [CVA6Cfg.VLEN-1:0] target_address;
+    logic                    is_mispredict;
+    logic                    is_taken;
+    cf_t                     cf_type;
+  };
+
+  localparam type icache_dreq_t = struct packed {
+    logic                    req;
+    logic                    kill_s1;
+    logic                    kill_s2;
+    logic                    spec;
+    logic [CVA6Cfg.VLEN-1:0] vaddr;
+  };
+
+  localparam type cbo_t = logic [7:0];
+
+  localparam type dcache_req_i_t = struct packed {
+    logic [CVA6Cfg.DCACHE_INDEX_WIDTH-1:0] address_index;
+    logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0]   address_tag;
+    logic [CVA6Cfg.XLEN-1:0]               data_wdata;
+    logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0]  data_wuser;
+    logic                                  data_req;
+    logic                                  data_we;
+    logic [(CVA6Cfg.XLEN/8)-1:0]           data_be;
+    logic [1:0]                            data_size;
+    logic [CVA6Cfg.DcacheIdWidth-1:0]      data_id;
+    logic                                  kill_req;
+    logic                                  tag_valid;
+    cbo_t                                  cbo_op;
+  };
+
+  localparam type scoreboard_entry_t = struct packed {
+    logic [CVA6Cfg.VLEN-1:0]              pc;
+    logic [CVA6Cfg.TRANS_ID_BITS-1:0]     trans_id;
+    fu_t                                  fu;
+    fu_op                                 op;
+    logic [REG_ADDR_SIZE-1:0]             rs1;
+    logic [REG_ADDR_SIZE-1:0]             rs2;
+    logic [REG_ADDR_SIZE-1:0]             rd;
+    logic [CVA6Cfg.XLEN-1:0]              result;
+    logic                                 valid;
+    logic                                 use_imm;
+    logic                                 use_zimm;
+    logic                                 use_pc;
+    exception_t                           ex;
+    branchpredict_sbe_t                   bp;
+    logic                                 is_compressed;
+    logic                                 is_macro_instr;
+    logic                                 is_last_macro_instr;
+    logic                                 is_double_rd_macro_instr;
+    logic                                 vfp;
+    logic                                 is_zcmt;
+  };
+
+  logic clk_i;
+  logic rst_ni;
+  logic debug_mode_i;
+  logic [11:0] addr_i;
+  logic we_i;
+  logic [CVA6Cfg.XLEN-1:0] data_i;
+  logic [CVA6Cfg.XLEN-1:0] data_o;
+  scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_i;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i;
+  logic l1_icache_miss_i;
+  logic l1_dcache_miss_i;
+  logic itlb_miss_i;
+  logic dtlb_miss_i;
+  logic sb_full_i;
+  logic if_empty_i;
+  exception_t ex_i;
+  logic eret_i;
+  bp_resolve_t resolved_branch_i;
+  exception_t branch_exceptions_i;
+  icache_dreq_t l1_icache_access_i;
+  dcache_req_i_t [2:0] l1_dcache_access_i;
+  logic [2:0][CVA6Cfg.DCACHE_SET_ASSOC-1:0] miss_vld_bits_i;
+  logic i_tlb_flush_i;
+  logic stall_issue_i;
+  logic [31:0] mcountinhibit_i;
+
+  assign clk_i = 1'b0;
+  assign rst_ni = 1'b1;
+  assign debug_mode_i = 1'b0;
+  assign addr_i = '0;
+  assign we_i = 1'b0;
+  assign data_i = '0;
+  assign commit_instr_i = '0;
+  assign commit_ack_i = '0;
+  assign l1_icache_miss_i = 1'b0;
+  assign l1_dcache_miss_i = 1'b0;
+  assign itlb_miss_i = 1'b0;
+  assign dtlb_miss_i = 1'b0;
+  assign sb_full_i = 1'b0;
+  assign if_empty_i = 1'b0;
+  assign ex_i = '0;
+  assign eret_i = 1'b0;
+  assign resolved_branch_i = '0;
+  assign branch_exceptions_i = '0;
+  assign l1_icache_access_i = '0;
+  assign l1_dcache_access_i = '0;
+  assign miss_vld_bits_i = '0;
+  assign i_tlb_flush_i = 1'b0;
+  assign stall_issue_i = 1'b0;
+  assign mcountinhibit_i = '0;
+
+  perf_counters #(
+    .CVA6Cfg(CVA6Cfg),
+    .bp_resolve_t(bp_resolve_t),
+    .dcache_req_i_t(dcache_req_i_t),
+    .dcache_req_o_t(dcache_req_i_t),
+    .exception_t(exception_t),
+    .icache_dreq_t(icache_dreq_t),
+    .scoreboard_entry_t(scoreboard_entry_t)
+  ) dut (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .debug_mode_i(debug_mode_i),
+    .addr_i(addr_i),
+    .we_i(we_i),
+    .data_i(data_i),
+    .data_o(data_o),
+    .commit_instr_i(commit_instr_i),
+    .commit_ack_i(commit_ack_i),
+    .l1_icache_miss_i(l1_icache_miss_i),
+    .l1_dcache_miss_i(l1_dcache_miss_i),
+    .itlb_miss_i(itlb_miss_i),
+    .dtlb_miss_i(dtlb_miss_i),
+    .sb_full_i(sb_full_i),
+    .if_empty_i(if_empty_i),
+    .ex_i(ex_i),
+    .eret_i(eret_i),
+    .resolved_branch_i(resolved_branch_i),
+    .branch_exceptions_i(branch_exceptions_i),
+    .l1_icache_access_i(l1_icache_access_i),
+    .l1_dcache_access_i(l1_dcache_access_i),
+    .miss_vld_bits_i(miss_vld_bits_i),
+    .i_tlb_flush_i(i_tlb_flush_i),
+    .stall_issue_i(stall_issue_i),
+    .mcountinhibit_i(mcountinhibit_i)
+  );
+endmodule
+)";
+  wrapperFile.close();
+
+  const auto args = buildExpandedCva6SlangArgsForSecTests(
+      context, moduleName, {wrapperPath});
+  return loadSystemVerilogTopFromPaths(designLibrary, moduleName, args);
+}
+
+SNLDesign* createMirroredInstanceTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* model) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* instance = SNLInstance::create(top, model, NLName("mem0"));
+
+  for (auto* scalarTerm : model->getScalarTerms()) {
+    auto* topTerm = SNLScalarTerm::create(
+        top, scalarTerm->getDirection(), scalarTerm->getName());
+    auto* net = SNLScalarNet::create(
+        top, NLName(scalarTerm->getName().getString() + "_net"));
+    topTerm->setNet(net);
+    instance->getInstTerm(scalarTerm)->setNet(net);
+  }
+
+  for (auto* busTerm : model->getBusTerms()) {
+    auto* topTerm = SNLBusTerm::create(
+        top,
+        busTerm->getDirection(),
+        busTerm->getMSB(),
+        busTerm->getLSB(),
+        busTerm->getName());
+    auto* net = SNLBusNet::create(
+        top,
+        busTerm->getMSB(),
+        busTerm->getLSB(),
+        NLName(busTerm->getName().getString() + "_net"));
+    for (int bit = busTerm->getLSB(); bit <= busTerm->getMSB(); ++bit) {
+      topTerm->getBit(bit)->setNet(net->getBit(bit));
+      instance->getInstTerm(busTerm->getBit(bit))->setNet(net->getBit(bit));
+    }
+  }
+
+  return top;
 }
 
 SNLDesign* createDffTop(
@@ -4395,6 +5196,632 @@ TEST_F(SequentialEquivalenceStrategyTests,
                                  {extracted.inputVarByKey.at(in1Key), true}}));
   EXPECT_TRUE(q1Expr->evaluate({{extracted.inputVarByKey.at(in0Key), false},
                                 {extracted.inputVarByKey.at(in1Key), true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractModelsStructuredMemoryWithoutBoundaryFallback) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = createSinglePortMemoryModel(primitives, "MEM1P");
+  auto* top = createSinglePortMemoryTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  auto hasBoundaryRoleName = [&](const std::vector<SignalKey>& keys,
+                                 const std::string& prefix) {
+    return std::any_of(keys.begin(), keys.end(), [&](const SignalKey& key) {
+      const auto it = extracted.displayNameByKey.find(key);
+      return it != extracted.displayNameByKey.end() &&
+             it->second.rfind(prefix, 0) == 0;
+    });
+  };
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem0."));
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem0."));
+  EXPECT_FALSE(extracted.stateBits.empty());
+  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractModelsImportedLibertyMemoryWithoutOpaqueBoundaryTerms) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* model = loadLibertyMemoryModel(
+      primitives, "fakeram45_64x32.lib", "fakeram45_64x32");
+  auto* top = createMirroredInstanceTop(library, "top", model);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  auto hasBoundaryRoleName = [&](const std::vector<SignalKey>& keys,
+                                 const std::string& prefix) {
+    return std::any_of(keys.begin(), keys.end(), [&](const SignalKey& key) {
+      const auto it = extracted.displayNameByKey.find(key);
+      return it != extracted.displayNameByKey.end() &&
+             it->second.rfind(prefix, 0) == 0;
+    });
+  };
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem0."));
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem0."));
+  EXPECT_FALSE(extracted.stateBits.empty());
+  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
+}
+
+TEST_F(
+    SequentialEquivalenceStrategyTests,
+    StructuredMemoryDependencyBatchBuildsRealCva6PerfCounterReadAddressRoot) {
+  const auto context = resolveCva6SourceContextForSecTests();
+  if (!context.has_value()) {
+    GTEST_SKIP()
+        << "CVA6 source tree is not available for the real-source SEC memory regression test";
+  }
+
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = loadRealCva6PerfCountersTargetConfigTopForSecTests(
+      library,
+      *context,
+      "real_cva6_perf_counters_module_with_target_config_sec_memory_probe");
+
+  detail::ScopedDnlContextForTest dnlContext(top);
+  auto* dnl = dnlContext.dnl();
+  ASSERT_NE(dnl, nullptr);
+  const auto requestedTermID = detail::findTermByDisplayNameForTest(
+      dnl, "dut.generic_counter_q_mem.RADDR[18]");
+  ASSERT_TRUE(requestedTermID.has_value());
+
+  const auto probe =
+      detail::probeRequestedBuilderOutputForTest(dnl, *requestedTermID);
+  std::ostringstream normalizationChain;
+  for (size_t index = 0; index < probe.normalizationChain.size(); ++index) {
+    if (index != 0) {
+      normalizationChain << " -> ";
+    }
+    normalizationChain << probe.normalizationChain[index];
+  }
+  std::ostringstream supportTerms;
+  for (size_t index = 0; index < probe.rootSupportTerms.size(); ++index) {
+    if (index != 0) {
+      supportTerms << " | ";
+    }
+    supportTerms << probe.rootSupportTerms[index];
+  }
+  std::ostringstream combinationalInputs;
+  for (size_t index = 0; index < probe.rootCombinationalInputs.size(); ++index) {
+    if (index != 0) {
+      combinationalInputs << " | ";
+    }
+    combinationalInputs << probe.rootCombinationalInputs[index];
+  }
+  std::ostringstream driverSpine;
+  for (size_t index = 0; index < probe.driverSpine.size(); ++index) {
+    if (index != 0) {
+      driverSpine << " -> ";
+    }
+    driverSpine << probe.driverSpine[index];
+  }
+
+  ASSERT_TRUE(probe.normalizedRoot.has_value())
+      << "normalization chain: " << normalizationChain.str();
+  EXPECT_TRUE(probe.hasBuiltExpr)
+      << "normalized root " << probe.normalizedRootName
+      << " model=" << probe.normalizedRootModelName
+      << " did not yield a valid clause-builder expression; support terms: "
+      << supportTerms.str()
+      << "; combinational inputs: " << combinationalInputs.str()
+      << "; driver spine: " << driverSpine.str();
+  EXPECT_FALSE(probe.hasSkip)
+      << "normalized root " << probe.normalizedRootName
+      << " model=" << probe.normalizedRootModelName
+      << " was skipped: " << probe.skipDetail
+      << "; support terms: " << supportTerms.str()
+      << "; combinational inputs: " << combinationalInputs.str()
+      << "; driver spine: " << driverSpine.str();
+}
+
+TEST_F(
+    SequentialEquivalenceStrategyTests,
+    StructuredMemoryDependencyBatchBuildsRealCva6TopPerfCounterWriteEnableRoot) {
+  const auto context = resolveCva6SourceContextForSecTests();
+  if (!context.has_value()) {
+    GTEST_SKIP()
+        << "CVA6 source tree is not available for the real-source SEC memory regression test";
+  }
+
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  const auto paths = buildExpandedCva6SlangArgsForSecTests(*context, "cva6");
+  auto* top = loadSystemVerilogTopFromPaths(library, "cva6", paths);
+
+  detail::ScopedDnlContextForTest dnlContext(top);
+  auto* dnl = dnlContext.dnl();
+  ASSERT_NE(dnl, nullptr);
+  const auto requestedTermID = detail::findTermByDisplayNameForTest(
+      dnl, "cva6_gen_perf_counter_perf_counters_i.generic_counter_q_mem.WE[1]");
+  ASSERT_TRUE(requestedTermID.has_value());
+
+  const auto skippedReportPath =
+      std::filesystem::current_path() / "skipped_no_driver_pos.txt";
+  std::filesystem::remove(skippedReportPath);
+  const bool previousReportSkippedPOs =
+      KEPLER_FORMAL::Config::getReportSkippedPOs();
+  KEPLER_FORMAL::Config::setReportSkippedPOs(true);
+  const auto probe =
+      detail::probeRequestedBuilderOutputForTest(dnl, *requestedTermID);
+  KEPLER_FORMAL::Config::setReportSkippedPOs(previousReportSkippedPOs);
+  std::ostringstream normalizationChain;
+  for (size_t index = 0; index < probe.normalizationChain.size(); ++index) {
+    if (index != 0) {
+      normalizationChain << " -> ";
+    }
+    normalizationChain << probe.normalizationChain[index];
+  }
+  std::ostringstream supportTerms;
+  for (size_t index = 0; index < probe.rootSupportTerms.size(); ++index) {
+    if (index != 0) {
+      supportTerms << " | ";
+    }
+    supportTerms << probe.rootSupportTerms[index];
+  }
+  std::ostringstream combinationalInputs;
+  for (size_t index = 0; index < probe.rootCombinationalInputs.size(); ++index) {
+    if (index != 0) {
+      combinationalInputs << " | ";
+    }
+    combinationalInputs << probe.rootCombinationalInputs[index];
+  }
+  std::ostringstream driverSpine;
+  for (size_t index = 0; index < probe.driverSpine.size(); ++index) {
+    if (index != 0) {
+      driverSpine << " -> ";
+    }
+    driverSpine << probe.driverSpine[index];
+  }
+  std::string skippedReport;
+  if (std::ifstream skippedReportFile(skippedReportPath);
+      skippedReportFile.good()) {
+    std::ostringstream report;
+    report << skippedReportFile.rdbuf();
+    skippedReport = report.str();
+  }
+
+  ASSERT_TRUE(probe.normalizedRoot.has_value())
+      << "normalization chain: " << normalizationChain.str();
+  EXPECT_TRUE(probe.hasBuiltExpr)
+      << "normalized root " << probe.normalizedRootName
+      << " model=" << probe.normalizedRootModelName
+      << " did not yield a valid clause-builder expression; support terms: "
+      << supportTerms.str()
+      << "; combinational inputs: " << combinationalInputs.str()
+      << "; driver spine: " << driverSpine.str()
+      << "; skipped report: " << skippedReport;
+  EXPECT_FALSE(probe.hasSkip)
+      << "normalized root " << probe.normalizedRootName
+      << " model=" << probe.normalizedRootModelName
+      << " was skipped: " << probe.skipDetail
+      << "; support terms: " << supportTerms.str()
+      << "; combinational inputs: " << combinationalInputs.str()
+      << "; driver spine: " << driverSpine.str()
+      << "; skipped report: " << skippedReport;
+}
+
+TEST_F(
+    SequentialEquivalenceStrategyTests,
+    StructuredMemoryDependencyBatchBuildsRealCva6TopPerfCounterWriteDataSliceRoot) {
+  const auto context = resolveCva6SourceContextForSecTests();
+  if (!context.has_value()) {
+    GTEST_SKIP()
+        << "CVA6 source tree is not available for the real-source SEC memory regression test";
+  }
+
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  const auto paths = buildExpandedCva6SlangArgsForSecTests(*context, "cva6");
+  auto* top = loadSystemVerilogTopFromPaths(library, "cva6", paths);
+
+  detail::ScopedDnlContextForTest dnlContext(top);
+  auto* dnl = dnlContext.dnl();
+  ASSERT_NE(dnl, nullptr);
+  const auto requestedTermID = detail::findTermByDisplayNameForTest(
+      dnl,
+      "cva6_gen_perf_counter_perf_counters_i.generic_counter_q_mem.WDATA[384]");
+  ASSERT_TRUE(requestedTermID.has_value());
+
+  const auto skippedNoDriverReportPath =
+      std::filesystem::current_path() / "skipped_no_driver_pos.txt";
+  const auto skippedLogicalLoopReportPath =
+      std::filesystem::current_path() / "skipped_logical_loop_pos.txt";
+  std::filesystem::remove(skippedNoDriverReportPath);
+  std::filesystem::remove(skippedLogicalLoopReportPath);
+  const bool previousReportSkippedPOs =
+      KEPLER_FORMAL::Config::getReportSkippedPOs();
+  KEPLER_FORMAL::Config::setReportSkippedPOs(true);
+  const auto probe =
+      detail::probeRequestedBuilderOutputForTest(dnl, *requestedTermID);
+  KEPLER_FORMAL::Config::setReportSkippedPOs(previousReportSkippedPOs);
+  std::ostringstream normalizationChain;
+  for (size_t index = 0; index < probe.normalizationChain.size(); ++index) {
+    if (index != 0) {
+      normalizationChain << " -> ";
+    }
+    normalizationChain << probe.normalizationChain[index];
+  }
+  std::ostringstream supportTerms;
+  for (size_t index = 0; index < probe.rootSupportTerms.size(); ++index) {
+    if (index != 0) {
+      supportTerms << " | ";
+    }
+    supportTerms << probe.rootSupportTerms[index];
+  }
+  std::ostringstream combinationalInputs;
+  for (size_t index = 0; index < probe.rootCombinationalInputs.size(); ++index) {
+    if (index != 0) {
+      combinationalInputs << " | ";
+    }
+    combinationalInputs << probe.rootCombinationalInputs[index];
+  }
+  std::ostringstream driverSpine;
+  for (size_t index = 0; index < probe.driverSpine.size(); ++index) {
+    if (index != 0) {
+      driverSpine << " -> ";
+    }
+    driverSpine << probe.driverSpine[index];
+  }
+  auto readReportFile = [](const std::filesystem::path& path) {
+    std::string contents;
+    if (std::ifstream file(path); file.good()) {
+      std::ostringstream buffer;
+      buffer << file.rdbuf();
+      contents = buffer.str();
+    }
+    return contents;
+  };
+  const auto skippedNoDriverReport = readReportFile(skippedNoDriverReportPath);
+  const auto skippedLogicalLoopReport =
+      readReportFile(skippedLogicalLoopReportPath);
+
+  ASSERT_TRUE(probe.normalizedRoot.has_value())
+      << "normalization chain: " << normalizationChain.str();
+  EXPECT_TRUE(probe.hasBuiltExpr)
+      << "normalized root " << probe.normalizedRootName
+      << " model=" << probe.normalizedRootModelName
+      << " did not yield a valid clause-builder expression; support terms: "
+      << supportTerms.str()
+      << "; combinational inputs: " << combinationalInputs.str()
+      << "; driver spine: " << driverSpine.str()
+      << "; skipped no-driver report: " << skippedNoDriverReport
+      << "; skipped logical-loop report: " << skippedLogicalLoopReport;
+  EXPECT_FALSE(probe.hasSkip)
+      << "normalized root " << probe.normalizedRootName
+      << " model=" << probe.normalizedRootModelName
+      << " was skipped: " << probe.skipDetail
+      << "; support terms: " << supportTerms.str()
+      << "; combinational inputs: " << combinationalInputs.str()
+      << "; driver spine: " << driverSpine.str()
+      << "; skipped no-driver report: " << skippedNoDriverReport
+      << "; skipped logical-loop report: " << skippedLogicalLoopReport;
+}
+
+TEST_F(
+    SequentialEquivalenceStrategyTests,
+    SequentialDesignModelExtractModelsRealCva6PerfCountersTargetConfigMemoryWithoutBoundaryFallback) {
+  const auto context = resolveCva6SourceContextForSecTests();
+  if (!context.has_value()) {
+    GTEST_SKIP()
+        << "CVA6 source tree is not available for the real-source SEC memory regression test";
+  }
+
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = loadRealCva6PerfCountersTargetConfigTopForSecTests(
+      library,
+      *context,
+      "real_cva6_perf_counters_module_with_target_config_sec_memory_supported");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+  auto hasBoundaryRoleName = [&](const std::vector<SignalKey>& keys,
+                                 const std::string& needle) {
+    return std::any_of(keys.begin(), keys.end(), [&](const SignalKey& key) {
+      const auto it = extracted.displayNameByKey.find(key);
+      return it != extracted.displayNameByKey.end() &&
+             it->second.find(needle) != std::string::npos;
+    });
+  };
+
+  // Guard the exact configured CVA6 perf-counter memory path that fails in
+  // full SEC runs: the inferred memory should stay inside the sequential model
+  // instead of leaking back out as generic boundary terms.
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
+  EXPECT_FALSE(
+      hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "generic_counter_q_mem"));
+  EXPECT_FALSE(
+      hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "generic_counter_q_mem"));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractModelsInferredMemoryWithConstantFalseGuardSkip) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = loadSystemVerilogTopFromSource(
+      library,
+      "qd_next_indexed_commit_constant_false_guard_skip_supported",
+      R"(module qd_next_indexed_commit_constant_false_guard_skip_supported(
+  input  logic       clk_i,
+  input  logic [1:0] addr_i,
+  input  logic [7:0] data_i,
+  output logic [7:0] data_o
+);
+  logic [7:0] mem_q [0:3];
+  logic [7:0] mem_d [0:3];
+  logic [7:0] mem_next [0:3];
+
+  always_comb begin
+    mem_d = mem_q;
+    mem_d[addr_i] = data_i;
+  end
+
+  always_comb begin
+    for (int i = 0; i < 4; i++) begin
+      mem_next[i] = mem_d[i];
+      if (i == 0) begin
+        mem_next[i] = mem_q[i];
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    mem_q <= mem_next;
+  end
+
+  assign data_o = mem_q[addr_i];
+endmodule
+)");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  auto hasBoundaryRoleName = [&](const std::vector<SignalKey>& keys,
+                                 const std::string& prefix) {
+    return std::any_of(keys.begin(), keys.end(), [&](const SignalKey& key) {
+      const auto it = extracted.displayNameByKey.find(key);
+      return it != extracted.displayNameByKey.end() &&
+             it->second.rfind(prefix, 0) == 0;
+    });
+  };
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem_q"));
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem_q"));
+  EXPECT_FALSE(extracted.stateBits.empty());
+  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractReportsStructuredMemoryDependencyNameForUndrivenAddressBit) {
+  // Regression guard for CVA6 diag runs: structured-memory dependency
+  // materialization may skip an internal root, and the skip diagnostic must
+  // describe that root without using stale DNL terminals after clause building.
+  ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = loadSystemVerilogTopFromSource(
+      library,
+      "structured_memory_undriven_address_dependency",
+      R"(module structured_memory_undriven_address_dependency(
+  input  logic       clk_i,
+  input  logic       we_i,
+  input  logic       addr_i,
+  input  logic [7:0] data_i,
+  output logic [7:0] data_o
+);
+  logic [7:0] mem_q [0:3];
+  logic       bad_addr_bit;
+
+  always_ff @(posedge clk_i) begin
+    if (we_i) begin
+      mem_q[{1'b0, addr_i}] <= data_i;
+    end
+  end
+
+  assign data_o = mem_q[{bad_addr_bit, addr_i}];
+endmodule
+)");
+
+  try {
+    static_cast<void>(SequentialDesignModel::extract(top));
+    FAIL() << "Expected structured memory extraction to reject the undriven "
+              "read-address dependency";
+  } catch (const std::runtime_error& error) {
+    const std::string text = error.what();
+    EXPECT_NE(text.find("Structured memory dependency"), std::string::npos)
+        << text;
+    EXPECT_NE(text.find("mem_q_mem.RADDR[1]"), std::string::npos)
+        << text;
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSkipsUndrivenMemoryWriteEnablePort) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* memoryModel = createSinglePortMemoryModel(primitives, "MEM_DISABLED_WE");
+  auto* top = SNLDesign::create(
+      library,
+      SNLDesign::Type::Standard,
+      NLName("structured_memory_undriven_write_enable_port"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topChipEnable =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("ce"));
+  auto* topAddress =
+      SNLBusTerm::create(top, SNLTerm::Direction::Input, 1, 0, NLName("addr"));
+  auto* topWriteData =
+      SNLBusTerm::create(top, SNLTerm::Direction::Input, 3, 0, NLName("wdata"));
+  auto* topWriteMask =
+      SNLBusTerm::create(top, SNLTerm::Direction::Input, 3, 0, NLName("wmask"));
+  auto* topOut =
+      SNLBusTerm::create(top, SNLTerm::Direction::Output, 3, 0, NLName("out"));
+
+  auto* memory = SNLInstance::create(top, memoryModel, NLName("mem0"));
+  auto* clockNet = SNLScalarNet::create(top, NLName("clk_net"));
+  auto* chipEnableNet = SNLScalarNet::create(top, NLName("ce_net"));
+  auto* undrivenWriteEnableNet = SNLScalarNet::create(top, NLName("we_net"));
+  auto* addressNet = SNLBusNet::create(top, 1, 0, NLName("addr_net"));
+  auto* writeDataNet = SNLBusNet::create(top, 3, 0, NLName("wdata_net"));
+  auto* writeMaskNet = SNLBusNet::create(top, 3, 0, NLName("wmask_net"));
+  auto* outNet = SNLBusNet::create(top, 3, 0, NLName("out_net"));
+
+  topClock->setNet(clockNet);
+  topChipEnable->setNet(chipEnableNet);
+  memory->getInstTerm(memoryModel->getScalarTerm(NLName("CLK")))->setNet(clockNet);
+  memory->getInstTerm(memoryModel->getScalarTerm(NLName("CE")))->setNet(chipEnableNet);
+  memory->getInstTerm(memoryModel->getScalarTerm(NLName("WE")))
+      ->setNet(undrivenWriteEnableNet);
+
+  auto* modelAddress = memoryModel->getBusTerm(NLName("ADDR"));
+  auto* modelWriteData = memoryModel->getBusTerm(NLName("WDATA"));
+  auto* modelWriteMask = memoryModel->getBusTerm(NLName("WMASK"));
+  auto* modelReadData = memoryModel->getBusTerm(NLName("RDATA"));
+  for (int bit = 0; bit <= 1; ++bit) {
+    topAddress->getBit(bit)->setNet(addressNet->getBit(bit));
+    memory->getInstTerm(modelAddress->getBit(bit))->setNet(addressNet->getBit(bit));
+  }
+  for (int bit = 0; bit <= 3; ++bit) {
+    topWriteData->getBit(bit)->setNet(writeDataNet->getBit(bit));
+    topWriteMask->getBit(bit)->setNet(writeMaskNet->getBit(bit));
+    topOut->getBit(bit)->setNet(outNet->getBit(bit));
+    memory->getInstTerm(modelWriteData->getBit(bit))->setNet(writeDataNet->getBit(bit));
+    memory->getInstTerm(modelWriteMask->getBit(bit))->setNet(writeMaskNet->getBit(bit));
+    memory->getInstTerm(modelReadData->getBit(bit))->setNet(outNet->getBit(bit));
+  }
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  auto findInputVarContaining = [&](std::string_view needle) {
+    std::optional<size_t> varID;
+    for (const auto& key : extracted.environmentInputs) {
+      const auto nameIt = extracted.displayNameByKey.find(key);
+      const auto varIt = extracted.inputVarByKey.find(key);
+      if (nameIt == extracted.displayNameByKey.end() ||
+          varIt == extracted.inputVarByKey.end()) {
+        continue;
+      }
+      if (nameIt->second.find(needle) != std::string::npos) {
+        varID = varIt->second;
+        break;
+      }
+    }
+    return varID;
+  };
+  const auto disabledWriteDataVar = findInputVarContaining("wdata[0]");
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  if (disabledWriteDataVar.has_value()) {
+    for (const auto& [_, nextStateExpr] : extracted.nextStateExprByStateKey) {
+      EXPECT_EQ(nextStateExpr->getSupportVars().count(*disabledWriteDataVar), 0u)
+          << "An undriven write-enable port must not pull its write-data cone "
+             "into the modeled memory transition";
+    }
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractModelsInferredStructMemoryWithLogicalOrCommit) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = loadSystemVerilogTopFromSource(
+      library,
+      "qd_next_local_commit_logical_or_supported",
+      R"(module qd_next_local_commit_logical_or_supported(
+  input  logic       clk_i,
+  input  logic [1:0] addr_i,
+  input  logic [1:0] mode_i,
+  input  logic [1:0] access_i,
+  input  logic [3:0] payload_i,
+  output logic [7:0] data_o
+);
+  typedef struct packed {
+    logic [1:0] mode;
+    logic [1:0] access;
+    logic [3:0] payload;
+  } entry_t;
+
+  entry_t mem_q [0:3];
+  entry_t mem_d [0:3];
+  entry_t mem_next [0:3];
+
+  always_comb begin
+    mem_d = mem_q;
+    mem_d[addr_i].mode = mode_i;
+    mem_d[addr_i].access = access_i;
+    mem_d[addr_i].payload = payload_i;
+  end
+
+  always_comb begin
+    for (int i = 0; i < 4; i++) begin
+      mem_next[i] = mem_d[i];
+      if ((mem_d[i].mode == 2'b11) || (mem_d[i].access == 2'b01)) begin
+        mem_next[i] = mem_q[i];
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    mem_q <= mem_next;
+  end
+
+  assign data_o = {mem_q[addr_i].mode, mem_q[addr_i].access, mem_q[addr_i].payload};
+endmodule
+)");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  auto hasBoundaryRoleName = [&](const std::vector<SignalKey>& keys,
+                                 const std::string& prefix) {
+    return std::any_of(keys.begin(), keys.end(), [&](const SignalKey& key) {
+      const auto it = extracted.displayNameByKey.find(key);
+      return it != extracted.displayNameByKey.end() &&
+             it->second.rfind(prefix, 0) == 0;
+    });
+  };
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem_q"));
+  EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem_q"));
+  EXPECT_FALSE(extracted.stateBits.empty());
+  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

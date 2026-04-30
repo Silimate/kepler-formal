@@ -682,7 +682,8 @@ void BuildPrimaryOutputClauses::initVarNames() {
     // Get Truth Table for terminal
     const DNLTerminalFull& tTerm = naja::DNL::get()->getDNLTerminalFromID(inputs_[i]);
     // If direction is input, skip
-    if (!tTerm.isTopPort()) {
+    if (!tTerm.isTopPort() &&
+        tTerm.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Input) {
       const auto tt = SNLDesignModeling::getTruthTable(tTerm.getSnlBitTerm()->getDesign(), 
       tTerm.getSnlBitTerm()->getOrderID());
       if (tt.isInitialized()) {
@@ -791,7 +792,12 @@ void BuildPrimaryOutputClauses::build() {
       return;
     }
     
-    SNLLogicCloud cloud(out, IsPIs_, IsPOs_);
+    SNLLogicCloud cloud(
+        out,
+        IsPIs_,
+        IsPOs_,
+        allowInternalLogicalLoopFrontier_,
+        allowInternalNoDriverFrontier_);
     #ifdef DEBUG_CHECKS
     auto startComp = std::chrono::steady_clock::now();
     #endif
@@ -880,6 +886,43 @@ void BuildPrimaryOutputClauses::build() {
     #endif
     if (cloud.getTruthTable().isValid()) {
       cloud.getTruthTable().finalize();
+    }
+    if (cloud.getTruthTable().isValid()) {
+      std::lock_guard<std::mutex> lock(inputsMutex_);
+      for (const auto inputTermID : cloud.getInputs()) {
+        if (inputTermID == DNLID_MAX) {
+          continue; // LCOV_EXCL_LINE
+        }
+        if (inputTermID >= termDNLID2varID_.size()) {
+          termDNLID2varID_.resize(inputTermID + 1, static_cast<size_t>(-1));
+        }
+        if (termDNLID2varID_[inputTermID] != static_cast<size_t>(-1)) {
+          continue;
+        }
+
+        const auto& inputTerm = get()->getDNLTerminalFromID(inputTermID);
+        if (inputTerm.getIsoID() != DNLID_MAX) {
+          const auto& inputIso =
+              get()->getDNLIsoDB().getIsoFromIsoIDconst(inputTerm.getIsoID());
+          if (inputIso.isConstant0()) {
+            termDNLID2varID_[inputTermID] = 0;
+            continue;
+          }
+          if (inputIso.isConstant1()) {
+            termDNLID2varID_[inputTermID] = 1;
+            continue;
+          }
+        }
+
+        // Internal SEC dependency roots may expose freshly-cut frontier leaves
+        // that were not part of the original top PI list. Publish them as
+        // ordinary Boolean inputs before converting the truth-table tree.
+        termDNLID2varID_[inputTermID] = inputs_.size() + 2;
+        inputs_.push_back(inputTermID);
+        PathKey key = getTerminalPathKey(inputTerm);
+        inputs2inputsIDs_[inputTermID] = key;
+        inputsMap_[std::move(key)] = inputTermID;
+      }
     }
     #ifdef DEBUG_CHECKS
     auto endFin = std::chrono::steady_clock::now();

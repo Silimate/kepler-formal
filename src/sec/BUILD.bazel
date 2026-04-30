@@ -22,6 +22,7 @@ cc_library(
         "common/AlignedSignals.h",
         "common/BoolExprUtils.h",
         "common/ProofProblemDebug.h",
+        "common/SecDiag.h",
         "common/SignalKey.h",
         "imc/ExactInterpolantSynthesizer.h",
         "imc/IMCEngine.h",

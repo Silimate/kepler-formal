@@ -375,6 +375,7 @@ bool SNLLogicCloud::isOutput(naja::DNL::DNLID termID) {
 void SNLLogicCloud::compute() {
   clearNewIterationInputsETS();
   clearCurrentIterationInputsETS();
+  const bool seedIsTopPort = dnl_.getDNLTerminalFromID(seedOutputTerm_).isTopPort();
   struct TruthTableKey {
     const SNLDesign* design;
     size_t flatTermID;
@@ -430,6 +431,7 @@ void SNLLogicCloud::compute() {
   const bool captureFrontierHistory =
       std::getenv("KEPLER_CAPTURE_FRONTIER_HISTORY") != nullptr;
   std::vector<std::string> frontierHistory;
+  std::unordered_set<naja::DNL::DNLID> forcedFrontierLeaves;
   // LCOV_EXCL_START
   auto appendTermList = [&](std::ostringstream& out,
                             const auto& termIDs,
@@ -504,6 +506,12 @@ void SNLLogicCloud::compute() {
     snapshot << "]";
     return snapshot.str();
   };
+  const auto isForcedFrontierLeaf = [&](naja::DNL::DNLID termID) {
+    return forcedFrontierLeaves.find(termID) != forcedFrontierLeaves.end();
+  };
+  const auto markForcedFrontierLeaf = [&](naja::DNL::DNLID termID) {
+    forcedFrontierLeaves.insert(termID);
+  };
   auto collectRelevantInstanceInputs = [&](naja::DNL::DNLID driver) {
     const auto& inst = dnl_.getDNLTerminalFromID(driver).getDNLInstance();
     const auto* model = inst.getSNLModel();
@@ -573,6 +581,42 @@ void SNLLogicCloud::compute() {
     }
     relevantTerms.push_back(selectIt->second);
     return relevantTerms;
+  };
+  auto resolveTransparentLoopTarget = [&](naja::DNL::DNLID termID) {
+    std::unordered_set<naja::DNL::DNLID> visitedTerms;
+    naja::DNL::DNLID currentTermID = termID;
+    while (currentTermID != naja::DNL::DNLID_MAX &&
+           visitedTerms.insert(currentTermID).second) {
+      const auto& currentTerm = dnl_.getDNLTerminalFromID(currentTermID);
+      if (currentTerm.isNull()) {
+        break;
+      }
+      if (currentTerm.getSnlBitTerm()->getDirection() !=
+          SNLBitTerm::Direction::Output) {
+        const auto isoID = currentTerm.getIsoID();
+        if (isoID == naja::DNL::DNLID_MAX) {
+          break;
+        }
+        const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(isoID);
+        if (iso.isConstant() || iso.getDrivers().size() != 1) {
+          break;
+        }
+        currentTermID = iso.getDrivers().front();
+        continue;
+      }
+
+      const auto* model = currentTerm.getDNLInstance().getSNLModel();
+      if (model == nullptr || !NLDB0::isAssign(model)) {
+        break;
+      }
+
+      const auto relevantInputs = collectRelevantInstanceInputs(currentTermID);
+      if (relevantInputs.size() != 1) {
+        break;
+      }
+      currentTermID = relevantInputs.front();
+    }
+    return currentTermID;
   };
   // LCOV_EXCL_STOP
 	  auto throwIfTruthTableArityMismatch = [&](naja::DNL::DNLID driver) {
@@ -954,7 +998,8 @@ void SNLLogicCloud::compute() {
       auto iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
           dnl_.getDNLTerminalFromID(input).getIsoID());
       const bool cachedAsInput = canUseCachedIsoShortcut(iso, input);
-      if (!isInput(input) && !cachedAsInput && !iso.isConstant()) {
+      if (!isInput(input) && !isForcedFrontierLeaf(input) &&
+          !cachedAsInput && !iso.isConstant()) {
         reachedPIs = false;
         break;
       }
@@ -968,12 +1013,13 @@ void SNLLogicCloud::compute() {
     DEBUG_LOG("table size: %zu, currentIterationInputs_ size: %zu\n",
               table_.size(), sizeOfCurrentIterationInputsETS());
     clearInputsToMergeETS();
+    std::unordered_set<naja::DNL::DNLID> expandedTableTermsThisIteration;
     size_t sizeOfCurrentInputs = sizeOfCurrentIterationInputsETS();
     for (size_t i = 0; i < sizeOfCurrentInputs; i++) {
       const auto& input = getCurrentIterationInputsETS().first[i];
       const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
           dnl_.getDNLTerminalFromID(input).getIsoID());
-      if (isInput(input) || iso.isConstant()) {
+      if (isInput(input) || isForcedFrontierLeaf(input) || iso.isConstant()) {
         pushBackNewIterationInputsETS(input);
         DEBUG_LOG("Adding input id: %zu %s\n", input,
                   dnl_.getDNLTerminalFromID(input)
@@ -1082,6 +1128,21 @@ void SNLLogicCloud::compute() {
         }
       } else if (iso.getDrivers().empty()) {
         if (!iso.isConstant()) {
+          const auto& inputTerm = dnl_.getDNLTerminalFromID(input);
+          if (allowInternalNoDriverFrontier_ &&
+              !seedIsTopPort &&
+              inputTerm.getSnlBitTerm()->getDirection() !=
+                  SNLBitTerm::Direction::Output) {
+            // Explicitly requested internal roots are allowed to stop at an
+            // undriven leaf input. SEC consumes these as opaque boundary terms
+            // when rebuilding structured-memory dependencies and similar
+            // internal cones.
+            markForcedFrontierLeaf(input);
+            pushBackNewIterationInputsETS(input);
+            pushBackInputsToMergeETS(
+                {naja::DNL::DNLID_MAX, input});  // Placeholder for PI/PO
+            continue;
+          }
           skipReason_ = SkipReason::NoDriver;
           skipReasonText_ = "its iso has no drivers during cloud expansion";
           reportCloudSkippedRoot(&dnl_, seedOutputTerm_, input, DNLID_MAX,
@@ -1122,8 +1183,41 @@ void SNLLogicCloud::compute() {
         continue;
       }
 
-      const auto& inst = dnl_.getDNLInstanceFromID(
-          dnl_.getDNLTerminalFromID(driver).getDNLInstance().getID());
+      const auto& driverTerm = dnl_.getDNLTerminalFromID(driver);
+      if (!seedIsTopPort &&
+          driverTerm.getSnlBitTerm()->getDirection() !=
+          SNLBitTerm::Direction::Output) {
+        // Some internal SEC boundary cones surface an input-side term as the
+        // only visible "driver" of an iso. That term is already the frontier
+        // cut we need; descending through its instance as though it produced a
+        // Boolean function only creates artificial no-driver skips.
+        markForcedFrontierLeaf(driver);
+        pushBackNewIterationInputsETS(driver);
+        pushBackInputsToMergeETS(
+            {naja::DNL::DNLID_MAX, driver});  // Placeholder for PI/PO
+        continue;
+      }
+
+      std::vector<DNLID> frontierLoopTerms;
+      const auto frontierLoopTarget = resolveTransparentLoopTarget(driver);
+      if (allowInternalLogicalLoopFrontier_ && !seedIsTopPort &&
+          table_.findAncestorLoopForBorderLeaf(i, frontierLoopTarget,
+                                               frontierLoopTerms)) {
+        // Explicit SEC-internal roots are often used to rebuild structured
+        // dependencies such as memory write-data cones. If one side branch of
+        // that cone is a transparent self-feedback mux, dropping the whole root
+        // hides the useful dependency. Cut only the looping leaf as an opaque
+        // frontier input; ordinary top-output extraction still reports the
+        // same loop as a skipped PO below.
+        markForcedFrontierLeaf(input);
+        pushBackNewIterationInputsETS(input);
+        pushBackInputsToMergeETS(
+            {naja::DNL::DNLID_MAX, input});  // Placeholder for PI/PO
+        continue;
+      }
+
+      const auto& inst =
+          dnl_.getDNLInstanceFromID(driverTerm.getDNLInstance().getID());
       throwIfTruthTableArityMismatch(driver);
 
       DEBUG_LOG("Adding driver id: %zu %s(%s)\n", driver,
@@ -1140,27 +1234,24 @@ void SNLLogicCloud::compute() {
                     .c_str());
       pushBackInputsToMergeETS({inst.getID(), driver});
 
+      const bool clonesExistingAncestor =
+          table_.willCloneTableTermForBorderLeaf(i, driver);
+      const bool alreadyInTree = table_.hasTableTerm(driver);
+      const bool firstExpansionInThisBatch =
+          expandedTableTermsThisIteration.insert(driver).second;
+      const bool tableWillExpand =
+          clonesExistingAncestor ||
+          (!alreadyInTree && firstExpansionInThisBatch);
+      if (!tableWillExpand) {
+        // Reused truth-table nodes keep their existing children, so adding the
+        // same instance inputs again would desynchronize the Boolean frontier
+        // from the tree border leaves. Ancestor clones are the exception: they
+        // intentionally create a fresh occurrence and therefore need a fresh
+        // set of frontier inputs.
+        continue;
+      }
+
       for (const auto termID : collectRelevantInstanceInputs(driver)) {
-        if (isPairVisitedETS(driver, termID)) {
-          DEBUG_LOG(
-              "#### iter %lu 1 Term (%zu) %s of inst %s already handled, "
-              "skipping\n",
-              iter, input,
-              naja::DNL::get()
-                  ->getDNLTerminalFromID(input)
-                  .getSnlBitTerm()
-                  ->getName()
-                  .getString()
-                  .c_str(),
-              naja::DNL::get()
-                  ->getDNLTerminalFromID(input)
-                  .getDNLInstance()
-                  .getSNLModel()
-                  ->getName()
-                  .getString()
-                  .c_str());
-          continue;
-        }
         pushBackNewIterationInputsETS(termID);
       }
     }
@@ -1180,8 +1271,15 @@ void SNLLogicCloud::compute() {
           continue;
         }
         std::vector<DNLID> loopTerms;
-        if (table_.findAncestorLoopForBorderLeaf(i, merges[i].second,
-                                                 loopTerms)) {
+        const auto loopTargetTerm =
+            resolveTransparentLoopTarget(merges[i].second);
+        // Normal cloud expansion must stay conservative: if this merge would
+        // reconnect to any transparent alias already above the border leaf, the
+        // cone contains a combinational loop. SEC's structured-memory path can
+        // opt into cutting a specific internal loop frontier before reaching
+        // this strict reporting path.
+        if (table_.findAncestorLoopForBorderLeaf(
+                i, loopTargetTerm, loopTerms)) {
           skipReason_ = SkipReason::LogicalLoop;
           skipReasonText_ =
               "a logical loop was detected during cloud expansion";

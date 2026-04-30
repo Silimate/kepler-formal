@@ -73,6 +73,15 @@ class BuildPrimaryOutputClauses {
     outputs_ = std::move(outputs); /*sortOutputs();*/
     setOutputs2OutputsIDs();
   }
+  // SEC enables these only for explicitly requested internal dependency roots.
+  // They remain disabled for normal top-output extraction so skipped-PO reports
+  // stay conservative for LEC and standard combinational cone building.
+  void setAllowInternalLogicalLoopFrontier(bool allow) {
+    allowInternalLogicalLoopFrontier_ = allow;
+  }
+  void setAllowInternalNoDriverFrontier(bool allow) {
+    allowInternalNoDriverFrontier_ = allow;
+  }
   const std::unordered_map<PathKey, naja::DNL::DNLID, KeyHash>&
   getInputsMap() const {
     return inputsMap_;
@@ -114,6 +123,8 @@ class BuildPrimaryOutputClauses {
   std::vector<bool> IsPIs_;
   std::vector<naja::DNL::DNLID> outputs_;
   std::vector<bool> IsPOs_;
+  bool allowInternalLogicalLoopFrontier_ = false;
+  bool allowInternalNoDriverFrontier_ = false;
 
   std::unordered_map<PathKey, naja::DNL::DNLID, KeyHash> inputsMap_;
   std::unordered_map<PathKey, naja::DNL::DNLID, KeyHash> outputsMap_;
@@ -123,6 +134,7 @@ class BuildPrimaryOutputClauses {
   size_t lastCommonID = 1;
   std::unordered_map<naja::DNL::DNLID, SkippedOutputInfo> skippedOutputs_;
   mutable std::mutex skippedOutputsMutex_;
+  mutable std::mutex inputsMutex_;
 
   struct hash {
     size_t operator()(const std::pair<unsigned int, unsigned long>& p) const noexcept {

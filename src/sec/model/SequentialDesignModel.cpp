@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 #include "DNL.h"
+#include "NLDB0.h"
 #include "NLUniverse.h"
 #include "SNLDesignModeling.h"
 #include "SNLPath.h"
@@ -53,6 +54,46 @@ struct PendingTransition {
   size_t boundaryInfoIndex = std::numeric_limits<size_t>::max();
   std::vector<SignalKey> complementedStateKeys;
   PendingPinMap pinTermIDs;
+};
+
+struct PendingMemoryReadPort {
+  std::vector<naja::DNL::DNLID> addressTermIDs;
+  std::vector<naja::DNL::DNLID> dataTermIDs;
+};
+
+struct PendingMemoryWritePort {
+  std::vector<naja::DNL::DNLID> addressTermIDs;
+  std::vector<naja::DNL::DNLID> dataTermIDs;
+  std::vector<naja::DNL::DNLID> maskTermIDs;
+  std::vector<naja::DNL::DNLID> enableTermIDs;
+  std::vector<std::vector<naja::DNL::DNLID>> extraWriteInputTermIDs;
+};
+
+struct PendingMemoryCellState {
+  SignalKey key;
+  std::string displayName;
+  size_t cellIndex = 0;
+  size_t bitIndex = 0;
+};
+
+struct PendingMemoryReadOutput {
+  SignalKey key;
+  size_t portIndex = 0;
+  size_t bitIndex = 0;
+};
+
+struct PendingMemoryInstance {
+  size_t width = 0;
+  size_t depth = 0;
+  size_t abits = 0;
+  naja::NL::SNLDesignModeling::MemoryResetMode resetMode =
+      naja::NL::SNLDesignModeling::MemoryResetMode::None;
+  std::optional<naja::DNL::DNLID> resetTermID;
+  size_t boundaryInfoIndex = std::numeric_limits<size_t>::max();
+  std::vector<PendingMemoryReadPort> readPorts;
+  std::vector<PendingMemoryWritePort> writePorts;
+  std::vector<PendingMemoryCellState> cellStates;
+  std::vector<PendingMemoryReadOutput> readOutputs;
 };
 
 struct BoundaryObservedTerm {
@@ -106,6 +147,21 @@ std::string describeConnectivitySkipOrigin(ConnectivitySkipOrigin origin) {
   return "connectivity";  // LCOV_EXCL_LINE
 }
 
+const char* describeBuilderSkippedOutputReason(
+    BuilderSkippedOutputReason reason) {
+  switch (reason) {
+    case BuilderSkippedOutputReason::NoDriver:
+      return "no_driver";
+    case BuilderSkippedOutputReason::MultiDriver:
+      return "multi_driver";
+    case BuilderSkippedOutputReason::LogicalLoop:
+      return "logical_loop";
+    case BuilderSkippedOutputReason::None:
+      return "none";
+  }
+  return "unknown";  // LCOV_EXCL_LINE
+}
+
 std::optional<ConnectivitySkipInfo> getConnectivitySkipInfo(
     const BuilderSkippedOutputInfo& info) {
   switch (info.reason) {
@@ -127,7 +183,8 @@ BuiltObservedExpr buildObservedExprForTerm(
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     const std::vector<naja::DNL::DNLID>& inputTerms,
     const std::vector<naja::DNL::DNLID>& outputTerms,
-    const std::vector<size_t>& termDNLID2varID) {
+    const std::vector<size_t>& termDNLID2varID,
+    bool allowInternalLogicalLoopFrontier = false) {
   BuiltObservedExpr result;
   if (const auto exprIt = outputExprByTerm.find(termID);
       exprIt != outputExprByTerm.end()) {
@@ -166,7 +223,16 @@ BuiltObservedExpr buildObservedExprForTerm(
     if (outputTermID < localIsPOs.size()) {
       localIsPOs[outputTermID] = true;
     }
-    KEPLER_FORMAL::SNLLogicCloud cloud(outputTermID, isPIs, localIsPOs);
+    // SEC rebuilds internal observability roots for modeled memories and
+    // abstracted boundaries. A transparent self-feedback branch under such an
+    // internal root should become a frontier input instead of causing the whole
+    // memory dependency to be skipped.
+    KEPLER_FORMAL::SNLLogicCloud cloud(
+        outputTermID,
+        isPIs,
+        localIsPOs,
+        allowInternalLogicalLoopFrontier,
+        false);
     cloud.compute();
     if (cloud.getTruthTable().isValid()) {
       cloud.getTruthTable().finalize();
@@ -317,43 +383,171 @@ struct MaterializedBuilderOutputs {
   std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo> skippedOutputsByTerm;
 };
 
+void appendUniqueTermIDs(
+    std::vector<naja::DNL::DNLID>& dest,
+    const std::vector<naja::DNL::DNLID>& src) {
+  std::unordered_set<naja::DNL::DNLID> seen(dest.begin(), dest.end());
+  for (const auto termID : src) {
+    if (seen.insert(termID).second) {
+      dest.push_back(termID);
+    }
+  }
+}
+
+void mergeBuilderTermVarIDs(
+    std::vector<size_t>& dest,
+    const std::vector<size_t>& src) {
+  if (src.size() > dest.size()) {
+    dest.resize(src.size(), 0);
+  }
+  for (size_t index = 0; index < src.size(); ++index) {
+    if (dest[index] == 0) {
+      dest[index] = src[index];
+    }
+  }
+}
+
 MaterializedBuilderOutputs materializeBuilderOutputs(
     const std::vector<naja::DNL::DNLID>& requestedOutputs,
     bool secDiagEnabled,
     const char* topName,
-    const char* phaseLabel) {
+    const char* phaseLabel,
+    bool allowInternalLogicalLoopFrontier = false) {
   MaterializedBuilderOutputs result;
 
   KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
   builder.collect();
-  std::unordered_set<naja::DNL::DNLID> collectedOutputSet(
-      builder.getOutputs().begin(), builder.getOutputs().end());
-  std::vector<naja::DNL::DNLID> filteredOutputs;
-  filteredOutputs.reserve(requestedOutputs.size());
-  for (const auto outputTermID : requestedOutputs) {
-    if (collectedOutputSet.find(outputTermID) != collectedOutputSet.end()) {
-      filteredOutputs.push_back(outputTermID);
+  std::vector<naja::DNL::DNLID> normalizedRoots;
+  normalizedRoots.reserve(requestedOutputs.size());
+  std::unordered_map<naja::DNL::DNLID, std::vector<naja::DNL::DNLID>> requestedByRoot;
+  std::unordered_set<naja::DNL::DNLID> seenRoots;
+  auto* dnl = naja::DNL::get();
+  const auto describeTerminal = [](const naja::DNL::DNLTerminalFull& terminal) {
+    std::ostringstream oss;
+    // Keep the debug label cheap: the full DNL instance path reconstruction is
+    // surprisingly expensive on large designs and can dominate CVA6 diag runs.
+    // The term ID is logged separately, so a compact model.pin[bit] label is
+    // enough to correlate skipped roots back to the detailed skip reports.
+    oss << terminal.getSnlBitTerm()->getDesign()->getName().getString() << "."
+        << terminal.getSnlBitTerm()->getName().getString() << "["
+        << terminal.getSnlBitTerm()->getBit() << "]";
+    return oss.str();
+  };
+  const auto findBuildableOutputRoot = [&](naja::DNL::DNLID requestedTermID)
+      -> std::optional<naja::DNL::DNLID> {
+    std::unordered_set<naja::DNL::DNLID> visitedTerms;
+    naja::DNL::DNLID currentTermID = requestedTermID;
+    while (currentTermID != naja::DNL::DNLID_MAX &&
+           visitedTerms.insert(currentTermID).second) {
+      const auto& currentTerm = dnl->getDNLTerminalFromID(currentTermID);
+      if (currentTerm.isNull()) {
+        return std::nullopt;
+      }
+      if (currentTerm.isTopPort() &&
+          currentTerm.getSnlBitTerm()->getDirection() !=
+              naja::NL::SNLBitTerm::Direction::Output) {
+        return currentTermID;
+      }
+      if (currentTerm.getSnlBitTerm()->getDirection() ==
+          naja::NL::SNLBitTerm::Direction::Output) {
+        const auto& inst = currentTerm.getDNLInstance();
+        auto* model = inst.getSNLModel();
+        if (model != nullptr && NLDB0::isAssign(model)) {
+          std::optional<naja::DNL::DNLID> passthroughDriver;
+          for (auto* inputBitTerm : naja::NL::SNLDesignModeling::getCombinatorialInputs(
+                   const_cast<naja::NL::SNLBitTerm*>(currentTerm.getSnlBitTerm()))) {
+            if (inputBitTerm == nullptr ||
+                inputBitTerm->getDirection() ==
+                    naja::NL::SNLBitTerm::Direction::Output) {
+              continue;
+            }
+            const auto& inputTerm = inst.getTerminalFromBitTerm(inputBitTerm);
+            if (inputTerm.isNull() || inputTerm.getIsoID() == naja::DNL::DNLID_MAX) {
+              passthroughDriver.reset();
+              break;
+            }
+            const auto& iso =
+                dnl->getDNLIsoDB().getIsoFromIsoIDconst(inputTerm.getIsoID());
+            if (iso.isConstant() || iso.getDrivers().size() != 1) {
+              passthroughDriver.reset();
+              break;
+            }
+            if (passthroughDriver.has_value()) {
+              passthroughDriver.reset();
+              break;
+            }
+            passthroughDriver = iso.getDrivers().front();
+          }
+          if (passthroughDriver.has_value()) {
+            currentTermID = *passthroughDriver;
+            continue;
+          }
+        }
+        return currentTermID;
+      }
+
+      const auto isoID = currentTerm.getIsoID();
+      if (isoID == naja::DNL::DNLID_MAX) {
+        return std::nullopt;
+      }
+      const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(isoID);
+      if (iso.isConstant() || iso.getDrivers().size() != 1) {
+        return std::nullopt;
+      }
+      currentTermID = iso.getDrivers().front();
+    }
+    return std::nullopt;
+  };
+  for (const auto requestedTermID : requestedOutputs) {
+    const auto rootTermID = findBuildableOutputRoot(requestedTermID);
+    if (!rootTermID.has_value()) {
+      continue;
+    }
+    requestedByRoot[*rootTermID].push_back(requestedTermID);
+    if (seenRoots.insert(*rootTermID).second) {
+      normalizedRoots.push_back(*rootTermID);
     }
   }
-  builder.setOutputs(filteredOutputs);
 
+  // Structured memory dependencies are often internal roots that SEC needs
+  // even when the generic boundary collector would not classify them as
+  // outputs. Root input-side dependency pins at their single-driver source so
+  // the clause builder sees the actual combinational producer instead of the
+  // sink pin on the memory instance.
+  builder.setAllowInternalLogicalLoopFrontier(
+      allowInternalLogicalLoopFrontier);
+  builder.setOutputs(normalizedRoots);
+
+  const bool traceDependencyRoots =
+      secDiagEnabled &&
+      std::string_view(phaseLabel).find("dependency build") !=
+          std::string_view::npos;
   if (secDiagEnabled) {
+    // Dependency batches on designs like CVA6 can include thousands of memory
+    // pins. Logging every requested-to-root mapping is prohibitively expensive,
+    // so the diagnostic path only prints summary begin/end markers here and
+    // prints the detailed term mapping only for the roots that later skip.
     fprintf(
         stderr,
         "SEC diag: extract(%s) %s begin outputs=%zu\n",
         topName,
         phaseLabel,
-        filteredOutputs.size());
+        normalizedRoots.size());
     fflush(stderr);
   }
   builder.build();
+  // BuildPrimaryOutputClauses owns a temporary DNL expansion and destroys the
+  // singleton when build() completes. SEC diagnostics below still need to
+  // describe skipped roots, so reacquire the DNL view instead of reusing the
+  // pre-build pointer.
+  dnl = naja::DNL::get();
   if (secDiagEnabled) {
     fprintf(
         stderr,
         "SEC diag: extract(%s) %s end outputs=%zu\n",
         topName,
         phaseLabel,
-        filteredOutputs.size());
+        normalizedRoots.size());
     fflush(stderr);
   }
 
@@ -361,6 +555,29 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   result.outputs = builder.getOutputs();
   result.termDNLID2varID = builder.getTermDNLID2VarID();
   result.skippedOutputsByTerm = builder.getSkippedOutputs();
+  if (traceDependencyRoots) {
+    for (const auto& [rootTermID, skipInfo] : result.skippedOutputsByTerm) {
+      const auto requestedIt = requestedByRoot.find(rootTermID);
+      if (requestedIt == requestedByRoot.end()) {
+        continue;
+      }
+      const auto& rootTerm = dnl->getDNLTerminalFromID(rootTermID);
+      for (const auto requestedTermID : requestedIt->second) {
+        const auto& requestedTerm = dnl->getDNLTerminalFromID(requestedTermID);
+        fprintf(
+            stderr,
+            "SEC diag: extract(%s) %s skipped requested=%s term=%zu root=%s term=%zu reason=%s detail=%s\n",
+            topName,
+            phaseLabel,
+            describeTerminal(requestedTerm).c_str(),
+            requestedTermID,
+            describeTerminal(rootTerm).c_str(),
+            rootTermID,
+            describeBuilderSkippedOutputReason(skipInfo.reason),
+            skipInfo.detail.c_str());
+      }
+    }
+  }
   const auto& outputExprs = builder.getPOs();
   for (size_t i = 0; i < result.outputs.size(); ++i) {
     BoolExpr* expr = outputExprs[i];
@@ -368,6 +585,23 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
       continue;
     }
     result.outputExprByTerm.emplace(result.outputs[i], expr);
+    if (const auto requestedIt = requestedByRoot.find(result.outputs[i]);
+        requestedIt != requestedByRoot.end()) {
+      for (const auto requestedTermID : requestedIt->second) {
+        result.outputExprByTerm.emplace(requestedTermID, expr);
+      }
+    }
+  }
+
+  std::vector<std::pair<naja::DNL::DNLID, BuilderSkippedOutputInfo>> skippedAliases(
+      result.skippedOutputsByTerm.begin(), result.skippedOutputsByTerm.end());
+  for (const auto& [rootTermID, info] : skippedAliases) {
+    if (const auto requestedIt = requestedByRoot.find(rootTermID);
+        requestedIt != requestedByRoot.end()) {
+      for (const auto requestedTermID : requestedIt->second) {
+        result.skippedOutputsByTerm.emplace(requestedTermID, info);
+      }
+    }
   }
 
   return result;
@@ -678,6 +912,36 @@ std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
     return true;
   }
   return std::nullopt;
+}
+
+BoolExpr* makeAndChain(const std::vector<BoolExpr*>& exprs) {
+  if (exprs.empty()) {
+    return BoolExpr::createTrue();
+  }
+  BoolExpr* result = exprs.front();
+  for (size_t index = 1; index < exprs.size(); ++index) {
+    result = BoolExpr::And(result, exprs[index]);
+  }
+  return result;
+}
+
+BoolExpr* makeIte(BoolExpr* condition, BoolExpr* whenTrue, BoolExpr* whenFalse) {
+  return BoolExpr::Or(
+      BoolExpr::And(condition, whenTrue),
+      BoolExpr::And(BoolExpr::Not(condition), whenFalse));
+}
+
+BoolExpr* buildAddressEqualsExpr(
+    const std::vector<BoolExpr*>& addressBits,
+    size_t addressValue) {
+  std::vector<BoolExpr*> equalities;
+  equalities.reserve(addressBits.size());
+  for (size_t bitIndex = 0; bitIndex < addressBits.size(); ++bitIndex) {
+    const bool expected = ((addressValue >> bitIndex) & size_t{1}) != 0;
+    equalities.push_back(expected ? addressBits[bitIndex]
+                                  : BoolExpr::Not(addressBits[bitIndex]));
+  }
+  return makeAndChain(equalities);
 }
 
 bool isConstBoolExpr(BoolExpr* expr, bool value) {
@@ -1028,6 +1292,7 @@ struct ExtractContext {
   std::unordered_set<SignalKey, SignalKeyHash> abstractedBoundaryObservedKeys;
   std::unordered_set<SignalKey, SignalKeyHash> unsupportedStateBits;
   std::vector<PendingTransition> pendingTransitions;
+  std::vector<PendingMemoryInstance> pendingMemoryInstances;
   std::vector<InstanceBoundaryInfo> instanceBoundaryInfos;
   std::unordered_map<naja::DNL::DNLID, bool> sequentialInstanceCache;
 };
@@ -1195,6 +1460,272 @@ std::optional<SequentialInstanceScan> scanSequentialInstance(
   return scan;
 }
 
+SignalKey makeMemoryCellStateKey(
+    const naja::DNL::DNLInstanceFull& instance,
+    size_t cellIndex,
+    size_t bitIndex) {
+  SignalKey key;
+  const auto pathNames = instance.getPath().getPathNames();
+  key.first.reserve(pathNames.size() + 1);
+  for (const auto& name : pathNames) {
+    key.first.push_back(stableSignalKeyNameID(name.getString()));
+  }
+  key.first.push_back(stableSignalKeyNameID("__MEM_CELL"));
+  key.second.push_back(
+      static_cast<naja::NL::NLID::DesignObjectID>(cellIndex));
+  key.second.push_back(
+      static_cast<naja::NL::NLID::DesignObjectID>(bitIndex));
+  return key;
+}
+
+std::string makeMemoryCellStateDisplayName(
+    const naja::DNL::DNLInstanceFull& instance,
+    size_t cellIndex,
+    size_t bitIndex) {
+  std::ostringstream oss;
+  oss << instance.getFullPath() << ".__MEM_CELL[" << cellIndex << "]["
+      << bitIndex << "]";
+  return oss.str();
+}
+
+std::unordered_map<const naja::NL::SNLBitTerm*, naja::DNL::DNLID>
+collectInstanceTermIDByBitTerm(const naja::DNL::DNLInstanceFull& instance) {
+  std::unordered_map<const naja::NL::SNLBitTerm*, naja::DNL::DNLID> termIDs;
+  for (naja::DNL::DNLID termID = instance.getTermIndexes().first;
+       termID != naja::DNL::DNLID_MAX &&
+       termID <= instance.getTermIndexes().second;
+       ++termID) {
+    const auto& term = naja::DNL::get()->getDNLTerminalFromID(termID);
+    if (term.isNull()) {
+      continue;
+    }
+    termIDs.emplace(term.getSnlBitTerm(), termID);
+  }
+  return termIDs;
+}
+
+bool supportsStructuredMemoryModel(
+    const naja::NL::SNLDesignModeling::MemoryInterface& interface) {
+  if (!interface.isValid()) {
+    return false;
+  }
+  for (const auto& readPort : interface.readPorts) {
+    if (readPort.address.size() != interface.abits ||
+        readPort.data.size() != interface.width) {
+      return false;
+    }
+  }
+  for (const auto& writePort : interface.writePorts) {
+    if (writePort.address.size() != interface.abits ||
+        writePort.data.size() != interface.width) {
+      return false;
+    }
+    if (!writePort.mask.empty() && writePort.mask.size() != interface.width) {
+      return false;
+    }
+    if (!writePort.extraWriteInputs.empty()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+naja::DNL::DNLID getRequiredInstanceTermID(
+    const std::unordered_map<const naja::NL::SNLBitTerm*, naja::DNL::DNLID>&
+        termIDsByBitTerm,
+    const naja::NL::SNLBitTerm* term,
+    const std::string& instancePath,
+    const char* context) {
+  const auto termIt = termIDsByBitTerm.find(term);
+  if (termIt == termIDsByBitTerm.end()) {
+    throw std::runtime_error(
+        "Missing DNL term for memory " + std::string(context) + " in instance `" +
+        instancePath + "`");
+  }
+  return termIt->second;
+}
+
+bool isNoDriverTerm(naja::DNL::DNLID termID) {
+  auto* dnl = naja::DNL::get();
+  if (dnl == nullptr || termID == naja::DNL::DNLID_MAX) {
+    return true;
+  }
+  const auto& term = dnl->getDNLTerminalFromID(termID);
+  if (term.isNull() || term.getIsoID() == naja::DNL::DNLID_MAX) {
+    return true;
+  }
+  const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID());
+  return !iso.isConstant() && iso.getDrivers().empty();
+}
+
+bool isConstantZeroTerm(naja::DNL::DNLID termID) {
+  auto* dnl = naja::DNL::get();
+  if (dnl == nullptr || termID == naja::DNL::DNLID_MAX) {
+    return false;
+  }
+  const auto& term = dnl->getDNLTerminalFromID(termID);
+  if (term.isNull() || term.getIsoID() == naja::DNL::DNLID_MAX) {
+    return false;
+  }
+  return dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).isConstant0();
+}
+
+bool isDisabledMemoryWriteEnable(naja::DNL::DNLID termID) {
+  // Some lowered memories expose fixed-width write ports even when a
+  // particular port is unused by the RTL. In that shape the enable pin can
+  // have a net but no leaf driver; treating it as an active symbolic input
+  // would pull unrelated address/data cones into the SEC memory transition.
+  // A constant-0 or undriven enable cannot assert in the concrete netlist, so
+  // the whole write port is semantically inactive and should be ignored.
+  return isConstantZeroTerm(termID) || isNoDriverTerm(termID);
+}
+
+void appendPendingMemoryInstance(
+    ExtractContext& ctx,
+    SequentialDesignModel& model,
+    const naja::DNL::DNLInstanceFull& instance) {
+  const auto interface =
+      naja::NL::SNLDesignModeling::getMemoryInterface(instance.getSNLInstance());
+  PendingMemoryInstance pending;
+  pending.width = interface.width;
+  pending.depth = interface.depth;
+  pending.abits = interface.abits;
+  pending.resetMode = interface.resetMode;
+
+  InstanceBoundaryInfo boundaryInfo;
+  boundaryInfo.instancePath = instance.getFullPath();
+  for (naja::DNL::DNLID termID = instance.getTermIndexes().first;
+       termID != naja::DNL::DNLID_MAX &&
+       termID <= instance.getTermIndexes().second;
+       ++termID) {
+    const auto& term = naja::DNL::get()->getDNLTerminalFromID(termID);
+    if (term.isNull() ||
+        term.getSnlBitTerm()->getDirection() ==
+            naja::NL::SNLBitTerm::Direction::Output) {
+      continue;
+    }
+    const SignalKey key = getTerminalPathKey(term);
+    model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
+    boundaryInfo.observedTerms.push_back({termID, key});
+  }
+
+  for (size_t cellIndex = 0; cellIndex < interface.depth; ++cellIndex) {
+    for (size_t bitIndex = 0; bitIndex < interface.width; ++bitIndex) {
+      auto key = makeMemoryCellStateKey(instance, cellIndex, bitIndex);
+      auto displayName = makeMemoryCellStateDisplayName(instance, cellIndex, bitIndex);
+      model.displayNameByKey.try_emplace(key, displayName);
+      boundaryInfo.stateKeys.push_back(key);
+      pending.cellStates.push_back({key, std::move(displayName), cellIndex, bitIndex});
+    }
+  }
+
+  const auto termIDsByBitTerm = collectInstanceTermIDByBitTerm(instance);
+  // Modeled memories always expose a reset terminal on the lowered primitive,
+  // but SEC should only rebuild that cone when the memory semantics actually
+  // use reset. Otherwise a disabled RST pin becomes a fake dependency surface.
+  if (pending.resetMode != naja::NL::SNLDesignModeling::MemoryResetMode::None &&
+      interface.reset != nullptr) {
+    pending.resetTermID = getRequiredInstanceTermID(
+        termIDsByBitTerm,
+        interface.reset,
+        boundaryInfo.instancePath,
+        "reset");
+  }
+  pending.readPorts.reserve(interface.readPorts.size());
+  for (size_t portIndex = 0; portIndex < interface.readPorts.size(); ++portIndex) {
+    const auto& readPort = interface.readPorts[portIndex];
+    PendingMemoryReadPort pendingReadPort;
+    pendingReadPort.addressTermIDs.reserve(readPort.address.size());
+    pendingReadPort.dataTermIDs.reserve(readPort.data.size());
+    size_t bitIndex = 0;
+    for (auto* addressTerm : readPort.address) {
+      pendingReadPort.addressTermIDs.push_back(
+          getRequiredInstanceTermID(
+              termIDsByBitTerm,
+              addressTerm,
+              boundaryInfo.instancePath,
+              "read-address"));
+    }
+    for (auto* dataTerm : readPort.data) {
+      const auto termID = getRequiredInstanceTermID(
+          termIDsByBitTerm, dataTerm, boundaryInfo.instancePath, "read-data");
+      pendingReadPort.dataTermIDs.push_back(termID);
+      const auto keyIt = ctx.inputKeyByTerm.find(termID);
+      if (keyIt == ctx.inputKeyByTerm.end()) {
+        throw std::runtime_error(
+            "Missing SEC state key for memory read-data bit in instance `" +
+            boundaryInfo.instancePath + "`");
+      }
+      pending.readOutputs.push_back({keyIt->second, portIndex, bitIndex});
+      ++bitIndex;
+    }
+    pending.readPorts.push_back(std::move(pendingReadPort));
+  }
+
+  pending.writePorts.reserve(interface.writePorts.size());
+  for (const auto& writePort : interface.writePorts) {
+    std::vector<naja::DNL::DNLID> enableTermIDs;
+    enableTermIDs.reserve(writePort.enables.size());
+    for (auto* enableTerm : writePort.enables) {
+      enableTermIDs.push_back(
+          getRequiredInstanceTermID(
+              termIDsByBitTerm,
+              enableTerm,
+              boundaryInfo.instancePath,
+              "write-enable"));
+    }
+    if (std::any_of(
+            enableTermIDs.begin(),
+            enableTermIDs.end(),
+            isDisabledMemoryWriteEnable)) {
+      continue;
+    }
+
+    PendingMemoryWritePort pendingWritePort;
+    pendingWritePort.addressTermIDs.reserve(writePort.address.size());
+    pendingWritePort.dataTermIDs.reserve(writePort.data.size());
+    pendingWritePort.maskTermIDs.reserve(writePort.mask.size());
+    pendingWritePort.enableTermIDs = std::move(enableTermIDs);
+    for (auto* addressTerm : writePort.address) {
+      pendingWritePort.addressTermIDs.push_back(
+          getRequiredInstanceTermID(
+              termIDsByBitTerm,
+              addressTerm,
+              boundaryInfo.instancePath,
+              "write-address"));
+    }
+    for (auto* dataTerm : writePort.data) {
+      pendingWritePort.dataTermIDs.push_back(
+          getRequiredInstanceTermID(
+              termIDsByBitTerm, dataTerm, boundaryInfo.instancePath, "write-data"));
+    }
+    for (auto* maskTerm : writePort.mask) {
+      pendingWritePort.maskTermIDs.push_back(
+          getRequiredInstanceTermID(
+              termIDsByBitTerm, maskTerm, boundaryInfo.instancePath, "write-mask"));
+    }
+    for (const auto& extraWriteTerms : writePort.extraWriteInputs) {
+      std::vector<naja::DNL::DNLID> pendingExtraTerms;
+      pendingExtraTerms.reserve(extraWriteTerms.size());
+      for (auto* extraTerm : extraWriteTerms) {
+        pendingExtraTerms.push_back(
+            getRequiredInstanceTermID(
+                termIDsByBitTerm,
+                extraTerm,
+                boundaryInfo.instancePath,
+                "extra-write"));
+      }
+      pendingWritePort.extraWriteInputTermIDs.push_back(
+          std::move(pendingExtraTerms));
+    }
+    pending.writePorts.push_back(std::move(pendingWritePort));
+  }
+
+  ctx.instanceBoundaryInfos.push_back(std::move(boundaryInfo));
+  pending.boundaryInfoIndex = ctx.instanceBoundaryInfos.size() - 1;
+  ctx.pendingMemoryInstances.push_back(std::move(pending));
+}
+
 void appendPendingTransitionsForInstance(
     ExtractContext& ctx,
     SequentialDesignModel& model,
@@ -1317,6 +1848,14 @@ void collectSequentialTransitions(ExtractContext& ctx, SequentialDesignModel& mo
   // Boolean expressions have been built.
   for (auto leafID : ctx.dnl->getLeaves()) {
     const auto& instance = ctx.dnl->getDNLInstanceFromID(leafID);
+    if (naja::NL::SNLDesignModeling::hasMemoryInterface(
+            instance.getSNLInstance()->getModel()) &&
+        supportsStructuredMemoryModel(
+            naja::NL::SNLDesignModeling::getMemoryInterface(
+                instance.getSNLInstance()))) {
+      appendPendingMemoryInstance(ctx, model, instance);
+      continue;
+    }
     const auto scan = scanSequentialInstance(instance, ctx.inputKeyByTerm, model);
     if (!scan.has_value()) {
       continue;
@@ -1408,11 +1947,12 @@ void publishNormalizedBoundary(ExtractContext& ctx, SequentialDesignModel& model
 
 void recordBoundaryInputVars(
     const ExtractContext& ctx,
+    const std::vector<naja::DNL::DNLID>& builderInputs,
     const std::vector<size_t>& termDNLID2varID,
     SequentialDesignModel& model) {
   // Preserve the symbolic variable chosen by the clause builder for each
   // aligned SEC input/state signal.
-  for (const auto inputTermID : ctx.builder.getInputs()) {
+  for (const auto inputTermID : builderInputs) {
     const auto keyIt = ctx.inputKeyByTerm.find(inputTermID);
     if (keyIt == ctx.inputKeyByTerm.end()) {
       continue;
@@ -1433,6 +1973,326 @@ void recordBoundaryInputVars(
         ctx.topName.c_str(),
         model.inputVarByKey.size());
     fflush(stderr);
+  }
+}
+
+size_t getNextSyntheticVarID(const SequentialDesignModel& model) {
+  size_t nextVarID = 2;
+  for (const auto& [_, varID] : model.inputVarByKey) {
+    nextVarID = std::max(nextVarID, varID + 1);
+  }
+  return nextVarID;
+}
+
+void assignStructuredMemoryStateVars(
+    const ExtractContext& ctx,
+    SequentialDesignModel& model) {
+  size_t nextVarID = getNextSyntheticVarID(model);
+  for (const auto& pendingMemory : ctx.pendingMemoryInstances) {
+    for (const auto& cellState : pendingMemory.cellStates) {
+      model.stateBits.push_back(cellState.key);
+      model.inputVarByKey.emplace(cellState.key, nextVarID++);
+    }
+  }
+}
+
+std::vector<naja::DNL::DNLID> collectStructuredMemoryDependencyTerms(
+    const ExtractContext& ctx) {
+  std::vector<naja::DNL::DNLID> termIDs;
+  std::unordered_set<naja::DNL::DNLID> seen;
+  for (const auto& pendingMemory : ctx.pendingMemoryInstances) {
+    if (pendingMemory.resetTermID.has_value() &&
+        seen.insert(*pendingMemory.resetTermID).second) {
+      termIDs.push_back(*pendingMemory.resetTermID);
+    }
+    for (const auto& readPort : pendingMemory.readPorts) {
+      for (const auto termID : readPort.addressTermIDs) {
+        if (seen.insert(termID).second) {
+          termIDs.push_back(termID);
+        }
+      }
+    }
+    for (const auto& writePort : pendingMemory.writePorts) {
+      for (const auto termID : writePort.addressTermIDs) {
+        if (seen.insert(termID).second) {
+          termIDs.push_back(termID);
+        }
+      }
+      for (const auto termID : writePort.dataTermIDs) {
+        if (seen.insert(termID).second) {
+          termIDs.push_back(termID);
+        }
+      }
+      for (const auto termID : writePort.maskTermIDs) {
+        if (seen.insert(termID).second) {
+          termIDs.push_back(termID);
+        }
+      }
+      for (const auto termID : writePort.enableTermIDs) {
+        if (seen.insert(termID).second) {
+          termIDs.push_back(termID);
+        }
+      }
+    }
+  }
+  return termIDs;
+}
+
+BoolExpr* getStructuredMemoryTermExprOrThrow(
+    naja::DNL::DNLID termID,
+    std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
+    const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
+        skippedOutputsByTerm,
+    const std::vector<naja::DNL::DNLID>& builderInputs,
+    const std::vector<naja::DNL::DNLID>& builderOutputs,
+    const std::vector<size_t>& termDNLID2varID) {
+  if (const auto exprIt = outputExprByTerm.find(termID);
+      exprIt != outputExprByTerm.end()) {
+    return exprIt->second;
+  }
+
+  auto* dnl = naja::DNL::get();
+  const std::string displayName =
+      dnl == nullptr ? ("term#" + std::to_string(termID))
+                     : getTerminalDisplayName(dnl->getDNLTerminalFromID(termID));
+
+  if (const auto skippedIt = skippedOutputsByTerm.find(termID);
+      skippedIt != skippedOutputsByTerm.end()) {
+    if (const auto connectivitySkip = getConnectivitySkipInfo(skippedIt->second);
+        connectivitySkip.has_value()) {
+      throw std::runtime_error(
+          "Structured memory dependency `" + displayName +
+          "` was skipped because " + connectivitySkip->detail);
+    }
+    throw std::runtime_error(
+        "Structured memory dependency `" + displayName +
+        "` is unsupported: " + skippedIt->second.detail);
+  }
+
+  const auto built = buildObservedExprForTerm(
+      termID,
+      outputExprByTerm,
+      builderInputs,
+      builderOutputs,
+      termDNLID2varID,
+      true);
+  if (built.expr != nullptr) {
+    outputExprByTerm.emplace(termID, built.expr);
+    return built.expr;
+  }
+  if (built.connectivitySkip.has_value()) {
+    throw std::runtime_error(
+        "Structured memory dependency `" + displayName +
+        "` was skipped because " +
+        built.connectivitySkip->detail);
+  }
+  throw std::runtime_error(
+      "Structured memory dependency `" + displayName +
+      "` is unsupported: " +
+      built.unsupportedReason);
+}
+
+bool isNoDriverSkippedStructuredMemoryTerm(
+    naja::DNL::DNLID termID,
+    const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
+        skippedOutputsByTerm) {
+  const auto skippedIt = skippedOutputsByTerm.find(termID);
+  if (skippedIt == skippedOutputsByTerm.end()) {
+    return false;
+  }
+  const auto connectivitySkip = getConnectivitySkipInfo(skippedIt->second);
+  return connectivitySkip.has_value() &&
+         connectivitySkip->origin == ConnectivitySkipOrigin::NoDriver;
+}
+
+bool isDisabledMemoryWriteEnable(
+    naja::DNL::DNLID termID,
+    const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
+        skippedOutputsByTerm) {
+  return isDisabledMemoryWriteEnable(termID) ||
+         isNoDriverSkippedStructuredMemoryTerm(termID, skippedOutputsByTerm);
+}
+
+void buildStructuredMemoryTransitions(
+    const ExtractContext& ctx,
+    SequentialDesignModel& model,
+    const std::vector<naja::DNL::DNLID>& builderInputs,
+    const std::vector<naja::DNL::DNLID>& builderOutputs,
+    const std::vector<size_t>& termDNLID2varID,
+    std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
+    const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
+        skippedOutputsByTerm) {
+  for (const auto& pendingMemory : ctx.pendingMemoryInstances) {
+    std::vector<std::vector<BoolExpr*>> readAddressExprs;
+    readAddressExprs.reserve(pendingMemory.readPorts.size());
+    for (const auto& readPort : pendingMemory.readPorts) {
+      std::vector<BoolExpr*> addressExprs;
+      addressExprs.reserve(readPort.addressTermIDs.size());
+      for (const auto termID : readPort.addressTermIDs) {
+        // Structured-memory dependency materialization can add extra
+        // boundary roots that were not present in the original top-output
+        // build. Read-address reconstruction must use that merged frontier,
+        // otherwise a dependency found in the batch phase can disappear when
+        // we rebuild the per-port expressions here.
+        addressExprs.push_back(getStructuredMemoryTermExprOrThrow(
+            termID,
+            outputExprByTerm,
+            skippedOutputsByTerm,
+            builderInputs,
+            builderOutputs,
+            termDNLID2varID));
+      }
+      readAddressExprs.push_back(std::move(addressExprs));
+    }
+
+    struct WritePortExprs {
+      bool disabled = false;
+      std::vector<BoolExpr*> addressExprs;
+      std::vector<BoolExpr*> dataExprs;
+      std::vector<BoolExpr*> maskExprs;
+      std::vector<BoolExpr*> enableExprs;
+    };
+    std::vector<WritePortExprs> writePortExprs;
+    writePortExprs.reserve(pendingMemory.writePorts.size());
+    for (const auto& writePort : pendingMemory.writePorts) {
+      WritePortExprs exprs;
+      exprs.addressExprs.reserve(writePort.addressTermIDs.size());
+      exprs.dataExprs.reserve(writePort.dataTermIDs.size());
+      exprs.maskExprs.reserve(writePort.maskTermIDs.size());
+      exprs.enableExprs.reserve(writePort.enableTermIDs.size());
+      for (const auto termID : writePort.enableTermIDs) {
+        if (isDisabledMemoryWriteEnable(termID, skippedOutputsByTerm)) {
+          exprs.disabled = true;
+          break;
+        }
+        exprs.enableExprs.push_back(getStructuredMemoryTermExprOrThrow(
+            termID,
+            outputExprByTerm,
+            skippedOutputsByTerm,
+            builderInputs,
+            builderOutputs,
+            termDNLID2varID));
+      }
+      if (exprs.disabled) {
+        writePortExprs.push_back(std::move(exprs));
+        continue;
+      }
+      for (const auto termID : writePort.addressTermIDs) {
+        exprs.addressExprs.push_back(getStructuredMemoryTermExprOrThrow(
+            termID,
+            outputExprByTerm,
+            skippedOutputsByTerm,
+            builderInputs,
+            builderOutputs,
+            termDNLID2varID));
+      }
+      for (const auto termID : writePort.dataTermIDs) {
+        exprs.dataExprs.push_back(getStructuredMemoryTermExprOrThrow(
+            termID,
+            outputExprByTerm,
+            skippedOutputsByTerm,
+            builderInputs,
+            builderOutputs,
+            termDNLID2varID));
+      }
+      for (const auto termID : writePort.maskTermIDs) {
+        exprs.maskExprs.push_back(getStructuredMemoryTermExprOrThrow(
+            termID,
+            outputExprByTerm,
+            skippedOutputsByTerm,
+            builderInputs,
+            builderOutputs,
+            termDNLID2varID));
+      }
+      writePortExprs.push_back(std::move(exprs));
+    }
+
+    BoolExpr* resetExpr = nullptr;
+    if (pendingMemory.resetTermID.has_value()) {
+      resetExpr = getStructuredMemoryTermExprOrThrow(
+          *pendingMemory.resetTermID,
+          outputExprByTerm,
+          skippedOutputsByTerm,
+          builderInputs,
+          builderOutputs,
+          termDNLID2varID);
+    }
+    const auto resetAssertedExpr = [&]() -> BoolExpr* {
+      switch (pendingMemory.resetMode) {
+        case naja::NL::SNLDesignModeling::MemoryResetMode::AsyncLow:
+        case naja::NL::SNLDesignModeling::MemoryResetMode::SyncLow:
+          return resetExpr == nullptr ? nullptr : BoolExpr::Not(resetExpr);
+        case naja::NL::SNLDesignModeling::MemoryResetMode::AsyncHigh:
+        case naja::NL::SNLDesignModeling::MemoryResetMode::SyncHigh:
+          return resetExpr;
+        case naja::NL::SNLDesignModeling::MemoryResetMode::None:
+        default:
+          return nullptr;
+      }
+    }();
+
+    std::vector<std::vector<BoolExpr*>> cellNextExprs(
+        pendingMemory.depth,
+        std::vector<BoolExpr*>(pendingMemory.width, nullptr));
+    for (const auto& cellState : pendingMemory.cellStates) {
+      const auto varIt = model.inputVarByKey.find(cellState.key);
+      if (varIt == model.inputVarByKey.end()) {
+        throw std::runtime_error(
+            "Missing synthetic SEC variable for memory cell state `" +
+            cellState.displayName + "`");
+      }
+      BoolExpr* next = BoolExpr::Var(varIt->second);
+      for (size_t portIndex = 0; portIndex < pendingMemory.writePorts.size(); ++portIndex) {
+        const auto& writePort = pendingMemory.writePorts[portIndex];
+        const auto& exprs = writePortExprs[portIndex];
+        if (exprs.disabled) {
+          continue;
+        }
+        std::vector<BoolExpr*> conditions;
+        conditions.reserve(2 + exprs.enableExprs.size());
+        conditions.push_back(buildAddressEqualsExpr(
+            exprs.addressExprs, cellState.cellIndex));
+        for (auto* enableExpr : exprs.enableExprs) {
+          conditions.push_back(enableExpr);
+        }
+        if (!exprs.maskExprs.empty()) {
+          conditions.push_back(exprs.maskExprs[cellState.bitIndex]);
+        }
+        BoolExpr* writeCondition = makeAndChain(conditions);
+        next = makeIte(
+            writeCondition,
+            exprs.dataExprs[cellState.bitIndex],
+            next);
+      }
+      if (resetAssertedExpr != nullptr) {
+        next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);
+        model.initialStateValueByKey.emplace(cellState.key, false);
+      }
+      model.nextStateExprByStateKey.emplace(cellState.key, next);
+      cellNextExprs[cellState.cellIndex][cellState.bitIndex] = next;
+    }
+
+    for (const auto& readOutput : pendingMemory.readOutputs) {
+      const auto varIt = model.inputVarByKey.find(readOutput.key);
+      if (varIt == model.inputVarByKey.end()) {
+        throw std::runtime_error(
+            "Missing SEC variable for memory read-output state `" +
+            signalKeyToString(readOutput.key) + "`");
+      }
+      const auto& addressExprs = readAddressExprs[readOutput.portIndex];
+      BoolExpr* next = cellNextExprs[0][readOutput.bitIndex];
+      for (size_t cellIndex = 1; cellIndex < pendingMemory.depth; ++cellIndex) {
+        next = makeIte(
+            buildAddressEqualsExpr(addressExprs, cellIndex),
+            cellNextExprs[cellIndex][readOutput.bitIndex],
+            next);
+      }
+      if (resetAssertedExpr != nullptr) {
+        next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);
+        model.initialStateValueByKey.emplace(readOutput.key, false);
+      }
+      model.nextStateExprByStateKey.emplace(readOutput.key, next);
+    }
   }
 }
 
@@ -1518,7 +2378,9 @@ struct RebuiltTransitionArtifacts {
 RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
     ExtractContext& ctx,
     SequentialDesignModel& model,
-    const std::vector<size_t>& termDNLID2varID,
+    std::vector<naja::DNL::DNLID>& builderInputs,
+    std::vector<naja::DNL::DNLID>& builderOutputs,
+    std::vector<size_t>& termDNLID2varID,
     std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>& skippedOutputsByTerm) {
   RebuiltTransitionArtifacts artifacts;
@@ -1542,6 +2404,15 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
         }
 
         const auto& info = ctx.instanceBoundaryInfos[boundaryInfoIndex];
+        if (ctx.secDiagEnabled) {
+          fprintf(
+              stderr,
+              "SEC diag: extract(%s) late abstracted sequential instance `%s`: %s\n",
+              ctx.topName.c_str(),
+              info.instancePath.c_str(),
+              reason.c_str());
+          fflush(stderr);
+        }
         model.abstractedSequentialBoundaries.push_back(
             "Abstracted uncomputable sequential instance `" +
             info.instancePath + "` as a SEC boundary: " + reason);
@@ -1579,11 +2450,19 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
   }
 
   std::unordered_set<size_t> requiredPendingIndexes;
-  std::unordered_set<naja::DNL::DNLID> materializedOutputTerms(
-      ctx.builder.getOutputs().begin(), ctx.builder.getOutputs().end());
+  std::unordered_set<naja::DNL::DNLID> materializedOutputTerms;
+  materializedOutputTerms.reserve(outputExprByTerm.size());
+  for (const auto& [termID, _] : outputExprByTerm) {
+    materializedOutputTerms.insert(termID);
+  }
   std::deque<size_t> pendingWorkQueue;
+  std::deque<SignalKey> stateDependencyWorkQueue;
+  std::unordered_set<SignalKey, SignalKeyHash> expandedStateDependencies;
   auto enqueueRequiredStateKey = [&](const SignalKey& key) {
-    artifacts.requiredStateKeys.insert(key);
+    if (!artifacts.requiredStateKeys.insert(key).second) {
+      return;
+    }
+    stateDependencyWorkQueue.push_back(key);
     const auto pendingIt = pendingIndexByStateKey.find(key);
     if (pendingIt != pendingIndexByStateKey.end() &&
         requiredPendingIndexes.insert(pendingIt->second).second) {
@@ -1609,7 +2488,26 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
 
   // Follow the state/output dependency frontier lazily so SEC only rebuilds the
   // sequential update cones that can actually influence covered observations.
-  while (!pendingWorkQueue.empty()) {
+  // States with prebuilt next-state relations, such as structured memories,
+  // participate in the same frontier expansion before we trim the SEC model.
+  while (!stateDependencyWorkQueue.empty() || !pendingWorkQueue.empty()) {
+    while (!stateDependencyWorkQueue.empty()) {
+      const SignalKey key = stateDependencyWorkQueue.front();
+      stateDependencyWorkQueue.pop_front();
+      const auto nextStateIt = model.nextStateExprByStateKey.find(key);
+      if (nextStateIt == model.nextStateExprByStateKey.end()) {
+        continue;
+      }
+      if (!expandedStateDependencies.insert(key).second) {
+        continue;
+      }
+      enqueueStateDependenciesFromExpr(nextStateIt->second);
+    }
+
+    if (pendingWorkQueue.empty()) {
+      continue;
+    }
+
     std::vector<size_t> batchPendingIndexes;
     std::vector<naja::DNL::DNLID> batchOutputTerms;
     while (!pendingWorkQueue.empty()) {
@@ -1635,6 +2533,9 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
     if (!batchOutputTerms.empty()) {
       const auto dependencyOutputs = materializeBuilderOutputs(
           batchOutputTerms, ctx.secDiagEnabled, ctx.topName.c_str(), "dependency build");
+      appendUniqueTermIDs(builderInputs, dependencyOutputs.inputs);
+      appendUniqueTermIDs(builderOutputs, dependencyOutputs.outputs);
+      mergeBuilderTermVarIDs(termDNLID2varID, dependencyOutputs.termDNLID2varID);
       for (const auto& [termID, expr] : dependencyOutputs.outputExprByTerm) {
         outputExprByTerm.emplace(termID, expr);
       }
@@ -1720,8 +2621,12 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
         // function with a logical inversion.
         for (const auto& complementedKey : pending.complementedStateKeys) {
           model.nextStateExprByStateKey.emplace(complementedKey, BoolExpr::Not(nextStateExpr));
+          if (artifacts.requiredStateKeys.find(complementedKey) !=
+              artifacts.requiredStateKeys.end()) {
+            stateDependencyWorkQueue.push_back(complementedKey);
+          }
         }
-        enqueueStateDependenciesFromExpr(nextStateExpr);
+        stateDependencyWorkQueue.push_back(pending.stateKey);
       } catch (const std::exception& e) {
         if (ctx.abstractUncomputableSequentialBoundaries) {
           recordLateAbstractedInstanceBoundary(pending.boundaryInfoIndex, e.what());
@@ -1756,6 +2661,8 @@ void applyRebuiltTransitionArtifacts(
     const ExtractContext& ctx,
     const RebuiltTransitionArtifacts& artifacts,
     SequentialDesignModel& model,
+    const std::vector<naja::DNL::DNLID>& builderInputs,
+    const std::vector<naja::DNL::DNLID>& builderOutputs,
     const std::vector<size_t>& termDNLID2varID,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>& skippedOutputsByTerm) {
@@ -1821,8 +2728,8 @@ void applyRebuiltTransitionArtifacts(
       artifacts.lateAbstractedBoundaryObservedTerms,
       outputExprByTerm,
       skippedOutputsByTerm,
-      ctx.builder.getInputs(),
-      ctx.builder.getOutputs(),
+      builderInputs,
+      builderOutputs,
       termDNLID2varID,
       model);
 }
@@ -2024,6 +2931,75 @@ void validateExtractedModel(SequentialDesignModel& model) {
   }
 }
 
+void logExtractedModelDebugSummary(const ExtractContext& ctx,
+                                   const SequentialDesignModel& model) {
+  if (!ctx.secDiagEnabled) {
+    return;
+  }
+
+  size_t structuredMemoryCellCount = 0;
+  for (const auto& pendingMemory : ctx.pendingMemoryInstances) {
+    structuredMemoryCellCount += pendingMemory.cellStates.size();
+  }
+  fprintf(
+      stderr,
+      "SEC diag: extract(%s) structured_memories=%zu structured_memory_cells=%zu abstracted_seq_boundaries=%zu opaque_inputs=%zu opaque_outputs=%zu\n",
+      ctx.topName.c_str(),
+      ctx.pendingMemoryInstances.size(),
+      structuredMemoryCellCount,
+      model.abstractedSequentialBoundaries.size(),
+      model.internalBoundaryInputKeys.size(),
+      model.internalBoundaryOutputKeys.size());
+
+  auto formatSignal = [&](const SignalKey& key) {
+    const auto nameIt = model.displayNameByKey.find(key);
+    const auto varIt = model.inputVarByKey.find(key);
+    std::ostringstream oss;
+    oss << (nameIt == model.displayNameByKey.end() ? signalKeyToString(key)
+                                                   : nameIt->second);
+    if (varIt != model.inputVarByKey.end()) {
+      oss << "@v" << varIt->second;
+    }
+    return oss.str();
+  };
+
+  std::ostringstream stateSummary;
+  for (size_t index = 0; index < model.stateBits.size(); ++index) {
+    if (index != 0) {
+      stateSummary << ", ";
+    }
+    stateSummary << formatSignal(model.stateBits[index]);
+  }
+  fprintf(
+      stderr,
+      "SEC diag: extract(%s) kept_states=[%s]\n",
+      ctx.topName.c_str(),
+      stateSummary.str().c_str());
+
+  for (const auto& key : model.observedOutputs) {
+    const auto exprIt = model.observedOutputExprByKey.find(key);
+    if (exprIt == model.observedOutputExprByKey.end() || exprIt->second == nullptr) {
+      continue;
+    }
+    std::ostringstream supportSummary;
+    bool first = true;
+    for (const auto symbol : exprIt->second->getSupportVars()) {
+      if (!first) {
+        supportSummary << ", ";
+      }
+      first = false;
+      supportSummary << "v" << symbol;
+    }
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) observed_support %s = [%s]\n",
+        ctx.topName.c_str(),
+        formatSignal(key).c_str(),
+        supportSummary.str().c_str());
+  }
+  fflush(stderr);
+}
+
 }  // namespace
 
 SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
@@ -2079,11 +3055,13 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   buildInitialObservedOutputClouds(ctx, model);
   publishNormalizedBoundary(ctx, model);
 
-  const auto& termDNLID2varID = ctx.builder.getTermDNLID2VarID();
-  recordBoundaryInputVars(ctx, termDNLID2varID, model);
+  std::vector<naja::DNL::DNLID> builderInputs = ctx.builder.getInputs();
+  std::vector<naja::DNL::DNLID> builderOutputs = ctx.builder.getOutputs();
+  std::vector<size_t> termDNLID2varID = ctx.builder.getTermDNLID2VarID();
+  recordBoundaryInputVars(ctx, builderInputs, termDNLID2varID, model);
 
   std::unordered_map<naja::DNL::DNLID, BoolExpr*> outputExprByTerm;
-  const auto& outputTerms = ctx.builder.getOutputs();
+  const auto& outputTerms = builderOutputs;
   const auto& outputExprs = ctx.builder.getPOs();
   auto skippedOutputsByTerm = ctx.builder.getSkippedOutputs();
   // Keep only the valid formulas produced by the clause builder. Invalid
@@ -2097,6 +3075,28 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     outputExprByTerm.emplace(outputTerms[i], expr);
   }
 
+  const auto structuredMemoryDependencyTerms =
+      collectStructuredMemoryDependencyTerms(ctx);
+  if (!structuredMemoryDependencyTerms.empty()) {
+    const auto dependencyOutputs = materializeBuilderOutputs(
+        structuredMemoryDependencyTerms,
+        ctx.secDiagEnabled,
+        ctx.topName.c_str(),
+        "structured memory dependency build",
+        true);
+    appendUniqueTermIDs(builderInputs, dependencyOutputs.inputs);
+    appendUniqueTermIDs(builderOutputs, dependencyOutputs.outputs);
+    mergeBuilderTermVarIDs(termDNLID2varID, dependencyOutputs.termDNLID2varID);
+    recordBoundaryInputVars(ctx, builderInputs, termDNLID2varID, model);
+    for (const auto& [termID, expr] : dependencyOutputs.outputExprByTerm) {
+      outputExprByTerm.emplace(termID, expr);
+    }
+    for (const auto& [termID, info] : dependencyOutputs.skippedOutputsByTerm) {
+      skippedOutputsByTerm.emplace(termID, info);
+    }
+  }
+  assignStructuredMemoryStateVars(ctx, model);
+
   // Phase 3: materialize the observed output formulas that SEC will actually
   // compare, classifying anything missing as either a skippable connectivity
   // gap or a hard unsupported boundary.
@@ -2104,8 +3104,8 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
       ctx.abstractedBoundaryObservedTerms,
       outputExprByTerm,
       skippedOutputsByTerm,
-      ctx.builder.getInputs(),
-      ctx.builder.getOutputs(),
+      builderInputs,
+      builderOutputs,
       termDNLID2varID,
       model);
   materializeTopObservedOutputs(
@@ -2120,13 +3120,37 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     fflush(stderr);
   }
 
+  if (!ctx.pendingMemoryInstances.empty()) {
+    buildStructuredMemoryTransitions(
+        ctx,
+        model,
+        builderInputs,
+        builderOutputs,
+        termDNLID2varID,
+        outputExprByTerm,
+        skippedOutputsByTerm);
+  }
+
   // Phase 4: rebuild the next-state relations for just the state that is still
   // relevant to covered outputs, then fold any late boundary abstractions back
   // into the published interface.
   const auto rebuiltArtifacts = rebuildRequiredStateTransitions(
-      ctx, model, termDNLID2varID, outputExprByTerm, skippedOutputsByTerm);
+      ctx,
+      model,
+      builderInputs,
+      builderOutputs,
+      termDNLID2varID,
+      outputExprByTerm,
+      skippedOutputsByTerm);
   applyRebuiltTransitionArtifacts(
-      ctx, rebuiltArtifacts, model, termDNLID2varID, outputExprByTerm, skippedOutputsByTerm);
+      ctx,
+      rebuiltArtifacts,
+      model,
+      builderInputs,
+      builderOutputs,
+      termDNLID2varID,
+      outputExprByTerm,
+      skippedOutputsByTerm);
   filterUnsupportedAndUnmappedBoundary(ctx, model);
 
   // Phase 5: propagate connectivity skips through dependent state/output cones,
@@ -2135,6 +3159,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   partitionCoveredSignals(model);
 
   inferSynthesizedResetInitialStateValues(model);
+  logExtractedModelDebugSummary(ctx, model);
   if (ctx.secDiagEnabled) {
     fprintf(
         stderr,
