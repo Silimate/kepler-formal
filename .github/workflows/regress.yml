@@ -129,6 +129,27 @@ jobs:
         ../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_csrfile_sec.yaml
         grep "SEC found a counterexample at k = 3" tinyrocket_csrfile_sec.log
 
+    - name: Run TinyRocket CSRFile SEC strategy counterexample examples
+      working-directory: ${{github.workspace}}/example
+      run: |
+        for engine in KINDUCTION IMC PDR; do
+          out="tinyrocket_csrfile_sec_${engine}.out"
+          ../build/src/bin/kepler-formal -verilog \
+            -v SEC \
+            -k 4 \
+            --sec-engine "$engine" \
+            --design1 tinyrocket_csrfile.v tinyrocket_csrfile_wrapper.v \
+            --design2 tinyrocket_csrfile.v tinyrocket_csrfile_wrapper_k3.v \
+            --liberty \
+              NangateOpenCellLibrary_typical.lib \
+              fakeram45_1024x32.lib \
+              fakeram45_64x32.lib \
+              fakeram45_64x15.lib \
+            > "$out" 2>&1
+          cat "$out"
+          grep "SEC found a counterexample" "$out"
+        done
+
     - name: Run TinyRocket SEC self-check
       working-directory: ${{github.workspace}}/example
       run: |
