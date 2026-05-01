@@ -1393,6 +1393,21 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   // spend time aligning interfaces or building proof problems.
   const auto model0 =
       extractSecDesign(top0_, "SEC diag: extracted design0", secDiagEnabled);
+  if (model0.hasUnsupportedFeatures()) {
+    std::vector<std::string> abstractedSequentialBoundaries;
+    std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports;
+    appendAbstractedSequentialBoundaries(
+        model0, "design0", abstractedSequentialBoundaries);
+    appendExtractedBoundaryReports(model0, "design0", extractedBoundaryReports);
+    return makeSecResult(
+        SequentialEquivalenceStatus::Unsupported,
+        0,
+        joinReasons(model0.unsupportedReasons),
+        OutputCoverageSelection{},
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
   const auto model1 =
       extractSecDesign(top1_, "SEC diag: extracted design1", secDiagEnabled);
   return runExtractedModels(model0, model1, maxK);
