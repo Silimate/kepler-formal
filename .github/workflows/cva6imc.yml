@@ -67,6 +67,7 @@ jobs:
         export TARGET_CFG="cv64a6_imafdc_sv39"
         export LD_LIBRARY_PATH="${{github.workspace}}/stage/lib:${LD_LIBRARY_PATH}"
         "${{github.workspace}}/stage/bin/kepler-formal" -systemverilog \
+          --compact \
           -v SEC \
           -k 4 \
           --sec-engine IMC \

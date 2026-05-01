@@ -55,6 +55,8 @@ struct SequentialEquivalenceResult {
   }
 };
 
+struct SequentialDesignModel;
+
 // Builds a combined SEC problem from two sequential designs and discharges it
 // with the selected SEC proof engine. "Legacy" preserves the historical hybrid
 // path, while KINDUCTION, IMC, and PDR expose distinct top-level engines over
@@ -69,6 +71,10 @@ class SequentialEquivalenceStrategy {
       SecEngine secEngine = SecEngine::Legacy);
 
   SequentialEquivalenceResult run(size_t maxK) const;
+  SequentialEquivalenceResult runExtractedModels(
+      const SequentialDesignModel& model0,
+      const SequentialDesignModel& model1,
+      size_t maxK) const;
 
  private:
   naja::NL::SNLDesign* top0_;

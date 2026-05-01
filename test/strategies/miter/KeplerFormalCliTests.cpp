@@ -2028,7 +2028,7 @@ TEST(KeplerFormalCliTests, ConfigTinyRocketSecVerificationAccepted) {
   std::filesystem::remove(cfgPath);
 }
 
-TEST(KeplerFormalCliTests, ConfigSecRejectsCompactMode) {
+TEST(KeplerFormalCliTests, ConfigSecCompactModeAccepted) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
@@ -2037,7 +2037,7 @@ TEST(KeplerFormalCliTests, ConfigSecRejectsCompactMode) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }

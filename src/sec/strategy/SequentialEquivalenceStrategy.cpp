@@ -464,6 +464,12 @@ std::string formatConeTraceback(const KInductionResult::CounterexampleWitness& w
   oss << "Traceback for first differing point `" << differencePoint.signal
       << "` at cycle " << witness.badFrame << ":\n";
 
+  if (top0 == nullptr || top1 == nullptr) {
+    oss << "  Cone traceback unavailable: compact SEC released the "
+           "elaborated designs after model extraction.\n";
+    return oss.str();
+  }
+
   try {
     const auto report0 = buildConeDiffReport(
         top0, differencePoint.signal, model0.environmentInputs);
@@ -1385,10 +1391,25 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
   // Phase 1: extract both designs into the normalized SEC model used by every
   // downstream engine. If either side cannot be modeled soundly, stop before we
   // spend time aligning interfaces or building proof problems.
-  std::vector<std::string> abstractedSequentialBoundaries;
-  std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports;
   const auto model0 =
       extractSecDesign(top0_, "SEC diag: extracted design0", secDiagEnabled);
+  const auto model1 =
+      extractSecDesign(top1_, "SEC diag: extracted design1", secDiagEnabled);
+  return runExtractedModels(model0, model1, maxK);
+}
+
+SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    size_t maxK) const {
+  const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
+  logSecDiagLine(secDiagEnabled, "SEC diag: start run from extracted models");
+
+  // Compact SEC can release the elaborated Naja DBs after extraction and run
+  // entirely from these value-type models. Rebuilding the boundary summaries
+  // here keeps normal and compact flows reporting the same coverage details.
+  std::vector<std::string> abstractedSequentialBoundaries;
+  std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports;
   appendAbstractedSequentialBoundaries(
       model0, "design0", abstractedSequentialBoundaries);
   appendExtractedBoundaryReports(model0, "design0", extractedBoundaryReports);
@@ -1401,8 +1422,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) cons
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
   }
-  const auto model1 =
-      extractSecDesign(top1_, "SEC diag: extracted design1", secDiagEnabled);
   appendAbstractedSequentialBoundaries(
       model1, "design1", abstractedSequentialBoundaries);
   appendExtractedBoundaryReports(model1, "design1", extractedBoundaryReports);

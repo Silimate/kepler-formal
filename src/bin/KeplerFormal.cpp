@@ -36,6 +36,7 @@
 #include "ScopeExtraction.h"
 #include "Config.h"
 #include "KeplerFormalUtils.h"
+#include "model/SequentialDesignModel.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 
 static const char* kBoundaryTermsReport = "boundary_terms.txt";
@@ -1077,10 +1078,6 @@ int KeplerFormalMain(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   if (verificationMode == VerificationMode::SEC) {
-    if (compactMode) {
-      SPDLOG_CRITICAL("SEC verification does not support compact mode");
-      return EXIT_FAILURE;
-    }
     if (useScopes || cleanScopes) {
       SPDLOG_CRITICAL("SEC verification does not support scope extraction/cleaning");
       return EXIT_FAILURE;
@@ -1138,6 +1135,68 @@ int KeplerFormalMain(int argc, char** argv) {
   if (!pythonFiles.empty()) {
     for (const auto& pf : pythonFiles) SPDLOG_INFO("Python library: {}", pf);
   }
+
+  auto emitSecResult =
+      [&](const KEPLER_FORMAL::SEC::SequentialEquivalenceResult& result) {
+        if (result.totalOutputs != 0) {
+          SPDLOG_INFO(
+              "SEC output coverage: {:.2f}% ({}/{} covered/existing outputs).",
+              result.outputCoveragePercent(),
+              result.coveredOutputs,
+              result.totalOutputs);
+        }
+        if (!result.skippedObservedOutputs.empty()) {
+          std::ostringstream skippedOutputs;
+          for (const auto& skippedOutput : result.skippedObservedOutputs) {
+            skippedOutputs << "  - " << skippedOutput << "\n";
+          }
+          SPDLOG_INFO(
+              "SEC skipped observed outputs due to connectivity issues "
+              "(no-driver, multi-driver, or logical-loop):\n{}",
+              skippedOutputs.str());
+        }
+        if (!result.abstractedSequentialBoundaries.empty()) {
+          std::ostringstream abstractedBoundaries;
+          for (const auto& abstractedBoundary :
+               result.abstractedSequentialBoundaries) {
+            abstractedBoundaries << "  - " << abstractedBoundary << "\n";
+          }
+          SPDLOG_INFO(
+              "SEC abstracted uncomputable sequential interfaces as "
+              "boundaries:\n{}",
+              abstractedBoundaries.str());
+        }
+        if (reportSkippedPOs) {
+          writeBoundaryTermsReport(
+              kBoundaryTermsReport, result.extractedBoundaryReports);
+        }
+        switch (result.status) {
+          case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:
+            SPDLOG_INFO(
+                "No difference was found. SEC proved equivalence at k = {}.",
+                result.bound);
+            return EXIT_SUCCESS;
+          case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Different:
+            SPDLOG_INFO(
+                "Difference was found. SEC found a counterexample at k = {}.",
+                result.bound);
+            if (!result.reason.empty()) {
+              SPDLOG_INFO("SEC counterexample details:\n{}", result.reason);
+            }
+            return EXIT_SUCCESS;
+          case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Inconclusive:
+            SPDLOG_CRITICAL(
+                "SEC was inconclusive up to max_k = {}: {}",
+                secMaxK,
+                result.reason);
+            return EXIT_FAILURE;
+          case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:
+          default:
+            SPDLOG_CRITICAL(
+                "SEC cannot run on this design pair: {}", result.reason);
+            return EXIT_FAILURE;
+        }
+      };
 
   // --------------------------------------------------------------------------
   // 2. Load two netlists via Cap’n Proto (or via VRL constructor)
@@ -1270,7 +1329,7 @@ int KeplerFormalMain(int argc, char** argv) {
           return captureCompactSnapshot(builder);
         };
 
-    if (compactMode && !useScopes) {
+    if (compactMode && verificationMode == VerificationMode::LEC && !useScopes) {
       NLDB* compactDb0 =
           loadOneDesign(designInputs.design0, systemVerilogOptions.design0, 0, 2);
       top0 = compactDb0->getTopDesign();
@@ -1303,8 +1362,76 @@ int KeplerFormalMain(int argc, char** argv) {
 	        SPDLOG_ERROR("Workflow failed: {}", e.what());
 	        return EXIT_FAILURE;
           // LCOV_EXCL_STOP
-	      }
+      }
       return EXIT_SUCCESS;
+    }
+
+    if (compactMode && verificationMode == VerificationMode::SEC) {
+      auto releaseCompactDb = [](NLDB* db) {
+        naja::DNL::destroy();
+        if (auto* universe = NLUniverse::get()) {
+          // Sequential extraction restores the current top when possible. In
+          // compact mode we deliberately drop that elaborated DB before loading
+          // the next design, so clear the universe top DB first to avoid a
+          // dangling top pointer.
+          universe->setTopDB(nullptr);
+        }
+        if (db != nullptr) {
+          db->destroy();
+        }
+      };
+
+      auto extractCompactSecModel =
+          [&](const std::vector<std::string>& designPaths,
+              const SystemVerilogDesignOptions& designOptions,
+              int designIndex,
+              int dbID,
+              const char* designLabel) {
+            NLDB* db =
+                loadOneDesign(designPaths, designOptions, designIndex, dbID);
+            try {
+              auto* top = db->getTopDesign();
+              if (top == nullptr) {
+                throw std::runtime_error(
+                    std::string("Top design not set for ") + designLabel);
+              }
+              auto model = KEPLER_FORMAL::SEC::SequentialDesignModel::extract(top);
+              releaseCompactDb(db);
+              return model;
+            } catch (...) {
+              releaseCompactDb(db);
+              throw;
+            }
+          };
+
+      try {
+        SPDLOG_INFO(
+            "SEC compact mode: extracting and releasing design 1 before "
+            "loading design 2");
+        const auto model0 = extractCompactSecModel(
+            designInputs.design0,
+            systemVerilogOptions.design0,
+            0,
+            2,
+            "design 1");
+        SPDLOG_INFO(
+            "SEC compact mode: extracting and releasing design 2 before "
+            "starting proof");
+        const auto model1 = extractCompactSecModel(
+            designInputs.design1,
+            systemVerilogOptions.design1,
+            1,
+            1,
+            "design 2");
+
+        KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
+            nullptr, nullptr, solverType, secEngine);
+        return emitSecResult(
+            strategy.runExtractedModels(model0, model1, secMaxK));
+      } catch (const std::exception& e) {
+        SPDLOG_ERROR("SEC compact workflow failed: {}", e.what());
+        return EXIT_FAILURE;
+      }
     }
 
     if (!libertyFiles.empty() || !pythonFiles.empty()) {
@@ -1470,55 +1597,7 @@ int KeplerFormalMain(int argc, char** argv) {
     try {
       KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
           top0, top1, solverType, secEngine);
-      const auto result = strategy.run(secMaxK);
-      if (result.totalOutputs != 0) {
-        SPDLOG_INFO(
-            "SEC output coverage: {:.2f}% ({}/{} covered/existing outputs).",
-            result.outputCoveragePercent(),
-            result.coveredOutputs,
-            result.totalOutputs);
-      }
-      if (!result.skippedObservedOutputs.empty()) {
-        std::ostringstream skippedOutputs;
-        for (const auto& skippedOutput : result.skippedObservedOutputs) {
-          skippedOutputs << "  - " << skippedOutput << "\n";
-        }
-        SPDLOG_INFO(
-            "SEC skipped observed outputs due to connectivity issues "
-            "(no-driver, multi-driver, or logical-loop):\n{}",
-            skippedOutputs.str());
-      }
-      if (!result.abstractedSequentialBoundaries.empty()) {
-        std::ostringstream abstractedBoundaries;
-        for (const auto& abstractedBoundary : result.abstractedSequentialBoundaries) {
-          abstractedBoundaries << "  - " << abstractedBoundary << "\n";
-        }
-        SPDLOG_INFO(
-            "SEC abstracted uncomputable sequential interfaces as boundaries:\n{}",
-            abstractedBoundaries.str());
-      }
-      if (reportSkippedPOs) {
-        writeBoundaryTermsReport(
-            kBoundaryTermsReport, result.extractedBoundaryReports);
-      }
-      switch (result.status) {
-        case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:
-          SPDLOG_INFO("No difference was found. SEC proved equivalence at k = {}.", result.bound);
-          return EXIT_SUCCESS;
-        case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Different:
-          SPDLOG_INFO("Difference was found. SEC found a counterexample at k = {}.", result.bound);
-          if (!result.reason.empty()) {
-            SPDLOG_INFO("SEC counterexample details:\n{}", result.reason);
-          }
-          return EXIT_SUCCESS;
-        case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Inconclusive:
-          SPDLOG_CRITICAL("SEC was inconclusive up to max_k = {}: {}", secMaxK, result.reason);
-          return EXIT_FAILURE;
-        case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:
-        default:
-          SPDLOG_CRITICAL("SEC cannot run on this design pair: {}", result.reason);
-          return EXIT_FAILURE;
-      }
+      return emitSecResult(strategy.run(secMaxK));
     } catch (const std::exception& e) {
       SPDLOG_ERROR("SEC workflow failed: {}", e.what());
       return EXIT_FAILURE;
