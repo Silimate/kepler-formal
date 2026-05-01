@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  cva6-pdr:
+  build-kepler-formal:
     runs-on: ubuntu-22.04
 
     steps:
@@ -46,6 +46,41 @@ jobs:
 
     - name: Restore executable bit
       run: chmod +x ${{github.workspace}}/stage/bin/kepler-formal
+
+    - name: Pack kepler-formal stage
+      run: tar -czf ${{github.workspace}}/kepler-formal-stage.tar.gz -C ${{github.workspace}} stage
+
+    - name: Upload kepler-formal stage
+      uses: actions/upload-artifact@v4
+      with:
+        name: kepler-formal-stage
+        path: ${{github.workspace}}/kepler-formal-stage.tar.gz
+        if-no-files-found: error
+        retention-days: 1
+
+  cva6-pdr:
+    runs-on: ubuntu-22.04
+    needs: build-kepler-formal
+
+    steps:
+    - name: Install runtime dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libgtest-dev cmake pkg-config libboost-dev libfl-dev \
+          capnproto libcapnp-dev ninja-build libtbb-dev libspdlog-dev \
+          libboost-iostreams-dev zlib1g-dev
+
+    - name: Download kepler-formal stage
+      uses: actions/download-artifact@v4
+      with:
+        name: kepler-formal-stage
+        path: ${{github.workspace}}
+
+    - name: Extract kepler-formal stage
+      run: |
+        tar -xzf ${{github.workspace}}/kepler-formal-stage.tar.gz -C ${{github.workspace}}
+        chmod +x ${{github.workspace}}/stage/bin/kepler-formal
 
     - name: Clone kepler-formal-regress
       working-directory: ${{github.workspace}}
