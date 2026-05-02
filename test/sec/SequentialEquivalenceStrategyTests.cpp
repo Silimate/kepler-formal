@@ -941,6 +941,21 @@ std::optional<naja::DNL::DNLID> findTermByDisplayNameForTest(
   return std::nullopt;
 }
 
+std::optional<naja::DNL::DNLID> findFirstTermByDisplayPrefixForTest(
+    naja::DNL::DNLFull* dnl,
+    const std::string& signalPrefix) {
+  for (naja::DNL::DNLID termID = 0; termID < dnl->getDNLTerms().size(); ++termID) {
+    const auto& term = dnl->getDNLTerminalFromID(termID);
+    if (term.isNull()) {
+      continue;
+    }
+    if (getTerminalDisplayNameForTest(term).rfind(signalPrefix, 0) == 0) {
+      return termID;
+    }
+  }
+  return std::nullopt;
+}
+
 std::optional<naja::DNL::DNLID> findBuildableOutputRootForTest(
     naja::DNL::DNLFull* dnl,
     naja::DNL::DNLID requestedTermID,
@@ -4662,6 +4677,35 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineProjectsBadCubesToRelevantStateSupport) {
+  auto problem = buildDocumentedBooleanPdrCounterexampleProblem();
+  problem.state0Symbols.push_back(5);
+  problem.allSymbols.push_back(5);
+  problem.initialCondition = BoolExpr::And(
+      problem.initialCondition, BoolExpr::Not(BoolExpr::Var(5)));
+  problem.transitions0.emplace_back(
+      5, BoolExpr::Xor(BoolExpr::Var(5), BoolExpr::Var(4)));
+
+  const ScopedEnvVar secPdrTrace("KEPLER_SEC_PDR_TRACE", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  ASSERT_EQ(result.status, PDRStatus::Different);
+  const auto badCubePos = stderrOutput.find("SEC PDR trace: bad_cube@F1");
+  ASSERT_NE(badCubePos, std::string::npos);
+  const auto nextTracePos = stderrOutput.find("SEC PDR trace:", badCubePos + 1);
+  const std::string badCubeTrace = stderrOutput.substr(
+      badCubePos,
+      nextTracePos == std::string::npos ? std::string::npos
+                                        : nextTracePos - badCubePos);
+  EXPECT_NE(badCubeTrace.find("x2="), std::string::npos);
+  EXPECT_NE(badCubeTrace.find("x3="), std::string::npos);
+  EXPECT_EQ(badCubeTrace.find("x5"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDoesNotConvergeAtFourFramesWithoutInitialConstraint) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -5280,8 +5324,15 @@ TEST_F(
   detail::ScopedDnlContextForTest dnlContext(top);
   auto* dnl = dnlContext.dnl();
   ASSERT_NE(dnl, nullptr);
-  const auto requestedTermID = detail::findTermByDisplayNameForTest(
+  auto requestedTermID = detail::findTermByDisplayNameForTest(
       dnl, "dut.generic_counter_q_mem.RADDR[18]");
+  if (!requestedTermID.has_value()) {
+    // Different CVA6 target configs can infer a narrower generated memory
+    // address port. The dependency regression only needs a real RADDR bit, not
+    // a specific width-dependent index.
+    requestedTermID = detail::findFirstTermByDisplayPrefixForTest(
+        dnl, "dut.generic_counter_q_mem.RADDR[");
+  }
   ASSERT_TRUE(requestedTermID.has_value());
 
   const auto probe =
@@ -5440,9 +5491,16 @@ TEST_F(
   detail::ScopedDnlContextForTest dnlContext(top);
   auto* dnl = dnlContext.dnl();
   ASSERT_NE(dnl, nullptr);
-  const auto requestedTermID = detail::findTermByDisplayNameForTest(
+  auto requestedTermID = detail::findTermByDisplayNameForTest(
       dnl,
       "cva6_gen_perf_counter_perf_counters_i.generic_counter_q_mem.WDATA[384]");
+  if (!requestedTermID.has_value()) {
+    // Keep the probe tied to the generated WDATA port while allowing the local
+    // CVA6 config to choose a smaller packed memory width.
+    requestedTermID = detail::findFirstTermByDisplayPrefixForTest(
+        dnl,
+        "cva6_gen_perf_counter_perf_counters_i.generic_counter_q_mem.WDATA[");
+  }
   ASSERT_TRUE(requestedTermID.has_value());
 
   const auto skippedNoDriverReportPath =

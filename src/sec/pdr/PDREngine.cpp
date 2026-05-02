@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <optional>
 #include <sstream>
+#include <unordered_map>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -79,6 +80,149 @@ void addTransitionRelation(SATSolverWrapper& solver,
                            const FrameVariableStore& variables,
                            const KInductionProblem& problem,
                            size_t frame);
+
+std::unordered_map<size_t, BoolExpr*> buildTransitionExprByStateSymbol(
+    const KInductionProblem& problem) {
+  std::unordered_map<size_t, BoolExpr*> transitionExprByStateSymbol;
+  transitionExprByStateSymbol.reserve(
+      problem.transitions0.size() + problem.transitions1.size());
+  for (const auto& [stateSymbol, expr] : problem.transitions0) {
+    transitionExprByStateSymbol.emplace(stateSymbol, expr);
+  }
+  for (const auto& [stateSymbol, expr] : problem.transitions1) {
+    transitionExprByStateSymbol.emplace(stateSymbol, expr);
+  }
+  return transitionExprByStateSymbol;
+}
+
+std::unordered_map<size_t, size_t> buildComplementPrimaryByStateSymbol(
+    const KInductionProblem& problem) {
+  std::unordered_map<size_t, size_t> primaryByComplement;
+  primaryByComplement.reserve(
+      problem.complementedStatePairs0.size() +
+      problem.complementedStatePairs1.size());
+  for (const auto& [primarySymbol, complementedSymbol] :
+       problem.complementedStatePairs0) {
+    primaryByComplement.emplace(complementedSymbol, primarySymbol);
+  }
+  for (const auto& [primarySymbol, complementedSymbol] :
+       problem.complementedStatePairs1) {
+    primaryByComplement.emplace(complementedSymbol, primarySymbol);
+  }
+  return primaryByComplement;
+}
+
+std::unordered_set<size_t> buildCombinedStateSymbolSet(
+    const KInductionProblem& problem) {
+  std::unordered_set<size_t> stateSymbols;
+  stateSymbols.reserve(problem.state0Symbols.size() + problem.state1Symbols.size());
+  stateSymbols.insert(problem.state0Symbols.begin(), problem.state0Symbols.end());
+  stateSymbols.insert(problem.state1Symbols.begin(), problem.state1Symbols.end());
+  return stateSymbols;
+}
+
+std::vector<size_t> sortUniqueSymbols(std::unordered_set<size_t> symbols) {
+  std::vector<size_t> ordered(symbols.begin(), symbols.end());
+  std::sort(ordered.begin(), ordered.end());
+  ordered.erase(std::unique(ordered.begin(), ordered.end()), ordered.end());
+  return ordered;
+}
+
+std::vector<size_t> collectStateSupportSymbols(
+    const KInductionProblem& problem,
+    BoolExpr* formula) {
+  if (formula == nullptr) {
+    return {};
+  }
+
+  const auto stateSymbolSet = buildCombinedStateSymbolSet(problem);
+  std::unordered_set<size_t> support;
+  for (const auto symbol : formula->getSupportVars()) {
+    if (stateSymbolSet.find(symbol) != stateSymbolSet.end()) {
+      support.insert(symbol);
+    }
+  }
+  return sortUniqueSymbols(std::move(support));
+}
+
+std::vector<size_t> expandTransitionTargets(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& requestedTargets,
+    const std::unordered_map<size_t, BoolExpr*>& transitionExprByStateSymbol) {
+  const auto primaryByComplement = buildComplementPrimaryByStateSymbol(problem);
+  std::unordered_set<size_t> targets;
+  targets.reserve(requestedTargets.size());
+
+  for (const auto symbol : requestedTargets) {
+    if (transitionExprByStateSymbol.find(symbol) !=
+        transitionExprByStateSymbol.end()) {
+      targets.insert(symbol);
+      continue;
+    }
+
+    // Complemented flop outputs are constrained through the primary flop. If a
+    // cube talks only about the complemented bit, encode the primary transition
+    // and let the complemented-state relation connect the two next-frame bits.
+    if (const auto primaryIt = primaryByComplement.find(symbol);
+        primaryIt != primaryByComplement.end() &&
+        transitionExprByStateSymbol.find(primaryIt->second) !=
+            transitionExprByStateSymbol.end()) {
+      targets.insert(primaryIt->second);
+    }
+  }
+
+  return sortUniqueSymbols(std::move(targets));
+}
+
+std::vector<size_t> cubeStateSymbols(const StateCube& cube) {
+  std::unordered_set<size_t> symbols;
+  symbols.reserve(cube.size());
+  for (const auto& literal : cube) {
+    symbols.insert(literal.symbol);
+  }
+  return sortUniqueSymbols(std::move(symbols));
+}
+
+void addTransitionRelationForTargets(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t frame,
+    const std::vector<size_t>& requestedTargets) {
+  const auto transitionExprByStateSymbol =
+      buildTransitionExprByStateSymbol(problem);
+  const auto encodedTargets = expandTransitionTargets(
+      problem, requestedTargets, transitionExprByStateSymbol);
+
+  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
+  for (const auto stateSymbol : encodedTargets) {
+    addLiteralEquivalence(
+        solver,
+        variables.getLiteral(stateSymbol, frame + 1),
+        encoder.encode(transitionExprByStateSymbol.at(stateSymbol)));
+  }
+}
+
+std::vector<size_t> predecessorProjectionSymbols(
+    const KInductionProblem& problem,
+    const StateCube& targetCube) {
+  const auto transitionExprByStateSymbol =
+      buildTransitionExprByStateSymbol(problem);
+  const auto encodedTargets = expandTransitionTargets(
+      problem, cubeStateSymbols(targetCube), transitionExprByStateSymbol);
+  const auto stateSymbolSet = buildCombinedStateSymbolSet(problem);
+
+  std::unordered_set<size_t> projection;
+  for (const auto target : encodedTargets) {
+    for (const auto symbol :
+         transitionExprByStateSymbol.at(target)->getSupportVars()) {
+      if (stateSymbolSet.find(symbol) != stateSymbolSet.end()) {
+        projection.insert(symbol);
+      }
+    }
+  }
+  return sortUniqueSymbols(std::move(projection));
+}
 
 void addComplementedStateRelations(
     SATSolverWrapper& solver,
@@ -301,7 +445,13 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
   if (!solver.solve()) {
     return std::nullopt;
   }
-  return extractStateCube(solver, variables, problem.combinedStateSymbols(), 0);
+
+  // A PDR cube only needs to mention the state bits that the bad predicate
+  // actually observes. Extracting every state bit is sound but disastrous on
+  // memory-rich designs such as CVA6 because every later blocking query would
+  // carry a full-register snapshot.
+  return extractStateCube(
+      solver, variables, collectStateSupportSymbols(problem, problem.bad), 0);
 }
 
 std::optional<StateCube> findPredecessorCube(
@@ -321,7 +471,11 @@ std::optional<StateCube> findPredecessorCube(
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
   addFrameConstraints(
       solver, variables, initFormula, frameInvariant, frames, level, 0);
-  addTransitionRelation(solver, variables, problem, 0);
+  // Encode only the next-state equations needed to decide the requested target
+  // cube. This keeps one local PDR obligation from materializing the entire
+  // design transition relation.
+  addTransitionRelationForTargets(
+      solver, variables, problem, 0, cubeStateSymbols(targetCube));
   addCubeAssumptions(solver, variables, targetCube, 1);
   if (excludeTargetOnCurrentFrame) {
     addNegatedCubeClause(solver, variables, targetCube, 0);
@@ -329,7 +483,12 @@ std::optional<StateCube> findPredecessorCube(
   if (!solver.solve()) {
     return std::nullopt;
   }
-  return extractStateCube(solver, variables, problem.combinedStateSymbols(), 0);
+
+  // The predecessor cube is projected onto the current-state support of the
+  // target transitions. Inputs stay existential, and unrelated flops stay out
+  // of the learned obligation instead of ballooning every clause.
+  return extractStateCube(
+      solver, variables, predecessorProjectionSymbols(problem, targetCube), 0);
 }
 
 bool cubeIntersectsInit(const KInductionProblem& problem,

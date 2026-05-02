@@ -4,6 +4,7 @@
 #include "proof/ProofEngineShared.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 #include "common/BoolExprUtils.h"
 #include "kinduction/SatEncoding.h"
@@ -31,22 +32,109 @@ void addComplementedStateRelations(
   }
 }
 
-void addTransitionRelation(SATSolverWrapper& solver,
-                           const FrameVariableStore& variables,
-                           const KInductionProblem& problem,
-                           size_t frame) {
-  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
+std::unordered_map<size_t, BoolExpr*> buildTransitionExprByStateSymbol(
+    const KInductionProblem& problem) {
+  std::unordered_map<size_t, BoolExpr*> transitionExprByStateSymbol;
+  transitionExprByStateSymbol.reserve(
+      problem.transitions0.size() + problem.transitions1.size());
   for (const auto& [stateSymbol, expr] : problem.transitions0) {
-    addLiteralEquivalence(
-        solver,
-        variables.getLiteral(stateSymbol, frame + 1),
-        encoder.encode(expr));
+    transitionExprByStateSymbol.emplace(stateSymbol, expr);
   }
   for (const auto& [stateSymbol, expr] : problem.transitions1) {
+    transitionExprByStateSymbol.emplace(stateSymbol, expr);
+  }
+  return transitionExprByStateSymbol;
+}
+
+std::unordered_map<size_t, size_t> buildComplementPrimaryByStateSymbol(
+    const KInductionProblem& problem) {
+  std::unordered_map<size_t, size_t> primaryByComplement;
+  primaryByComplement.reserve(
+      problem.complementedStatePairs0.size() +
+      problem.complementedStatePairs1.size());
+  for (const auto& [primarySymbol, complementedSymbol] :
+       problem.complementedStatePairs0) {
+    primaryByComplement.emplace(complementedSymbol, primarySymbol);
+  }
+  for (const auto& [primarySymbol, complementedSymbol] :
+       problem.complementedStatePairs1) {
+    primaryByComplement.emplace(complementedSymbol, primarySymbol);
+  }
+  return primaryByComplement;
+}
+
+std::unordered_set<size_t> buildCombinedStateSymbolSet(
+    const KInductionProblem& problem) {
+  std::unordered_set<size_t> stateSymbols;
+  stateSymbols.reserve(problem.state0Symbols.size() + problem.state1Symbols.size());
+  stateSymbols.insert(problem.state0Symbols.begin(), problem.state0Symbols.end());
+  stateSymbols.insert(problem.state1Symbols.begin(), problem.state1Symbols.end());
+  return stateSymbols;
+}
+
+std::vector<size_t> collectStateSupportSymbols(
+    const KInductionProblem& problem,
+    BoolExpr* formula) {
+  std::vector<size_t> support;
+  if (formula == nullptr) {
+    return support;
+  }
+
+  const auto stateSymbolSet = buildCombinedStateSymbolSet(problem);
+  for (const auto symbol : formula->getSupportVars()) {
+    if (stateSymbolSet.find(symbol) != stateSymbolSet.end()) {
+      support.push_back(symbol);
+    }
+  }
+  std::sort(support.begin(), support.end());
+  support.erase(std::unique(support.begin(), support.end()), support.end());
+  return support;
+}
+
+std::vector<size_t> expandTransitionTargets(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& requestedTargets,
+    const std::unordered_map<size_t, BoolExpr*>& transitionExprByStateSymbol) {
+  const auto primaryByComplement = buildComplementPrimaryByStateSymbol(problem);
+  std::vector<size_t> targets;
+  targets.reserve(requestedTargets.size());
+
+  for (const auto symbol : requestedTargets) {
+    if (transitionExprByStateSymbol.find(symbol) !=
+        transitionExprByStateSymbol.end()) {
+      targets.push_back(symbol);
+      continue;
+    }
+    if (const auto primaryIt = primaryByComplement.find(symbol);
+        primaryIt != primaryByComplement.end() &&
+        transitionExprByStateSymbol.find(primaryIt->second) !=
+            transitionExprByStateSymbol.end()) {
+      targets.push_back(primaryIt->second);
+    }
+  }
+
+  std::sort(targets.begin(), targets.end());
+  targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+  return targets;
+}
+
+void addTransitionRelationForTargets(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t frame,
+    const std::vector<size_t>& requestedTargets) {
+  const auto transitionExprByStateSymbol =
+      buildTransitionExprByStateSymbol(problem);
+  const auto encodedTargets = expandTransitionTargets(
+      problem, requestedTargets, transitionExprByStateSymbol);
+
+  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
+  for (const auto stateSymbol : encodedTargets) {
     addLiteralEquivalence(
         solver,
         variables.getLiteral(stateSymbol, frame + 1),
-        encoder.encode(expr));
+        encoder.encode(transitionExprByStateSymbol.at(stateSymbol)));
   }
 }
 
@@ -229,7 +317,12 @@ bool isInductiveInvariant(
   FrameVariableStore variables(solver, problem.allSymbols, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
-  addTransitionRelation(solver, variables, problem, 0);
+  // Only next-state symbols read by the candidate invariant need transition
+  // equations. Encoding every flop transition here made PDR's immediate
+  // invariant validation scale like a full-design induction proof even when
+  // the candidate touched a small cone.
+  addTransitionRelationForTargets(
+      solver, variables, problem, 0, collectStateSupportSymbols(problem, invariant));
 
   FrameFormulaEncoder currentEncoder(solver, variables.makeLeafLits(0));
   FrameFormulaEncoder nextEncoder(solver, variables.makeLeafLits(1));

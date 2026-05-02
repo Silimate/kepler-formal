@@ -456,6 +456,62 @@ static std::vector<std::filesystem::path> toPathVector(
   return out;
 }
 
+static std::string normalizeInputPathForComparison(const std::string& path) {
+  std::error_code ec;
+  const auto canonical = std::filesystem::weakly_canonical(path, ec);
+  if (!ec) {
+    return canonical.string();
+  }
+
+  ec.clear();
+  const auto absolute = std::filesystem::absolute(path, ec);
+  if (!ec) {
+    return absolute.lexically_normal().string();
+  }
+  return std::filesystem::path(path).lexically_normal().string();
+}
+
+static std::vector<std::string> normalizeInputListForComparison(
+    const std::vector<std::string>& inputs) {
+  std::vector<std::string> normalized;
+  normalized.reserve(inputs.size());
+  for (const auto& input : inputs) {
+    normalized.push_back(normalizeInputPathForComparison(input));
+  }
+  return normalized;
+}
+
+static std::optional<std::string> normalizeOptionalInputPathForComparison(
+    const std::optional<std::string>& input) {
+  if (!input.has_value()) {
+    return std::nullopt;
+  }
+  return normalizeInputPathForComparison(*input);
+}
+
+static bool sameSystemVerilogDesignOptions(
+    const SystemVerilogDesignOptions& lhs,
+    const SystemVerilogDesignOptions& rhs) {
+  return normalizeOptionalInputPathForComparison(lhs.flist) ==
+             normalizeOptionalInputPathForComparison(rhs.flist) &&
+         lhs.top == rhs.top;
+}
+
+static bool sameCompactSecDesignSpec(
+    bool isSystemVerilog,
+    const DesignInputs& designInputs,
+    const SystemVerilogOptions& systemVerilogOptions) {
+  if (normalizeInputListForComparison(designInputs.design0) !=
+      normalizeInputListForComparison(designInputs.design1)) {
+    return false;
+  }
+  if (!isSystemVerilog) {
+    return true;
+  }
+  return sameSystemVerilogDesignOptions(
+      systemVerilogOptions.design0, systemVerilogOptions.design1);
+}
+
 static bool applySystemVerilogConfigOption(const YAML::Node& cfg,
                                            const char* key,
                                            std::optional<std::string>& target,
@@ -1414,6 +1470,23 @@ int KeplerFormalMain(int argc, char** argv) {
             0,
             2,
             "design 1");
+        if (sameCompactSecDesignSpec(
+                inputFormatType == FormatType::SYSTEMVERILOG,
+                designInputs,
+                systemVerilogOptions)) {
+          // CVA6-style smoke runs often compare a design against itself. In
+          // compact SEC, extracting that identical second side would require
+          // holding the already extracted value model while elaborating the
+          // same large SystemVerilog design again. Reusing the immutable model
+          // keeps the formal problem identical and removes that avoidable peak.
+          SPDLOG_INFO(
+              "SEC compact mode: reusing extracted design 1 model for "
+              "identical design 2 input");
+          KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
+              nullptr, nullptr, solverType, secEngine);
+          return emitSecResult(
+              strategy.runExtractedModels(model0, model0, secMaxK));
+        }
         SPDLOG_INFO(
             "SEC compact mode: extracting and releasing design 2 before "
             "starting proof");

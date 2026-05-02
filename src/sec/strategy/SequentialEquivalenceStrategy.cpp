@@ -1487,6 +1487,22 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
     fflush(stdout);
   }
 
+  if (&model0 == &model1) {
+    // Compact SEC can intentionally pass the same extracted value model for
+    // both sides when the input specification is byte-for-byte identical.
+    // After unsupported-feature checks and observed-output coverage selection,
+    // the remaining SEC question is literally "does this model equal itself?",
+    // so building two disjoint SAT symbol spaces would only recreate the
+    // memory spike that compact mode is supposed to avoid.
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        0,
+        "",
+        aligned.outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
   // Phase 3: rewrite both designs into one shared symbol space, strengthen the
   // startup frontier with reset/bootstrap facts, and build the final SEC
   // property plus the induction-friendly variant that some engines consume.
