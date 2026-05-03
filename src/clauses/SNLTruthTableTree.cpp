@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <stack>
 #include <stdexcept>
 #include <unordered_map>
@@ -142,6 +143,12 @@ const SNLTruthTable SNLTruthTableTree::PtableHolder_ = SNLTruthTable(1, 2, SNLTr
 // diagnostic global
 static std::atomic<size_t> g_live_nodes{0};
 
+namespace {
+std::shared_ptr<const SNLTruthTable> getSharedTruthTable(
+    const naja::NL::SNLDesign* design,
+    size_t flatTermID);
+}
+
 // NodeLifetimeCounter impl
 // SNLTruthTableTree::Node::NodeLifetimeCounter::NodeLifetimeCounter()  {
 // g_live_nodes.fetch_add(1, std::memory_order_relaxed); }
@@ -183,13 +190,10 @@ SNLTruthTableTree::Node::Node(SNLTruthTableTree* t,
     nodeID = (uint32_t)tree->lastID_++;
   }
   if (type == Type::Table) {
-    truthTable = SNLDesignModeling::getTruthTable(naja::DNL::get()
-                                             ->getDNLTerminalFromID(data.termid)
-                                             .getDNLInstance()
-                                             .getSNLModel(), naja::DNL::get()
-                                    ->getDNLTerminalFromID(data.termid)
-                                    .getSnlBitTerm()
-                                    ->getOrderID());
+    const auto& termInfo = naja::DNL::get()->getDNLTerminalFromID(data.termid);
+    truthTable.setShared(getSharedTruthTable(
+        termInfo.getDNLInstance().getSNLModel(),
+        termInfo.getSnlBitTerm()->getOrderID()));
   }
 }
 
@@ -209,7 +213,7 @@ const SNLTruthTable& SNLTruthTableTree::Node::getTruthTable() const {
       throw std::logic_error("getTruthTable: uninitialized Table node");
       // LCOV_EXCL_STOP
     }
-    return truthTable;
+    return truthTable.get();
   } else if (type == Type::P || type == Type::Input) {
     return PtableHolder_;
   }
@@ -221,6 +225,45 @@ const SNLTruthTable& SNLTruthTableTree::Node::getTruthTable() const {
 static std::shared_ptr<SNLTruthTableTree::Node> nullNodePtr = nullptr;
 
 namespace {
+
+struct SharedTruthTableKey {
+  const naja::NL::SNLDesign* design = nullptr;
+  size_t flatTermID = 0;
+
+  bool operator==(const SharedTruthTableKey& other) const {
+    return design == other.design && flatTermID == other.flatTermID;
+  }
+};
+
+struct SharedTruthTableKeyHash {
+  size_t operator()(const SharedTruthTableKey& key) const {
+    return std::hash<const naja::NL::SNLDesign*>{}(key.design) ^
+           (std::hash<size_t>{}(key.flatTermID) << 1);
+  }
+};
+
+std::shared_ptr<const SNLTruthTable> getSharedTruthTable(
+    const naja::NL::SNLDesign* design,
+    size_t flatTermID) {
+  static std::mutex cacheMutex;
+  static std::unordered_map<SharedTruthTableKey,
+                            std::shared_ptr<const SNLTruthTable>,
+                            SharedTruthTableKeyHash>
+      cache;
+
+  const SharedTruthTableKey key{design, flatTermID};
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  const auto it = cache.find(key);
+  if (it != cache.end()) {
+    return it->second;
+  }
+
+  auto sharedTable =
+      std::make_shared<SNLTruthTable>(
+          SNLDesignModeling::getTruthTable(design, flatTermID));
+  cache.emplace(key, sharedTable);
+  return sharedTable;
+}
 
 bool isNodeOnParentPath(const SNLTruthTableTree& tree,
                         uint32_t startId,
@@ -634,18 +677,17 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
   std::shared_ptr<Node> newNodeSp;
   bool forceFreshTableNode = false;
   if (instid != naja::DNL::DNLID_MAX) {
-    newNodeSp = std::make_shared<Node>(this, instid, termid, Node::Type::Table);
-    const auto& tbl = newNodeSp->getTruthTable();
-    arity = tbl.size();
     auto iter = termid2nodeid_.find(termid);
     if (iter != termid2nodeid_.end()) {
-      if (willCloneTableTermForBorderLeaf(borderIndex, termid)) {
+      if (allowAncestorTableNodeClones_ &&
+          willCloneTableTermForBorderLeaf(borderIndex, termid)) {
         // This term is already on the path from the current leaf to the root.
         // Reusing the canonical node here would make the tree cyclic even when
         // the netlist path is only a transparent alias of the same expression.
         // Clone the table node for this occurrence and keep the canonical map
         // pointing at the original node for ordinary reconvergence elsewhere.
         forceFreshTableNode = true;
+        arity = nodeFromId(iter->second)->getTruthTable().size();
       } else {
         DEBUG_LOG(
             "###@@@@concat: node for termid %zu %s %s already exists, "
@@ -678,6 +720,10 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
         }
         return *newNodeSp;
       }
+    }
+    newNodeSp = std::make_shared<Node>(this, instid, termid, Node::Type::Table);
+    if (!forceFreshTableNode) {
+      arity = newNodeSp->getTruthTable().size();
     }
   } else {
     arity = 1;

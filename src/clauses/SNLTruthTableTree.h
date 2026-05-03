@@ -22,6 +22,38 @@ namespace KEPLER_FORMAL {
 class SNLTruthTableTree {
 public:
   struct Node {
+    struct TruthTableStorage {
+      TruthTableStorage() = default;
+      TruthTableStorage(const TruthTableStorage&) = default;
+      TruthTableStorage& operator=(const TruthTableStorage&) = default;
+
+      TruthTableStorage& operator=(const SNLTruthTable& table) {
+        localTruthTable = table;
+        sharedTruthTable.reset();
+        return *this;
+      }
+
+      void setShared(std::shared_ptr<const SNLTruthTable> table) {
+        sharedTruthTable = std::move(table);
+        localTruthTable = SNLTruthTable();
+      }
+
+      bool isInitialized() const {
+        return localTruthTable.isInitialized() ||
+               (sharedTruthTable && sharedTruthTable->isInitialized());
+      }
+
+      const SNLTruthTable& get() const {
+        if (localTruthTable.isInitialized() || !sharedTruthTable) {
+          return localTruthTable;
+        }
+        return *sharedTruthTable;
+      }
+
+      SNLTruthTable localTruthTable;
+      std::shared_ptr<const SNLTruthTable> sharedTruthTable;
+    };
+
     // group 32-bit scalars first
   uint32_t nodeID   = std::numeric_limits<uint32_t>::max();
   //uint32_t parentId = std::numeric_limits<uint32_t>::max();
@@ -36,7 +68,7 @@ public:
 
   bool visited = false; // for traversals
 
-  SNLTruthTable truthTable; 
+  TruthTableStorage truthTable;
 
   SNLTruthTableTree* tree = nullptr; // 8 bytes
   std::vector<uint32_t, tbb::tbb_allocator<uint32_t>> childrenIds; // typically 24 bytes on LP64
@@ -100,6 +132,9 @@ public:
   bool hasTableTerm(naja::DNL::DNLID termid) const;
   bool willCloneTableTermForBorderLeaf(size_t borderIndex,
                                        naja::DNL::DNLID termid) const;
+  void setAllowAncestorTableNodeClones(bool allow) {
+    allowAncestorTableNodeClones_ = allow;
+  }
 
   // allocateNode guarantees id assignment before publishing node in nodes_
   uint32_t allocateNode(std::shared_ptr<Node>& np);
@@ -144,6 +179,7 @@ private:
   size_t lastID_ = 2;       // debug counter for nodeID assignment
   static const SNLTruthTable PtableHolder_;
   std::unordered_map<naja::DNL::DNLID, uint32_t> termid2nodeid_;
+  bool allowAncestorTableNodeClones_ = false;
 };
 
 } // namespace KEPLER_FORMAL

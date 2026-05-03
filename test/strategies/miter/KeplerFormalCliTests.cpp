@@ -2755,6 +2755,8 @@ TEST(KeplerFormalCliTests, CliSystemVerilogFirstDesignFailureCleansTemporaryComm
   const auto tmpDir =
       std::filesystem::temp_directory_path() / "kepler_formal_sv_cleanup_first";
   std::filesystem::create_directories(tmpDir);
+  EnvVarGuard tmpDirGuard("TMPDIR");
+  tmpDirGuard.set(tmpDir.string());
   const auto design0 = tmpDir / "design0_invalid.sv";
   const auto design1 = tmpDir / "design1_valid.sv";
   {
@@ -2794,6 +2796,8 @@ TEST(KeplerFormalCliTests, CliSystemVerilogSecondDesignFailureCleansTemporaryCom
   const auto tmpDir =
       std::filesystem::temp_directory_path() / "kepler_formal_sv_cleanup_second";
   std::filesystem::create_directories(tmpDir);
+  EnvVarGuard tmpDirGuard("TMPDIR");
+  tmpDirGuard.set(tmpDir.string());
   const auto design0 = tmpDir / "design0_valid.sv";
   const auto design1 = tmpDir / "design1_invalid.sv";
   {

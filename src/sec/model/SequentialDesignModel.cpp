@@ -416,6 +416,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   MaterializedBuilderOutputs result;
 
   KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
+  builder.setRetainDnl(true);
   builder.collect();
   std::vector<naja::DNL::DNLID> normalizedRoots;
   normalizedRoots.reserve(requestedOutputs.size());
@@ -537,10 +538,12 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   }
   builder.build();
   // BuildPrimaryOutputClauses owns a temporary DNL expansion and destroys the
-  // singleton when build() completes. SEC diagnostics below still need to
-  // describe skipped roots, so reacquire the DNL view instead of reusing the
-  // pre-build pointer.
-  dnl = naja::DNL::get();
+  // singleton when build() completes. Rebuilding the full DNL here is very
+  // expensive on CVA6, so only reacquire it when the detailed dependency-root
+  // diagnostics actually need to print terminal names after the build.
+  if (traceDependencyRoots) {
+    dnl = naja::DNL::get();
+  }
   if (secDiagEnabled) {
     fprintf(
         stderr,
@@ -3022,6 +3025,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
       .abstractUncomputableSequentialBoundaries =
           KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary(),
   };
+  ctx.builder.setRetainDnl(true);
 
   // Phase 1: collect the raw boundary, classify top I/O vs sequential state,
   // and scan leaf sequentials so the later formula build knows what it must
@@ -3036,6 +3040,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     // immediately so large designs fail fast before the expensive cone builder
     // tries to derive BoolExprs for a transition system we already know is
     // unsupported.
+    naja::DNL::destroy();
     if (ctx.previousTop != nullptr) {
       universe->setTopDesign(ctx.previousTop);
     }
@@ -3174,6 +3179,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   validateExtractedModel(model);
 
   // Restore the original top design for callers that keep using the universe.
+  naja::DNL::destroy();
   if (ctx.previousTop != nullptr) {
     universe->setTopDesign(ctx.previousTop);
   }

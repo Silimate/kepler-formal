@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <tbb/concurrent_vector.h>
+#include <cstdint>
 #include <vector>
 #include "BoolExpr.h"
 #include "DNL.h"
@@ -17,7 +18,8 @@ namespace KEPLER_FORMAL {
 
 class BuildPrimaryOutputClauses {
  public:
-  using PathNameIDs = std::vector<NLName::ID>;
+  using PathComponentID = uint64_t;
+  using PathNameIDs = std::vector<PathComponentID>;
   using PathObjectIDs = std::vector<NLID::DesignObjectID>;
   using PathKey = std::pair<PathNameIDs, PathObjectIDs>;
 
@@ -25,7 +27,8 @@ class BuildPrimaryOutputClauses {
     size_t operator()(const PathKey& k) const {
       size_t res = 0;
       for (const auto& nameID : k.first) {
-        res ^= std::hash<NLName::ID>()(nameID) + 0x9e3779b9 + (res << 6) + (res >> 2);
+        res ^= std::hash<PathComponentID>()(nameID) + 0x9e3779b9 +
+               (res << 6) + (res >> 2);
       }
       for (const auto& id : k.second) {
         res ^= std::hash<NLID::DesignObjectID>()(id) + 0x9e3779b9 + (res << 6) + (res >> 2);
@@ -82,6 +85,7 @@ class BuildPrimaryOutputClauses {
   void setAllowInternalNoDriverFrontier(bool allow) {
     allowInternalNoDriverFrontier_ = allow;
   }
+  void setRetainDnl(bool retain) { retainDnl_ = retain; }
   const std::unordered_map<PathKey, naja::DNL::DNLID, KeyHash>&
   getInputsMap() const {
     return inputsMap_;
@@ -111,6 +115,8 @@ class BuildPrimaryOutputClauses {
   //const naja::NL::SNLTruthTable& getTruthTable(naja::NL::SNLDesign* design, size_t orderID);
   
   std::vector<naja::DNL::DNLID> collectInputs();
+  PathNameIDs getPathNameIDs(const naja::DNL::DNLInstanceFull& instance) const;
+  PathKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) const;
   void setInputs2InputsIDs();
   // void sortInputs();
   std::vector<naja::DNL::DNLID> collectOutputs();
@@ -125,11 +131,15 @@ class BuildPrimaryOutputClauses {
   std::vector<bool> IsPOs_;
   bool allowInternalLogicalLoopFrontier_ = false;
   bool allowInternalNoDriverFrontier_ = false;
+  bool retainDnl_ = false;
 
   std::unordered_map<PathKey, naja::DNL::DNLID, KeyHash> inputsMap_;
   std::unordered_map<PathKey, naja::DNL::DNLID, KeyHash> outputsMap_;
   std::unordered_map<naja::DNL::DNLID, PathKey> inputs2inputsIDs_;
   std::unordered_map<naja::DNL::DNLID, PathKey> outputs2outputsIDs_;
+  mutable std::mutex pathNameIDsCacheMutex_;
+  mutable std::unordered_map<naja::DNL::DNLID, PathNameIDs>
+      instancePathNameIDsCache_;
   std::vector<size_t> termDNLID2varID_;  // Only for PIs
   size_t lastCommonID = 1;
   std::unordered_map<naja::DNL::DNLID, SkippedOutputInfo> skippedOutputs_;

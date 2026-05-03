@@ -33,23 +33,8 @@ using namespace naja::NL;
 
 namespace {
 
-BuildPrimaryOutputClauses::PathNameIDs getPathNameIDs(const SNLPath& path) {
-  BuildPrimaryOutputClauses::PathNameIDs ids;
-  const auto pathNames = path.getPathNames();
-  ids.reserve(pathNames.size());
-  for (const auto& name : pathNames) {
-    ids.push_back(name.getID());
-  }
-  return ids;
-}
-
-BuildPrimaryOutputClauses::PathKey getTerminalPathKey(const DNLTerminalFull& terminal) {
-  auto pathIDs = getPathNameIDs(terminal.getDNLInstance().getPath());
-  pathIDs.push_back(terminal.getSnlBitTerm()->getName().getID());
-  BuildPrimaryOutputClauses::PathObjectIDs objectIDs = {
-      static_cast<NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit())};
-  return {std::move(pathIDs), std::move(objectIDs)};
-}
+constexpr BuildPrimaryOutputClauses::PathComponentID kUnnamedPathComponentTag =
+    BuildPrimaryOutputClauses::PathComponentID{1} << 63;
 
 const char* getSnlDirectionName(SNLBitTerm::Direction direction) {
   switch (direction) {
@@ -303,6 +288,50 @@ void reportSkippedPO(const DNLFull* dnl,
 }
 
 }  // namespace
+
+BuildPrimaryOutputClauses::PathNameIDs BuildPrimaryOutputClauses::getPathNameIDs(
+    const DNLInstanceFull& instance) const {
+  const auto instanceID = instance.getID();
+  {
+    std::lock_guard<std::mutex> lock(pathNameIDsCacheMutex_);
+    const auto cached = instancePathNameIDsCache_.find(instanceID);
+    if (cached != instancePathNameIDsCache_.end()) {
+      return cached->second;
+    }
+  }
+
+  PathNameIDs ids;
+  const auto pathInstances = instance.getPath().getInstances();
+  ids.reserve(pathInstances.size());
+  for (const auto* pathInstance : pathInstances) {
+    const auto& name = pathInstance->getName();
+    if (!name.empty()) {
+      ids.push_back(static_cast<BuildPrimaryOutputClauses::PathComponentID>(
+          name.getID()));
+      continue;
+    }
+
+    ids.push_back(kUnnamedPathComponentTag |
+                  static_cast<BuildPrimaryOutputClauses::PathComponentID>(
+                      pathInstance->getID()));
+  }
+
+  std::lock_guard<std::mutex> lock(pathNameIDsCacheMutex_);
+  const auto [cached, _] =
+      instancePathNameIDsCache_.emplace(instanceID, std::move(ids));
+  return cached->second;
+}
+
+BuildPrimaryOutputClauses::PathKey
+BuildPrimaryOutputClauses::getTerminalPathKey(
+    const DNLTerminalFull& terminal) const {
+  auto pathIDs = getPathNameIDs(terminal.getDNLInstance());
+  pathIDs.push_back(static_cast<PathComponentID>(
+      terminal.getSnlBitTerm()->getName().getID()));
+  PathObjectIDs objectIDs = {
+      static_cast<NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit())};
+  return {std::move(pathIDs), std::move(objectIDs)};
+}
 
 std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
   std::vector<DNLID> inputs;
@@ -996,7 +1025,9 @@ void BuildPrimaryOutputClauses::build() {
     );
   }
   SNLLogicCloud::flushSkippedPOReports();
-  destroy();  // Clean up DNL instance
+  if (!retainDnl_) {
+    destroy();  // Clean up DNL instance unless the caller is batching builds.
+  }
 }
 
 void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
@@ -1015,7 +1046,7 @@ void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
     //termIDs.emplace_back(
     //    get()->getDNLTerminalFromID(input).getSnlBitTerm()->getBit());
     PathKey& pair = inputs2inputsIDs_[input];
-    pair.first = getPathNameIDs(currentInstance.getPath());
+    pair.first = getPathNameIDs(currentInstance);
     pair.first.emplace_back(
         get()->getDNLTerminalFromID(input).getSnlBitTerm()->getName().getID());
     pair.second.emplace_back(
@@ -1034,7 +1065,7 @@ void BuildPrimaryOutputClauses::setOutputs2OutputsIDs() {
     //     get()->getDNLTerminalFromID(output).getSnlBitTerm()->getID());
     //termIDs
     PathKey& pair = outputs2outputsIDs_[output];
-    pair.first = getPathNameIDs(currentInstance.getPath());
+    pair.first = getPathNameIDs(currentInstance);
     pair.first.emplace_back(
         get()->getDNLTerminalFromID(output).getSnlBitTerm()->getName().getID());
     pair.second.emplace_back(

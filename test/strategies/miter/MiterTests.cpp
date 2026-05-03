@@ -27,6 +27,7 @@
 #include "SNLDesignModeling.h"
 #include "SNLDesignModeling.h"
 #include "SNLBusTerm.h"
+#include "SNLParameter.h"
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
 #include "SNLPath.h"
@@ -282,6 +283,56 @@ void expectGenericGateMiterEquivalent(const char* gateName,
   KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
   miterS.init();
   EXPECT_TRUE(miterS.run());
+}
+
+SNLDesign* createNonDB0WideMuxModel(NLLibrary* library, size_t width) {
+  auto* referenceMux = NLDB0::getOrCreateMux2(width);
+  if (referenceMux == nullptr) {
+    return nullptr;
+  }
+
+  auto* muxModel = SNLDesign::create(
+      library, SNLDesign::Type::Primitive, referenceMux->getName());
+  SNLParameter::create(
+      muxModel,
+      NLName("WIDTH"),
+      SNLParameter::Type::Decimal,
+      std::to_string(width));
+
+  auto* inA = SNLBusTerm::create(
+      muxModel,
+      SNLTerm::Direction::Input,
+      static_cast<NLID::Bit>(width - 1),
+      0,
+      NLName("A"));
+  auto* inB = SNLBusTerm::create(
+      muxModel,
+      SNLTerm::Direction::Input,
+      static_cast<NLID::Bit>(width - 1),
+      0,
+      NLName("B"));
+  auto* sel =
+      SNLScalarTerm::create(muxModel, SNLTerm::Direction::Input, NLName("S"));
+  auto* out = SNLBusTerm::create(
+      muxModel,
+      SNLTerm::Direction::Output,
+      static_cast<NLID::Bit>(width - 1),
+      0,
+      NLName("Y"));
+
+  const auto truthTable = NLDB0::getPrimitiveTruthTable(referenceMux);
+  std::vector<SNLTruthTable> truthTables(width, truthTable);
+  for (size_t bit = 0; bit < width; ++bit) {
+    SNLDesignModeling::BitTerms inputs{
+        inA->getBit(static_cast<NLID::Bit>(bit)),
+        inB->getBit(static_cast<NLID::Bit>(bit)),
+        sel};
+    SNLDesignModeling::BitTerms outputs{
+        out->getBit(static_cast<NLID::Bit>(bit))};
+    SNLDesignModeling::addCombinatorialArcs(inputs, outputs);
+  }
+  SNLDesignModeling::setTruthTables(muxModel, truthTables);
+  return muxModel;
 }
 
 }  // namespace
@@ -1742,6 +1793,75 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesDoesNotTreatWideMuxInputsAsPOs) {
   EXPECT_EQ(outputNames, (std::set<std::string>{"y0", "y1", "y2", "y3"}));
 }
 
+TEST_F(MiterTests, BuildPrimaryOutputClausesDoesNotTreatClonedWideMuxInputsAsPOs) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  NLLibrary* libraryPrimitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("custom_prims"));
+
+  SNLDesign* muxModel = createNonDB0WideMuxModel(libraryPrimitives, 4);
+  ASSERT_NE(nullptr, muxModel);
+  EXPECT_FALSE(NLDB0::isDB0Primitive(muxModel));
+  EXPECT_TRUE(NLDB0::isMux2(muxModel));
+  EXPECT_EQ(4u, SNLDesignModeling::getTruthTableCount(muxModel));
+
+  auto top = SNLDesign::create(
+      libraryDesigns, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+
+  std::array<SNLScalarTerm*, 4> topA{};
+  std::array<SNLScalarTerm*, 4> topB{};
+  std::array<SNLScalarTerm*, 4> topY{};
+  for (size_t bit = 0; bit < 4; ++bit) {
+    topA[bit] = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Input, NLName("a" + std::to_string(bit)));
+    topB[bit] = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Input, NLName("b" + std::to_string(bit)));
+    topY[bit] = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Output, NLName("y" + std::to_string(bit)));
+  }
+  auto topS =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("s"));
+
+  auto muxInst = SNLInstance::create(top, muxModel, NLName("mux0"));
+  auto netS = SNLScalarNet::create(top, NLName("net_s"));
+  topS->setNet(netS);
+  muxInst->getInstTerm(NLDB0::getMux2Select(muxModel))->setNet(netS);
+
+  for (size_t bit = 0; bit < 4; ++bit) {
+    auto* netA =
+        SNLScalarNet::create(top, NLName("net_a" + std::to_string(bit)));
+    auto* netB =
+        SNLScalarNet::create(top, NLName("net_b" + std::to_string(bit)));
+    auto* netY =
+        SNLScalarNet::create(top, NLName("net_y" + std::to_string(bit)));
+    topA[bit]->setNet(netA);
+    topB[bit]->setNet(netB);
+    topY[bit]->setNet(netY);
+    muxInst->getInstTerm(NLDB0::getMux2InputA(muxModel)->getBit(bit))
+        ->setNet(netA);
+    muxInst->getInstTerm(NLDB0::getMux2InputB(muxModel)->getBit(bit))
+        ->setNet(netB);
+    muxInst->getInstTerm(NLDB0::getMux2Output(muxModel)->getBit(bit))
+        ->setNet(netY);
+  }
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  ASSERT_EQ(builder.getOutputs().size(), 4u);
+  std::set<std::string> outputNames;
+  for (const auto outputID : builder.getOutputs()) {
+    const auto& outputTerm = naja::DNL::get()->getDNLTerminalFromID(outputID);
+    EXPECT_TRUE(outputTerm.isTopPort());
+    outputNames.insert(outputTerm.getSnlBitTerm()->getName().getString());
+  }
+  EXPECT_EQ(outputNames, (std::set<std::string>{"y0", "y1", "y2", "y3"}));
+}
+
 TEST_F(MiterTests, BuildPrimaryOutputClausesBuildsExplicitInternalOutputRoots) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
@@ -1866,6 +1986,72 @@ TEST_F(MiterTests, WideMuxMiterEquivalent) {
   auto top = buildTop("top");
   auto topClone = top->clone(NLName("topClone"));
   MiterStrategy MiterS(top, topClone, "WideMuxMiterEquivalent");
+  MiterS.init();
+  EXPECT_TRUE(MiterS.run());
+}
+
+TEST_F(MiterTests, ClonedWideMuxMiterEquivalent) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  NLLibrary* libraryPrimitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("custom_prims"));
+
+  SNLDesign* muxModel = createNonDB0WideMuxModel(libraryPrimitives, 4);
+  ASSERT_NE(nullptr, muxModel);
+  EXPECT_FALSE(NLDB0::isDB0Primitive(muxModel));
+  EXPECT_TRUE(NLDB0::isMux2(muxModel));
+  EXPECT_EQ(4u, SNLDesignModeling::getTruthTableCount(muxModel));
+
+  auto buildTop = [&](const char* topName) {
+    auto top = SNLDesign::create(
+        libraryDesigns, SNLDesign::Type::Standard, NLName(topName));
+    univ->setTopDesign(top);
+
+    std::array<SNLScalarTerm*, 4> topA{};
+    std::array<SNLScalarTerm*, 4> topB{};
+    std::array<SNLScalarTerm*, 4> topY{};
+    for (size_t bit = 0; bit < 4; ++bit) {
+      topA[bit] = SNLScalarTerm::create(
+          top, SNLTerm::Direction::Input, NLName("a" + std::to_string(bit)));
+      topB[bit] = SNLScalarTerm::create(
+          top, SNLTerm::Direction::Input, NLName("b" + std::to_string(bit)));
+      topY[bit] = SNLScalarTerm::create(
+          top, SNLTerm::Direction::Output, NLName("y" + std::to_string(bit)));
+    }
+    auto topS =
+        SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("s"));
+
+    auto muxInst = SNLInstance::create(top, muxModel, NLName("mux0"));
+    auto netS = SNLScalarNet::create(top, NLName("net_s"));
+    topS->setNet(netS);
+    muxInst->getInstTerm(NLDB0::getMux2Select(muxModel))->setNet(netS);
+
+    for (size_t bit = 0; bit < 4; ++bit) {
+      auto* netA =
+          SNLScalarNet::create(top, NLName("net_a" + std::to_string(bit)));
+      auto* netB =
+          SNLScalarNet::create(top, NLName("net_b" + std::to_string(bit)));
+      auto* netY =
+          SNLScalarNet::create(top, NLName("net_y" + std::to_string(bit)));
+      topA[bit]->setNet(netA);
+      topB[bit]->setNet(netB);
+      topY[bit]->setNet(netY);
+      muxInst->getInstTerm(NLDB0::getMux2InputA(muxModel)->getBit(bit))
+          ->setNet(netA);
+      muxInst->getInstTerm(NLDB0::getMux2InputB(muxModel)->getBit(bit))
+          ->setNet(netB);
+      muxInst->getInstTerm(NLDB0::getMux2Output(muxModel)->getBit(bit))
+          ->setNet(netY);
+    }
+
+    return top;
+  };
+
+  auto top = buildTop("top");
+  auto topClone = top->clone(NLName("topClone"));
+  MiterStrategy MiterS(top, topClone, "ClonedWideMuxMiterEquivalent");
   MiterS.init();
   EXPECT_TRUE(MiterS.run());
 }
