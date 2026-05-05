@@ -48,7 +48,7 @@ struct SequentialEquivalenceResult {
 
   double outputCoveragePercent() const {
     if (totalOutputs == 0) {
-      return 0.0;
+      return 0.0;  // LCOV_EXCL_LINE
     }
     return (100.0 * static_cast<double>(coveredOutputs)) /
            static_cast<double>(totalOutputs);

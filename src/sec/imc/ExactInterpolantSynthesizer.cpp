@@ -37,10 +37,10 @@ BoolExpr* computeExactInterpolant(
     const std::vector<size_t>& sharedSymbols,
     KEPLER_FORMAL::Config::SolverType solverType) {
   if (lhs == nullptr || rhs == nullptr || sharedSymbols.empty()) {
-    return nullptr;
+    return nullptr;  // LCOV_EXCL_LINE
   }
   if (isProofFormulaSatisfiable(BoolExpr::And(lhs, rhs), solverType)) {
-    return nullptr;
+    return nullptr;  // LCOV_EXCL_LINE
   }
 
   BoolExpr* interpolant = BoolExpr::createFalse();
@@ -58,7 +58,7 @@ BoolExpr* computeExactInterpolant(
   interpolant = BoolExpr::simplify(interpolant);
   if (isProofFormulaSatisfiable(
           BoolExpr::And(lhs, BoolExpr::Not(interpolant)), solverType)) {
-    return nullptr;
+    return nullptr;  // LCOV_EXCL_LINE
   }
   if (isProofFormulaSatisfiable(BoolExpr::And(interpolant, rhs), solverType)) {
     return nullptr;

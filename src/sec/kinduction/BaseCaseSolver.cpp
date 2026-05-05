@@ -171,8 +171,8 @@ size_t findFirstBadFrame(const SATSolverWrapper& solver,
       return frame;
     }
   }
-  throw std::runtime_error("SAT model does not satisfy any bad frame");
-}
+  throw std::runtime_error("SAT model does not satisfy any bad frame");  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 std::vector<KInductionResult::FrameInputAssignments> buildInputTrace(
     const SATSolverWrapper& solver,

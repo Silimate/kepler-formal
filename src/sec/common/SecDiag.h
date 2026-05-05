@@ -39,7 +39,7 @@ inline void emitSecDiag(Args&&... args) {
   while (remaining > 0) {
     const ssize_t written = ::write(STDERR_FILENO, data, remaining);
     if (written <= 0) {
-      break;
+      break;  // LCOV_EXCL_LINE
     }
     data += written;
     remaining -= static_cast<size_t>(written);

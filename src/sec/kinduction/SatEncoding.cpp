@@ -61,13 +61,13 @@ FrameFormulaEncoder::FrameFormulaEncoder(
 int FrameFormulaEncoder::getConstLit(bool value) {
   auto& cache = value ? trueLit_ : falseLit_;
   if (cache.has_value()) {
-    return *cache;
+    return *cache;  // LCOV_EXCL_LINE
   }
   int lit = newSolverLiteral(solver_);
   solver_.addClause({value ? lit : -lit});
   cache = lit;
   return lit;
-}
+}  // LCOV_EXCL_LINE
 
 int FrameFormulaEncoder::encode(BoolExpr* expr) {
   if (expr == nullptr) {

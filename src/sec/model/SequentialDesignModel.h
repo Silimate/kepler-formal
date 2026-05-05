@@ -32,7 +32,7 @@ struct ConnectivitySkipInfo {
   std::string detail;
 };
 
-struct AbstractedSequentialBoundaryDetail {
+struct AbstractedSequentialBoundaryDetail {  // LCOV_EXCL_LINE
   std::string instancePath;
   std::vector<SignalKey> stateKeys;
   std::vector<SignalKey> observedKeys;

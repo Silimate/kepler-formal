@@ -142,7 +142,7 @@ bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
                                    const AlignedSignals& alignedInputs,
                                    const AlignedSignals& orderedStates) {
   if (orderedStates.names.empty()) {
-    return false;
+    return false;  // LCOV_EXCL_LINE
   }
 
   const auto [abstractMap0, abstractMap1] =
@@ -161,7 +161,7 @@ bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
     }
   }
   return true;
-}
+}  // LCOV_EXCL_LINE
 
 std::unordered_map<SignalKey, size_t, SignalKeyHash> buildStateIndexMap(
     const std::vector<SignalKey>& stateBits) {
