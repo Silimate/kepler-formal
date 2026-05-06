@@ -1776,6 +1776,10 @@ SNLDesign* createSinglePortMemoryTop(
 }
 
 std::filesystem::path repoRootForSecTests() {
+  if (const char* prefix = std::getenv("TEST_DATA_PREFIX");
+      prefix != nullptr) {
+    return std::filesystem::path(prefix);
+  }
   return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
 }
 
