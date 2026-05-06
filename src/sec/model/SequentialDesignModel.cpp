@@ -183,8 +183,7 @@ BuiltObservedExpr buildObservedExprForTerm(  // LCOV_EXCL_LINE
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     const std::vector<naja::DNL::DNLID>& inputTerms,
     const std::vector<naja::DNL::DNLID>& outputTerms,
-    const std::vector<size_t>& termDNLID2varID,
-    bool allowInternalLogicalLoopFrontier = false) {
+    const std::vector<size_t>& termDNLID2varID) {
   BuiltObservedExpr result;  // LCOV_EXCL_LINE
   if (const auto exprIt = outputExprByTerm.find(termID);  // LCOV_EXCL_LINE
       exprIt != outputExprByTerm.end()) {  // LCOV_EXCL_LINE
@@ -223,18 +222,27 @@ BuiltObservedExpr buildObservedExprForTerm(  // LCOV_EXCL_LINE
     if (outputTermID < localIsPOs.size()) {  // LCOV_EXCL_LINE
       localIsPOs[outputTermID] = true;  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
-    // SEC rebuilds internal observability roots for modeled memories and
-    // abstracted boundaries. A transparent self-feedback branch under such an
-    // internal root should become a frontier input instead of causing the whole
-    // memory dependency to be skipped.
     KEPLER_FORMAL::SNLLogicCloud cloud(  // LCOV_EXCL_LINE
         outputTermID,  // LCOV_EXCL_LINE
         isPIs,  // LCOV_EXCL_LINE
-        localIsPOs,
-        allowInternalLogicalLoopFrontier,  // LCOV_EXCL_LINE
-        false);
+        localIsPOs);
     cloud.compute();  // LCOV_EXCL_LINE
     if (cloud.getTruthTable().isValid()) {  // LCOV_EXCL_LINE
+      for (const auto inputTermID : cloud.getInputs()) {  // LCOV_EXCL_LINE
+        if (inputTermID == naja::DNL::DNLID_MAX) {  // LCOV_EXCL_LINE
+          continue;  // LCOV_EXCL_LINE
+        }  // LCOV_EXCL_LINE
+        if (inputTermID >= termDNLID2varID.size() ||  // LCOV_EXCL_LINE
+            termDNLID2varID[inputTermID] < 2) {  // LCOV_EXCL_LINE
+          localResult.connectivitySkip = ConnectivitySkipInfo{  // LCOV_EXCL_LINE
+              ConnectivitySkipOrigin::NoDriver,  // LCOV_EXCL_LINE
+              "encountered internal frontier term " +  // LCOV_EXCL_LINE
+                  std::to_string(inputTermID) +  // LCOV_EXCL_LINE
+                  " that was not collected as a primary input"};  // LCOV_EXCL_LINE
+          cloud.destroy();  // LCOV_EXCL_LINE
+          return localResult;  // LCOV_EXCL_LINE
+        }  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
       cloud.getTruthTable().finalize();  // LCOV_EXCL_LINE
       localResult.expr =  // LCOV_EXCL_LINE
           KEPLER_FORMAL::Tree2BoolExpr::convert(cloud.getTruthTable(), termDNLID2varID);  // LCOV_EXCL_LINE
@@ -411,8 +419,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
     const std::vector<naja::DNL::DNLID>& requestedOutputs,
     bool secDiagEnabled,
     const char* topName,
-    const char* phaseLabel,
-    bool allowInternalLogicalLoopFrontier = false) {
+    const char* phaseLabel) {
   MaterializedBuilderOutputs result;
 
   KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
@@ -514,9 +521,8 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   // even when the generic boundary collector would not classify them as
   // outputs. Root input-side dependency pins at their single-driver source so
   // the clause builder sees the actual combinational producer instead of the
-  // sink pin on the memory instance.
-  builder.setAllowInternalLogicalLoopFrontier(
-      allowInternalLogicalLoopFrontier);
+  // sink pin on the memory instance. If that cone hits a bad frontier, the root
+  // is skipped and the dependent state/output is filtered later.
   builder.setOutputs(normalizedRoots);
 
   const bool traceDependencyRoots =
@@ -2041,7 +2047,7 @@ std::vector<naja::DNL::DNLID> collectStructuredMemoryDependencyTerms(
   return termIDs;
 }
 
-BoolExpr* getStructuredMemoryTermExprOrThrow(
+BuiltObservedExpr materializeStructuredMemoryTermExpr(
     naja::DNL::DNLID termID,
     std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
@@ -2049,9 +2055,11 @@ BoolExpr* getStructuredMemoryTermExprOrThrow(
     const std::vector<naja::DNL::DNLID>& builderInputs,
     const std::vector<naja::DNL::DNLID>& builderOutputs,
     const std::vector<size_t>& termDNLID2varID) {
+  BuiltObservedExpr result;
   if (const auto exprIt = outputExprByTerm.find(termID);
       exprIt != outputExprByTerm.end()) {
-    return exprIt->second;
+    result.expr = exprIt->second;
+    return result;
   }
 
   auto* dnl = naja::DNL::get();
@@ -2063,13 +2071,16 @@ BoolExpr* getStructuredMemoryTermExprOrThrow(
       skippedIt != skippedOutputsByTerm.end()) {
     if (const auto connectivitySkip = getConnectivitySkipInfo(skippedIt->second);
         connectivitySkip.has_value()) {
-      throw std::runtime_error(
+      result.connectivitySkip = ConnectivitySkipInfo{
+          connectivitySkip->origin,
           "Structured memory dependency `" + displayName +
-          "` was skipped because " + connectivitySkip->detail);
+              "` was skipped because " + connectivitySkip->detail};
+      return result;
     }
-    throw std::runtime_error(  // LCOV_EXCL_LINE
+    result.unsupportedReason =  // LCOV_EXCL_LINE
         "Structured memory dependency `" + displayName +  // LCOV_EXCL_LINE
-        "` is unsupported: " + skippedIt->second.detail);  // LCOV_EXCL_LINE
+        "` is unsupported: " + skippedIt->second.detail;  // LCOV_EXCL_LINE
+    return result;  // LCOV_EXCL_LINE
   }
 
   const auto built = buildObservedExprForTerm(  // LCOV_EXCL_LINE
@@ -2077,22 +2088,24 @@ BoolExpr* getStructuredMemoryTermExprOrThrow(
       outputExprByTerm,  // LCOV_EXCL_LINE
       builderInputs,  // LCOV_EXCL_LINE
       builderOutputs,  // LCOV_EXCL_LINE
-      termDNLID2varID,  // LCOV_EXCL_LINE
-      true);
+      termDNLID2varID);  // LCOV_EXCL_LINE
   if (built.expr != nullptr) {  // LCOV_EXCL_LINE
     outputExprByTerm.emplace(termID, built.expr);  // LCOV_EXCL_LINE
-    return built.expr;  // LCOV_EXCL_LINE
+    return built;  // LCOV_EXCL_LINE
   }
   if (built.connectivitySkip.has_value()) {  // LCOV_EXCL_LINE
-    throw std::runtime_error(  // LCOV_EXCL_LINE
+    result.connectivitySkip = ConnectivitySkipInfo{  // LCOV_EXCL_LINE
+        built.connectivitySkip->origin,  // LCOV_EXCL_LINE
         "Structured memory dependency `" + displayName +  // LCOV_EXCL_LINE
-        "` was skipped because " +  // LCOV_EXCL_LINE
-        built.connectivitySkip->detail);  // LCOV_EXCL_LINE
+            "` was skipped because " +  // LCOV_EXCL_LINE
+            built.connectivitySkip->detail};  // LCOV_EXCL_LINE
+    return result;  // LCOV_EXCL_LINE
   }
-  throw std::runtime_error(  // LCOV_EXCL_LINE
+  result.unsupportedReason =  // LCOV_EXCL_LINE
       "Structured memory dependency `" + displayName +  // LCOV_EXCL_LINE
       "` is unsupported: " +  // LCOV_EXCL_LINE
-      built.unsupportedReason);  // LCOV_EXCL_LINE
+      built.unsupportedReason;  // LCOV_EXCL_LINE
+  return result;  // LCOV_EXCL_LINE
 }
 
 bool isNoDriverSkippedStructuredMemoryTerm(
@@ -2126,26 +2139,62 @@ void buildStructuredMemoryTransitions(
     const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
         skippedOutputsByTerm) {
   for (const auto& pendingMemory : ctx.pendingMemoryInstances) {
+    auto markConnectivitySkipped = [&](const SignalKey& key,
+                                       const ConnectivitySkipInfo& info) {
+      model.connectivitySkipInfoByKey.emplace(key, info);
+    };
+    auto markWholeMemoryConnectivitySkipped =
+        [&](const ConnectivitySkipInfo& info) {
+          for (const auto& cellState : pendingMemory.cellStates) {
+            markConnectivitySkipped(cellState.key, info);
+          }
+          for (const auto& readOutput : pendingMemory.readOutputs) {
+            markConnectivitySkipped(readOutput.key, info);
+          }
+        };
+    auto appendStructuredMemoryExpr =
+        [&](naja::DNL::DNLID termID,
+            std::vector<BoolExpr*>& exprs,
+            std::optional<ConnectivitySkipInfo>& connectivitySkip) {
+          const auto built = materializeStructuredMemoryTermExpr(
+              termID,
+              outputExprByTerm,
+              skippedOutputsByTerm,
+              builderInputs,
+              builderOutputs,
+              termDNLID2varID);
+          if (built.expr != nullptr) {
+            exprs.push_back(built.expr);
+            return true;
+          }
+          if (built.connectivitySkip.has_value()) {
+            connectivitySkip = *built.connectivitySkip;
+            return false;
+          }
+          model.unsupportedReasons.push_back(built.unsupportedReason);
+          return false;
+        };
+
     std::vector<std::vector<BoolExpr*>> readAddressExprs;
     readAddressExprs.reserve(pendingMemory.readPorts.size());
+    std::vector<std::optional<ConnectivitySkipInfo>> readPortSkips;
+    readPortSkips.reserve(pendingMemory.readPorts.size());
     for (const auto& readPort : pendingMemory.readPorts) {
       std::vector<BoolExpr*> addressExprs;
       addressExprs.reserve(readPort.addressTermIDs.size());
+      std::optional<ConnectivitySkipInfo> readPortSkip;
       for (const auto termID : readPort.addressTermIDs) {
         // Structured-memory dependency materialization can add extra
         // boundary roots that were not present in the original top-output
         // build. Read-address reconstruction must use that merged frontier,
         // otherwise a dependency found in the batch phase can disappear when
         // we rebuild the per-port expressions here.
-        addressExprs.push_back(getStructuredMemoryTermExprOrThrow(
-            termID,
-            outputExprByTerm,
-            skippedOutputsByTerm,
-            builderInputs,
-            builderOutputs,
-            termDNLID2varID));
+        if (!appendStructuredMemoryExpr(termID, addressExprs, readPortSkip)) {
+          break;
+        }
       }
       readAddressExprs.push_back(std::move(addressExprs));
+      readPortSkips.push_back(std::move(readPortSkip));
     }
 
     struct WritePortExprs {
@@ -2157,6 +2206,21 @@ void buildStructuredMemoryTransitions(
     };
     std::vector<WritePortExprs> writePortExprs;
     writePortExprs.reserve(pendingMemory.writePorts.size());
+    std::optional<ConnectivitySkipInfo> memorySkip;
+    bool unsupportedMemoryDependency = false;
+    auto appendWriteDependencyExpr =
+        [&](naja::DNL::DNLID termID, std::vector<BoolExpr*>& exprs) {
+          std::optional<ConnectivitySkipInfo> dependencySkip;
+          if (appendStructuredMemoryExpr(termID, exprs, dependencySkip)) {
+            return true;
+          }
+          if (dependencySkip.has_value()) {
+            memorySkip = *dependencySkip;
+          } else {
+            unsupportedMemoryDependency = true;
+          }
+          return false;
+        };
     for (const auto& writePort : pendingMemory.writePorts) {
       WritePortExprs exprs;
       exprs.addressExprs.reserve(writePort.addressTermIDs.size());
@@ -2168,57 +2232,63 @@ void buildStructuredMemoryTransitions(
           exprs.disabled = true;  // LCOV_EXCL_LINE
           break;  // LCOV_EXCL_LINE
         }
-        exprs.enableExprs.push_back(getStructuredMemoryTermExprOrThrow(
-            termID,
-            outputExprByTerm,
-            skippedOutputsByTerm,
-            builderInputs,
-            builderOutputs,
-            termDNLID2varID));
+        if (!appendWriteDependencyExpr(termID, exprs.enableExprs)) {
+          break;
+        }
+      }
+      if (memorySkip.has_value() || unsupportedMemoryDependency) {
+        break;
       }
       if (exprs.disabled) {
         writePortExprs.push_back(std::move(exprs));  // LCOV_EXCL_LINE
         continue;  // LCOV_EXCL_LINE
       }
       for (const auto termID : writePort.addressTermIDs) {
-        exprs.addressExprs.push_back(getStructuredMemoryTermExprOrThrow(
-            termID,
-            outputExprByTerm,
-            skippedOutputsByTerm,
-            builderInputs,
-            builderOutputs,
-            termDNLID2varID));
+        if (!appendWriteDependencyExpr(termID, exprs.addressExprs)) {
+          break;
+        }
+      }
+      if (memorySkip.has_value() || unsupportedMemoryDependency) {
+        break;
       }
       for (const auto termID : writePort.dataTermIDs) {
-        exprs.dataExprs.push_back(getStructuredMemoryTermExprOrThrow(
-            termID,
-            outputExprByTerm,
-            skippedOutputsByTerm,
-            builderInputs,
-            builderOutputs,
-            termDNLID2varID));
+        if (!appendWriteDependencyExpr(termID, exprs.dataExprs)) {
+          break;
+        }
+      }
+      if (memorySkip.has_value() || unsupportedMemoryDependency) {
+        break;
       }
       for (const auto termID : writePort.maskTermIDs) {
-        exprs.maskExprs.push_back(getStructuredMemoryTermExprOrThrow(
-            termID,
-            outputExprByTerm,
-            skippedOutputsByTerm,
-            builderInputs,
-            builderOutputs,
-            termDNLID2varID));
+        if (!appendWriteDependencyExpr(termID, exprs.maskExprs)) {
+          break;
+        }
+      }
+      if (memorySkip.has_value() || unsupportedMemoryDependency) {
+        break;
       }
       writePortExprs.push_back(std::move(exprs));
+    }
+    if (memorySkip.has_value()) {
+      markWholeMemoryConnectivitySkipped(*memorySkip);
+      continue;
+    }
+    if (unsupportedMemoryDependency) {
+      continue;  // LCOV_EXCL_LINE
     }
 
     BoolExpr* resetExpr = nullptr;
     if (pendingMemory.resetTermID.has_value()) {
-      resetExpr = getStructuredMemoryTermExprOrThrow(
-          *pendingMemory.resetTermID,
-          outputExprByTerm,
-          skippedOutputsByTerm,
-          builderInputs,
-          builderOutputs,
-          termDNLID2varID);
+      std::vector<BoolExpr*> resetExprs;
+      std::optional<ConnectivitySkipInfo> resetSkip;
+      if (!appendStructuredMemoryExpr(
+              *pendingMemory.resetTermID, resetExprs, resetSkip)) {
+        if (resetSkip.has_value()) {
+          markWholeMemoryConnectivitySkipped(*resetSkip);
+        }
+        continue;
+      }
+      resetExpr = resetExprs.front();
     }
     const auto resetAssertedExpr = [&]() -> BoolExpr* {
       switch (pendingMemory.resetMode) {
@@ -2281,6 +2351,12 @@ void buildStructuredMemoryTransitions(
         throw std::runtime_error(  // LCOV_EXCL_LINE
             "Missing SEC variable for memory read-output state `" +  // LCOV_EXCL_LINE
             signalKeyToString(readOutput.key) + "`");  // LCOV_EXCL_LINE
+      }
+      if (readOutput.portIndex < readPortSkips.size() &&
+          readPortSkips[readOutput.portIndex].has_value()) {
+        markConnectivitySkipped(
+            readOutput.key, *readPortSkips[readOutput.portIndex]);
+        continue;
       }
       const auto& addressExprs = readAddressExprs[readOutput.portIndex];
       BoolExpr* next = cellNextExprs[0][readOutput.bitIndex];
@@ -3087,8 +3163,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
         structuredMemoryDependencyTerms,
         ctx.secDiagEnabled,
         ctx.topName.c_str(),
-        "structured memory dependency build",
-        true);
+        "structured memory dependency build");
     appendUniqueTermIDs(builderInputs, dependencyOutputs.inputs);
     appendUniqueTermIDs(builderOutputs, dependencyOutputs.outputs);
     mergeBuilderTermVarIDs(termDNLID2varID, dependencyOutputs.termDNLID2varID);

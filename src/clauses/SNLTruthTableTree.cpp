@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <tbb/enumerable_thread_specific.h>
 #include "tbb/concurrent_vector.h"
 
@@ -252,15 +253,22 @@ std::shared_ptr<const SNLTruthTable> getSharedTruthTable(
       cache;
 
   const SharedTruthTableKey key{design, flatTermID};
+  auto currentTable = SNLDesignModeling::getTruthTable(design, flatTermID);
   std::lock_guard<std::mutex> lock(cacheMutex);
   const auto it = cache.find(key);
   if (it != cache.end()) {
-    return it->second;
+    // NLUniverse teardown can free a design and a later test/run can reuse the
+    // same address for a different primitive. Keep the cache fast, but never
+    // trust pointer identity alone across universe lifetimes.
+    if (*(it->second) == currentTable) {
+      return it->second;
+    }
+    auto sharedTable = std::make_shared<SNLTruthTable>(std::move(currentTable));
+    it->second = sharedTable;
+    return sharedTable;
   }
 
-  auto sharedTable =
-      std::make_shared<SNLTruthTable>(
-          SNLDesignModeling::getTruthTable(design, flatTermID));
+  auto sharedTable = std::make_shared<SNLTruthTable>(std::move(currentTable));
   cache.emplace(key, sharedTable);
   return sharedTable;
 }

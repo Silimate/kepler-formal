@@ -14,6 +14,7 @@
 #include <fstream>
 #include <mutex>
 #include <ostream>
+#include <sstream>
 #include <string_view>
 #include <thread>
 #include <tbb/global_control.h>
@@ -821,12 +822,7 @@ void BuildPrimaryOutputClauses::build() {
       return;
     }
     
-    SNLLogicCloud cloud(
-        out,
-        IsPIs_,
-        IsPOs_,
-        allowInternalLogicalLoopFrontier_,
-        allowInternalNoDriverFrontier_);
+    SNLLogicCloud cloud(out, IsPIs_, IsPOs_);
     #ifdef DEBUG_CHECKS
     auto startComp = std::chrono::steady_clock::now();
     #endif
@@ -917,40 +913,33 @@ void BuildPrimaryOutputClauses::build() {
       cloud.getTruthTable().finalize();
     }
     if (cloud.getTruthTable().isValid()) {
-      std::lock_guard<std::mutex> lock(inputsMutex_);
+      DNLID unmappedInput = DNLID_MAX;
       for (const auto inputTermID : cloud.getInputs()) {
         if (inputTermID == DNLID_MAX) {
           continue;  // LCOV_EXCL_LINE
         }
-        if (inputTermID >= termDNLID2varID_.size()) {
-          termDNLID2varID_.resize(inputTermID + 1, static_cast<size_t>(-1));  // LCOV_EXCL_LINE
-        }  // LCOV_EXCL_LINE
-        if (termDNLID2varID_[inputTermID] != static_cast<size_t>(-1)) {
-          continue;
+        if (inputTermID >= termDNLID2varID_.size() ||
+            termDNLID2varID_[inputTermID] == static_cast<size_t>(-1)) {
+          unmappedInput = inputTermID;
+          break;
         }
-
-        const auto& inputTerm = get()->getDNLTerminalFromID(inputTermID);
-        if (inputTerm.getIsoID() != DNLID_MAX) {
-          const auto& inputIso =
-              get()->getDNLIsoDB().getIsoFromIsoIDconst(inputTerm.getIsoID());
-          if (inputIso.isConstant0()) {
-            termDNLID2varID_[inputTermID] = 0;  // LCOV_EXCL_LINE
-            continue;  // LCOV_EXCL_LINE
-          }
-          if (inputIso.isConstant1()) {
-            termDNLID2varID_[inputTermID] = 1;  // LCOV_EXCL_LINE
-            continue;  // LCOV_EXCL_LINE
-          }
+      }
+      if (unmappedInput != DNLID_MAX) {
+        POs_[i] = BoolExpr::createInvalid();
+        std::ostringstream detail;
+        detail << "encountered internal frontier term "
+               << unmappedInput
+               << " that was not collected as a primary input";
+        {
+          std::lock_guard<std::mutex> lock(skippedOutputsMutex_);
+          skippedOutputs_[out] = makeSkippedOutputInfo(
+              SkippedOutputReason::NoDriver, detail.str());
         }
-
-        // Internal SEC dependency roots may expose freshly-cut frontier leaves
-        // that were not part of the original top PI list. Publish them as
-        // ordinary Boolean inputs before converting the truth-table tree.
-        termDNLID2varID_[inputTermID] = inputs_.size() + 2;
-        inputs_.push_back(inputTermID);
-        PathKey key = getTerminalPathKey(inputTerm);
-        inputs2inputsIDs_[inputTermID] = key;
-        inputsMap_[std::move(key)] = inputTermID;
+        reportSkippedPO(
+            get(),
+            get()->getDNLTerminalFromID(out),
+            detail.str().c_str(),
+            kSkippedNoDriverPOReport);
       }
     }
     #ifdef DEBUG_CHECKS
@@ -961,9 +950,9 @@ void BuildPrimaryOutputClauses::build() {
     #ifdef DEBUG_CHECKS
     auto startConv = std::chrono::steady_clock::now();
     #endif
-    if (cloud.getTruthTable().isValid()) {
+    if (cloud.getTruthTable().isValid() && POs_[i] == nullptr) {
       POs_[i] = Tree2BoolExpr::convert(cloud.getTruthTable(), termDNLID2varID_);
-    } else {
+    } else if (POs_[i] == nullptr) {
       POs_[i] = BoolExpr::createInvalid();
       SkippedOutputReason skipReason = SkippedOutputReason::None;
       switch (cloud.getSkipReason()) {
@@ -991,18 +980,26 @@ void BuildPrimaryOutputClauses::build() {
     std::chrono::duration<double> elapsed_seconds_conv = endConv - startConv;
     printf("Conversion time for %lu: %f seconds\n", i, elapsed_seconds_conv.count());
     #endif
-    cloud.destroy();
     // BoolExpr::getMutex().unlock();
     // printf("size of expr: %lu\n", POs_.back()->size());
-    if (isoID != DNLID_MAX) {
+    if (Tree2BoolExpr::isIsoCacheEnabled() && isoID != DNLID_MAX &&
+        POs_[i] != nullptr && POs_[i]->isValid()) {
       // Publish only fully-built expressions; do not expose a placeholder entry.
       auto insertResult = Tree2BoolExpr::iso2boolExpr_.insert({isoID, POs_[i]});
       if (!insertResult.second) {
         POs_[i] = insertResult.first->second;
       }
     }
+    cloud.destroy();
   };
-  Tree2BoolExpr::iso2boolExpr_.clear();
+  struct ScopedIsoCacheReset {
+    ScopedIsoCacheReset() {
+      Tree2BoolExpr::iso2boolExpr_.clear();
+    }
+    ~ScopedIsoCacheReset() {
+      Tree2BoolExpr::iso2boolExpr_.clear();
+    }
+  } scopedIsoCacheReset;
   if (getenv("KEPLER_NO_MT")) {
     for (size_t i = 0; i < outputs_.size(); ++i) {
       processOutput(i);

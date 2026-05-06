@@ -14,6 +14,7 @@
 #include <tbb/concurrent_vector.h>
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/tbb_allocator.h>
+#include <atomic>
 #include <bitset>
 #include <cstdint>
 #include <stdexcept>
@@ -37,6 +38,16 @@ using namespace KEPLER_FORMAL;
 // This allows sharing of BoolExpr objects across conversions and threads.
 tbb::concurrent_unordered_map<naja::DNL::DNLID, BoolExpr*> Tree2BoolExpr::iso2boolExpr_ =
     tbb::concurrent_unordered_map<naja::DNL::DNLID, BoolExpr*>();
+
+std::atomic_bool Tree2BoolExpr::isoCacheEnabled_{true};
+
+bool Tree2BoolExpr::isIsoCacheEnabled() {
+  return isoCacheEnabled_.load(std::memory_order_relaxed);
+}
+
+void Tree2BoolExpr::setIsoCacheEnabled(bool enabled) {
+  isoCacheEnabled_.store(enabled, std::memory_order_relaxed);
+}
 
 // Helper typedefs for thread-local containers. Each pair stores a vector
 // allocated with TBB allocator and a size_t representing the logical size.
@@ -278,6 +289,7 @@ BoolExpr* Tree2BoolExpr::convert(
   // 2) memo table: clear and reserve memoization storage for all node IDs.
   clearMemoETS();
   reserveMemoETS(maxID + 1);
+  const bool useIsoCache = isIsoCacheEnabled();
 
   // 3) post-order build using an explicit stack to avoid recursion.
   auto & stack = getStackETS();
@@ -304,8 +316,9 @@ BoolExpr* Tree2BoolExpr::convert(
       naja::DNL::DNLID isoID = naja::DNL::DNLID_MAX;
       if (node->type != SNLTruthTableTree::Node::Type::Input) {
         isoID = naja::DNL::get()->getDNLTerminalFromID(node->data.termid).getIsoID();
-        auto it = iso2boolExpr_.find(isoID);
-        if (it != iso2boolExpr_.end() && isoID != naja::DNL::DNLID_MAX) {
+        auto it = useIsoCache ? iso2boolExpr_.find(isoID) : iso2boolExpr_.end();
+        if (useIsoCache && it != iso2boolExpr_.end() &&
+            isoID != naja::DNL::DNLID_MAX) {
           setMemoETS(id, it->second);
         }
       }
@@ -352,7 +365,7 @@ BoolExpr* Tree2BoolExpr::convert(
            BoolExpr* expr = BoolExpr::createFalse();
            // LCOV_EXCL_START
            // Impossible to catch in unit tests as it is an mt race condition
-           if (isoID != naja::DNL::DNLID_MAX) {
+           if (useIsoCache && isoID != naja::DNL::DNLID_MAX) {
                auto result = iso2boolExpr_.insert({isoID, expr});
                if (!result.second) {
                    // Another thread inserted concurrently.
@@ -364,7 +377,7 @@ BoolExpr* Tree2BoolExpr::convert(
            setMemoETS(id, expr);
         } else if (name == 1) {
            BoolExpr* expr = BoolExpr::createTrue();
-           if (isoID != naja::DNL::DNLID_MAX) {
+           if (useIsoCache && isoID != naja::DNL::DNLID_MAX) {
               // LCOV_EXCL_START
               // Impossible to catch in unit tests as it is an mt race condition
               auto result = iso2boolExpr_.insert({isoID, expr});
@@ -379,7 +392,7 @@ BoolExpr* Tree2BoolExpr::convert(
         } else {
           // Normal variable mapping.
           BoolExpr* expr = BoolExpr::Var(name);
-          if (isoID != naja::DNL::DNLID_MAX) {
+          if (useIsoCache && isoID != naja::DNL::DNLID_MAX) {
             // LCOV_EXCL_START
             // Impossible to catch in unit tests as it is an mt race condition
             auto result = iso2boolExpr_.insert({isoID, expr});
@@ -416,7 +429,7 @@ BoolExpr* Tree2BoolExpr::convert(
 
         if (tbl.isGeneric()) {
           BoolExpr* expr = buildGenericTruthTableExpr(tbl, k);
-          if (isoID != naja::DNL::DNLID_MAX) {
+          if (useIsoCache && isoID != naja::DNL::DNLID_MAX) {
             // LCOV_EXCL_START
             // The duplicate insert path only happens through concurrent reuse of
             // the same isoID during conversion.
@@ -490,7 +503,7 @@ BoolExpr* Tree2BoolExpr::convert(
               DEBUG_LOG("Intermediate OR expr for node ID %zu: %s\n", id, expr->toString().c_str());
             }
             // Store the resulting expression in the memo table and in the iso map.
-            if (isoID != naja::DNL::DNLID_MAX) {
+            if (useIsoCache && isoID != naja::DNL::DNLID_MAX) {
                 auto result = iso2boolExpr_.insert({isoID, expr});
                 if (!result.second) {
                     // Another thread inserted concurrently.

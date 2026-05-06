@@ -882,7 +882,7 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesInitializesSkippedPOReportFilesOnlyO
 
 TEST_F(
     MiterTests,
-    BuildPrimaryOutputClausesBuildsRequestedInternalOutputWithUndrivenLeafInputAsBoundary) {
+    BuildPrimaryOutputClausesSkipsRequestedInternalOutputWithUndrivenLeafInput) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
   NLLibrary* libraryPrims =
@@ -951,32 +951,24 @@ TEST_F(
       findDNLTermIDByInstanceAndTerm("and0", andOut->getName().getString().c_str());
   ASSERT_NE(internalOutputID, naja::DNL::DNLID_MAX);
 
-  // Guard the SEC structured-memory dependency path: explicitly requested
-  // internal roots can legitimately stop at an undriven leaf input, which
-  // should become an opaque boundary input instead of skipping the entire
-  // requested root as a broken top-level PO.
-  builder.setAllowInternalNoDriverFrontier(true);
+  const auto inputCountBeforeBuild = builder.getInputs().size();
   builder.setOutputs({internalOutputID});
   builder.build();
 
   ASSERT_EQ(builder.getOutputs().size(), 1u);
   ASSERT_EQ(builder.getPOs().size(), 1u);
   ASSERT_NE(builder.getPOs()[0], nullptr);
-  EXPECT_TRUE(builder.getPOs()[0]->isValid());
-  EXPECT_TRUE(builder.getSkippedOutputs().empty());
-
-  std::vector<naja::DNL::DNLID, tbb::tbb_allocator<naja::DNL::DNLID>> inputIDs(
-      builder.getInputs().begin(), builder.getInputs().end());
-  const auto inputLabels = getTermLabels(inputIDs);
-  EXPECT_TRUE(std::any_of(
-      inputLabels.begin(), inputLabels.end(), [](const std::string& label) {
-        return label.rfind("xnor0.", 0) == 0;
-      }));
+  EXPECT_FALSE(builder.getPOs()[0]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  ASSERT_NE(builder.getSkippedOutputs().find(internalOutputID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getSkippedOutputs().at(internalOutputID).reason,
+            BuildPrimaryOutputClauses::SkippedOutputReason::NoDriver);
 }
 
 TEST_F(
     MiterTests,
-    BuildPrimaryOutputClausesBuildsRequestedInternalMuxSelfFeedbackAsBoundary) {
+    BuildPrimaryOutputClausesSkipsRequestedInternalMuxSelfFeedback) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
   NLLibrary* libraryDesigns =
@@ -1019,29 +1011,19 @@ TEST_F(
       "mux_loop", NLDB0::getMux2Output()->getBit(0)->getName().getString().c_str());
   ASSERT_NE(internalOutputID, naja::DNL::DNLID_MAX);
 
-  // This is the small form of the CVA6 memory-WDATA regression: the requested
-  // SEC-internal root is useful, but one mux input is a transparent self-loop.
-  // Keep top-level PO cycle reporting strict elsewhere; for internal roots,
-  // cut only the self-feedback input as an opaque frontier leaf so the rest of
-  // the memory dependency can still be modeled.
-  builder.setAllowInternalLogicalLoopFrontier(true);
+  const auto inputCountBeforeBuild = builder.getInputs().size();
   builder.setOutputs({internalOutputID});
   builder.build();
 
   ASSERT_EQ(builder.getOutputs().size(), 1u);
   ASSERT_EQ(builder.getPOs().size(), 1u);
   ASSERT_NE(builder.getPOs()[0], nullptr);
-  EXPECT_TRUE(builder.getPOs()[0]->isValid());
-  EXPECT_TRUE(builder.getSkippedOutputs().empty());
-
-  std::vector<naja::DNL::DNLID, tbb::tbb_allocator<naja::DNL::DNLID>> inputIDs(
-      builder.getInputs().begin(), builder.getInputs().end());
-  const auto inputLabels = getTermLabels(inputIDs);
-  EXPECT_TRUE(std::any_of(
-      inputLabels.begin(), inputLabels.end(), [](const std::string& label) {
-        return label.rfind("assign_loop.", 0) == 0 ||
-               label.rfind("mux_loop.", 0) == 0;
-      }));
+  EXPECT_FALSE(builder.getPOs()[0]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  ASSERT_NE(builder.getSkippedOutputs().find(internalOutputID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getSkippedOutputs().at(internalOutputID).reason,
+            BuildPrimaryOutputClauses::SkippedOutputReason::LogicalLoop);
 }
 
 TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {

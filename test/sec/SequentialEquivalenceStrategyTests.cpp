@@ -1181,8 +1181,6 @@ BuilderOutputProbeForTest probeRequestedBuilderOutputForTest(
 
   KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
   builder.collect();
-  builder.setAllowInternalLogicalLoopFrontier(true);
-  builder.setAllowInternalNoDriverFrontier(true);
   builder.setOutputs({*probe.normalizedRoot});
   builder.build();
 
@@ -5989,8 +5987,9 @@ endmodule
   EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem_q"));
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem_q"));
-  EXPECT_FALSE(extracted.stateBits.empty());
-  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
+  EXPECT_TRUE(extracted.stateBits.empty());
+  EXPECT_TRUE(extracted.nextStateExprByStateKey.empty());
+  EXPECT_FALSE(extracted.skippedObservedOutputs.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -6026,17 +6025,20 @@ TEST_F(SequentialEquivalenceStrategyTests,
 endmodule
 )");
 
-  try {
-    static_cast<void>(SequentialDesignModel::extract(top));
-    FAIL() << "Expected structured memory extraction to reject the undriven "
-              "read-address dependency";
-  } catch (const std::runtime_error& error) {
-    const std::string text = error.what();
-    EXPECT_NE(text.find("Structured memory dependency"), std::string::npos)
-        << text;
-    EXPECT_NE(text.find("mem_q_mem.RADDR[1]"), std::string::npos)
-        << text;
-  }
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_FALSE(extracted.skippedObservedOutputs.empty());
+  const auto hasStructuredMemorySkipDetail = std::any_of(
+      extracted.connectivitySkipInfoByKey.begin(),
+      extracted.connectivitySkipInfoByKey.end(),
+      [](const auto& entry) {
+        return entry.second.detail.find("Structured memory dependency") !=
+                   std::string::npos &&
+               entry.second.detail.find("mem_q_mem.RADDR[1]") !=
+                   std::string::npos;
+      });
+  EXPECT_TRUE(hasStructuredMemorySkipDetail);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -6194,8 +6196,9 @@ endmodule
   EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem_q"));
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem_q"));
-  EXPECT_FALSE(extracted.stateBits.empty());
-  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
+  EXPECT_TRUE(extracted.stateBits.empty());
+  EXPECT_TRUE(extracted.nextStateExprByStateKey.empty());
+  EXPECT_FALSE(extracted.skippedObservedOutputs.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
