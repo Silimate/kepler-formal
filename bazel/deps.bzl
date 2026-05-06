@@ -107,11 +107,11 @@ naja_repo = repository_rule(
 # to verify, then update the sha256 hashes.
 _GLUCOSE_COMMIT = "7f887abba7cf13636a5ac2d28653668a20a91b25"
 _KISSAT_COMMIT = "8af8e56f174b778aef3aa45af9f739b2a5f492c2"
-_NAJA_COMMIT = "0ed0e44350ea1bcbec3a0a7cf5f550a96b992d0d"
-_NAJA_VERILOG_COMMIT = "a377d7f2644bbbf98ff1ae9e8511d52eba8dd6ca"
+_NAJA_COMMIT = "cb35df2298b61325ce5c16552f94d6e02a2ae7c8"
+_NAJA_VERILOG_COMMIT = "8a13b5986c765035548775808273d61defcaf738"
 _NAJA_IF_COMMIT = "27ea776a0c3022fea0c29ccd14a4fb7daea941f0"
 _CPPTRACE_COMMIT = "3db8da80111171c219ab5839905771386bee06b3"
-_SLANG_COMMIT = "7d36365b4ee32c615f30b971bf2fa69d7d5debc6"
+_SLANG_COMMIT = "aedd7bc0394e5621340be94ed58def33d74ac677"
 _GOOGLETEST_COMMIT = "52eb8108c5bdec04579160ae17225d66034bd723"
 
 def _deps_impl(_module_ctx):
@@ -134,10 +134,10 @@ def _deps_impl(_module_ctx):
     naja_repo(
         name = "naja",
         naja_url = "https://github.com/nanocoh/naja/archive/{}.tar.gz".format(_NAJA_COMMIT),
-        naja_sha256 = "8c9cd8a10ccf01139f373ea071426f3d312cd83e3e93b4e81da0738a410caed3",
+        naja_sha256 = "01ec2b4293489865bbeba75778e0f9ef14d4dd4a49c418e6b013fc98a2dc2998",
         naja_strip_prefix = "naja-{}".format(_NAJA_COMMIT),
         naja_verilog_url = "https://github.com/najaeda/naja-verilog/archive/{}.tar.gz".format(_NAJA_VERILOG_COMMIT),
-        naja_verilog_sha256 = "beffd84e14da4b146d9a0dc4699ebf44596cd437cf8157e3b39430a4080c606d",
+        naja_verilog_sha256 = "e5caf041d7c8867bb0805b8a182cc4330afc40d0dde74760f4ee42d10b70c9cb",
         naja_verilog_strip_prefix = "naja-verilog-{}".format(_NAJA_VERILOG_COMMIT),
         naja_if_url = "https://github.com/najaeda/naja-if/archive/{}.tar.gz".format(_NAJA_IF_COMMIT),
         naja_if_sha256 = "bfc0b22855aaf332efb86a5b2801363e36646b6fac816e4bcbed9284f627ab52",
@@ -146,7 +146,7 @@ def _deps_impl(_module_ctx):
         cpptrace_sha256 = "77d689fd7956ff80351a079d83e86a03865dbbe2433b4559cc6cea50bed77390",
         cpptrace_strip_prefix = "cpptrace-{}".format(_CPPTRACE_COMMIT),
         slang_url = "https://github.com/najaeda/slang/archive/{}.tar.gz".format(_SLANG_COMMIT),
-        slang_sha256 = "31e36f3b53be8bff17b6d1cbb10e7460b24a7866a68c3aea157c697f329548f3",
+        slang_sha256 = "94bf48b70ee125109c133d91e9d48b4597eca39fb692eec9220937668aff3a99",
         slang_strip_prefix = "slang-{}".format(_SLANG_COMMIT),
         googletest_url = "https://github.com/google/googletest/archive/{}.tar.gz".format(_GOOGLETEST_COMMIT),
         googletest_sha256 = "745c55415660044610f7fcd3af7a6420d5de16a7dbb9ebfe2e131275676232be",
