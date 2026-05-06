@@ -546,12 +546,6 @@ void SNLLogicCloud::compute() {
     snapshot << "]";
     return snapshot.str();
   };
-  const auto isForcedFrontierLeaf = [&](naja::DNL::DNLID termID) {
-    return forcedFrontierLeaves.find(termID) != forcedFrontierLeaves.end();
-  };
-  const auto markForcedFrontierLeaf = [&](naja::DNL::DNLID termID) {
-    forcedFrontierLeaves.insert(termID);
-  };
   auto resolveInstanceInputTerm = [&](const DNLInstanceFull& inst,
                                       const SNLBitTerm* bitTerm,
                                       naja::DNL::DNLID driver,
@@ -614,46 +608,6 @@ void SNLLogicCloud::compute() {
       relevantTerms.push_back(termID);
     });
     return relevantTerms;
-  };
-  auto resolveTransparentLoopTarget = [&](naja::DNL::DNLID termID) {
-    std::unordered_set<naja::DNL::DNLID> visitedTerms;
-    naja::DNL::DNLID currentTermID = termID;
-    while (currentTermID != naja::DNL::DNLID_MAX &&
-           visitedTerms.insert(currentTermID).second) {
-      const auto& currentTerm = dnl_.getDNLTerminalFromID(currentTermID);
-      if (currentTerm.isNull()) {
-        break;
-      }
-      if (currentTerm.getSnlBitTerm()->getDirection() !=
-          SNLBitTerm::Direction::Output) {
-        const auto isoID = currentTerm.getIsoID();
-        if (isoID == naja::DNL::DNLID_MAX) {
-          break;
-        }
-        const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(isoID);
-        if (iso.isConstant() || iso.getDrivers().size() != 1) {
-          break;
-        }
-        currentTermID = iso.getDrivers().front();
-        continue;
-      }
-
-      const auto* model = currentTerm.getDNLInstance().getSNLModel();
-      if (model == nullptr || !NLDB0::isAssign(model)) {
-        break;
-      }
-
-      if (getRelevantInstanceInputCount(currentTermID) != 1) {
-        break;
-      }
-      naja::DNL::DNLID nextTermID = naja::DNL::DNLID_MAX;
-      forEachRelevantInstanceInput(currentTermID,
-                                   [&](naja::DNL::DNLID relevantTermID) {
-                                     nextTermID = relevantTermID;
-                                   });
-      currentTermID = nextTermID;
-    }
-    return currentTermID;
   };
   // LCOV_EXCL_STOP
 	  auto throwIfTruthTableArityMismatch = [&](naja::DNL::DNLID driver) {
@@ -1021,6 +975,52 @@ void SNLLogicCloud::compute() {
   // handledTerms.reserve(naja::DNL::get()->getDNLTerms().size() / 4);
   clearVisitedTermsPairsETS();
   size_t iter = 0;
+  const auto isForcedFrontierLeaf = [&](naja::DNL::DNLID termID) {
+    return forcedFrontierLeaves.find(termID) != forcedFrontierLeaves.end();
+  };
+  const auto markForcedFrontierLeaf = [&](naja::DNL::DNLID termID) {
+    forcedFrontierLeaves.insert(termID);
+  };
+  auto resolveTransparentLoopTarget = [&](naja::DNL::DNLID termID) {
+    std::unordered_set<naja::DNL::DNLID> visitedTerms;
+    naja::DNL::DNLID currentTermID = termID;
+    while (currentTermID != naja::DNL::DNLID_MAX &&
+           visitedTerms.insert(currentTermID).second) {
+      const auto& currentTerm = dnl_.getDNLTerminalFromID(currentTermID);
+      if (currentTerm.isNull()) {
+        break;
+      }
+      if (currentTerm.getSnlBitTerm()->getDirection() !=
+          SNLBitTerm::Direction::Output) {
+        const auto isoID = currentTerm.getIsoID();
+        if (isoID == naja::DNL::DNLID_MAX) {
+          break;
+        }
+        const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(isoID);
+        if (iso.isConstant() || iso.getDrivers().size() != 1) {
+          break;
+        }
+        currentTermID = iso.getDrivers().front();
+        continue;
+      }
+
+      const auto* model = currentTerm.getDNLInstance().getSNLModel();
+      if (model == nullptr || !NLDB0::isAssign(model)) {
+        break;
+      }
+
+      if (getRelevantInstanceInputCount(currentTermID) != 1) {
+        break;
+      }
+      naja::DNL::DNLID nextTermID = naja::DNL::DNLID_MAX;
+      forEachRelevantInstanceInput(currentTermID,
+                                   [&](naja::DNL::DNLID relevantTermID) {
+                                     nextTermID = relevantTermID;
+                                   });
+      currentTermID = nextTermID;
+    }
+    return currentTermID;
+  };
 
   while (!reachedPIs) {
     // Originally computation of reachedPIs have been handled in the end of the loop,
