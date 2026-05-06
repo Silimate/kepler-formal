@@ -133,7 +133,7 @@ public:
     bool positiveValue = false;
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       const auto value = glucoseSolver_->modelValue(Glucose::mkLit(var));
-      if (Glucose::toInt(value) == 2) {  // LCOV_EXCL_LINE
+      if (Glucose::toInt(value) == 2) {
         positiveValue = false;  // LCOV_EXCL_LINE
       } else {  // LCOV_EXCL_LINE
         positiveValue = Glucose::toInt(value) == 0;

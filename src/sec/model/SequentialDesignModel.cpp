@@ -1627,13 +1627,13 @@ void appendPendingMemoryInstance(
   // but SEC should only rebuild that cone when the memory semantics actually
   // use reset. Otherwise a disabled RST pin becomes a fake dependency surface.
   if (pending.resetMode != naja::NL::SNLDesignModeling::MemoryResetMode::None &&
-      interface.reset != nullptr) {  // LCOV_EXCL_LINE
-    pending.resetTermID = getRequiredInstanceTermID(  // LCOV_EXCL_LINE
+      interface.reset != nullptr) {
+    pending.resetTermID = getRequiredInstanceTermID(
         termIDsByBitTerm,
-        interface.reset,  // LCOV_EXCL_LINE
-        boundaryInfo.instancePath,  // LCOV_EXCL_LINE
+        interface.reset,
+        boundaryInfo.instancePath,
         "reset");
-  }  // LCOV_EXCL_LINE
+  }
   pending.readPorts.reserve(interface.readPorts.size());
   for (size_t portIndex = 0; portIndex < interface.readPorts.size(); ++portIndex) {
     const auto& readPort = interface.readPorts[portIndex];
@@ -2005,9 +2005,9 @@ std::vector<naja::DNL::DNLID> collectStructuredMemoryDependencyTerms(
   std::unordered_set<naja::DNL::DNLID> seen;
   for (const auto& pendingMemory : ctx.pendingMemoryInstances) {
     if (pendingMemory.resetTermID.has_value() &&
-        seen.insert(*pendingMemory.resetTermID).second) {  // LCOV_EXCL_LINE
-      termIDs.push_back(*pendingMemory.resetTermID);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+        seen.insert(*pendingMemory.resetTermID).second) {
+      termIDs.push_back(*pendingMemory.resetTermID);
+    }
     for (const auto& readPort : pendingMemory.readPorts) {
       for (const auto termID : readPort.addressTermIDs) {
         if (seen.insert(termID).second) {
@@ -2212,19 +2212,19 @@ void buildStructuredMemoryTransitions(
 
     BoolExpr* resetExpr = nullptr;
     if (pendingMemory.resetTermID.has_value()) {
-      resetExpr = getStructuredMemoryTermExprOrThrow(  // LCOV_EXCL_LINE
-          *pendingMemory.resetTermID,  // LCOV_EXCL_LINE
-          outputExprByTerm,  // LCOV_EXCL_LINE
-          skippedOutputsByTerm,  // LCOV_EXCL_LINE
-          builderInputs,  // LCOV_EXCL_LINE
-          builderOutputs,  // LCOV_EXCL_LINE
-          termDNLID2varID);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+      resetExpr = getStructuredMemoryTermExprOrThrow(
+          *pendingMemory.resetTermID,
+          outputExprByTerm,
+          skippedOutputsByTerm,
+          builderInputs,
+          builderOutputs,
+          termDNLID2varID);
+    }
     const auto resetAssertedExpr = [&]() -> BoolExpr* {
       switch (pendingMemory.resetMode) {
         case naja::NL::SNLDesignModeling::MemoryResetMode::AsyncLow:
         case naja::NL::SNLDesignModeling::MemoryResetMode::SyncLow:
-          return resetExpr == nullptr ? nullptr : BoolExpr::Not(resetExpr);  // LCOV_EXCL_LINE
+          return resetExpr == nullptr ? nullptr : BoolExpr::Not(resetExpr);
         case naja::NL::SNLDesignModeling::MemoryResetMode::AsyncHigh:
         case naja::NL::SNLDesignModeling::MemoryResetMode::SyncHigh:
           return resetExpr;  // LCOV_EXCL_LINE
@@ -2268,9 +2268,9 @@ void buildStructuredMemoryTransitions(
             next);
       }
       if (resetAssertedExpr != nullptr) {
-        next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);  // LCOV_EXCL_LINE
-        model.initialStateValueByKey.emplace(cellState.key, false);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+        next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);
+        model.initialStateValueByKey.emplace(cellState.key, false);
+      }
       model.nextStateExprByStateKey.emplace(cellState.key, next);
       cellNextExprs[cellState.cellIndex][cellState.bitIndex] = next;
     }
@@ -2291,9 +2291,9 @@ void buildStructuredMemoryTransitions(
             next);
       }
       if (resetAssertedExpr != nullptr) {
-        next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);  // LCOV_EXCL_LINE
-        model.initialStateValueByKey.emplace(readOutput.key, false);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+        next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);
+        model.initialStateValueByKey.emplace(readOutput.key, false);
+      }
       model.nextStateExprByStateKey.emplace(readOutput.key, next);
     }
   }

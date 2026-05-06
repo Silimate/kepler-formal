@@ -465,9 +465,9 @@ std::string formatConeTraceback(const KInductionResult::CounterexampleWitness& w
       << "` at cycle " << witness.badFrame << ":\n";
 
   if (top0 == nullptr || top1 == nullptr) {
-    oss << "  Cone traceback unavailable: compact SEC released the "  // LCOV_EXCL_LINE
+    oss << "  Cone traceback unavailable: compact SEC released the "
            "elaborated designs after model extraction.\n";
-    return oss.str();  // LCOV_EXCL_LINE
+    return oss.str();
   }
 
   try {
@@ -666,9 +666,9 @@ OutputCoverageSelection selectCoveredObservedOutputs(
             model0.observedOutputExprByKey.end() ||
         model1.observedOutputExprByKey.find(key1) ==
             model1.observedOutputExprByKey.end()) {
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          "Missing observed output expression for aligned SEC output `" +  // LCOV_EXCL_LINE
-          name + "`");  // LCOV_EXCL_LINE
+      throw std::runtime_error(
+          "Missing observed output expression for aligned SEC output `" +
+          name + "`");
     }
 
     selection.checkedOutputs.names.push_back(name);
@@ -816,7 +816,7 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
       selectCoveredObservedOutputs(alignedAllOutputs, model0, model1);
   aligned.outputs = aligned.outputCoverage.checkedOutputs;
   if (aligned.outputs.names.empty()) {
-    return aligned;  // LCOV_EXCL_LINE
+    return aligned;
   }
 
   if (secDiagEnabled) {
@@ -836,7 +836,7 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
       model1.displayNameByKey,
       "observed output");
   if (aligned.outputs.names.size() != aligned.outputCoverage.checkedOutputs.names.size()) {
-    throw std::runtime_error(  // LCOV_EXCL_LINE
+    throw std::runtime_error(
         "Internal SEC error: checked observed outputs and extractor-visible observed "
         "outputs disagree after connectivity skipping");
   }
@@ -1114,11 +1114,11 @@ void buildSecPropertiesAndTransitions(
 const char* describeSecEngine(SecEngine secEngine) {
   switch (secEngine) {
     case SecEngine::Pdr:
-      return "pdr engine";  // LCOV_EXCL_LINE
+      return "pdr engine";
     case SecEngine::Imc:
-      return "imc engine";  // LCOV_EXCL_LINE
+      return "imc engine";
     case SecEngine::KInduction:
-      return "classic k-induction engine";  // LCOV_EXCL_LINE
+      return "classic k-induction engine";
     case SecEngine::Legacy:
     default:
       return "legacy engine";
@@ -1140,13 +1140,13 @@ SequentialEquivalenceResult runPdrSecEngine(
   const auto baselineResult = baseline.run(0);
   switch (baselineResult.status) {
     case KInductionStatus::Equivalent:
-      return makeSecResult(  // LCOV_EXCL_LINE
+      return makeSecResult(
           SequentialEquivalenceStatus::Equivalent,
-          baselineResult.bound,  // LCOV_EXCL_LINE
-          "",  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
+          baselineResult.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Different:
       return makeSecResult(  // LCOV_EXCL_LINE
           SequentialEquivalenceStatus::Different,
@@ -1222,16 +1222,16 @@ SequentialEquivalenceResult runKInductionSecEngine(
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
     case KInductionStatus::Different:
-      return makeSecResult(  // LCOV_EXCL_LINE
+      return makeSecResult(
           SequentialEquivalenceStatus::Different,
-          result.bound,  // LCOV_EXCL_LINE
-          result.witness.has_value()  // LCOV_EXCL_LINE
-              ? formatCounterexampleWitness(result, model0, model1, top0, top1)  // LCOV_EXCL_LINE
+          result.bound,
+          result.witness.has_value()
+              ? formatCounterexampleWitness(result, model0, model1, top0, top1)
               : "Classic k-induction found a counterexample at k = " +  // LCOV_EXCL_LINE
                     std::to_string(result.bound),  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     case KInductionStatus::Inconclusive:  // LCOV_EXCL_LINE
     default:
       return makeSecResult(  // LCOV_EXCL_LINE
@@ -1429,25 +1429,25 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       model0, "design0", abstractedSequentialBoundaries);
   appendExtractedBoundaryReports(model0, "design0", extractedBoundaryReports);
   if (model0.hasUnsupportedFeatures()) {
-    return makeSecResult(  // LCOV_EXCL_LINE
+    return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
-        joinReasons(model0.unsupportedReasons),  // LCOV_EXCL_LINE
-        OutputCoverageSelection{},  // LCOV_EXCL_LINE
-        abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-        extractedBoundaryReports);  // LCOV_EXCL_LINE
+        joinReasons(model0.unsupportedReasons),
+        OutputCoverageSelection{},
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
   appendAbstractedSequentialBoundaries(
       model1, "design1", abstractedSequentialBoundaries);
   appendExtractedBoundaryReports(model1, "design1", extractedBoundaryReports);
   if (model1.hasUnsupportedFeatures()) {
-    return makeSecResult(  // LCOV_EXCL_LINE
+    return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
-        joinReasons(model1.unsupportedReasons),  // LCOV_EXCL_LINE
-        OutputCoverageSelection{},  // LCOV_EXCL_LINE
-        abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-        extractedBoundaryReports);  // LCOV_EXCL_LINE
+        joinReasons(model1.unsupportedReasons),
+        OutputCoverageSelection{},
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
 
   // Phase 2: align the externally visible SEC interface, then drop any outputs
@@ -1465,14 +1465,14 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         extractedBoundaryReports);
   }
   if (aligned.outputs.names.empty()) {
-    return makeSecResult(  // LCOV_EXCL_LINE
+    return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
         0,
-        "No aligned observed outputs remain after skipping cones with no-driver, "  // LCOV_EXCL_LINE
+        "No aligned observed outputs remain after skipping cones with no-driver, "
         "multi-driver, or logical-loop connectivity.",
-        aligned.outputCoverage,  // LCOV_EXCL_LINE
-        abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-        extractedBoundaryReports);  // LCOV_EXCL_LINE
+        aligned.outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
 
   if (secDiagEnabled) {

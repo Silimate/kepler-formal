@@ -224,10 +224,10 @@ BoolExpr* buildOneStepTransitionFormula(
 BoolExpr* buildCurrentStateLegalityFormula(const KInductionProblem& problem) {
   BoolExpr* legality = BoolExpr::createTrue();
   for (const auto& [primarySymbol, complementedSymbol] : problem.complementedStatePairs0) {
-    legality = BoolExpr::And(  // LCOV_EXCL_LINE
-        legality,  // LCOV_EXCL_LINE
-        makeEqualityExpr(  // LCOV_EXCL_LINE
-            BoolExpr::Var(complementedSymbol), BoolExpr::Not(BoolExpr::Var(primarySymbol))));  // LCOV_EXCL_LINE
+    legality = BoolExpr::And(
+        legality,
+        makeEqualityExpr(
+            BoolExpr::Var(complementedSymbol), BoolExpr::Not(BoolExpr::Var(primarySymbol))));
   }
   for (const auto& [primarySymbol, complementedSymbol] : problem.complementedStatePairs1) {
     legality = BoolExpr::And(

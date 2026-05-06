@@ -107,7 +107,7 @@ std::unordered_map<size_t, size_t> buildComplementPrimaryByStateSymbol(
   }
   for (const auto& [primarySymbol, complementedSymbol] :
        problem.complementedStatePairs1) {
-    primaryByComplement.emplace(complementedSymbol, primarySymbol);  // LCOV_EXCL_LINE
+    primaryByComplement.emplace(complementedSymbol, primarySymbol);
   }
   return primaryByComplement;
 }
@@ -168,7 +168,7 @@ std::vector<size_t> expandTransitionTargets(
         transitionExprByStateSymbol.find(primaryIt->second) !=  // LCOV_EXCL_LINE
             transitionExprByStateSymbol.end()) {  // LCOV_EXCL_LINE
       targets.insert(primaryIt->second);  // LCOV_EXCL_LINE
-    }
+    }  // LCOV_EXCL_LINE
   }
 
   return sortUniqueSymbols(std::move(targets));
@@ -230,11 +230,11 @@ void addComplementedStateRelations(
     const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
     size_t numFrames) {
   for (size_t frame = 0; frame < numFrames; ++frame) {
-    for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {  // LCOV_EXCL_LINE
-      addLiteralEquivalence(  // LCOV_EXCL_LINE
-          solver,  // LCOV_EXCL_LINE
-          variables.getLiteral(complementedSymbol, frame),  // LCOV_EXCL_LINE
-          -variables.getLiteral(primarySymbol, frame));  // LCOV_EXCL_LINE
+    for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(complementedSymbol, frame),
+          -variables.getLiteral(primarySymbol, frame));
     }
   }
 }
@@ -410,7 +410,7 @@ void addFrameConstraints(SATSolverWrapper& solver,
     // is validated before we allow the engine to rely on it.
     FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));  // LCOV_EXCL_LINE
     solver.addClause({encoder.encode(frameInvariant)});  // LCOV_EXCL_LINE
-  }
+  }  // LCOV_EXCL_LINE
 }
 
 StateCube extractStateCube(const SATSolverWrapper& solver,
@@ -561,8 +561,8 @@ bool framesConverged(const FrameClauses& lhs, const FrameClauses& rhs) {
 
 bool obligationAlreadyBlocked(const std::vector<FrameClauses>& frames,
                               const ProofObligation& obligation) {
-  return frameHasSubsumingClause(frames[obligation.level], clauseFromCube(obligation.cube));  // LCOV_EXCL_LINE
-}
+  return frameHasSubsumingClause(frames[obligation.level], clauseFromCube(obligation.cube));
+}  // LCOV_EXCL_LINE
 
 size_t popNextObligationIndex(const std::vector<ProofObligation>& queue) {
   size_t bestIndex = 0;
@@ -644,19 +644,19 @@ std::vector<StateClause> buildSeedClauses(const KInductionProblem& problem,
   // guaranteed by Init/bootstrap, so PDR starts from facts that are known
   // reachable-state invariants instead of rediscovering them from scratch.
   for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-    StateClause clause0 = {{lhsSymbol, false}, {rhsSymbol, true}};  // LCOV_EXCL_LINE
-    StateClause clause1 = {{lhsSymbol, true}, {rhsSymbol, false}};  // LCOV_EXCL_LINE
-    normalizeClause(clause0);  // LCOV_EXCL_LINE
-    normalizeClause(clause1);  // LCOV_EXCL_LINE
+    StateClause clause0 = {{lhsSymbol, false}, {rhsSymbol, true}};
+    StateClause clause1 = {{lhsSymbol, true}, {rhsSymbol, false}};
+    normalizeClause(clause0);
+    normalizeClause(clause1);
 
     // Promote already-anchored state equalities into initial frame facts when
     // they are guaranteed by Init/bootstrap instead of guessed from structure.
-    if (!cubeIntersectsInit(problem, solverType, initFormula, cubeFromClauseNegation(clause0))) {  // LCOV_EXCL_LINE
-      seedClauses.push_back(clause0);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    if (!cubeIntersectsInit(problem, solverType, initFormula, cubeFromClauseNegation(clause1))) {  // LCOV_EXCL_LINE
-      seedClauses.push_back(clause1);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+    if (!cubeIntersectsInit(problem, solverType, initFormula, cubeFromClauseNegation(clause0))) {
+      seedClauses.push_back(clause0);
+    }
+    if (!cubeIntersectsInit(problem, solverType, initFormula, cubeFromClauseNegation(clause1))) {
+      seedClauses.push_back(clause1);
+    }
   }
   return seedClauses;
 }
@@ -796,8 +796,8 @@ std::optional<PDRResult> tryImmediatePdrProofCandidate(
 
   // Otherwise the candidate is a safe frame fact, even if it is not by itself
   // enough to prove the full SEC property.
-  if (frameInvariant == nullptr) {  // LCOV_EXCL_LINE
-    frameInvariant = candidate;  // LCOV_EXCL_LINE
+  if (frameInvariant == nullptr) {
+    frameInvariant = candidate;
   }
   return std::nullopt;
 }
@@ -861,12 +861,12 @@ PDRResult PDREngine::run(size_t maxFrames) const {
   if (auto badCube = findBadCube(
           problem_, solverType_, initFormula, frameInvariant, frames, 0);
       badCube.has_value()) {
-    emitPdrTrace("bad_cube@F0", formatCubeForPdrTrace(*badCube));  // LCOV_EXCL_LINE
-    return {PDRStatus::Different, 0};  // LCOV_EXCL_LINE
+    emitPdrTrace("bad_cube@F0", formatCubeForPdrTrace(*badCube));
+    return {PDRStatus::Different, 0};
   }
 
   if (maxFrames == 0) {
-    return {PDRStatus::Inconclusive, 0};  // LCOV_EXCL_LINE
+    return {PDRStatus::Inconclusive, 0};
   }
 
   const auto seedClauses = buildSeedClauses(problem_, solverType_, initFormula);
@@ -894,8 +894,8 @@ PDRResult PDREngine::run(size_t maxFrames) const {
               *badCube,
               level,
               badFrame)) {
-        emitPdrTraceFrames("frames_before_counterexample", frames);  // LCOV_EXCL_LINE
-        return {PDRStatus::Different, badFrame};  // LCOV_EXCL_LINE
+        emitPdrTraceFrames("frames_before_counterexample", frames);
+        return {PDRStatus::Different, badFrame};
       }
       emitPdrTraceFrames("frames_after_blocking", frames);
     }

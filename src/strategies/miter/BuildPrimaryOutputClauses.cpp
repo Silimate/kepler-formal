@@ -920,7 +920,7 @@ void BuildPrimaryOutputClauses::build() {
       std::lock_guard<std::mutex> lock(inputsMutex_);
       for (const auto inputTermID : cloud.getInputs()) {
         if (inputTermID == DNLID_MAX) {
-          continue; // LCOV_EXCL_LINE
+          continue;  // LCOV_EXCL_LINE
         }
         if (inputTermID >= termDNLID2varID_.size()) {
           termDNLID2varID_.resize(inputTermID + 1, static_cast<size_t>(-1));  // LCOV_EXCL_LINE

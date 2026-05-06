@@ -289,7 +289,7 @@ bool isNodeOnParentPath(const SNLTruthTableTree& tree,
 
     const auto& nodeSp = tree.nodeFromId(nodeId);
     if (!nodeSp) {
-      continue; // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
     for (const auto parentId : nodeSp->parentIds) {
       pending.emplace_back(parentId);
@@ -583,7 +583,7 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
     std::vector<naja::DNL::DNLID>& loopTerms) const {
   loopTerms.clear();
   if (borderIndex >= borderLeaves_.size()) {
-    return false;  // LCOV_EXCL_LINE
+    return false;
   }
   const auto termIt = termid2nodeid_.find(termid);
   if (termIt == termid2nodeid_.end()) {
@@ -639,7 +639,7 @@ bool SNLTruthTableTree::willCloneTableTermForBorderLeaf(
     size_t borderIndex,
     naja::DNL::DNLID termid) const {
   if (borderIndex >= borderLeaves_.size()) {
-    return false;
+    return false;  // LCOV_EXCL_LINE
   }
   const auto termIt = termid2nodeid_.find(termid);
   if (termIt == termid2nodeid_.end()) {

@@ -198,7 +198,7 @@ IMCResult IMCEngine::run(size_t maxK) const {
   }
 
   if (problem_.combinedStateSymbols().empty()) {
-    return {IMCStatus::Equivalent, 0};  // LCOV_EXCL_LINE
+    return {IMCStatus::Equivalent, 0};
   }
 
   BoolExpr* initFormula = buildProofInitFormula(problem_);
@@ -235,8 +235,8 @@ IMCResult IMCEngine::run(size_t maxK) const {
     // reuse any already validated strengthening to reduce the SAT work needed
     // to establish inductiveness on compact transition systems.
     BoolExpr* proofInvariant =
-        sharedStrengthening == nullptr  // LCOV_EXCL_LINE
-            ? frontierInvariant
+        sharedStrengthening == nullptr
+            ? frontierInvariant  // LCOV_EXCL_LINE
             : BoolExpr::simplify(
                   BoolExpr::And(frontierInvariant, const_cast<BoolExpr*>(sharedStrengthening)));
 

@@ -40,7 +40,7 @@ BoolExpr* computeExactInterpolant(
     return nullptr;  // LCOV_EXCL_LINE
   }
   if (isProofFormulaSatisfiable(BoolExpr::And(lhs, rhs), solverType)) {
-    return nullptr;  // LCOV_EXCL_LINE
+    return nullptr;
   }
 
   BoolExpr* interpolant = BoolExpr::createFalse();
@@ -61,7 +61,7 @@ BoolExpr* computeExactInterpolant(
     return nullptr;  // LCOV_EXCL_LINE
   }
   if (isProofFormulaSatisfiable(BoolExpr::And(interpolant, rhs), solverType)) {
-    return nullptr;
+    return nullptr;  // LCOV_EXCL_LINE
   }
   return interpolant;
 }

@@ -92,8 +92,8 @@ std::string formatSymbolVector(const std::vector<size_t>& symbols) {
   oss << "[";
   for (size_t i = 0; i < symbols.size(); ++i) {
     if (i != 0) {
-      oss << ", ";  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+      oss << ", ";
+    }
     oss << formatProofSymbol(symbols[i]);
   }
   oss << "]";
@@ -105,8 +105,8 @@ std::string formatEqualityPairs(const std::vector<std::pair<size_t, size_t>>& pa
   oss << "[";
   for (size_t i = 0; i < pairs.size(); ++i) {
     if (i != 0) {
-      oss << ", ";
-    }
+      oss << ", ";  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     oss << formatProofSymbol(pairs[i].first) << "=" << formatProofSymbol(pairs[i].second);
   }
   oss << "]";

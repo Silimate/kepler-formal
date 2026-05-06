@@ -1463,6 +1463,22 @@ SignalKey makeSignalKey(const std::string& name) {
   return key;
 }
 
+SequentialDesignModel makeCombinationalExtractedModel(BoolExpr* outputExpr) {
+  SequentialDesignModel model;
+  const SignalKey inputKey = makeSignalKey("in");
+  const SignalKey outputKey = makeSignalKey("out");
+  model.environmentInputs = {inputKey};
+  model.topInputKeys = {inputKey};
+  model.topOutputKeys = {outputKey};
+  model.allObservedOutputs = {outputKey};
+  model.observedOutputs = {outputKey};
+  model.inputVarByKey.emplace(inputKey, 2);
+  model.displayNameByKey.emplace(inputKey, "in[0]");
+  model.displayNameByKey.emplace(outputKey, "out[0]");
+  model.observedOutputExprByKey.emplace(outputKey, outputExpr);
+  return model;
+}
+
 KInductionProblem buildLinearChainSecProblem(size_t logicalStateCount) {
   const auto bitCount = [logicalStateCount]() {
     size_t bits = 0;
@@ -4858,6 +4874,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ProofProblemDebugFormatsConstantsInvalidExpressionsAndMultiplePairs) {
+  BoolExpr invalid;
+  KInductionProblem problem;
+  problem.description = "debug edge cases";
+  problem.allSymbols = {0, 1, 2};
+  problem.state0Symbols = {0, 1};
+  problem.initialStateEqualityPairs = {{0, 1}, {1, 2}};
+  problem.bootstrapStateEqualityPairs = {{0, 1}, {1, 2}};
+  problem.inductiveStateEqualityPairs = {{0, 1}, {1, 2}};
+  problem.transitions0.emplace_back(0, &invalid);
+  problem.property = BoolExpr::Not(BoolExpr::Var(0));
+  problem.bad = BoolExpr::Var(1);
+
+  const std::string formattedProblem = formatKInductionProblemForDebug(problem);
+
+  EXPECT_NE(formattedProblem.find("state0_symbols: [FALSE, TRUE]"),
+            std::string::npos);
+  EXPECT_NE(formattedProblem.find("initial_state_equalities: [FALSE=TRUE, TRUE=x2]"),
+            std::string::npos);
+  EXPECT_NE(formattedProblem.find("FALSE' = <invalid>"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        KInductionEngineProvesEquivalentSmallTransitionSystem) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -5052,6 +5091,283 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
   EXPECT_EQ(result.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialEquivalenceResultReportsZeroCoverageWhenNoOutputsExist) {
+  SequentialEquivalenceResult result;
+
+  EXPECT_EQ(result.outputCoveragePercent(), 0.0);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsStopsOnUnsupportedFirstModelWithBoundaryReports) {
+  auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  const SignalKey stateKey = makeSignalKey("state");
+  const SignalKey internalIn = makeSignalKey("internal_in");
+  const SignalKey internalOut = makeSignalKey("internal_out");
+  model0.unsupportedReasons = {"unsupported sequential state"};
+  model0.abstractedSequentialBoundaries = {"abstracted cell u_ff"};
+  model0.internalBoundaryInputKeys = {internalIn};
+  model0.internalBoundaryOutputKeys = {internalOut};
+  model0.displayNameByKey.emplace(stateKey, "u_ff.STATE[0]");
+  model0.displayNameByKey.emplace(internalIn, "u_logic.A[0]");
+  model0.displayNameByKey.emplace(internalOut, "u_logic.Y[0]");
+  model0.abstractedSequentialBoundaryDetails.push_back(
+      {"u_ff", {stateKey}, model0.allObservedOutputs});
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(result.reason.find("unsupported sequential state"), std::string::npos);
+  ASSERT_EQ(result.abstractedSequentialBoundaries.size(), 1u);
+  EXPECT_EQ(result.abstractedSequentialBoundaries.front(),
+            "design0 abstracted cell u_ff");
+  EXPECT_GE(result.extractedBoundaryReports.size(), 4u);
+  const auto stateReport = std::find_if(
+      result.extractedBoundaryReports.begin(),
+      result.extractedBoundaryReports.end(),
+      [](const ExtractedBoundaryReportEntry& entry) {
+        return entry.signal == "u_ff.STATE[0]";
+      });
+  ASSERT_NE(stateReport, result.extractedBoundaryReports.end());
+  EXPECT_NE(
+      std::find(
+          stateReport->roles.begin(),
+          stateReport->roles.end(),
+          "abstracted_sequential_state"),
+      stateReport->roles.end());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsStopsOnUnsupportedSecondModelAfterFirstReports) {
+  auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  model0.abstractedSequentialBoundaries = {"kept first-side boundary"};
+  model1.unsupportedReasons = {"unsupported second side"};
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(result.reason.find("unsupported second side"), std::string::npos);
+  ASSERT_EQ(result.abstractedSequentialBoundaries.size(), 1u);
+  EXPECT_EQ(result.abstractedSequentialBoundaries.front(),
+            "design0 kept first-side boundary");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsReportsAllConnectivitySkippedOutputs) {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  std::array<ConnectivitySkipOrigin, 3> origins = {
+      ConnectivitySkipOrigin::NoDriver,
+      ConnectivitySkipOrigin::MultiDriver,
+      ConnectivitySkipOrigin::LogicalLoop};
+  for (size_t i = 0; i < origins.size(); ++i) {
+    const SignalKey key = makeSignalKey("skipped_out_" + std::to_string(i));
+    const std::string name = "out" + std::to_string(i) + "[0]";
+    model0.allObservedOutputs.push_back(key);
+    model1.allObservedOutputs.push_back(key);
+    model0.displayNameByKey.emplace(key, name);
+    model1.displayNameByKey.emplace(key, name);
+    model0.connectivitySkipInfoByKey.emplace(
+        key, ConnectivitySkipInfo{origins[i], "left side"});
+    model1.connectivitySkipInfoByKey.emplace(
+        key, ConnectivitySkipInfo{origins[i], "right side"});
+  }
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, origins.size());
+  ASSERT_EQ(result.skippedObservedOutputs.size(), origins.size());
+  const auto hasSkipText = [&](const char* text) {
+    return std::any_of(
+        result.skippedObservedOutputs.begin(),
+        result.skippedObservedOutputs.end(),
+        [&](const std::string& skipped) {
+          return skipped.find(text) != std::string::npos;
+        });
+  };
+  EXPECT_TRUE(hasSkipText("no-driver connectivity"));
+  EXPECT_TRUE(hasSkipText("multi-driver connectivity"));
+  EXPECT_TRUE(hasSkipText("logical-loop connectivity"));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsReportsMissingOutputExpression) {
+  auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  model1.observedOutputExprByKey.clear();
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(
+      result.reason.find("Missing observed output expression"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsReportsObservedOutputCoverageMismatch) {
+  auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  const SignalKey extraKey = makeSignalKey("extra_observed");
+  model0.observedOutputs.push_back(extraKey);
+  model1.observedOutputs.push_back(extraKey);
+  model0.displayNameByKey.emplace(extraKey, "extra[0]");
+  model1.displayNameByKey.emplace(extraKey, "extra[0]");
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_NE(result.reason.find("checked observed outputs"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsAcceptsSameValueModelWithoutBuildingSatProblem) {
+  const auto model = makeCombinationalExtractedModel(BoolExpr::Var(2));
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = strategy.runExtractedModels(model, model, 9);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_EQ(result.outputCoveragePercent(), 100.0);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsEmitsSelectedEngineDiagnostics) {
+  const auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  const auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  const std::array<std::pair<SecEngine, const char*>, 4> expected = {{
+      {SecEngine::Pdr, "pdr engine"},
+      {SecEngine::Imc, "imc engine"},
+      {SecEngine::KInduction, "classic k-induction engine"},
+      {SecEngine::Legacy, "legacy engine"},
+  }};
+
+  for (const auto& [engine, label] : expected) {
+    testing::internal::CaptureStderr();
+    SequentialEquivalenceStrategy strategy(
+        nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT, engine);
+    const auto result = strategy.runExtractedModels(model0, model1, 1);
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_NE(stderrOutput.find(label), std::string::npos);
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsFormatsCompactCounterexampleWithoutDnlTraceback) {
+  const auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
+  const auto model1 = makeCombinationalExtractedModel(BoolExpr::createTrue());
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction);
+  const auto result = strategy.runExtractedModels(model0, model1, 0);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_NE(result.reason.find("Counterexample reaches"), std::string::npos);
+  EXPECT_NE(result.reason.find("compact SEC released"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFindsInitialBadStateBeforeGrowingFrames) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::Var(2);
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar secPdrTrace("KEPLER_SEC_PDR_TRACE", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_NE(stderrOutput.find("bad_cube@F0"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineReturnsInconclusiveWhenZeroBudgetNeedsFrames) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = BoolExpr::createTrue();
+  problem.inductionBad = BoolExpr::createFalse();
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSeedsInductiveStateEqualitiesAndComplementedDesign1Pairs) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.state1Symbols = {4, 5};
+  problem.allSymbols = {2, 3, 4, 5};
+  problem.complementedStatePairs1 = {{4, 5}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0.emplace_back(2, BoolExpr::Var(3));
+  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
+  problem.transitions1.emplace_back(4, BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(2)), BoolExpr::Not(BoolExpr::Var(3))),
+      BoolExpr::Not(BoolExpr::Var(4)));
+  problem.initializedStateCount = 3;
+  problem.totalStateCount = 4;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar secPdrTrace("KEPLER_SEC_PDR_TRACE", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(stderrOutput.find("F[1]"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

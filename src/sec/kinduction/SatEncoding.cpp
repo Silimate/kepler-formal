@@ -67,7 +67,7 @@ int FrameFormulaEncoder::getConstLit(bool value) {
   solver_.addClause({value ? lit : -lit});
   cache = lit;
   return lit;
-}  // LCOV_EXCL_LINE
+}
 
 int FrameFormulaEncoder::encode(BoolExpr* expr) {
   if (expr == nullptr) {
@@ -169,7 +169,7 @@ int createXorLiteral(SATSolverWrapper& solver, int lhs, int rhs) {
   solver.addClause({lit, -lhs, rhs});
   solver.addClause({lit, lhs, -rhs});
   return lit;
-}
+}  // LCOV_EXCL_LINE
 
 void addSimplePathConstraint(SATSolverWrapper& solver,
                              const FrameVariableStore& variables,

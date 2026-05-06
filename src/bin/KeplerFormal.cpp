@@ -122,8 +122,8 @@ static bool parseSecEngineToken(const std::string& token,
   // user-facing SEC modes stay explicit and predictable.
   const std::string normalized = toUpperCopy(token);
   if (normalized == "LEGACY") {
-    engine = KEPLER_FORMAL::SEC::SecEngine::Legacy;  // LCOV_EXCL_LINE
-    return true;  // LCOV_EXCL_LINE
+    engine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
+    return true;
   }
   if (normalized == "KINDUCTION" || normalized == "K_INDUCTION" ||
       normalized == "CLASSIC_K_INDUCTION") {
@@ -324,7 +324,7 @@ void writeBoundaryTermsReport(
     const std::filesystem::path& reportPath,
     const std::vector<KEPLER_FORMAL::SEC::ExtractedBoundaryReportEntry>& reports) {
   if (reports.empty()) {
-    return;  // LCOV_EXCL_LINE
+    return;
   }
 
   std::ofstream report(reportPath, std::ios::trunc);
@@ -463,12 +463,12 @@ static std::string normalizeInputPathForComparison(const std::string& path) {
     return canonical.string();
   }
 
-  ec.clear();  // LCOV_EXCL_LINE
-  const auto absolute = std::filesystem::absolute(path, ec);  // LCOV_EXCL_LINE
-  if (!ec) {  // LCOV_EXCL_LINE
-    return absolute.lexically_normal().string();  // LCOV_EXCL_LINE
+  ec.clear();
+  const auto absolute = std::filesystem::absolute(path, ec);
+  if (!ec) {
+    return absolute.lexically_normal().string();
   }
-  return std::filesystem::path(path).lexically_normal().string();  // LCOV_EXCL_LINE
+  return std::filesystem::path(path).lexically_normal().string();
 }
 
 static std::vector<std::string> normalizeInputListForComparison(
@@ -481,21 +481,21 @@ static std::vector<std::string> normalizeInputListForComparison(
   return normalized;
 }
 
-static std::optional<std::string> normalizeOptionalInputPathForComparison(  // LCOV_EXCL_LINE
+static std::optional<std::string> normalizeOptionalInputPathForComparison(
     const std::optional<std::string>& input) {
-  if (!input.has_value()) {  // LCOV_EXCL_LINE
-    return std::nullopt;  // LCOV_EXCL_LINE
+  if (!input.has_value()) {
+    return std::nullopt;
   }
-  return normalizeInputPathForComparison(*input);  // LCOV_EXCL_LINE
-}  // LCOV_EXCL_LINE
+  return normalizeInputPathForComparison(*input);
+}
 
-static bool sameSystemVerilogDesignOptions(  // LCOV_EXCL_LINE
+static bool sameSystemVerilogDesignOptions(
     const SystemVerilogDesignOptions& lhs,
     const SystemVerilogDesignOptions& rhs) {
-  return normalizeOptionalInputPathForComparison(lhs.flist) ==  // LCOV_EXCL_LINE
-             normalizeOptionalInputPathForComparison(rhs.flist) &&  // LCOV_EXCL_LINE
-         lhs.top == rhs.top;  // LCOV_EXCL_LINE
-}  // LCOV_EXCL_LINE
+  return normalizeOptionalInputPathForComparison(lhs.flist) ==
+             normalizeOptionalInputPathForComparison(rhs.flist) &&
+         lhs.top == rhs.top;
+}
 
 static bool sameCompactSecDesignSpec(
     bool isSystemVerilog,
@@ -508,8 +508,8 @@ static bool sameCompactSecDesignSpec(
   if (!isSystemVerilog) {
     return true;
   }
-  return sameSystemVerilogDesignOptions(  // LCOV_EXCL_LINE
-      systemVerilogOptions.design0, systemVerilogOptions.design1);  // LCOV_EXCL_LINE
+  return sameSystemVerilogDesignOptions(
+      systemVerilogOptions.design0, systemVerilogOptions.design1);
 }
 
 static bool applySystemVerilogConfigOption(const YAML::Node& cfg,
@@ -744,8 +744,8 @@ int KeplerFormalMain(int argc, char** argv) {
 
         if (cfg["sec_engine"]) {
           if (!cfg["sec_engine"].IsScalar()) {
-            SPDLOG_CRITICAL("sec_engine must be a scalar");  // LCOV_EXCL_LINE
-            return EXIT_FAILURE;  // LCOV_EXCL_LINE
+            SPDLOG_CRITICAL("sec_engine must be a scalar");
+            return EXIT_FAILURE;
           }
           std::string secEngineError;
           if (!parseSecEngineToken(
@@ -758,9 +758,9 @@ int KeplerFormalMain(int argc, char** argv) {
 
         if (cfg["sec_uncomputable_seq_as_boundary"]) {
           if (!cfg["sec_uncomputable_seq_as_boundary"].IsScalar()) {
-            SPDLOG_CRITICAL(  // LCOV_EXCL_LINE
+            SPDLOG_CRITICAL(
                 "sec_uncomputable_seq_as_boundary must be a scalar");
-            return EXIT_FAILURE;  // LCOV_EXCL_LINE
+            return EXIT_FAILURE;
           }
           secTreatUncomputableSeqAsBoundary =
               cfg["sec_uncomputable_seq_as_boundary"].as<bool>();
@@ -898,8 +898,8 @@ int KeplerFormalMain(int argc, char** argv) {
       }
       if (arg == "--sec-engine") {
         if (parseStart + 1 >= argc) {
-          SPDLOG_CRITICAL("Missing SEC engine after {}", arg);  // LCOV_EXCL_LINE
-          return EXIT_FAILURE;  // LCOV_EXCL_LINE
+          SPDLOG_CRITICAL("Missing SEC engine after {}", arg);
+          return EXIT_FAILURE;
         }
         std::string secEngineError;
         if (!parseSecEngineToken(argv[parseStart + 1], secEngine, secEngineError)) {
@@ -911,14 +911,14 @@ int KeplerFormalMain(int argc, char** argv) {
         continue;
       }
       if (arg == "--sec-uncomputable-seq-boundary") {
-        secTreatUncomputableSeqAsBoundary = true;  // LCOV_EXCL_LINE
-        ++parseStart;  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
+        secTreatUncomputableSeqAsBoundary = true;
+        ++parseStart;
+        continue;
       }
       if (arg == "--no-sec-uncomputable-seq-boundary") {
-        secTreatUncomputableSeqAsBoundary = false;  // LCOV_EXCL_LINE
-        ++parseStart;  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
+        secTreatUncomputableSeqAsBoundary = false;
+        ++parseStart;
+        continue;
       }
       if (arg == "-naja_if") {
         inputFormatType = FormatType::NAJA_IF;
@@ -963,7 +963,7 @@ int KeplerFormalMain(int argc, char** argv) {
           SPDLOG_CRITICAL("Invalid verification mode: {}", verificationError);
           return EXIT_FAILURE;
         }
-        continue;  // LCOV_EXCL_LINE
+        continue;
       }
       if (arg == "-k" || arg == "--max-k") {
         if (i + 1 >= argc) {
@@ -975,29 +975,29 @@ int KeplerFormalMain(int argc, char** argv) {
           SPDLOG_CRITICAL("Invalid max_k: {}", maxKError);
           return EXIT_FAILURE;
         }
-        secMaxKExplicit = true;  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
+        secMaxKExplicit = true;
+        continue;
       }
       if (arg == "--sec-engine") {
-        if (i + 1 >= argc) {  // LCOV_EXCL_LINE
-          SPDLOG_CRITICAL("Missing SEC engine after {}", arg);  // LCOV_EXCL_LINE
-          return EXIT_FAILURE;  // LCOV_EXCL_LINE
+        if (i + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing SEC engine after {}", arg);
+          return EXIT_FAILURE;
         }
-        std::string secEngineError;  // LCOV_EXCL_LINE
-        if (!parseSecEngineToken(argv[++i], secEngine, secEngineError)) {  // LCOV_EXCL_LINE
-          SPDLOG_CRITICAL("Invalid SEC engine: {}", secEngineError);  // LCOV_EXCL_LINE
-          return EXIT_FAILURE;  // LCOV_EXCL_LINE
+        std::string secEngineError;
+        if (!parseSecEngineToken(argv[++i], secEngine, secEngineError)) {
+          SPDLOG_CRITICAL("Invalid SEC engine: {}", secEngineError);
+          return EXIT_FAILURE;
         }
-        secEngineExplicit = true;  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+        secEngineExplicit = true;
+        continue;
+      }
       if (arg == "--sec-uncomputable-seq-boundary") {
-        secTreatUncomputableSeqAsBoundary = true;  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
+        secTreatUncomputableSeqAsBoundary = true;
+        continue;
       }
       if (arg == "--no-sec-uncomputable-seq-boundary") {
-        secTreatUncomputableSeqAsBoundary = false;  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
+        secTreatUncomputableSeqAsBoundary = false;
+        continue;
       }
       if (arg == "--design1") {
         explicitDesignFlags = true;
@@ -1212,16 +1212,16 @@ int KeplerFormalMain(int argc, char** argv) {
               skippedOutputs.str());
         }
         if (!result.abstractedSequentialBoundaries.empty()) {
-          std::ostringstream abstractedBoundaries;  // LCOV_EXCL_LINE
-          for (const auto& abstractedBoundary :  // LCOV_EXCL_LINE
-               result.abstractedSequentialBoundaries) {  // LCOV_EXCL_LINE
-            abstractedBoundaries << "  - " << abstractedBoundary << "\n";  // LCOV_EXCL_LINE
+          std::ostringstream abstractedBoundaries;
+          for (const auto& abstractedBoundary :
+               result.abstractedSequentialBoundaries) {
+            abstractedBoundaries << "  - " << abstractedBoundary << "\n";
           }
-          SPDLOG_INFO(  // LCOV_EXCL_LINE
+          SPDLOG_INFO(
               "SEC abstracted uncomputable sequential interfaces as "
               "boundaries:\n{}",
               abstractedBoundaries.str());
-        }  // LCOV_EXCL_LINE
+        }
         if (reportSkippedPOs) {
           writeBoundaryTermsReport(
               kBoundaryTermsReport, result.extractedBoundaryReports);
@@ -1246,11 +1246,11 @@ int KeplerFormalMain(int argc, char** argv) {
                 secMaxK,
                 result.reason);
             return EXIT_FAILURE;
-          case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:  // LCOV_EXCL_LINE
+          case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:
           default:
-            SPDLOG_CRITICAL(  // LCOV_EXCL_LINE
+            SPDLOG_CRITICAL(
                 "SEC cannot run on this design pair: {}", result.reason);
-            return EXIT_FAILURE;  // LCOV_EXCL_LINE
+            return EXIT_FAILURE;
         }
       };
 
@@ -1418,7 +1418,7 @@ int KeplerFormalMain(int argc, char** argv) {
 	        SPDLOG_ERROR("Workflow failed: {}", e.what());
 	        return EXIT_FAILURE;
           // LCOV_EXCL_STOP
-      }  // LCOV_EXCL_LINE
+      }
       return EXIT_SUCCESS;
     }
 
@@ -1448,16 +1448,16 @@ int KeplerFormalMain(int argc, char** argv) {
             try {
               auto* top = db->getTopDesign();
               if (top == nullptr) {
-                throw std::runtime_error(  // LCOV_EXCL_LINE
-                    std::string("Top design not set for ") + designLabel);  // LCOV_EXCL_LINE
+                throw std::runtime_error(
+                    std::string("Top design not set for ") + designLabel);
               }
               auto model = KEPLER_FORMAL::SEC::SequentialDesignModel::extract(top);
               releaseCompactDb(db);
               return model;
             } catch (...) {
-              releaseCompactDb(db);  // LCOV_EXCL_LINE
-              throw;  // LCOV_EXCL_LINE
-            }  // LCOV_EXCL_LINE
+              releaseCompactDb(db);
+              throw;
+            }
           };
 
       try {
@@ -1502,10 +1502,10 @@ int KeplerFormalMain(int argc, char** argv) {
         return emitSecResult(
             strategy.runExtractedModels(model0, model1, secMaxK));
       } catch (const std::exception& e) {
-        SPDLOG_ERROR("SEC compact workflow failed: {}", e.what());  // LCOV_EXCL_LINE
-        return EXIT_FAILURE;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+        SPDLOG_ERROR("SEC compact workflow failed: {}", e.what());
+        return EXIT_FAILURE;
+      }
+    }
 
     if (!libertyFiles.empty() || !pythonFiles.empty()) {
       db0 = NLDB::create(NLUniverse::get());
@@ -1671,10 +1671,10 @@ int KeplerFormalMain(int argc, char** argv) {
       KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
           top0, top1, solverType, secEngine);
       return emitSecResult(strategy.run(secMaxK));
-    } catch (const std::exception& e) {  // LCOV_EXCL_LINE
-      SPDLOG_ERROR("SEC workflow failed: {}", e.what());  // LCOV_EXCL_LINE
-      return EXIT_FAILURE;  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+    } catch (const std::exception& e) {
+      SPDLOG_ERROR("SEC workflow failed: {}", e.what());
+      return EXIT_FAILURE;
+    }
   } else if (inputFormatType == FormatType::NAJA_IF && useScopes) {
     KEPLER_FORMAL::MiterStrategy MiterS(top0, top1);
     MiterS.init(false);

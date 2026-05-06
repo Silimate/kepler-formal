@@ -665,7 +665,7 @@ void SNLLogicCloud::compute() {
 		    const auto& tt = getTruthTableCached(
 		        model, dnl_.getDNLTerminalFromID(driver).getSnlBitTerm()->getOrderID());
 		    if (!tt.isInitialized()) {
-		      return; // LCOV_EXCL_LINE
+		      return;  // LCOV_EXCL_LINE
 		    }
     const auto& layout = getModelInputLayout(model);
     const size_t expectedInputCount =
@@ -960,7 +960,7 @@ void SNLLogicCloud::compute() {
 	    DEBUG_LOG("model name: %s\n",
 	              inst.getSNLModel()->getName().getString().c_str());
 	    table_ = SNLTruthTableTree(inst.getID(), driver);
-    table_.setAllowAncestorTableNodeClones(allowAncestorTableNodeClones);  // LCOV_EXCL_LINE
+    table_.setAllowAncestorTableNodeClones(allowAncestorTableNodeClones);
     auto* model = inst.getSNLModel();
     assert(SNLDesignModeling::getTruthTable(model, 
                 dnl_.getDNLTerminalFromID(driver).getSnlBitTerm()->getOrderID())
@@ -983,7 +983,7 @@ void SNLLogicCloud::compute() {
     DEBUG_LOG("model name: %s\n",
               inst.getSNLModel()->getName().getString().c_str());
     table_ = SNLTruthTableTree(inst.getID(), seedOutputTerm_);
-    table_.setAllowAncestorTableNodeClones(allowAncestorTableNodeClones);
+    table_.setAllowAncestorTableNodeClones(allowAncestorTableNodeClones);  // LCOV_EXCL_LINE
     assert(table_.isInitialized() &&
            "Truth table for seed output term is not initialized");
   }

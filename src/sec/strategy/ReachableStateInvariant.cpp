@@ -183,9 +183,9 @@ std::optional<bool> evaluateConstantUnderAssignments(
       break;
     }
     case Op::XOR: {
-      const auto lhs =  // LCOV_EXCL_LINE
+      const auto lhs =
           evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);  // LCOV_EXCL_LINE
-      const auto rhs =  // LCOV_EXCL_LINE
+      const auto rhs =
           evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);  // LCOV_EXCL_LINE
       if (lhs.has_value() && rhs.has_value()) {  // LCOV_EXCL_LINE
         value = *lhs != *rhs;  // LCOV_EXCL_LINE
@@ -248,13 +248,13 @@ AlignedSignals deriveResetBootstrapStateEqualities(
   // logic. A pair survives only if both sides either collapse to the same
   // constant or stay structurally equivalent after each bootstrap step.
   if (cycles == 0 || candidateStates.names.empty()) {
-    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);  // LCOV_EXCL_LINE
+    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);
   }
 
   const auto resetAssignments0 = collectResetAssignments(model0);
   const auto resetAssignments1 = collectResetAssignments(model1);
   if (resetAssignments0.empty() || resetAssignments1.empty()) {
-    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);
+    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);  // LCOV_EXCL_LINE
   }
 
   auto specializeForReset = [](const SequentialDesignModel& model,

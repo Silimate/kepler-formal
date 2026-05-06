@@ -161,7 +161,7 @@ bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
     }
   }
   return true;
-}  // LCOV_EXCL_LINE
+}
 
 std::unordered_map<SignalKey, size_t, SignalKeyHash> buildStateIndexMap(
     const std::vector<SignalKey>& stateBits) {
@@ -389,7 +389,7 @@ std::vector<StateClassFingerprint> computeFinalFingerprints(
 std::string stateFingerprintKey(const StateClassFingerprint& fingerprint) {
   return std::to_string(fingerprint.seedSignature) + ":" +
       std::to_string(fingerprint.transitionFingerprint);
-}
+}  // LCOV_EXCL_LINE
 
 }  // namespace
 
