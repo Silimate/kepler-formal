@@ -53,4 +53,9 @@ if [[ ! -s "${output_cnf}" ]]; then
   exit 1
 fi
 
-diff -u "${golden_cnf}" "${output_cnf}"
+if diff -u "${golden_cnf}" "${output_cnf}"; then
+  echo "Identical CNF files: ${golden_cnf} and ${output_cnf}"
+else
+  echo "Different CNF files: ${golden_cnf} and ${output_cnf}" >&2
+  exit 1
+fi
