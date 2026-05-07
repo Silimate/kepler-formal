@@ -13,12 +13,18 @@
 #include "simp/SimpSolver.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <unordered_map>
+#include <unistd.h>
 #include "SNLEquipotential.h"
 #include "SNLLogicCone.h"
 #include "../sat/SATSolverWrapper.h"
