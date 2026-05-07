@@ -269,6 +269,16 @@ TEST(SNLTruthTableTreeApiTest, FindAncestorLoopRejectsOutOfRangeBorderIndex) {
   EXPECT_TRUE(loopTerms.empty());
 }
 
+TEST(SNLTruthTableTreeApiTest, WillCloneTableTermRejectsInvalidBorderAndUnknownTerm) {
+  SNLTruthTableTree emptyTree;
+  EXPECT_FALSE(emptyTree.willCloneTableTermForBorderLeaf(0, 42));
+
+  SNLTruthTableTree tree(0, 0, Node::Type::P);
+  ASSERT_GT(tree.getBorderLeavesSize(), 0u);
+  EXPECT_FALSE(tree.hasTableTerm(42));
+  EXPECT_FALSE(tree.willCloneTableTermForBorderLeaf(0, 42));
+}
+
 TEST(SNLTruthTableTreeApiTest, IsInitializedTraversesNestedTableChildren) {
   SNLTruthTableTree tree(0, 0, Node::Type::P);
 
