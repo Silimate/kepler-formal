@@ -318,7 +318,8 @@ BoolExpr* Tree2BoolExpr::convert(
         isoID = naja::DNL::get()->getDNLTerminalFromID(node->data.termid).getIsoID();
         auto it = useIsoCache ? iso2boolExpr_.find(isoID) : iso2boolExpr_.end();
         if (useIsoCache && it != iso2boolExpr_.end() &&
-            isoID != naja::DNL::DNLID_MAX) {
+            isoID != naja::DNL::DNLID_MAX && it->second != nullptr &&
+            it->second->isValid()) {
           setMemoETS(id, it->second);
         }
       }

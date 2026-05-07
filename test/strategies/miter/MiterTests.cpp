@@ -1026,7 +1026,7 @@ TEST_F(
             BuildPrimaryOutputClauses::SkippedOutputReason::LogicalLoop);
 }
 
-TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
+TEST_F(MiterTests, CachedIsoShortcutDoesNotCreateNewMiterInput) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
   NLLibrary* library =
@@ -1043,6 +1043,8 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
       SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("c"));
   auto topOut =
       SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+  auto topAndOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("and_y"));
 
   SNLDesign* andModel =
       SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("AND2"));
@@ -1090,6 +1092,7 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
   topInB->setNet(netB);
   topInC->setNet(netC);
   topOut->setNet(netY);
+  topAndOut->setNet(netAnd);
 
   andInst->getInstTerm(andIn0)->setNet(netA);
   andInst->getInstTerm(andIn1)->setNet(netB);
@@ -1107,7 +1110,20 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
   builder.collect();
 
   auto* dnl = naja::DNL::get();
-  ASSERT_EQ(builder.getOutputs().size(), 1u);
+  ASSERT_EQ(builder.getOutputs().size(), 2u);
+  const auto findOutputByName = [&](const char* name) {
+    for (auto output : builder.getOutputs()) {
+      const auto& term = dnl->getDNLTerminalFromID(output);
+      if (term.getSnlBitTerm()->getName().getString() == name) {
+        return output;
+      }
+    }
+    return naja::DNL::DNLID_MAX;
+  };
+  const auto topYID = findOutputByName("y");
+  const auto topAndYID = findOutputByName("and_y");
+  ASSERT_NE(topYID, naja::DNL::DNLID_MAX);
+  ASSERT_NE(topAndYID, naja::DNL::DNLID_MAX);
 
   std::vector<bool> isPIs(dnl->getNBterms() + 1, false);
   for (auto input : builder.getInputs()) {
@@ -1129,7 +1145,7 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
 
   {
     ScopedReportSkippedPOs reportGuard(false);
-    SNLLogicCloud cloud(builder.getOutputs()[0], isPIs, isPOs);
+    SNLLogicCloud cloud(topYID, isPIs, isPOs);
     cloud.compute();
     EXPECT_EQ(getTermLabels(cloud.getInputs()),
               (std::vector<std::string>{"and0.y", "c"}));
@@ -1138,7 +1154,7 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
 
   {
     ScopedReportSkippedPOs reportGuard(true);
-    SNLLogicCloud cloud(builder.getOutputs()[0], isPIs, isPOs);
+    SNLLogicCloud cloud(topYID, isPIs, isPOs);
     cloud.compute();
     EXPECT_EQ(getTermLabels(cloud.getInputs()),
               (std::vector<std::string>{"and0.y", "c"}));
@@ -1146,6 +1162,21 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
   }
 
   Tree2BoolExpr::iso2boolExpr_.clear();
+  builder.setRetainDnl(true);
+  builder.setOutputs({topAndYID, topYID});
+  const size_t inputCountBeforeBuild = builder.getInputs().size();
+  {
+    ScopedReportSkippedPOs reportGuard(false);
+    builder.build();
+  }
+  ASSERT_EQ(builder.getPOs().size(), 2u);
+  ASSERT_NE(builder.getPOs()[1], nullptr);
+  EXPECT_TRUE(builder.getPOs()[1]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  EXPECT_EQ(builder.getSkippedOutputs().find(topYID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getPOs()[1]->getSupportVars(),
+            (std::set<size_t>{2, 3, 4}));
   naja::DNL::destroy();
 }
 

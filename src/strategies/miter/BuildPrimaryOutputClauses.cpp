@@ -787,6 +787,25 @@ void BuildPrimaryOutputClauses::build() {
     }
     IsPOs_[po] = true;
   }
+
+  std::vector<size_t> representativeForOutput(outputs_.size());
+  std::vector<size_t> representativeOutputs;
+  representativeOutputs.reserve(outputs_.size());
+  std::unordered_map<DNLID, size_t> firstOutputForIso;
+  firstOutputForIso.reserve(outputs_.size());
+  for (size_t i = 0; i < outputs_.size(); ++i) {
+    const DNLID isoID = get()->getDNLTerminalFromID(outputs_[i]).getIsoID();
+    if (isoID != DNLID_MAX) {
+      auto [it, inserted] = firstOutputForIso.emplace(isoID, i);
+      if (!inserted) {
+        representativeForOutput[i] = it->second;
+        continue;
+      }
+    }
+    representativeForOutput[i] = i;
+    representativeOutputs.emplace_back(i);
+  }
+
   auto processOutput = [&](size_t i) {
     DNLID out = outputs_[i];
     #ifdef DEBUG_PRINTS
@@ -802,9 +821,13 @@ void BuildPrimaryOutputClauses::build() {
 
     DNLID isoID = get()->getDNLTerminalFromID(out).getIsoID();
     DEBUG_LOG("isoID: %zu\n", isoID);
-    auto cachedIt = Tree2BoolExpr::iso2boolExpr_.find(isoID);
-    if (cachedIt != Tree2BoolExpr::iso2boolExpr_.end() &&
-        cachedIt->second != nullptr) {
+    const bool useIsoCache = Tree2BoolExpr::isIsoCacheEnabled();
+    auto cachedIt = useIsoCache
+                        ? Tree2BoolExpr::iso2boolExpr_.find(isoID)
+                        : Tree2BoolExpr::iso2boolExpr_.end();
+    if (useIsoCache && isoID != DNLID_MAX &&
+        cachedIt != Tree2BoolExpr::iso2boolExpr_.end() &&
+        cachedIt->second != nullptr && cachedIt->second->isValid()) {
       POs_[i] = cachedIt->second;
       #ifdef DEBUG_CHECKS
       assert(POs_[i] != nullptr);
@@ -913,6 +936,19 @@ void BuildPrimaryOutputClauses::build() {
       cloud.getTruthTable().finalize();
     }
     if (cloud.getTruthTable().isValid()) {
+      auto hasCachedIsoExpression = [](DNLID termID) {
+        if (!Tree2BoolExpr::isIsoCacheEnabled() || termID == DNLID_MAX) {
+          return false;
+        }
+        const auto& term = get()->getDNLTerminalFromID(termID);
+        const DNLID termIsoID = term.getIsoID();
+        if (termIsoID == DNLID_MAX) {
+          return false;
+        }
+        const auto cached = Tree2BoolExpr::iso2boolExpr_.find(termIsoID);
+        return cached != Tree2BoolExpr::iso2boolExpr_.end() &&
+               cached->second != nullptr && cached->second->isValid();
+      };
       DNLID unmappedInput = DNLID_MAX;
       for (const auto inputTermID : cloud.getInputs()) {
         if (inputTermID == DNLID_MAX) {
@@ -920,6 +956,9 @@ void BuildPrimaryOutputClauses::build() {
         }
         if (inputTermID >= termDNLID2varID_.size() ||
             termDNLID2varID_[inputTermID] == static_cast<size_t>(-1)) {
+          if (hasCachedIsoExpression(inputTermID)) {
+            continue;
+          }
           unmappedInput = inputTermID;
           break;
         }
@@ -1001,12 +1040,12 @@ void BuildPrimaryOutputClauses::build() {
     }
   } scopedIsoCacheReset;
   if (getenv("KEPLER_NO_MT")) {
-    for (size_t i = 0; i < outputs_.size(); ++i) {
+    for (size_t i : representativeOutputs) {
       processOutput(i);
     }
   } else {
     // compute grain safely
-    size_t n = outputs_.size();
+    size_t n = representativeOutputs.size();
     size_t default_grain = 1000;
     size_t computed = (n >= 1000) ? (n / 1000) : 1; // never zero
     size_t grain = std::max<size_t>(computed, default_grain); // or clamp as you prefer
@@ -1015,11 +1054,22 @@ void BuildPrimaryOutputClauses::build() {
       tbb::blocked_range<DNLID>(0, n, grain),
       [&](const tbb::blocked_range<DNLID>& r) {
         for (DNLID i = r.begin(); i < r.end(); ++i) {
-          processOutput(i);
+          processOutput(representativeOutputs[i]);
         }
       },
       tbb::static_partitioner()
     );
+  }
+  for (size_t i = 0; i < outputs_.size(); ++i) {
+    const size_t representative = representativeForOutput[i];
+    if (representative == i) {
+      continue;
+    }
+    POs_[i] = POs_[representative];
+    const auto skippedIt = skippedOutputs_.find(outputs_[representative]);
+    if (skippedIt != skippedOutputs_.end()) {
+      skippedOutputs_[outputs_[i]] = skippedIt->second;
+    }
   }
   SNLLogicCloud::flushSkippedPOReports();
   if (!retainDnl_) {

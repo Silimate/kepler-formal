@@ -5936,7 +5936,7 @@ TEST_F(
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelExtractModelsInferredMemoryWithConstantFalseGuardSkip) {
+       SequentialDesignModelExtractModelsInferredMemoryWithConstantFalseCommitGuard) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* library =
@@ -5991,9 +5991,9 @@ endmodule
   EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem_q"));
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem_q"));
-  EXPECT_TRUE(extracted.stateBits.empty());
-  EXPECT_TRUE(extracted.nextStateExprByStateKey.empty());
-  EXPECT_FALSE(extracted.skippedObservedOutputs.empty());
+  EXPECT_FALSE(extracted.stateBits.empty());
+  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
+  EXPECT_TRUE(extracted.skippedObservedOutputs.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -6135,7 +6135,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelExtractModelsInferredStructMemoryWithLogicalOrCommit) {
+       SequentialDesignModelExtractModelsInferredStructMemoryWithLogicalOrCommitGuard) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* library =
@@ -6200,9 +6200,9 @@ endmodule
   EXPECT_TRUE(extracted.abstractedSequentialBoundaries.empty());
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryInputKeys, "mem_q"));
   EXPECT_FALSE(hasBoundaryRoleName(extracted.internalBoundaryOutputKeys, "mem_q"));
-  EXPECT_TRUE(extracted.stateBits.empty());
-  EXPECT_TRUE(extracted.nextStateExprByStateKey.empty());
-  EXPECT_FALSE(extracted.skippedObservedOutputs.empty());
+  EXPECT_FALSE(extracted.stateBits.empty());
+  EXPECT_FALSE(extracted.nextStateExprByStateKey.empty());
+  EXPECT_TRUE(extracted.skippedObservedOutputs.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

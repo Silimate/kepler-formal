@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <atomic>
+#include <unordered_map>
 #include <tbb/tbb_allocator.h>
 #include <unordered_set>
 #include "DNL.h"
@@ -56,6 +57,7 @@ public:
 
     // group 32-bit scalars first
   uint32_t nodeID   = std::numeric_limits<uint32_t>::max();
+  mutable uint32_t ancestorVisitEpoch = 0;
   //uint32_t parentId = std::numeric_limits<uint32_t>::max();
   std::vector<uint32_t, tbb::tbb_allocator<uint32_t>> parentIds; // for multiple parents support
 
@@ -157,6 +159,13 @@ public:
   }
 
 private:
+  Node* rawNodeFromId(uint32_t id) const;
+  bool isNodeOnParentPath(uint32_t startId, uint32_t candidateId) const;
+  void clearAncestorPathCache() const {
+    if (!ancestorPathCache_.empty()) {
+      ancestorPathCache_.clear();
+    }
+  }
 
   const Node& concatBody(size_t borderIndex,
                          naja::DNL::DNLID instid,
@@ -179,6 +188,8 @@ private:
   size_t lastID_ = 2;       // debug counter for nodeID assignment
   static const SNLTruthTable PtableHolder_;
   std::unordered_map<naja::DNL::DNLID, uint32_t> termid2nodeid_;
+  mutable uint32_t ancestorSearchEpoch_ = 0;
+  mutable std::unordered_map<uint64_t, bool> ancestorPathCache_;
   bool allowAncestorTableNodeClones_ = false;
 };
 

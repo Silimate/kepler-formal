@@ -849,7 +849,7 @@ bool MiterStrategy::run(bool compact) {
   univ->setTopDesign(top1_);
   builder1_.setInputs(inputs1sort);
   builder1_.setOutputs(outputs1sort);
-  builder1_.build();  
+  builder1_.build();
   const auto& PIs1 = builder1_.getInputs();
   const auto& POs1 = builder1_.getPOs();
   const auto& outputs1 = builder1_.getOutputs();
@@ -941,7 +941,7 @@ bool MiterStrategy::run(bool compact) {
   solver.addClause({rootVar});
 
   // solve with no assumptions
-  logger->info("SAT solver starting");
+  logger->info("Starting solver");
   bool sat = solver.solve();
   logger->info("SAT solver finished: {}", sat ? "SAT" : "UNSAT");
 
@@ -1278,7 +1278,7 @@ bool MiterStrategy::runCompactPOs(const tbb::concurrent_vector<BoolExpr*>& POs0,
   int rootVar = tseitinEncode(solver, miter, node2var, varName2idx);
   solver.addClause({rootVar});
 
-  logger->info("SAT solver starting");
+  logger->info("Starting solver");
   const bool sat = solver.solve();
   logger->info("SAT solver finished: {}", sat ? "SAT" : "UNSAT");
   logger->info("Circuits are {}", sat ? "DIFFERENT" : "IDENTICAL");

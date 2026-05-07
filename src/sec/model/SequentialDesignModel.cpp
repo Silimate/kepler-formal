@@ -417,6 +417,9 @@ void mergeBuilderTermVarIDs(
 
 MaterializedBuilderOutputs materializeBuilderOutputs(
     const std::vector<naja::DNL::DNLID>& requestedOutputs,
+    const std::vector<naja::DNL::DNLID>& collectedInputs,
+    const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
+        collectedSkippedOutputs,
     bool secDiagEnabled,
     const char* topName,
     const char* phaseLabel) {
@@ -424,7 +427,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
 
   KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
   builder.setRetainDnl(true);
-  builder.collect();
+  builder.setInputs(collectedInputs);
   std::vector<naja::DNL::DNLID> normalizedRoots;
   normalizedRoots.reserve(requestedOutputs.size());
   std::unordered_map<naja::DNL::DNLID, std::vector<naja::DNL::DNLID>> requestedByRoot;
@@ -512,6 +515,11 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
       continue;
     }
     requestedByRoot[*rootTermID].push_back(requestedTermID);
+    const auto skippedIt = collectedSkippedOutputs.find(*rootTermID);
+    if (skippedIt != collectedSkippedOutputs.end()) {
+      result.skippedOutputsByTerm.emplace(*rootTermID, skippedIt->second);
+      continue;
+    }
     if (seenRoots.insert(*rootTermID).second) {
       normalizedRoots.push_back(*rootTermID);
     }
@@ -563,7 +571,9 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   result.inputs = builder.getInputs();
   result.outputs = builder.getOutputs();
   result.termDNLID2varID = builder.getTermDNLID2VarID();
-  result.skippedOutputsByTerm = builder.getSkippedOutputs();
+  for (const auto& [termID, info] : builder.getSkippedOutputs()) {
+    result.skippedOutputsByTerm.emplace(termID, info);
+  }
   if (traceDependencyRoots) {
     for (const auto& [rootTermID, skipInfo] : result.skippedOutputsByTerm) {
       const auto requestedIt = requestedByRoot.find(rootTermID);
@@ -1296,6 +1306,8 @@ struct ExtractContext {
   std::set<SignalKey, SignalKeyLess> stateBits;
   std::set<SignalKey, SignalKeyLess> allObservedOutputs;
   std::unordered_set<naja::DNL::DNLID> prunedBuilderOutputTerms;
+  std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>
+      collectedSkippedOutputs;
   std::set<SignalKey, SignalKeyLess> abstractedBoundaryStateKeys;
   std::vector<std::pair<naja::DNL::DNLID, SignalKey>> abstractedBoundaryObservedTerms;
   std::unordered_set<SignalKey, SignalKeyHash> abstractedBoundaryObservedKeys;
@@ -1317,6 +1329,7 @@ void collectInitialBuilderBoundary(ExtractContext& ctx) {
     fflush(stderr);
   }
   ctx.builder.collect();
+  ctx.collectedSkippedOutputs = ctx.builder.getSkippedOutputs();
   if (ctx.secDiagEnabled) {
     fprintf(
         stderr,
@@ -2611,7 +2624,12 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
 
     if (!batchOutputTerms.empty()) {
       const auto dependencyOutputs = materializeBuilderOutputs(
-          batchOutputTerms, ctx.secDiagEnabled, ctx.topName.c_str(), "dependency build");
+          batchOutputTerms,
+          builderInputs,
+          ctx.collectedSkippedOutputs,
+          ctx.secDiagEnabled,
+          ctx.topName.c_str(),
+          "dependency build");
       appendUniqueTermIDs(builderInputs, dependencyOutputs.inputs);
       appendUniqueTermIDs(builderOutputs, dependencyOutputs.outputs);
       mergeBuilderTermVarIDs(termDNLID2varID, dependencyOutputs.termDNLID2varID);
@@ -3161,6 +3179,8 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   if (!structuredMemoryDependencyTerms.empty()) {
     const auto dependencyOutputs = materializeBuilderOutputs(
         structuredMemoryDependencyTerms,
+        builderInputs,
+        ctx.collectedSkippedOutputs,
         ctx.secDiagEnabled,
         ctx.topName.c_str(),
         "structured memory dependency build");
