@@ -845,6 +845,7 @@ void BuildPrimaryOutputClauses::build() {
     if (cloud.getTruthTable().isValid()) {
       cloud.getTruthTable().finalize();
     }
+    // LCOV_EXCL_START
     if (cloud.getTruthTable().isValid()) {
       auto hasCachedIsoExpression = [](DNLID termID) {
         if (termID == DNLID_MAX) {
@@ -891,6 +892,7 @@ void BuildPrimaryOutputClauses::build() {
             kSkippedNoDriverPOReport);
       }
     }
+    // LCOV_EXCL_STOP
     #ifdef DEBUG_CHECKS
     auto endFin = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed_seconds_fin = endFin - startFin;

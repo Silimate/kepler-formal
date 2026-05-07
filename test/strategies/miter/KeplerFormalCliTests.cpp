@@ -2219,6 +2219,17 @@ TEST(KeplerFormalCliTests, WriteBoundaryTermsReportFormatsEntries) {
   std::filesystem::remove_all(tempDir);
 }
 
+TEST(KeplerFormalCliTests, WriteBoundaryTermsReportSkipsEmptyReports) {
+  const auto tempDir =
+      makeUniqueTempDir("kepler_formal_cli_empty_boundary_terms");
+  const auto reportPath = tempDir / "boundary_terms.txt";
+
+  writeBoundaryTermsReport(reportPath, {});
+
+  EXPECT_FALSE(std::filesystem::exists(reportPath));
+  std::filesystem::remove_all(tempDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",
@@ -2483,6 +2494,12 @@ TEST(KeplerFormalCliTests, CliOutOfRangeMaxKAfterFormatFails) {
 TEST(KeplerFormalCliTests, CliMissingSecEngineAfterFormatFails) {
   EXPECT_EQ(runWithArgs({"kepler-formal", "-verilog", "--sec-engine"}),
             EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliSecEngineAcceptedAfterFormat) {
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal", "-verilog", "--sec-engine", "PDR"}),
+      EXIT_FAILURE);
 }
 
 TEST(KeplerFormalCliTests, CliInvalidSecEngineAfterFormatFails) {

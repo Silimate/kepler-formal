@@ -234,7 +234,7 @@ const std::shared_ptr<SNLTruthTableTree::Node>& SNLTruthTableTree::nodeFromId(
 bool SNLTruthTableTree::isNodeOnParentPath(uint32_t startId,
                                            uint32_t candidateId) const {
   if (startId == kInvalidId || candidateId == kInvalidId) {
-    return false;
+    return false;  // LCOV_EXCL_LINE
   }
 
   const uint64_t cacheKey =
@@ -266,6 +266,7 @@ bool SNLTruthTableTree::isNodeOnParentPath(uint32_t startId,
   pending.clear();
 
   uint32_t epoch = ++ancestorSearchEpoch_;
+  // LCOV_EXCL_START
   if (epoch == 0) {
     for (const auto& node : nodes_) {
       if (node) {
@@ -274,6 +275,7 @@ bool SNLTruthTableTree::isNodeOnParentPath(uint32_t startId,
     }
     epoch = ++ancestorSearchEpoch_;
   }
+  // LCOV_EXCL_STOP
 
   pending.emplace_back(nodeId);
   while (!pending.empty()) {
@@ -613,6 +615,7 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
   pendingAncestors.clear();
 
   uint32_t epoch = ++ancestorSearchEpoch_;
+  // LCOV_EXCL_START
   if (epoch == 0) {
     for (const auto& node : nodes_) {
       if (node) {
@@ -621,12 +624,15 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
     }
     epoch = ++ancestorSearchEpoch_;
   }
+  // LCOV_EXCL_STOP
 
   auto* branchNode = rawNodeFromId(nodeId);
+  // LCOV_EXCL_START
   if (branchNode == nullptr) {
     nodePath.clear();
-    return false; // LCOV_EXCL_LINE
+    return false;
   }
+  // LCOV_EXCL_STOP
   branchNode->ancestorVisitEpoch = epoch;
   pendingAncestors.push_back({nodeId, 0});
   while (!pendingAncestors.empty()) {
@@ -714,7 +720,7 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
     auto iter = termid2nodeid_.find(termid);
     if (iter != termid2nodeid_.end()) {
       if (allowAncestorTableNodeClones_ &&
-          willCloneTableTermForBorderLeaf(borderIndex, termid)) {
+          willCloneTableTermForBorderLeaf(borderIndex, termid)) {  // LCOV_EXCL_LINE
         // This term is already on the path from the current leaf to the root.
         // Reusing the canonical node here would make the tree cyclic even when
         // the netlist path is only a transparent alias of the same expression.

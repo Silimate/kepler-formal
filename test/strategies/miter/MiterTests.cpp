@@ -5,6 +5,7 @@
 #include <chrono>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -125,6 +126,30 @@ class ScopedCurrentPath {
 
  private:
   std::filesystem::path original_;
+};
+
+class ScopedEnvVar {
+ public:
+  ScopedEnvVar(const char* name, const char* value) : name_(name) {
+    if (const char* current = std::getenv(name)) {
+      hadOriginal_ = true;
+      original_ = current;
+    }
+    setenv(name, value, 1);
+  }
+
+  ~ScopedEnvVar() {
+    if (hadOriginal_) {
+      setenv(name_.c_str(), original_.c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  bool hadOriginal_ = false;
+  std::string original_;
 };
 
 std::vector<uint64_t> getInputFlatDependencies(const SNLDesign* design) {
@@ -952,13 +977,16 @@ TEST_F(
   ASSERT_NE(internalOutputID, naja::DNL::DNLID_MAX);
 
   const auto inputCountBeforeBuild = builder.getInputs().size();
-  builder.setOutputs({internalOutputID});
+  builder.setOutputs({internalOutputID, internalOutputID});
+  ScopedEnvVar noMt("KEPLER_NO_MT", "1");
   builder.build();
 
-  ASSERT_EQ(builder.getOutputs().size(), 1u);
-  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_EQ(builder.getOutputs().size(), 2u);
+  ASSERT_EQ(builder.getPOs().size(), 2u);
   ASSERT_NE(builder.getPOs()[0], nullptr);
+  ASSERT_NE(builder.getPOs()[1], nullptr);
   EXPECT_FALSE(builder.getPOs()[0]->isValid());
+  EXPECT_FALSE(builder.getPOs()[1]->isValid());
   EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
   ASSERT_NE(builder.getSkippedOutputs().find(internalOutputID),
             builder.getSkippedOutputs().end());

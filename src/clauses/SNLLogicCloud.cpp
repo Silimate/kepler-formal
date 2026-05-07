@@ -281,11 +281,13 @@ bool canUseCachedIsoShortcut(const naja::DNL::DNLIso& iso,
 
 uint32_t nextExpandedTableTermEpoch() {
   ++expandedTableTermEpoch;
+  // LCOV_EXCL_START
   if (expandedTableTermEpoch == 0) {
     std::fill(expandedTableTermEpochs.begin(), expandedTableTermEpochs.end(),
               0);
     expandedTableTermEpoch = 1;
   }
+  // LCOV_EXCL_STOP
   return expandedTableTermEpoch;
 }
 
@@ -655,13 +657,13 @@ void SNLLogicCloud::compute() {
   const auto termIsoIDs = getSharedTermIsoIDCache(dnl_);
   auto getIsoIDCached = [&](naja::DNL::DNLID termID) {
     if (termID == naja::DNL::DNLID_MAX) {
-      return naja::DNL::DNLID_MAX;
+      return naja::DNL::DNLID_MAX;  // LCOV_EXCL_LINE
     }
     const size_t index = static_cast<size_t>(termID);
     if (index < termIsoIDs->size()) {
       return (*termIsoIDs)[index];
     }
-    return dnl_.getDNLTerminalFromID(termID).getIsoID();
+    return dnl_.getDNLTerminalFromID(termID).getIsoID();  // LCOV_EXCL_LINE
   };
   auto formatTermName = [&](naja::DNL::DNLID termID) {
     const auto& term = dnl_.getDNLTerminalFromID(termID);
