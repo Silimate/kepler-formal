@@ -1,10 +1,5 @@
 // Copyright 2024-2026 keplertech.io
 // SPDX-License-Identifier: GPL-3.0-only
-//
-// Annotated version: comments added to explain the flow, data structures,
-// and algorithmic steps. No executable code has been changed; only
-// explanatory comments were inserted and commented-out code blocks
-// that were previously disabled have been removed.
 
 #include "Tree2BoolExpr.h"
 #include "BoolExpr.h"
@@ -20,9 +15,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-// #define DEBUG_CHECKS
-// #define DEBUG_PRINTS
 
 #ifdef DEBUG_PRINTS
 #define DEBUG_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
@@ -289,7 +281,6 @@ BoolExpr* Tree2BoolExpr::convert(
     stack.pop_back();
     const SNLTruthTableTree::Node* node = f.first;
 
-    // isoID is used to map DNL terminals to shared BoolExpr instances.
     naja::DNL::DNLID isoID = naja::DNL::DNLID_MAX;
     if (node->type != SNLTruthTableTree::Node::Type::Input) {
       isoID = naja::DNL::get()->getDNLTerminalFromID(node->data.termid).getIsoID();
@@ -301,9 +292,7 @@ BoolExpr* Tree2BoolExpr::convert(
     if (!visited) {
       // Pre-visit: attempt to reuse an existing BoolExpr from iso2boolExpr_
       // if the node corresponds to a DNL terminal that was already converted.
-      naja::DNL::DNLID isoID = naja::DNL::DNLID_MAX;
       if (node->type != SNLTruthTableTree::Node::Type::Input) {
-        isoID = naja::DNL::get()->getDNLTerminalFromID(node->data.termid).getIsoID();
         auto it = iso2boolExpr_.find(isoID);
         if (isoID != naja::DNL::DNLID_MAX &&
             it != iso2boolExpr_.end() && it->second != nullptr &&

@@ -1612,16 +1612,12 @@ TEST_F(MiterTests, TestMiterANDNonConstantWithSequentialElements) {
       std::cout << "PO: " << po->toString() << std::endl;
     }
     printf("%s\n", pc.getPOs()[0]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[0]->toString() == std::string("((6 ∧ 6) ∧ 2)"));
     EXPECT_TRUE(pc.getPOs()[0]->toString() == std::string("2 AND 4"));
     printf("%s\n", pc.getPOs()[1]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[1]->toString() == std::string("(6 ∧ 6)"));
     EXPECT_TRUE(pc.getPOs()[1]->toString() == std::string("4"));
     printf("%s\n", pc.getPOs()[2]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[2]->toString() == std::string("2"));
     EXPECT_TRUE(pc.getPOs()[2]->toString() == std::string("2"));
     printf("%s\n", pc.getPOs()[3]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[3]->toString() == std::string("3"));
     EXPECT_TRUE(pc.getPOs()[3]->toString() == std::string("3"));
   }
 }

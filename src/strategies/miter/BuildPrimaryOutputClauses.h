@@ -69,11 +69,11 @@ class BuildPrimaryOutputClauses {
     return outputs2outputsIDs_;
   }
   void setInputs(const std::vector<naja::DNL::DNLID>& inputs) {
-    inputs_ = std::move(inputs); /*sortInputs();*/
+    inputs_ = inputs;
     setInputs2InputsIDs();
   }
   void setOutputs(const std::vector<naja::DNL::DNLID>& outputs) {
-    outputs_ = std::move(outputs); /*sortOutputs();*/
+    outputs_ = outputs;
     setOutputs2OutputsIDs();
   }
   void setRetainDnl(bool retain) { retainDnl_ = retain; }
@@ -103,16 +103,12 @@ class BuildPrimaryOutputClauses {
 
  private:
 
-  //const naja::NL::SNLTruthTable& getTruthTable(naja::NL::SNLDesign* design, size_t orderID);
-  
   std::vector<naja::DNL::DNLID> collectInputs();
   PathNameIDs getPathNameIDs(const naja::DNL::DNLInstanceFull& instance) const;
   PathKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) const;
   void setInputs2InputsIDs();
-  // void sortInputs();
   std::vector<naja::DNL::DNLID> collectOutputs();
   void setOutputs2OutputsIDs();
-  // void sortOutputs();
   void initVarNames();
   
   tbb::concurrent_vector<BoolExpr*> POs_;

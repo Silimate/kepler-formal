@@ -30,11 +30,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-
-
-//#define DEBUG_CHECKS
-//#define DEBUG_PRINTS
-
 #ifdef DEBUG_PRINTS
 #define DEBUG_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
 #else
@@ -1567,7 +1562,6 @@ void SNLLogicCloud::compute() {
   #ifdef DEBUG_CHECKS
   assert(finalSize == currentIterationInputs_.size() &&
          "compute: size mismatch after final copy");
-  //assert(currentIterationInputs_.size() == sizeOfCurrentIterationInputsETS());
   for (const auto& input : currentIterationInputs_) {
     const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(
         dnl_.getDNLTerminalFromID(input).getIsoID());

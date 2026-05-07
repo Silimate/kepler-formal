@@ -58,7 +58,6 @@ public:
     // group 32-bit scalars first
   uint32_t nodeID   = std::numeric_limits<uint32_t>::max();
   mutable uint32_t ancestorVisitEpoch = 0;
-  //uint32_t parentId = std::numeric_limits<uint32_t>::max();
   std::vector<uint32_t, tbb::tbb_allocator<uint32_t>> parentIds; // for multiple parents support
 
   // put the 64-bit-aligned items next: union with 64-bit termid,

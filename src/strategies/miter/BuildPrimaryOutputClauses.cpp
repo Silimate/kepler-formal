@@ -19,9 +19,6 @@
 #include <thread>
 #include <tbb/global_control.h>
 
-//#define DEBUG_PRINTS
-//#define DEBUG_CHECKS
-
 #ifdef DEBUG_PRINTS
 #define DEBUG_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
 #else
@@ -678,20 +675,17 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
     outputs.emplace_back(out);
   }
-  //outputs.assign(outputsSet.begin(), outputsSet.end());
   return outputs;
 }
 
 void BuildPrimaryOutputClauses::collect() {
   inputs_ = collectInputs();
-  //sortInputs(); <- cannot sort inputs as it has to respect the inputs vector order
   for (const auto& input : inputs_) {
     PathKey key = getTerminalPathKey(naja::DNL::get()->getDNLTerminalFromID(input));
     inputsMap_[std::move(key)]  =
             input;
   }
   outputs_ = collectOutputs();
-  //sortOutputs(); <- cannot sort as it needs to keep the order for POs_
   for (const auto& output : outputs_) {
     PathKey key = getTerminalPathKey(naja::DNL::get()->getDNLTerminalFromID(output));
     outputsMap_[std::move(key)]  =
@@ -750,22 +744,11 @@ void BuildPrimaryOutputClauses::initVarNames() {
 }
 
 void BuildPrimaryOutputClauses::build() {
-  //printf("Building primary output clauses\n");
   naja::DNL::get();
   POs_.clear();
   POs_ = tbb::concurrent_vector<BoolExpr*>(outputs_.size());
   initVarNames();
-  // Init var names(counting on the fact that normalization happened before)
-
-  // inputs_ = collectInputs();
-  // sortInputs();
-  // outputs_ = collectOutputs();
-  // sortOutputs();
   size_t processedOutputs = 0;
-  // tbb::task_arena arena(20);
-  //  init arena with automatic number of threads
-  // unsigned hw = std::thread::hardware_concurrency(); 
-  // if (hw == 0) hw = 1; // fallback 
   tbb::task_arena arena(20);
   IsPIs_ = std::vector<bool>(naja::DNL::get()->getNBterms(), false);
   for (auto pi : inputs_) {
@@ -852,80 +835,10 @@ void BuildPrimaryOutputClauses::build() {
     std::chrono::duration<double> elapsed_seconds_comp = endComp - startComp;
     printf("Computation time for %lu: %f seconds\n", i, elapsed_seconds_comp.count());
     #endif
-    // //cloud.SNLDesignModeling::getTruthTable().print();
-    // std::vector<DNLID> test1;
-    // std::vector<DNLID> test2;
-    // for (auto in : cloud.getAllInputs()) {
-    //   printf("Input in tree cloud: %lu\n", in);
-    //   // if (in >= cloud.getInputs().size()) {
-    //   //   printf("size of inputs in cloud: %lu\n",
-    //   cloud.getInputs().size());
-    //   //   //assert(false && "Input in cloud is out of range");
-    //   // }
-    //  test1.emplace_back(in);
-    // }
-    // for (auto in : cloud.getInputs()) {
-    //   printf("Input in cloud: %lu\n", in);
-    //   test2.emplace_back(in);
-    // }
-    // std::sort(test1.begin(), test1.end());
-    // std::sort(test2.begin(), test2.end());
-    // assert(test1 == test2);
-    // std::vector<std::string> varNames;
-    /*for (auto input : cloud.getInputs()) {
-      DNLTerminalFull term = get()->getDNLTerminalFromID(input);
-      if (term.getSnlTerm() != nullptr) {
-        auto net = term.getSnlTerm()->getNet();
-        if (net != nullptr) {
-          if (net->isConstant0()) {
-            varNames.emplace_back("0");
-            continue;
-          } else if (net->isConstant1()) {
-            varNames.emplace_back("1");
-            continue;
-          }
-        }
-        auto model = const_cast<SNLDesign*>(
-            term.getSnlBitTerm()->getDesign());
-        auto tt = model->SNLDesignModeling::getTruthTable(term.getSnlBitTerm()->getOrderID());
-        if (tt.isInitialized()) {
-          if (tt.all0()) {
-            varNames.emplace_back("0");
-            continue;
-          } else if (tt.all1()) {
-            varNames.emplace_back("1");
-            continue;
-          }
-        }
-      }
-      // find the index of input in inputs_
-      auto it = std::find(inputs_.begin(), inputs_.end(), input);
-      // printf("Input: %s\n",
-      //
-    get()->getDNLTerminalFromID(input).getSnlBitTerm()->getName().getString().c_str());
-      // printf("Model: %s\n",
-      //
-    get()->getDNLTerminalFromID(input).getSnlBitTerm()->getDesign()->getName().getString().c_str());
-      assert(it != inputs_.end());
-      size_t index = std::distance(inputs_.begin(), it);
-      varNames.emplace_back(std::to_string(index + 2)); // +2 to avoid 0 and 1
-    which are reserved for constants
-    }*/
 #ifdef DEBUG_CHECKS
     assert(cloud.SNLDesignModeling::getTruthTable().isInitialized());
 #endif
-    // DEBUG_LOG("Truth Table: %s\n",
-    //           cloud.SNLDesignModeling::getTruthTable().print().c_str());
-    /*std::shared_ptr<BoolExpr> expr = Tree2BoolExpr::convert(
-        cloud.SNLDesignModeling::getTruthTable(), varNames);*/
-    // BoolExpr::getMutex().lock();
-    //  if (POs_.size() - 1 < i) {
-    //    for (size_t j = POs_.size(); j <= i; ++j) {
-    //      POs_.emplace_back(nullptr);
-    //    }
-    //  }
     assert(POs_.size() - 1 >= i);
-    // add run time counter here
     #ifdef DEBUG_CHECKS
     auto startFin = std::chrono::steady_clock::now();    
     #endif
@@ -1016,8 +929,6 @@ void BuildPrimaryOutputClauses::build() {
     std::chrono::duration<double> elapsed_seconds_conv = endConv - startConv;
     printf("Conversion time for %lu: %f seconds\n", i, elapsed_seconds_conv.count());
     #endif
-    // BoolExpr::getMutex().unlock();
-    // printf("size of expr: %lu\n", POs_.back()->size());
     if (isoID != DNLID_MAX &&
         POs_[i] != nullptr && POs_[i]->isValid()) {
       // Publish only fully-built expressions; do not expose a placeholder entry.
@@ -1075,7 +986,6 @@ void BuildPrimaryOutputClauses::build() {
 }
 
 void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
-  //printf("Setting inputs to input IDs mapping\n");
   inputs2inputsIDs_.clear();
   for (const auto& input : inputs_) {
     if (get()->getDNLTerminalFromID(input).isNull()) {
@@ -1083,12 +993,6 @@ void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
     }
     const DNLInstanceFull& currentInstance =
         get()->getDNLTerminalFromID(input).getDNLInstance();
-   
-    //std::vector<NLID::DesignObjectID> termIDs;
-    //termIDs.emplace_back(
-    //     get()->getDNLTerminalFromID(input).getSnlBitTerm()->getID());
-    //termIDs.emplace_back(
-    //    get()->getDNLTerminalFromID(input).getSnlBitTerm()->getBit());
     PathKey& pair = inputs2inputsIDs_[input];
     pair.first = getPathNameIDs(currentInstance);
     pair.first.emplace_back(
@@ -1099,15 +1003,10 @@ void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
 }
 
 void BuildPrimaryOutputClauses::setOutputs2OutputsIDs() {
-  //printf("Setting outputs to output IDs mapping\n");
   outputs2outputsIDs_.clear();
   for (const auto& output : outputs_) {
-    //std::vector<NLID::DesignObjectID> termIDs;
     const DNLInstanceFull& currentInstance =
         get()->getDNLTerminalFromID(output).getDNLInstance();
-    //termIDs.emplace_back(
-    //     get()->getDNLTerminalFromID(output).getSnlBitTerm()->getID());
-    //termIDs
     PathKey& pair = outputs2outputsIDs_[output];
     pair.first = getPathNameIDs(currentInstance);
     pair.first.emplace_back(
@@ -1116,34 +1015,3 @@ void BuildPrimaryOutputClauses::setOutputs2OutputsIDs() {
         get()->getDNLTerminalFromID(output).getSnlBitTerm()->getBit());
   }
 }
-
-// Sort functions are retierd for now as they break the mapping between the 2 circuits, normalize is used instead
-
-// void BuildPrimaryOutputClauses::sortInputs() {
-//   // Sort based on inputs2inputsIDs_ content
-//   std::sort(inputs_.begin(), inputs_.end(),
-//             [this](const DNLID& a, const DNLID& b) {
-//               return inputs2inputsIDs_[a].first < inputs2inputsIDs_[b].first && 
-//                       inputs2inputsIDs_[a].second < inputs2inputsIDs_[b].second;
-//             });
-// }
-
-// void BuildPrimaryOutputClauses::sortOutputs() {
-//   // Sort based on outputs2outputsIDs_ content
-//   std::sort(
-//       outputs_.begin(), outputs_.end(), [this](const DNLID& a, const DNLID& b) {
-//         return outputs2outputsIDs_[a].first < outputs2outputsIDs_[b].first && 
-//                outputs2outputsIDs_[a].second < outputs2outputsIDs_[b].second;
-//       });
-// }
-
-// const naja::NL::SNLTruthTable& BuildPrimaryOutputClauses::getTruthTable(naja::NL::SNLDesign* design, size_t orderID) {
-//   auto designID = design->getID();
-//   auto iter = ttCache_.find({designID, orderID});
-//   if (iter != ttCache_.end()) {
-//     return iter->second;
-//   }
-//   const auto tt = SNLDesignModeling::getTruthTable(design, orderID);
-//   ttCache_[{designID, orderID}] = tt;
-//   return tt;
-// }
