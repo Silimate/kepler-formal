@@ -275,9 +275,6 @@ const ModelInputLayout& getModelInputLayout(const DNLFull& dnl,
 
 bool canUseCachedIsoShortcut(const naja::DNL::DNLIso& iso,
                              naja::DNL::DNLID driver) {
-  if (!Tree2BoolExpr::isIsoCacheEnabled()) {
-    return false;
-  }
   if (iso.getIsoID() == naja::DNL::DNLID_MAX || iso.getDrivers().empty() ||
       iso.getDrivers().front() != driver) {
     return false;

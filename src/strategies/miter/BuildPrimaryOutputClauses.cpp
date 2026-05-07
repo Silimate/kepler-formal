@@ -821,11 +821,8 @@ void BuildPrimaryOutputClauses::build() {
 
     DNLID isoID = get()->getDNLTerminalFromID(out).getIsoID();
     DEBUG_LOG("isoID: %zu\n", isoID);
-    const bool useIsoCache = Tree2BoolExpr::isIsoCacheEnabled();
-    auto cachedIt = useIsoCache
-                        ? Tree2BoolExpr::iso2boolExpr_.find(isoID)
-                        : Tree2BoolExpr::iso2boolExpr_.end();
-    if (useIsoCache && isoID != DNLID_MAX &&
+    auto cachedIt = Tree2BoolExpr::iso2boolExpr_.find(isoID);
+    if (isoID != DNLID_MAX &&
         cachedIt != Tree2BoolExpr::iso2boolExpr_.end() &&
         cachedIt->second != nullptr && cachedIt->second->isValid()) {
       POs_[i] = cachedIt->second;
@@ -937,7 +934,7 @@ void BuildPrimaryOutputClauses::build() {
     }
     if (cloud.getTruthTable().isValid()) {
       auto hasCachedIsoExpression = [](DNLID termID) {
-        if (!Tree2BoolExpr::isIsoCacheEnabled() || termID == DNLID_MAX) {
+        if (termID == DNLID_MAX) {
           return false;
         }
         const auto& term = get()->getDNLTerminalFromID(termID);
@@ -1021,7 +1018,7 @@ void BuildPrimaryOutputClauses::build() {
     #endif
     // BoolExpr::getMutex().unlock();
     // printf("size of expr: %lu\n", POs_.back()->size());
-    if (Tree2BoolExpr::isIsoCacheEnabled() && isoID != DNLID_MAX &&
+    if (isoID != DNLID_MAX &&
         POs_[i] != nullptr && POs_[i]->isValid()) {
       // Publish only fully-built expressions; do not expose a placeholder entry.
       auto insertResult = Tree2BoolExpr::iso2boolExpr_.insert({isoID, POs_[i]});

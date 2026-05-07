@@ -6,7 +6,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <atomic>
 
 #include "BoolExpr.h"
 #include "SNLTruthTableTree.h"
@@ -19,11 +18,7 @@ class Tree2BoolExpr {
  public:
   static BoolExpr* convert(const SNLTruthTableTree& tree,
                                            const std::vector<size_t>& varNames);
-  static bool isIsoCacheEnabled();
-  static void setIsoCacheEnabled(bool enabled);
   static tbb::concurrent_unordered_map<naja::DNL::DNLID, BoolExpr*> iso2boolExpr_;
- private:
-  static std::atomic_bool isoCacheEnabled_;
 };
 
 }  // namespace KEPLER_FORMAL
