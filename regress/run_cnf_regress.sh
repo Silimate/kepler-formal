@@ -85,6 +85,19 @@ with open(destination, "wb") as raw:
 PY
 }
 
+compare_cnf_archive() {
+  local label="$1"
+  local golden="$2"
+  local output="$3"
+
+  if cmp -s "${golden}" "${output}"; then
+    echo "Identical CNF files for ${label}: ${golden} and ${output}"
+  else
+    echo "Different CNF files for ${label}: ${golden} and ${output}" >&2
+    exit 1
+  fi
+}
+
 mkdir -p "${output_dir}"
 rm -rf "${output_po_cnf_dir}"
 rm -f "${output_cnf}" "${output_cnf_archive}" "${output_po_cnf_archive}"
@@ -123,10 +136,7 @@ if [[ ! -s "${output_cnf}" ]]; then
 fi
 
 create_deterministic_tar_gz "${output_cnf}" "miter.cnf" "${output_cnf_archive}"
-if cmp "${golden_cnf_archive}" "${output_cnf_archive}"; then
-  echo "Identical CNF files for Mitter"
-else 
-  echo "Different CNF files for Mitter"
+compare_cnf_archive "Miter" "${golden_cnf_archive}" "${output_cnf_archive}"
 
 if [[ -n "${dump_po_cnfs}" ]]; then
   if [[ ! -d "${output_po_cnf_dir}" ]]; then
@@ -135,8 +145,5 @@ if [[ -n "${dump_po_cnfs}" ]]; then
   fi
 
   create_deterministic_tar_gz "${output_po_cnf_dir}" "po_cnfs" "${output_po_cnf_archive}"
-  if cmp "${golden_po_cnf_archive}" "${output_po_cnf_archive}"; then
-    echo "Identical CNF files for POs"
-  else 
-    echo "Different CNF files for POs"
+  compare_cnf_archive "POs" "${golden_po_cnf_archive}" "${output_po_cnf_archive}"
 fi
