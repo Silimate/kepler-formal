@@ -76,6 +76,41 @@ std::string pathKeyToString(const KEPLER_FORMAL::BuildPrimaryOutputClauses::Path
 using PathKey = KEPLER_FORMAL::BuildPrimaryOutputClauses::PathKey;
 using PathKeyHash = KEPLER_FORMAL::BuildPrimaryOutputClauses::KeyHash;
 
+std::filesystem::path makePoCnfPath(const std::filesystem::path& baseDir,
+                                    const std::string& topLabel,
+                                    size_t index) {
+  std::ostringstream filename;
+  filename << "po_" << std::setw(6) << std::setfill('0') << index << ".cnf";
+  return baseDir / topLabel / filename.str();
+}
+
+void dumpPoCnfs(const tbb::concurrent_vector<BoolExpr*>& POs,
+                const std::string& baseDir,
+                const std::string& topLabel) {
+  const std::filesystem::path topDir = std::filesystem::path(baseDir) / topLabel;
+  std::error_code ec;
+  std::filesystem::create_directories(topDir, ec);
+  if (ec) {
+    logger->warn("Failed to create PO CNF dump directory {}: {}",
+                 topDir.string(), ec.message());
+    return;
+  }
+
+  for (size_t i = 0; i < POs.size(); ++i) {
+    BoolExpr* po = POs[i];
+    if (!po || !po->isValid()) {
+      logger->warn("Skipping invalid PO CNF dump for {} PO {}", topLabel, i);
+      continue;
+    }
+    const auto outPath = makePoCnfPath(baseDir, topLabel, i);
+    if (!dumpBoolExprToDimacs(po, outPath.string())) {
+      logger->warn("Failed to dump PO CNF to {}", outPath.string());
+      continue;
+    }
+    logger->debug("Dumped PO CNF to {}", outPath.string());
+  }
+}
+
 size_t normalizeCompactInputs(std::vector<PathKey>& inputs0,
                               std::vector<PathKey>& inputs1) {
   std::set<PathKey> paths1(inputs1.begin(), inputs1.end());
@@ -590,6 +625,11 @@ void MiterStrategy::setCnfDump(bool enabled, const std::string& path) {
   dumpCnfPath_ = path;
 }
 
+void MiterStrategy::setPoCnfDump(bool enabled, const std::string& path) {
+  dumpPoCnf_ = enabled;
+  dumpPoCnfPath_ = path;
+}
+
 size_t MiterStrategy::normalizeInputs(
     std::vector<naja::DNL::DNLID>& inputs0,
     std::vector<naja::DNL::DNLID>& inputs1,
@@ -880,6 +920,13 @@ bool MiterStrategy::run(bool compact) {
         "No valid outputs to compare. Miter vacuously equivalent.");
     return true; // vacuously equivalent
   }
+  
+  if (dumpPoCnf_) {
+    const std::string outDir = dumpPoCnfPath_.empty() ? "po_cnfs" : dumpPoCnfPath_;
+    dumpPoCnfs(POs0, outDir, "top0");
+    dumpPoCnfs(POs1, outDir, "top1");
+  }
+
   // build the Boolean-miter expression
   logger->info("Building miter expression");
   auto miter = buildMiter(POs0, POs1);
@@ -1159,6 +1206,12 @@ bool MiterStrategy::runCompactPOs(const tbb::concurrent_vector<BoolExpr*>& POs0,
   if (POs0.empty() || POs1.empty()) {
     logger->warn("No valid outputs to compare. Miter vacuously equivalent.");
     return true;
+  }
+
+  if (dumpPoCnf_) {
+    const std::string outDir = dumpPoCnfPath_.empty() ? "po_cnfs" : dumpPoCnfPath_;
+    dumpPoCnfs(POs0, outDir, "top0");
+    dumpPoCnfs(POs1, outDir, "top1");
   }
 
   logger->info("Building miter expression");
