@@ -330,9 +330,10 @@ BoolExpr* Tree2BoolExpr::convert(
         assert(node->parentIds.size() == 1);
         SNLTruthTableTree::Node* const parent = node->tree->nodeFromId(node->parentIds[0]).get();
         assert(parent && parent->type == SNLTruthTableTree::Node::Type::P);
-        if (isoID == naja::DNL::DNLID_MAX) {
+        if (isoID != naja::DNL::DNLID_MAX) {
           // LCOV_EXCL_START
-          throw std::runtime_error("Input node has invalid iso ID");
+          throw std::runtime_error(
+              "Input node unexpectedly has a cacheable iso ID");
           // LCOV_EXCL_STOP
         }
         assert(parent->data.termid < varNames.size());
