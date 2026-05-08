@@ -292,10 +292,9 @@ BoolExpr* Tree2BoolExpr::convert(
     if (!visited) {
       // Pre-visit: attempt to reuse an existing BoolExpr from iso2boolExpr_
       // if the node corresponds to a DNL terminal that was already converted.
-      if (node->type != SNLTruthTableTree::Node::Type::Input) {
+      if (isoID != naja::DNL::DNLID_MAX) {
         auto it = iso2boolExpr_.find(isoID);
-        if (isoID != naja::DNL::DNLID_MAX &&
-            it != iso2boolExpr_.end() && it->second != nullptr &&
+        if (it != iso2boolExpr_.end() && it->second != nullptr &&
             it->second->isValid()) {
           setMemoETS(id, it->second);
         }
@@ -331,6 +330,11 @@ BoolExpr* Tree2BoolExpr::convert(
         assert(node->parentIds.size() == 1);
         SNLTruthTableTree::Node* const parent = node->tree->nodeFromId(node->parentIds[0]).get();
         assert(parent && parent->type == SNLTruthTableTree::Node::Type::P);
+        if (isoID == naja::DNL::DNLID_MAX) {
+          // LCOV_EXCL_START
+          throw std::runtime_error("Input node has invalid iso ID");
+          // LCOV_EXCL_STOP
+        }
         assert(parent->data.termid < varNames.size());
         const auto& name = varNames[parent->data.termid];
         if (name == (size_t)-1) {
