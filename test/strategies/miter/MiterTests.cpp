@@ -1173,6 +1173,7 @@ TEST_F(MiterTests, CachedIsoShortcutDoesNotCreateNewMiterInput) {
 
   {
     ScopedReportSkippedPOs reportGuard(false);
+    ScopedEnvVar frontierHistory("KEPLER_CAPTURE_FRONTIER_HISTORY", "1");
     SNLLogicCloud cloud(topYID, isPIs, isPOs);
     cloud.compute();
     EXPECT_EQ(getTermLabels(cloud.getInputs()),

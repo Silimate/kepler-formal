@@ -231,81 +231,6 @@ const std::shared_ptr<SNLTruthTableTree::Node>& SNLTruthTableTree::nodeFromId(
   return sp;
 }
 
-bool SNLTruthTableTree::isNodeOnParentPath(uint32_t startId,
-                                           uint32_t candidateId) const {
-  if (startId == kInvalidId || candidateId == kInvalidId) {
-    return false;  // LCOV_EXCL_LINE
-  }
-
-  const uint64_t cacheKey =
-      (static_cast<uint64_t>(startId) << 32) |
-      static_cast<uint64_t>(candidateId);
-  const auto cached = ancestorPathCache_.find(cacheKey);
-  if (cached != ancestorPathCache_.end()) {
-    return cached->second;
-  }
-
-  uint32_t nodeId = startId;
-  while (true) {
-    if (nodeId == candidateId) {
-      ancestorPathCache_.emplace(cacheKey, true);
-      return true;
-    }
-    auto* node = rawNodeFromId(nodeId);
-    if (node == nullptr || node->parentIds.empty()) {
-      ancestorPathCache_.emplace(cacheKey, false);
-      return false;
-    }
-    if (node->parentIds.size() != 1) {
-      break;
-    }
-    nodeId = node->parentIds.front();
-  }
-
-  thread_local std::vector<uint32_t> pending;
-  pending.clear();
-
-  uint32_t epoch = ++ancestorSearchEpoch_;
-  // LCOV_EXCL_START
-  if (epoch == 0) {
-    for (const auto& node : nodes_) {
-      if (node) {
-        node->ancestorVisitEpoch = 0;
-      }
-    }
-    epoch = ++ancestorSearchEpoch_;
-  }
-  // LCOV_EXCL_STOP
-
-  pending.emplace_back(nodeId);
-  while (!pending.empty()) {
-    const uint32_t currentId = pending.back();
-    pending.pop_back();
-    if (currentId == kInvalidId) {
-      continue;
-    }
-    if (currentId == candidateId) {
-      ancestorPathCache_.emplace(cacheKey, true);
-      return true;
-    }
-
-    auto* node = rawNodeFromId(currentId);
-    if (node == nullptr) {
-      continue;  // LCOV_EXCL_LINE
-    }
-    if (node->ancestorVisitEpoch == epoch) {
-      continue;
-    }
-    node->ancestorVisitEpoch = epoch;
-
-    for (const auto parentId : node->parentIds) {
-      pending.emplace_back(parentId);
-    }
-  }
-  ancestorPathCache_.emplace(cacheKey, false);
-  return false;
-}
-
 //----------------------------------------------------------------------
 // Node::eval (resolves children via ids)
 //----------------------------------------------------------------------
@@ -354,7 +279,7 @@ bool SNLTruthTableTree::Node::eval(const std::vector<bool>& extInputs) const {
     }
   }
   return tbl.bits().bit(idx);
-}
+}  // LCOV_EXCL_LINE
 
 //----------------------------------------------------------------------
 // addChildId: set parent/child relationship via ids
@@ -404,7 +329,6 @@ uint32_t SNLTruthTableTree::allocateNode(std::shared_ptr<Node>& np) {
       return iter->second;
     }
   }
-  clearAncestorPathCache();
   uint32_t id = static_cast<uint32_t>(nodes_.size()) + kIdOffset;
   np->nodeID = id;
   np->tree = this;
@@ -712,7 +636,6 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
       newNodeSp = nodeFromId(iter->second);
       assert(newNodeSp->type == Node::Type::Table);
       newNodeSp->parentIds.emplace_back(parentId);
-      clearAncestorPathCache();
       parentSp->childrenIds[leaf.childPos] = newNodeSp->nodeID;
       if (newNodeSp->childrenIds.size() == 0) {
         // LCOV_EXCL_START
@@ -760,9 +683,9 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
 
   parentSp->childrenIds[leaf.childPos] = newNodeId;
   newNodeSp->parentIds.emplace_back(parentId);
-  clearAncestorPathCache();
   if (!(newNodeSp->parentIds.size() == 1 ||
         newNodeSp->type == Node::Type::Table)) {
+    // LCOV_EXCL_START
     DEBUG_LOG("concat: new node parent count %zu\n",
               newNodeSp->parentIds.size());
     DEBUG_LOG("concat: new node type %s\n",
@@ -771,6 +694,7 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
                                                    : "Input");
     assert(newNodeSp->parentIds.size() == 1 ||
            newNodeSp->type == Node::Type::Table);
+    // LCOV_EXCL_STOP
   }
 
   return *newNodeSp;
@@ -1059,7 +983,6 @@ void SNLTruthTableTree::concatFull(
   numExternalInputs_ = (size_t)newInputs;
   borderLeaves_.swap(newBorderLeaves.first);
   newBorderLeaves.first.clear();
-  clearAncestorPathCache();
   DEBUG_LOG("ConcatBody done, new numExternalInputs_: %zu\n",
             numExternalInputs_);
   DEBUG_LOG("ConcatBody done, borderLeaves_ size: %zu\n", borderLeaves_.size());
@@ -1301,7 +1224,6 @@ void SNLTruthTableTree::destroy() {
   rootId_ = kInvalidId;
   borderLeaves_.clear();
   numExternalInputs_ = 0;
-  clearAncestorPathCache();
 }
 
 thread_local std::unordered_map<uint32_t, SNLTruthTableTree::Node*, std::hash<uint32_t>, std::equal_to<uint32_t>,

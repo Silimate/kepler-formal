@@ -1657,11 +1657,15 @@ SNLDesign* createOpaqueLeafModel(NLLibrary* library) {
 
 SNLDesign* createSinglePortMemoryModel(
     NLLibrary* library,
-    const std::string& name) {
+    const std::string& name,
+    bool withReset = false) {
   auto* model =
       SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
   auto* clock =
       SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CLK"));
+  auto* reset = withReset
+      ? SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("RST"))
+      : nullptr;
   auto* chipEnable =
       SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CE"));
   auto* writeEnable =
@@ -1688,20 +1692,23 @@ SNLDesign* createSinglePortMemoryModel(
     }
   }
   SNLDesignModeling::addClockToOutputsArcs(clock, readDataBits);
-  SNLDesignModeling::addInputsToClockArcs(
-      {address->getBit(0),
-       address->getBit(1),
-       writeData->getBit(0),
-       writeData->getBit(1),
-       writeData->getBit(2),
-       writeData->getBit(3),
-       writeMask->getBit(0),
-       writeMask->getBit(1),
-       writeMask->getBit(2),
-       writeMask->getBit(3),
-       chipEnable,
-       writeEnable},
-      clock);
+  SNLDesignModeling::BitTerms clockInputs = {
+      address->getBit(0),
+      address->getBit(1),
+      writeData->getBit(0),
+      writeData->getBit(1),
+      writeData->getBit(2),
+      writeData->getBit(3),
+      writeMask->getBit(0),
+      writeMask->getBit(1),
+      writeMask->getBit(2),
+      writeMask->getBit(3),
+      chipEnable,
+      writeEnable};
+  if (reset != nullptr) {
+    clockInputs.push_back(reset);
+  }
+  SNLDesignModeling::addInputsToClockArcs(clockInputs, clock);
   SNLDesignModeling::addCombinatorialArcs(readAddressBits, readDataBits);
 
   SNLDesignModeling::MemoryInterface interface;
@@ -1709,6 +1716,10 @@ SNLDesign* createSinglePortMemoryModel(
   interface.depth = 4;
   interface.abits = 2;
   interface.clock = clock;
+  if (reset != nullptr) {
+    interface.resetMode = SNLDesignModeling::MemoryResetMode::AsyncHigh;
+    interface.reset = reset;
+  }
   interface.readPorts.push_back(
       {.address = {address->getBit(0), address->getBit(1)},
        .data = {readData->getBit(0),
@@ -1733,7 +1744,9 @@ SNLDesign* createSinglePortMemoryModel(
 SNLDesign* createSinglePortMemoryTop(
     NLLibrary* library,
     const std::string& name,
-    SNLDesign* memoryModel) {
+    SNLDesign* memoryModel,
+    std::optional<int> floatingWriteDataBit = std::nullopt,
+    bool floatingReset = false) {
   auto* top =
       SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
   auto* topClock =
@@ -1742,6 +1755,10 @@ SNLDesign* createSinglePortMemoryTop(
       SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("ce"));
   auto* topWriteEnable =
       SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("we"));
+  auto* modelReset = memoryModel->getScalarTerm(NLName("RST"));
+  auto* topReset = modelReset == nullptr || floatingReset
+      ? nullptr
+      : SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst"));
   auto* topAddress =
       SNLBusTerm::create(top, SNLTerm::Direction::Input, 1, 0, NLName("addr"));
   auto* topWriteData =
@@ -1755,6 +1772,9 @@ SNLDesign* createSinglePortMemoryTop(
   auto* clockNet = SNLScalarNet::create(top, NLName("clk_net"));
   auto* chipEnableNet = SNLScalarNet::create(top, NLName("ce_net"));
   auto* writeEnableNet = SNLScalarNet::create(top, NLName("we_net"));
+  auto* resetNet = modelReset == nullptr
+      ? nullptr
+      : SNLScalarNet::create(top, NLName("rst_net"));
   auto* addressNet = SNLBusNet::create(top, 1, 0, NLName("addr_net"));
   auto* writeDataNet = SNLBusNet::create(top, 3, 0, NLName("wdata_net"));
   auto* writeMaskNet = SNLBusNet::create(top, 3, 0, NLName("wmask_net"));
@@ -1763,9 +1783,15 @@ SNLDesign* createSinglePortMemoryTop(
   topClock->setNet(clockNet);
   topChipEnable->setNet(chipEnableNet);
   topWriteEnable->setNet(writeEnableNet);
+  if (topReset != nullptr) {
+    topReset->setNet(resetNet);
+  }
   memory->getInstTerm(memoryModel->getScalarTerm(NLName("CLK")))->setNet(clockNet);
   memory->getInstTerm(memoryModel->getScalarTerm(NLName("CE")))->setNet(chipEnableNet);
   memory->getInstTerm(memoryModel->getScalarTerm(NLName("WE")))->setNet(writeEnableNet);
+  if (modelReset != nullptr) {
+    memory->getInstTerm(modelReset)->setNet(resetNet);
+  }
 
   auto* modelAddress = memoryModel->getBusTerm(NLName("ADDR"));
   auto* modelWriteData = memoryModel->getBusTerm(NLName("WDATA"));
@@ -1776,10 +1802,16 @@ SNLDesign* createSinglePortMemoryTop(
     memory->getInstTerm(modelAddress->getBit(bit))->setNet(addressNet->getBit(bit));
   }
   for (int bit = 0; bit <= 3; ++bit) {
-    topWriteData->getBit(bit)->setNet(writeDataNet->getBit(bit));
+    if (floatingWriteDataBit.has_value() && bit == *floatingWriteDataBit) {
+      auto* floatingWriteDataNet = SNLScalarNet::create(
+          top, NLName("floating_wdata" + std::to_string(bit) + "_net"));
+      memory->getInstTerm(modelWriteData->getBit(bit))->setNet(floatingWriteDataNet);
+    } else {
+      topWriteData->getBit(bit)->setNet(writeDataNet->getBit(bit));
+      memory->getInstTerm(modelWriteData->getBit(bit))->setNet(writeDataNet->getBit(bit));
+    }
     topWriteMask->getBit(bit)->setNet(writeMaskNet->getBit(bit));
     topOut->getBit(bit)->setNet(outNet->getBit(bit));
-    memory->getInstTerm(modelWriteData->getBit(bit))->setNet(writeDataNet->getBit(bit));
     memory->getInstTerm(modelWriteMask->getBit(bit))->setNet(writeMaskNet->getBit(bit));
     memory->getInstTerm(modelReadData->getBit(bit))->setNet(outNet->getBit(bit));
   }
@@ -6144,6 +6176,63 @@ TEST_F(SequentialEquivalenceStrategyTests,
              "into the modeled memory transition";
     }
   }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSkipsWholeMemoryForUndrivenWriteData) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* memoryModel = createSinglePortMemoryModel(primitives, "MEM_FLOAT_WDATA");
+  auto* top = createSinglePortMemoryTop(
+      library, "structured_memory_undriven_write_data", memoryModel, 0);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_FALSE(extracted.connectivitySkipInfoByKey.empty());
+  EXPECT_FALSE(extracted.skippedObservedOutputs.empty());
+  EXPECT_TRUE(std::any_of(
+      extracted.connectivitySkipInfoByKey.begin(),
+      extracted.connectivitySkipInfoByKey.end(),
+      [](const auto& entry) {
+        return entry.second.detail.find("Structured memory dependency") !=
+               std::string::npos;
+      }));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSkipsWholeMemoryForUndrivenReset) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* memoryModel =
+      createSinglePortMemoryModel(primitives, "MEM_FLOAT_RST", true);
+  auto* top = createSinglePortMemoryTop(
+      library,
+      "structured_memory_undriven_reset",
+      memoryModel,
+      std::nullopt,
+      true);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_FALSE(extracted.connectivitySkipInfoByKey.empty());
+  EXPECT_FALSE(extracted.skippedObservedOutputs.empty());
+  EXPECT_TRUE(std::any_of(
+      extracted.connectivitySkipInfoByKey.begin(),
+      extracted.connectivitySkipInfoByKey.end(),
+      [](const auto& entry) {
+        return entry.second.detail.find("Structured memory dependency") !=
+               std::string::npos;
+      }));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

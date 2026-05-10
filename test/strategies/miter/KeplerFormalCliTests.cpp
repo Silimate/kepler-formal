@@ -1982,6 +1982,98 @@ TEST(KeplerFormalCliTests, ConfigSystemVerilogSecVerificationAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesModel) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(\n"
+      "    input logic clk,\n"
+      "    input logic rst,\n"
+      "    input logic d,\n"
+      "    output logic q\n"
+      ");\n"
+      "  always_ff @(posedge clk)\n"
+      "  if (rst) begin\n"
+      "    q <= 1'b0;\n"
+      "  end else begin\n"
+      "    q <= d;\n"
+      "  end\n"
+      "endmodule\n");
+  const auto logPath = fixture.tmpDir / "sv_sec_compact_identical.log";
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: SEC\n"
+      "compact_mode: true\n"
+      "max_k: 4\n"
+      "sv_design1_top: top\n"
+      "sv_design2_top: top\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto contents = readFileContents(logPath);
+  EXPECT_NE(
+      contents.find(
+          "SEC compact mode: reusing extracted design 1 model for identical design 2 input"),
+      std::string::npos);
+
+  const auto flistLogPath =
+      fixture.tmpDir / "sv_sec_compact_identical_flist.log";
+  const auto flistPath = fixture.tmpDir / "sv_sec_compact_identical.f";
+  {
+    std::ofstream flist(flistPath);
+    flist << fixture.design0Path.string() << "\n";
+  }
+  const auto flistCfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: SEC\n"
+      "compact_mode: true\n"
+      "max_k: 4\n"
+      "sv_design1_flist: " + flistPath.string() + "\n"
+      "sv_design2_flist: " + flistPath.string() + "\n"
+      "sv_design1_top: top\n"
+      "sv_design2_top: top\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "log_file: " + flistLogPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(flistCfgPath), EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(flistLogPath));
+  const auto flistContents = readFileContents(flistLogPath);
+  EXPECT_NE(
+      flistContents.find(
+          "SEC compact mode: reusing extracted design 1 model for identical design 2 input"),
+      std::string::npos);
+
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove(flistCfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST(KeplerFormalCliTests, ConfigPythonLibraryPathIsLoggedBeforeLoadFailure) {
+  const auto fixture = createEquivalentDesignFixture(
+      "v",
+      "module top(output y);\n"
+      "  assign y = 1'b0;\n"
+      "endmodule\n");
+  const auto missingPythonPath = fixture.tmpDir / "missing_primitives.py";
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "py_tech_files:\n"
+      "  - " + missingPythonPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigSecVerificationWritesDefaultLog) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",

@@ -156,13 +156,6 @@ public:
 
 private:
   Node* rawNodeFromId(uint32_t id) const;
-  bool isNodeOnParentPath(uint32_t startId, uint32_t candidateId) const;
-  void clearAncestorPathCache() const {
-    if (!ancestorPathCache_.empty()) {
-      ancestorPathCache_.clear();
-    }
-  }
-
   const Node& concatBody(size_t borderIndex,
                          naja::DNL::DNLID instid,
                          naja::DNL::DNLID termid);
@@ -185,7 +178,6 @@ private:
   static const SNLTruthTable PtableHolder_;
   std::unordered_map<naja::DNL::DNLID, uint32_t> termid2nodeid_;
   mutable uint32_t ancestorSearchEpoch_ = 0;
-  mutable std::unordered_map<uint64_t, bool> ancestorPathCache_;
 };
 
 } // namespace KEPLER_FORMAL

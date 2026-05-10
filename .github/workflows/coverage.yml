@@ -55,7 +55,7 @@ jobs:
       working-directory: ${{github.workspace}}/build
       run: |
            lcov --directory . --capture --output-file coverage.info
-           lcov --remove coverage.info --output-file coverage.info '/usr/*' '*/test/*' '*/kepler-formal/thirdparty/*'
+           lcov --remove coverage.info --output-file coverage.info '/usr/*' '*/test/*' '*/kepler-formal/thirdparty/*' '*/kepler-formal/build*/thirdparty/*'
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4

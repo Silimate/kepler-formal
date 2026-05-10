@@ -552,6 +552,25 @@ TEST(SNLTruthTableTreeEval_Additions, EvaluatesInputChildAndReadsTableBit) {
   EXPECT_FALSE(parent->eval({true}));
 }
 
+TEST(SNLTruthTableTreeEval_Additions, EvaluatesNestedTableChild) {
+  SNLTruthTableTree tree;
+
+  auto constantChild = std::make_shared<Node>(0u, &tree);
+  constantChild->type = Node::Type::Table;
+  constantChild->data.termid = 10;
+  constantChild->truthTable = makeMaskTable(0, 0b1);
+  const uint32_t constantChildId = tree.allocateNode(constantChild);
+
+  auto parent = std::make_shared<Node>(0u, &tree);
+  parent->type = Node::Type::Table;
+  parent->data.termid = 11;
+  parent->truthTable = makeMaskTable(1, 0b10);
+  parent->childrenIds.push_back(constantChildId);
+  tree.allocateNode(parent);
+
+  EXPECT_TRUE(parent->eval({}));
+}
+
 TEST(SNLTruthTableTreeAddChild_Additions, AddChildIdRejectsInvalidId) {
   SNLTruthTableTree tree;
 

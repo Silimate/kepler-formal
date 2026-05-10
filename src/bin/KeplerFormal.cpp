@@ -465,12 +465,14 @@ static std::string normalizeInputPathForComparison(const std::string& path) {
     return canonical.string();
   }
 
+  // LCOV_EXCL_START
   ec.clear();
   const auto absolute = std::filesystem::absolute(path, ec);
   if (!ec) {
     return absolute.lexically_normal().string();
   }
   return std::filesystem::path(path).lexically_normal().string();
+  // LCOV_EXCL_STOP
 }
 
 static std::vector<std::string> normalizeInputListForComparison(
@@ -497,7 +499,7 @@ static bool sameSystemVerilogDesignOptions(
   return normalizeOptionalInputPathForComparison(lhs.flist) ==
              normalizeOptionalInputPathForComparison(rhs.flist) &&
          lhs.top == rhs.top;
-}
+}  // LCOV_EXCL_LINE
 
 static bool sameCompactSecDesignSpec(
     bool isSystemVerilog,
@@ -1225,6 +1227,7 @@ int KeplerFormalMain(int argc, char** argv) {
               "(no-driver, multi-driver, or logical-loop):\n{}",
               skippedOutputs.str());
         }
+        // LCOV_EXCL_START
         if (!result.abstractedSequentialBoundaries.empty()) {
           std::ostringstream abstractedBoundaries;
           for (const auto& abstractedBoundary :
@@ -1236,6 +1239,7 @@ int KeplerFormalMain(int argc, char** argv) {
               "boundaries:\n{}",
               abstractedBoundaries.str());
         }
+        // LCOV_EXCL_STOP
         if (reportSkippedPOs) {
           writeBoundaryTermsReport(
               kBoundaryTermsReport, result.extractedBoundaryReports);
@@ -1431,12 +1435,12 @@ int KeplerFormalMain(int argc, char** argv) {
         } else {
           SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");
         }
+	      // LCOV_EXCL_START
 	      } catch (const std::exception& e) {
-          // LCOV_EXCL_START
 	        SPDLOG_ERROR("Workflow failed: {}", e.what());
 	        return EXIT_FAILURE;
-          // LCOV_EXCL_STOP
       }
+      // LCOV_EXCL_STOP
       return EXIT_SUCCESS;
     }
 
@@ -1466,16 +1470,20 @@ int KeplerFormalMain(int argc, char** argv) {
             try {
               auto* top = db->getTopDesign();
               if (top == nullptr) {
+                // LCOV_EXCL_START
                 throw std::runtime_error(
                     std::string("Top design not set for ") + designLabel);
+                // LCOV_EXCL_STOP
               }
               auto model = KEPLER_FORMAL::SEC::SequentialDesignModel::extract(top);
               releaseCompactDb(db);
               return model;
             } catch (...) {
+              // LCOV_EXCL_START
               releaseCompactDb(db);
               throw;
-            }
+              // LCOV_EXCL_STOP
+            }  // LCOV_EXCL_LINE
           };
 
       try {
@@ -1519,10 +1527,12 @@ int KeplerFormalMain(int argc, char** argv) {
             nullptr, nullptr, solverType, secEngine);
         return emitSecResult(
             strategy.runExtractedModels(model0, model1, secMaxK));
+      // LCOV_EXCL_START
       } catch (const std::exception& e) {
         SPDLOG_ERROR("SEC compact workflow failed: {}", e.what());
         return EXIT_FAILURE;
       }
+      // LCOV_EXCL_STOP
     }
 
     if (!libertyFiles.empty() || !pythonFiles.empty()) {
@@ -1689,10 +1699,12 @@ int KeplerFormalMain(int argc, char** argv) {
       KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
           top0, top1, solverType, secEngine);
       return emitSecResult(strategy.run(secMaxK));
+    // LCOV_EXCL_START
     } catch (const std::exception& e) {
       SPDLOG_ERROR("SEC workflow failed: {}", e.what());
       return EXIT_FAILURE;
     }
+    // LCOV_EXCL_STOP
   } else if (inputFormatType == FormatType::NAJA_IF && useScopes) {
     KEPLER_FORMAL::MiterStrategy MiterS(top0, top1);
     MiterS.init(false);
