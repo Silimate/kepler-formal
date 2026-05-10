@@ -18,6 +18,7 @@
 
 #include "DNL.h"
 #include "NLDB0.h"
+#include "NLName.h"
 #include "NLUniverse.h"
 #include "SNLDesignModeling.h"
 #include "SNLPath.h"
@@ -673,10 +674,9 @@ SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
   const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
   key.first.reserve(pathNames.size() + 1);
   for (const auto& name : pathNames) {
-    key.first.push_back(stableSignalKeyNameID(name.getString()));
+    key.first.push_back(name.getID());
   }
-  key.first.push_back(
-      stableSignalKeyNameID(terminal.getSnlBitTerm()->getName().getString()));
+  key.first.push_back(terminal.getSnlBitTerm()->getName().getID());
   key.second.push_back(
       static_cast<naja::NL::NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit()));
   return key;
@@ -1490,9 +1490,9 @@ SignalKey makeMemoryCellStateKey(
   const auto pathNames = instance.getPath().getPathNames();
   key.first.reserve(pathNames.size() + 1);
   for (const auto& name : pathNames) {
-    key.first.push_back(stableSignalKeyNameID(name.getString()));
+    key.first.push_back(name.getID());
   }
-  key.first.push_back(stableSignalKeyNameID("__MEM_CELL"));
+  key.first.push_back(naja::NL::NLName("__MEM_CELL").getID());
   key.second.push_back(
       static_cast<naja::NL::NLID::DesignObjectID>(cellIndex));
   key.second.push_back(
@@ -1939,6 +1939,55 @@ void buildInitialObservedOutputClouds(ExtractContext& ctx, SequentialDesignModel
   }
 }
 
+void orderComplementedStateBitsByPrimary(SequentialDesignModel& model) {
+  if (model.complementedStateRelations.empty() || model.stateBits.size() < 2) {
+    return;
+  }
+
+  struct ComplementRole {
+    SignalKey canonicalPrimaryKey;
+    bool isComplementedOutput = false;
+  };
+
+  std::unordered_map<SignalKey, ComplementRole, SignalKeyHash> complementRoles;
+  for (const auto& relation : model.complementedStateRelations) {
+    complementRoles.emplace(
+        relation.primaryKey,
+        ComplementRole{relation.primaryKey, false});
+    complementRoles.emplace(
+        relation.complementedKey,
+        ComplementRole{relation.primaryKey, true});
+  }
+
+  const SignalKeyLess less;
+  auto roleFor = [&](const SignalKey& key) -> ComplementRole {
+    const auto it = complementRoles.find(key);
+    if (it != complementRoles.end()) {
+      return it->second;
+    }
+    return ComplementRole{key, false};
+  };
+
+  // Real NLName IDs expose construction order. If a complemented pin is
+  // interned before its primary pin, the plain key sort can publish QN before
+  // Q. Keep each primary/complement group ordered as primary first so SEC uses
+  // the real state output as the canonical representative.
+  std::sort(
+      model.stateBits.begin(),
+      model.stateBits.end(),
+      [&](const SignalKey& lhs, const SignalKey& rhs) {
+        const auto lhsRole = roleFor(lhs);
+        const auto rhsRole = roleFor(rhs);
+        if (lhsRole.canonicalPrimaryKey != rhsRole.canonicalPrimaryKey) {
+          return less(lhsRole.canonicalPrimaryKey, rhsRole.canonicalPrimaryKey);
+        }
+        if (lhsRole.isComplementedOutput != rhsRole.isComplementedOutput) {
+          return !lhsRole.isComplementedOutput;
+        }
+        return less(lhs, rhs);
+      });
+}
+
 void publishNormalizedBoundary(ExtractContext& ctx, SequentialDesignModel& model) {
   for (const auto& key : ctx.abstractedBoundaryStateKeys) {
     ctx.stateBits.erase(key);
@@ -1953,6 +2002,7 @@ void publishNormalizedBoundary(ExtractContext& ctx, SequentialDesignModel& model
   model.internalBoundaryOutputKeys.assign(
       ctx.internalBoundaryOutputKeys.begin(), ctx.internalBoundaryOutputKeys.end());
   model.stateBits.assign(ctx.stateBits.begin(), ctx.stateBits.end());
+  orderComplementedStateBitsByPrimary(model);
   model.allObservedOutputs.assign(ctx.allObservedOutputs.begin(), ctx.allObservedOutputs.end());
   if (ctx.secDiagEnabled) {
     fprintf(

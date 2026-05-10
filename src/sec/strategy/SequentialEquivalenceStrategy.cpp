@@ -115,10 +115,9 @@ SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
   const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
   key.first.reserve(pathNames.size() + 1);
   for (const auto& name : pathNames) {
-    key.first.push_back(stableSignalKeyNameID(name.getString()));  // LCOV_EXCL_LINE
+    key.first.push_back(name.getID());  // LCOV_EXCL_LINE
   }
-  key.first.push_back(
-      stableSignalKeyNameID(terminal.getSnlBitTerm()->getName().getString()));
+  key.first.push_back(terminal.getSnlBitTerm()->getName().getID());
   key.second.push_back(
       static_cast<naja::NL::NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit()));
   return key;

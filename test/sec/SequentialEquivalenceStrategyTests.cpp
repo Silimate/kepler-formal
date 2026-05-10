@@ -23,6 +23,7 @@
 #include "BoolExprCache.h"
 #include "DNL.h"
 #include "NLDB0.h"
+#include "NLName.h"
 #include "NLUniverse.h"
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
@@ -864,10 +865,9 @@ SignalKey getTerminalPathKeyForTest(
   const auto pathNames = terminal.getDNLInstance().getPath().getPathNames();
   key.first.reserve(pathNames.size() + 1);
   for (const auto& name : pathNames) {
-    key.first.push_back(stableSignalKeyNameID(name.getString()));
+    key.first.push_back(name.getID());
   }
-  key.first.push_back(
-      stableSignalKeyNameID(terminal.getSnlBitTerm()->getName().getString()));
+  key.first.push_back(terminal.getSnlBitTerm()->getName().getID());
   key.second.push_back(
       static_cast<naja::NL::NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit()));
   return key;
@@ -1454,10 +1454,22 @@ class ScopedSecBoundaryAbstraction {
   bool previousValue_;
 };
 
+// Synthetic tests below do not always build a Naja universe. Production SEC
+// keys come from NLName::getID() on real terminals; this local allocator only
+// gives those unit-only artificial keys stable, collision-free identities.
+naja::NL::NLID::DesignObjectID makeSyntheticSignalNameID(
+    const std::string& name) {
+  static std::unordered_map<std::string, naja::NL::NLID::DesignObjectID> ids;
+  const auto nextID =
+      static_cast<naja::NL::NLID::DesignObjectID>(ids.size() + 1);
+  return ids.emplace(name, nextID).first->second;
+}
+
 SignalKey makeSignalKey(const std::string& name) {
   SignalKey key;
-  key.first.push_back(stableSignalKeyNameID(name));
-  key.second.push_back(stableSignalKeyNameID(name));
+  const auto nameID = makeSyntheticSignalNameID(name);
+  key.first.push_back(nameID);
+  key.second.push_back(nameID);
   return key;
 }
 
