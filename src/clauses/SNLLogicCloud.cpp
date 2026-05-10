@@ -94,10 +94,10 @@ thread_local std::unordered_map<TruthTableKey, SNLTruthTable, TruthTableKeyHash>
 thread_local std::vector<uint32_t> expandedTableTermEpochs;
 thread_local uint32_t expandedTableTermEpoch = 1;
 thread_local std::unordered_map<naja::DNL::DNLID, naja::DNL::DNLID>
-    transparentLoopTargetCacheETS;
+    transparentLoopTargetCacheTL;
 thread_local std::unordered_set<naja::DNL::DNLID>
-    transparentLoopVisitedTermsETS;
-thread_local std::vector<naja::DNL::DNLID> loopTermsScratchETS;
+    transparentLoopVisitedTermsTL;
+thread_local std::vector<naja::DNL::DNLID> loopTermsScratchTL;
 
 ModelInputLayoutKey makeModelInputLayoutKey(const SNLDesign* model) {
   return ModelInputLayoutKey{model};
@@ -194,9 +194,9 @@ void refreshPerDnlCaches(const DNLFull& dnl) {
   truthTableCache.clear();
   expandedTableTermEpochs.clear();
   expandedTableTermEpoch = 1;
-  transparentLoopTargetCacheETS.clear();
-  transparentLoopVisitedTermsETS.clear();
-  loopTermsScratchETS.clear();
+  transparentLoopTargetCacheTL.clear();
+  transparentLoopVisitedTermsTL.clear();
+  loopTermsScratchTL.clear();
   lastDnlContextSignature = currentSignature;
 }
 
@@ -478,67 +478,67 @@ void reportCloudSkippedRoot(const DNLFull* dnl,
 typedef std::pair<
     std::vector<naja::DNL::DNLID, tbb::tbb_allocator<naja::DNL::DNLID>>,
     size_t>
-    IterationInputsETSPair;
+    IterationInputsTLPair;
 
-thread_local IterationInputsETSPair currentIterationInputsETS;
+thread_local IterationInputsTLPair currentIterationInputsTL;
 
-IterationInputsETSPair& getCurrentIterationInputsETS() {
-  return currentIterationInputsETS;
+IterationInputsTLPair& getCurrentIterationInputsTL() {
+  return currentIterationInputsTL;
 }
 
-thread_local IterationInputsETSPair newIterationInputsETS;
+thread_local IterationInputsTLPair newIterationInputsTL;
 
-IterationInputsETSPair& getNewIterationInputsETS() {
-  return newIterationInputsETS;
+IterationInputsTLPair& getNewIterationInputsTL() {
+  return newIterationInputsTL;
 }
 
-void clearCurrentIterationInputsETS() {
-  auto& currentIterationInputs = getCurrentIterationInputsETS();
+void clearCurrentIterationInputsTL() {
+  auto& currentIterationInputs = getCurrentIterationInputsTL();
   currentIterationInputs.first.clear();
 }
 
-void pushBackCurrentIterationInputsETS(naja::DNL::DNLID input) {
-  auto& currentIterationInputs = getCurrentIterationInputsETS();
+void pushBackCurrentIterationInputsTL(naja::DNL::DNLID input) {
+  auto& currentIterationInputs = getCurrentIterationInputsTL();
   currentIterationInputs.first.emplace_back(input);
 }
 
-size_t sizeOfCurrentIterationInputsETS() {
-  return getCurrentIterationInputsETS().first.size();
+size_t sizeOfCurrentIterationInputsTL() {
+  return getCurrentIterationInputsTL().first.size();
 }
 
-void copyCurrentIterationInputsETS(std::vector<naja::DNL::DNLID, tbb::tbb_allocator<naja::DNL::DNLID>>& res) {
+void copyCurrentIterationInputsTL(std::vector<naja::DNL::DNLID, tbb::tbb_allocator<naja::DNL::DNLID>>& res) {
   res.clear();
-  auto& current = getCurrentIterationInputsETS();
+  auto& current = getCurrentIterationInputsTL();
   res = std::move(current.first);
 }
 
-void clearNewIterationInputsETS() {
-  auto& newIterationInputs = getNewIterationInputsETS();
+void clearNewIterationInputsTL() {
+  auto& newIterationInputs = getNewIterationInputsTL();
   newIterationInputs.first.clear();
 }
 
-void pushBackNewIterationInputsETS(naja::DNL::DNLID input) {
-  getNewIterationInputsETS().first.emplace_back(input);
+void pushBackNewIterationInputsTL(naja::DNL::DNLID input) {
+  getNewIterationInputsTL().first.emplace_back(input);
 }
 
-bool emptyNewIterationInputsETS() {
-  return getNewIterationInputsETS().first.empty();
+bool emptyNewIterationInputsTL() {
+  return getNewIterationInputsTL().first.empty();
 }
 
-size_t sizeOfNewIterationInputsETS() {
-  return getNewIterationInputsETS().first.size();
+size_t sizeOfNewIterationInputsTL() {
+  return getNewIterationInputsTL().first.size();
 }
 
-void copyNewIterationInputsETStoCurrent() {
-  auto& newIterationInputs = getNewIterationInputsETS();
-  auto& currentIterationInputs = getCurrentIterationInputsETS();
+void copyNewIterationInputsTLToCurrent() {
+  auto& newIterationInputs = getNewIterationInputsTL();
+  auto& currentIterationInputs = getCurrentIterationInputsTL();
   #ifdef DEBUG_CHECKS
   size_t newSize = newIterationInputs.first.size();
   #endif
   currentIterationInputs = std::move(newIterationInputs);
   #ifdef DEBUG_CHECKS
   assert(currentIterationInputs.first.size() == newSize &&
-         "copyNewIterationInputsETStoCurrent: size mismatch after copy");
+         "copyNewIterationInputsTLToCurrent: size mismatch after copy");
   #endif
 }
 
@@ -547,7 +547,7 @@ thread_local std::pair<
                 tbb::tbb_allocator<std::pair<naja::DNL::DNLID,
                                             naja::DNL::DNLID>>>,
     size_t>
-    inputsToMergeETS;
+    inputsToMergeTL;
 
 struct PairHash {
   size_t operator()(const std::pair<naja::DNL::DNLID,naja::DNL::DNLID>& p) const noexcept {
@@ -569,22 +569,22 @@ using HandledSet = std::unordered_set<
 std::pair<std::vector<std::pair<naja::DNL::DNLID, naja::DNL::DNLID>,
                       tbb::tbb_allocator<std::pair<naja::DNL::DNLID,
                                                   naja::DNL::DNLID>>>, size_t>&
-getInputsToMergeETS() {
-  return inputsToMergeETS;
+getInputsToMergeTL() {
+  return inputsToMergeTL;
 }
 
-void clearInputsToMergeETS() {
-  auto& inputsToMerge = getInputsToMergeETS();
+void clearInputsToMergeTL() {
+  auto& inputsToMerge = getInputsToMergeTL();
   inputsToMerge.first.clear();
 }
 
-void pushBackInputsToMergeETS(
+void pushBackInputsToMergeTL(
     const std::pair<naja::DNL::DNLID, naja::DNL::DNLID>& input) {
-  getInputsToMergeETS().first.emplace_back(input);
+  getInputsToMergeTL().first.emplace_back(input);
 }
 
-size_t sizeOfInputsToMergeETS() {
-  return getInputsToMergeETS().first.size();
+size_t sizeOfInputsToMergeTL() {
+  return getInputsToMergeTL().first.size();
 }
 
 // 2 level vector visited terms pair - 1st: termID, 2nd: termID
@@ -599,20 +599,20 @@ typedef std::vector<
                                                  tbb::tbb_allocator<naja::DNL::DNLID>>>>
     VisitedTermsPairsVec;
 
-thread_local VisitedTermsPairsVec visitedTermsPairsETS;
-thread_local HandledSet visitedTermsPairsETSSet;
+thread_local VisitedTermsPairsVec visitedTermsPairsTL;
+thread_local HandledSet visitedTermsPairsTLSet;
 
-void clearVisitedTermsPairsETS() {
-  visitedTermsPairsETSSet.clear();
+void clearVisitedTermsPairsTL() {
+  visitedTermsPairsTLSet.clear();
 }
 
-thread_local std::pair<naja::DNL::DNLID, naja::DNL::DNLID> tempPairETS;
+thread_local std::pair<naja::DNL::DNLID, naja::DNL::DNLID> tempPairTL;
 
-bool isPairVisitedETS(naja::DNL::DNLID termA,
+bool isPairVisitedTL(naja::DNL::DNLID termA,
                               naja::DNL::DNLID termB) {
-  tempPairETS.first = termA;
-  tempPairETS.second = termB;
-  if (!(visitedTermsPairsETSSet.insert(tempPairETS)).second) {
+  tempPairTL.first = termA;
+  tempPairTL.second = termB;
+  if (!(visitedTermsPairsTLSet.insert(tempPairTL)).second) {
     return true;
   }
   return false;
@@ -628,11 +628,11 @@ bool SNLLogicCloud::isOutput(naja::DNL::DNLID termID) {
 
 void SNLLogicCloud::compute() {
   refreshPerDnlCaches(dnl_);
-  clearNewIterationInputsETS();
-  clearCurrentIterationInputsETS();
-  auto& currentIterationInputs = getCurrentIterationInputsETS().first;
-  auto& newIterationInputs = getNewIterationInputsETS().first;
-  auto& inputsToMerge = getInputsToMergeETS().first;
+  clearNewIterationInputsTL();
+  clearCurrentIterationInputsTL();
+  auto& currentIterationInputs = getCurrentIterationInputsTL().first;
+  auto& newIterationInputs = getNewIterationInputsTL().first;
+  auto& inputsToMerge = getInputsToMergeTL().first;
   auto getTruthTableCountCached = [&](const SNLDesign* model) {
     const TruthTableKey key{model, InvalidFlatTermID};
     auto it = truthTableCountCache.find(key);
@@ -730,7 +730,7 @@ void SNLLogicCloud::compute() {
   };
   auto appendMergeListDetailed = [&](std::ostringstream& out,
                                      size_t limit = 24) {
-    const auto& merges = getInputsToMergeETS().first;
+    const auto& merges = getInputsToMergeTL().first;
     const size_t capped = std::min(merges.size(), limit);
     for (size_t i = 0; i < capped; ++i) {
       out << "#" << i << "{inst=" << merges[i].first
@@ -749,11 +749,11 @@ void SNLLogicCloud::compute() {
   auto buildIterationSnapshot = [&](size_t iter) {
     std::ostringstream snapshot;
     snapshot << "iter " << iter << ": current_inputs=[";
-    appendTermList(snapshot, getCurrentIterationInputsETS().first);
+    appendTermList(snapshot, getCurrentIterationInputsTL().first);
     snapshot << "] inputs_to_merge=[";
     appendMergeListDetailed(snapshot);
     snapshot << "] next_inputs=[";
-    appendTermList(snapshot, getNewIterationInputsETS().first);
+    appendTermList(snapshot, getNewIterationInputsTL().first);
     snapshot << "]";
     return snapshot.str();
   };
@@ -903,8 +903,8 @@ void SNLLogicCloud::compute() {
   };
   // LCOV_EXCL_START
   auto throwIfFrontierMismatch = [&](size_t iter) {
-    const size_t currentCount = sizeOfCurrentIterationInputsETS();
-    const size_t mergeCount = sizeOfInputsToMergeETS();
+    const size_t currentCount = sizeOfCurrentIterationInputsTL();
+    const size_t mergeCount = sizeOfInputsToMergeTL();
     const size_t borderCount = table_.getBorderLeavesSize();
     if (currentCount == borderCount && mergeCount == borderCount) {
       return;
@@ -913,7 +913,7 @@ void SNLLogicCloud::compute() {
     constexpr size_t kMaxEntries = 24;
     auto appendInputList = [&](std::ostringstream& error) {
       error << " current_inputs=[";
-      const auto& current = getCurrentIterationInputsETS().first;
+      const auto& current = getCurrentIterationInputsTL().first;
       const size_t limit = std::min(current.size(), kMaxEntries);
       for (size_t i = 0; i < limit; ++i) {
         const auto input = current[i];
@@ -936,7 +936,7 @@ void SNLLogicCloud::compute() {
     };
     auto appendMergeList = [&](std::ostringstream& error) {
       error << " inputs_to_merge=[";
-      const auto& merges = getInputsToMergeETS().first;
+      const auto& merges = getInputsToMergeTL().first;
       const size_t limit = std::min(merges.size(), kMaxEntries);
       for (size_t i = 0; i < limit; ++i) {
         error << "#" << i << "{inst=" << merges[i].first
@@ -952,7 +952,7 @@ void SNLLogicCloud::compute() {
     };
     auto appendDuplicateMergeTerms = [&](std::ostringstream& error) {
       std::map<naja::DNL::DNLID, size_t> counts;
-      for (const auto& merge : getInputsToMergeETS().first) {
+      for (const auto& merge : getInputsToMergeTL().first) {
         ++counts[merge.second];
       }
       bool emitted = false;
@@ -981,7 +981,7 @@ void SNLLogicCloud::compute() {
     };
     auto appendDuplicateCurrentInputs = [&](std::ostringstream& error) {
       std::map<naja::DNL::DNLID, size_t> counts;
-      for (const auto input : getCurrentIterationInputsETS().first) {
+      for (const auto input : getCurrentIterationInputsTL().first) {
         ++counts[input];
       }
       bool emitted = false;
@@ -1031,7 +1031,7 @@ void SNLLogicCloud::compute() {
     throw std::runtime_error(error.str());
   };
   auto throwIfNextFrontierMismatch = [&](size_t iter) {
-    const size_t nextCount = sizeOfNewIterationInputsETS();
+    const size_t nextCount = sizeOfNewIterationInputsTL();
     const size_t borderCount = table_.getBorderLeavesSize();
     if (nextCount == borderCount) {
       return;
@@ -1043,7 +1043,7 @@ void SNLLogicCloud::compute() {
           << ", border_leaves=" << borderCount;
 
     error << " next_inputs=[";
-    const auto& nextInputs = getNewIterationInputsETS().first;
+    const auto& nextInputs = getNewIterationInputsTL().first;
     const size_t nextLimit = std::min(nextInputs.size(), kMaxEntries);
     for (size_t i = 0; i < nextLimit; ++i) {
       const auto input = nextInputs[i];
@@ -1065,7 +1065,7 @@ void SNLLogicCloud::compute() {
     error << "]";
 
     error << " from_current_inputs=[";
-    const auto& current = getCurrentIterationInputsETS().first;
+    const auto& current = getCurrentIterationInputsTL().first;
     const size_t currentLimit = std::min(current.size(), kMaxEntries);
     for (size_t i = 0; i < currentLimit; ++i) {
       error << "#" << i << "{" << formatTermName(current[i]) << "}";
@@ -1079,7 +1079,7 @@ void SNLLogicCloud::compute() {
     error << "]";
 
     error << " from_inputs_to_merge=[";
-    const auto& merges = getInputsToMergeETS().first;
+    const auto& merges = getInputsToMergeTL().first;
     const size_t mergeLimit = std::min(merges.size(), kMaxEntries);
     for (size_t i = 0; i < mergeLimit; ++i) {
       error << "#" << i << "{inst=" << merges[i].first
@@ -1187,7 +1187,7 @@ void SNLLogicCloud::compute() {
 	    std::ostringstream seedInfo;
 	    seedInfo << "seed_output={" << formatTermName(seedOutputTerm_) << "}"
 	             << " initial_inputs=[";
-	    appendTermList(seedInfo, getNewIterationInputsETS().first);
+	    appendTermList(seedInfo, getNewIterationInputsTL().first);
 	    seedInfo << "]";
 	    frontierHistory.emplace_back(seedInfo.str());
 	  }
@@ -1207,16 +1207,16 @@ void SNLLogicCloud::compute() {
 
   // HandledSet handledTerms;
   // handledTerms.reserve(naja::DNL::get()->getDNLTerms().size() / 4);
-  clearVisitedTermsPairsETS();
+  clearVisitedTermsPairsTL();
   size_t iter = 0;
-  auto& transparentLoopTargetCache = transparentLoopTargetCacheETS;
+  auto& transparentLoopTargetCache = transparentLoopTargetCacheTL;
   transparentLoopTargetCache.clear();
   auto resolveTransparentLoopTarget = [&](naja::DNL::DNLID termID) {
     const auto cachedIt = transparentLoopTargetCache.find(termID);
     if (cachedIt != transparentLoopTargetCache.end()) {
       return cachedIt->second;
     }
-    auto& visitedTerms = transparentLoopVisitedTermsETS;
+    auto& visitedTerms = transparentLoopVisitedTermsTL;
     visitedTerms.clear();
     naja::DNL::DNLID currentTermID = termID;
     while (currentTermID != naja::DNL::DNLID_MAX &&
@@ -1280,12 +1280,12 @@ void SNLLogicCloud::compute() {
     DEBUG_LOG("---iter %lu---\n", iter);
     DEBUG_LOG("Current iteration inputs size: %zu\n",
               newIterationInputs.size());
-    copyNewIterationInputsETStoCurrent();
+    copyNewIterationInputsTLToCurrent();
 
-    clearNewIterationInputsETS();
+    clearNewIterationInputsTL();
     DEBUG_LOG("table size: %zu, currentIterationInputs_ size: %zu\n",
               table_.size(), currentIterationInputs.size());
-    clearInputsToMergeETS();
+    clearInputsToMergeTL();
     const uint32_t expandedTableTermEpochThisIteration =
         nextExpandedTableTermEpoch();
     size_t sizeOfCurrentInputs = currentIterationInputs.size();
@@ -1505,8 +1505,8 @@ void SNLLogicCloud::compute() {
               inputsToMerge.size());
     throwIfFrontierMismatch(iter);
     {
-      const auto& merges = getInputsToMergeETS().first;
-      const auto& currentInputs = getCurrentIterationInputsETS().first;
+      const auto& merges = getInputsToMergeTL().first;
+      const auto& currentInputs = getCurrentIterationInputsTL().first;
       for (size_t i = 0; i < merges.size(); ++i) {
         if (merges[i].first == naja::DNL::DNLID_MAX) {
           continue;
@@ -1524,7 +1524,7 @@ void SNLLogicCloud::compute() {
             continue;
           }
         }
-        auto& loopTerms = loopTermsScratchETS;
+        auto& loopTerms = loopTermsScratchTL;
         loopTerms.clear();
         // Normal cloud expansion must stay conservative: if this merge would
         // reconnect to any transparent alias already above the border leaf, the
@@ -1556,11 +1556,11 @@ void SNLLogicCloud::compute() {
     iter++;
   }
 
-  copyNewIterationInputsETStoCurrent();
+  copyNewIterationInputsTLToCurrent();
   #ifdef DEBUG_CHECKS
   size_t finalSize = currentIterationInputs.size();
   #endif
-  copyCurrentIterationInputsETS(currentIterationInputs_);
+  copyCurrentIterationInputsTL(currentIterationInputs_);
   #ifdef DEBUG_CHECKS
   assert(finalSize == currentIterationInputs_.size() &&
          "compute: size mismatch after final copy");
