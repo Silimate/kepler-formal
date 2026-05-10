@@ -339,11 +339,11 @@ const char* kSkippedMultiDriverPOReport = "skipped_multi_driver_pos.txt";
 const char* kSkippedNoDriverPOReport = "skipped_no_driver_pos.txt";
 const char* kSkippedLogicalLoopPOReport = "skipped_logical_loop_pos.txt";
 
-	void initializeSkippedPOReportFiles() {
-	  static std::once_flag once;
-	  if (!shouldReportSkippedPOs()) {
-	    return; // LCOV_EXCL_LINE
-	  }
+void initializeSkippedPOReportFiles() {
+  static std::once_flag once;
+  if (!shouldReportSkippedPOs()) {
+    return; // LCOV_EXCL_LINE
+  }
   std::call_once(once, []() {
     std::ofstream(kSkippedMultiDriverPOReport, std::ios::trunc);
     std::ofstream(kSkippedNoDriverPOReport, std::ios::trunc);
@@ -352,10 +352,10 @@ const char* kSkippedLogicalLoopPOReport = "skipped_logical_loop_pos.txt";
 }
 
 DNLID getReportIsoID(const DNLFull* dnl, DNLID currentInput, DNLID mergeTerm) {
-	  auto getIsoID = [&](DNLID termID) -> DNLID {
-	    if (termID == DNLID_MAX) {
-	      return DNLID_MAX; // LCOV_EXCL_LINE
-	    }
+  auto getIsoID = [&](DNLID termID) -> DNLID {
+    if (termID == DNLID_MAX) {
+      return DNLID_MAX; // LCOV_EXCL_LINE
+    }
     return dnl->getDNLTerminalFromID(termID).getIsoID();
   };
 
@@ -417,11 +417,11 @@ std::string getSnlModelName(const DNLTerminalFull& term) {
   return design ? design->getName().getString() : "<unknown>";
 }
 
-	void appendCloudTermName(std::ostream& out, const DNLFull* dnl, DNLID termID) {
-	  if (termID == DNLID_MAX) {
-	    out << "<invalid>"; // LCOV_EXCL_LINE
-	    return; // LCOV_EXCL_LINE
-	  }
+void appendCloudTermName(std::ostream& out, const DNLFull* dnl, DNLID termID) {
+  if (termID == DNLID_MAX) {
+    out << "<invalid>"; // LCOV_EXCL_LINE
+    return; // LCOV_EXCL_LINE
+  }
   const auto& term = dnl->getDNLTerminalFromID(termID);
   if (term.getDNLInstance().getSNLModel()) {
     out << term.getDNLInstance().getSNLModel()->getName().getString() << ":";
@@ -455,17 +455,17 @@ void appendTermsToReport(std::ostream& out,
   out << "]";
 }
 
-	void appendIsoDetailsToReport(std::ostream& out,
-	                              const DNLFull* dnl,
-	                              DNLID termID,
-	                              const char* label) {
-	  if (termID == DNLID_MAX) {
-	    return; // LCOV_EXCL_LINE
-	  }
-	  const auto& term = dnl->getDNLTerminalFromID(termID);
-	  if (term.getIsoID() == DNLID_MAX) {
-	    return; // LCOV_EXCL_LINE
-	  }
+void appendIsoDetailsToReport(std::ostream& out,
+                              const DNLFull* dnl,
+                              DNLID termID,
+                              const char* label) {
+  if (termID == DNLID_MAX) {
+    return; // LCOV_EXCL_LINE
+  }
+  const auto& term = dnl->getDNLTerminalFromID(termID);
+  if (term.getIsoID() == DNLID_MAX) {
+    return; // LCOV_EXCL_LINE
+  }
   const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID());
   out << " " << label << "_iso=" << term.getIsoID() << " ";
   appendTermsToReport(out, dnl, "readers", iso.getReaders());
@@ -1182,12 +1182,12 @@ void SNLLogicCloud::compute() {
       return;
     }
     throwIfTruthTableArityMismatch(driver);
-	    DEBUG_LOG("Instance name: %s\n",
-	              inst.getSNLInstance()->getName().getString().c_str());
-	    appendRelevantInstanceInputs(driver, newIterationInputs);
-	    DEBUG_LOG("model name: %s\n",
-	              inst.getSNLModel()->getName().getString().c_str());
-	    table_ = SNLTruthTableTree(inst.getID(), driver);
+    DEBUG_LOG("Instance name: %s\n",
+              inst.getSNLInstance()->getName().getString().c_str());
+    appendRelevantInstanceInputs(driver, newIterationInputs);
+    DEBUG_LOG("model name: %s\n",
+              inst.getSNLModel()->getName().getString().c_str());
+    table_ = SNLTruthTableTree(inst.getID(), driver);
     auto* model = inst.getSNLModel();
     assert(SNLDesignModeling::getTruthTable(model, 
                 dnl_.getDNLTerminalFromID(driver).getSnlBitTerm()->getOrderID())
@@ -1218,16 +1218,16 @@ void SNLLogicCloud::compute() {
     DEBUG_LOG("No inputs found for seed output term %zu\n", seedOutputTerm_);
     return;
   }
-	  // LCOV_EXCL_START
-	  if (captureFrontierHistory) {
-	    std::ostringstream seedInfo;
-	    seedInfo << "seed_output={" << formatTermName(seedOutputTerm_) << "}"
-	             << " initial_inputs=[";
-	    appendTermList(seedInfo, getNewIterationInputsTL().first);
-	    seedInfo << "]";
-	    frontierHistory.emplace_back(seedInfo.str());
-	  }
-	  // LCOV_EXCL_STOP
+  // LCOV_EXCL_START
+  if (captureFrontierHistory) {
+    std::ostringstream seedInfo;
+    seedInfo << "seed_output={" << formatTermName(seedOutputTerm_) << "}"
+             << " initial_inputs=[";
+    appendTermList(seedInfo, getNewIterationInputsTL().first);
+    seedInfo << "]";
+    frontierHistory.emplace_back(seedInfo.str());
+  }
+  // LCOV_EXCL_STOP
 
   bool reachedPIs = true;
   size_t size = newIterationInputs.size();
@@ -1333,12 +1333,12 @@ void SNLLogicCloud::compute() {
           table_ = SNLTruthTableTree();
           return;
         }
-	        // LCOV_EXCL_START
-	        newIterationInputs.emplace_back(input);
-	        inputsToMerge.emplace_back(naja::DNL::DNLID_MAX,
-	                                   input);  // Placeholder for PI/PO
-	        continue;
-	        // LCOV_EXCL_STOP
+        // LCOV_EXCL_START
+        newIterationInputs.emplace_back(input);
+        inputsToMerge.emplace_back(naja::DNL::DNLID_MAX,
+                                   input);  // Placeholder for PI/PO
+        continue;
+        // LCOV_EXCL_STOP
       }
       const auto& driver = iso.getDrivers().front();
       
@@ -1464,11 +1464,11 @@ void SNLLogicCloud::compute() {
     }
     table_.concatFull(inputsToMerge, inputsToMerge.size());
     throwIfNextFrontierMismatch(iter, frontierHistory);
-	    // LCOV_EXCL_START
-	    if (captureFrontierHistory) {
-	      frontierHistory.emplace_back(buildIterationSnapshot(iter));
-	    }
-	    // LCOV_EXCL_STOP
+    // LCOV_EXCL_START
+    if (captureFrontierHistory) {
+      frontierHistory.emplace_back(buildIterationSnapshot(iter));
+    }
+    // LCOV_EXCL_STOP
     DEBUG_LOG("--- End of iteration %zu\n", iter);
     iter++;
   }
@@ -1506,23 +1506,23 @@ void SNLLogicCloud::flushSkippedPOReports() {
            static_cast<uint64_t>(isoID);
   };
 
-	  for (auto* eventsPtr : skippedPOReportEventsETS) {
-	    if (eventsPtr == nullptr) {
-	      continue; // LCOV_EXCL_LINE
-	    }
+  for (auto* eventsPtr : skippedPOReportEventsETS) {
+    if (eventsPtr == nullptr) {
+      continue; // LCOV_EXCL_LINE
+    }
     auto& events = *eventsPtr;
     for (const auto& event : events) {
       std::ostream* out = &logicalLoopOut;
       const std::string_view reportFile(event.reportFile);
-	      if (reportFile == std::string_view(kSkippedMultiDriverPOReport)) {
-	        out = &multiDriverOut; // LCOV_EXCL_LINE
-	      } else if (reportFile == std::string_view(kSkippedNoDriverPOReport)) {
-	        out = &noDriverOut;
-	      }
+      if (reportFile == std::string_view(kSkippedMultiDriverPOReport)) {
+        out = &multiDriverOut; // LCOV_EXCL_LINE
+      } else if (reportFile == std::string_view(kSkippedNoDriverPOReport)) {
+        out = &noDriverOut;
+      }
 
-	      if (!(*out)) {
-	        continue; // LCOV_EXCL_LINE
-	      }
+      if (!(*out)) {
+        continue; // LCOV_EXCL_LINE
+      }
 
       const bool isFirstForIso =
           event.reportIsoID == DNLID_MAX ||
@@ -1534,16 +1534,16 @@ void SNLLogicCloud::flushSkippedPOReports() {
       if (event.reportIsoID != DNLID_MAX) {
         *out << ". iso=" << event.reportIsoID;
       }
-	      if (!isFirstForIso) {
-	        // LCOV_EXCL_START
-	        if (event.reportIsoID != DNLID_MAX) {
-	          *out << ". See first encounter of iso=" << event.reportIsoID
-	               << " for details";
-	        }
-	        *out << "\n\n";
-	        continue;
-	        // LCOV_EXCL_STOP
-	      }
+      if (!isFirstForIso) {
+        // LCOV_EXCL_START
+        if (event.reportIsoID != DNLID_MAX) {
+          *out << ". See first encounter of iso=" << event.reportIsoID
+               << " for details";
+        }
+        *out << "\n\n";
+        continue;
+        // LCOV_EXCL_STOP
+      }
 
       *out << ". current_input=";
       appendCloudTermName(*out, event.dnl, event.currentInput);
