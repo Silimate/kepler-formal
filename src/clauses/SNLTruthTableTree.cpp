@@ -415,21 +415,6 @@ uint32_t SNLTruthTableTree::allocateNode(std::shared_ptr<Node>& np) {
   return id;
 }
 
-uint32_t SNLTruthTableTree::allocateFreshNode(std::shared_ptr<Node>& np) {  // LCOV_EXCL_LINE
-  if (!np) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
-    throw std::invalid_argument("allocateFreshNode: null");
-    // LCOV_EXCL_STOP
-  }
-
-  clearAncestorPathCache();  // LCOV_EXCL_LINE
-  const uint32_t id = static_cast<uint32_t>(nodes_.size()) + kIdOffset;  // LCOV_EXCL_LINE
-  np->nodeID = id;  // LCOV_EXCL_LINE
-  np->tree = this;  // LCOV_EXCL_LINE
-  nodes_.emplace_back(np);  // LCOV_EXCL_LINE
-  return id;  // LCOV_EXCL_LINE
-}  // LCOV_EXCL_LINE
-
 //----------------------------------------------------------------------
 // updateBorderLeaves
 //----------------------------------------------------------------------
@@ -675,20 +660,6 @@ bool SNLTruthTableTree::hasTableTerm(naja::DNL::DNLID termid) const {
   return termid2nodeid_.find(termid) != termid2nodeid_.end();
 }
 
-bool SNLTruthTableTree::willCloneTableTermForBorderLeaf(
-    size_t borderIndex,
-    naja::DNL::DNLID termid) const {
-  if (borderIndex >= borderLeaves_.size()) {
-    return false;  // LCOV_EXCL_LINE
-  }
-  const auto termIt = termid2nodeid_.find(termid);
-  if (termIt == termid2nodeid_.end()) {
-    return false;
-  }
-  const uint32_t startId = borderLeaves_[borderIndex].parentId;
-  return isNodeOnParentPath(startId, termIt->second);
-}
-
 //----------------------------------------------------------------------
 // concatBody
 //----------------------------------------------------------------------
@@ -715,63 +686,49 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
 
   uint32_t arity = 1;
   std::shared_ptr<Node> newNodeSp;
-  bool forceFreshTableNode = false;
   if (instid != naja::DNL::DNLID_MAX) {
     auto iter = termid2nodeid_.find(termid);
     if (iter != termid2nodeid_.end()) {
-      if (allowAncestorTableNodeClones_ &&
-          willCloneTableTermForBorderLeaf(borderIndex, termid)) {  // LCOV_EXCL_LINE
-        // This term is already on the path from the current leaf to the root.
-        // Reusing the canonical node here would make the tree cyclic even when
-        // the netlist path is only a transparent alias of the same expression.
-        // Clone the table node for this occurrence and keep the canonical map
-        // pointing at the original node for ordinary reconvergence elsewhere.
-        forceFreshTableNode = true;  // LCOV_EXCL_LINE
-        arity = nodeFromId(iter->second)->getTruthTable().size();  // LCOV_EXCL_LINE
-      } else {  // LCOV_EXCL_LINE
-        DEBUG_LOG(
-            "###@@@@concat: node for termid %zu %s %s already exists, "
-            "reusing\n",
-            termid,
-            naja::DNL::get()
-                ->getDNLTerminalFromID(termid)
-                .getSnlBitTerm()
-                ->getName()
-                .getString()
-                .c_str(),
-            naja::DNL::get()
-                ->getDNLTerminalFromID(termid)
-                .getDNLInstance()
-                .getSNLModel()
-                ->getName()
-                .getString()
-                .c_str());
-        // node exist, just connect it to the new parent, but leave the child
-        // connections intact
-        newNodeSp = nodeFromId(iter->second);
-        assert(newNodeSp->type == Node::Type::Table);
-        newNodeSp->parentIds.emplace_back(parentId);
-        clearAncestorPathCache();
-        parentSp->childrenIds[leaf.childPos] = newNodeSp->nodeID;
-        if (newNodeSp->childrenIds.size() == 0) {
-          // LCOV_EXCL_START
-          throw std::logic_error("concat: existing node has no children");
-          // LCOV_EXCL_STOP
-        }
-        return *newNodeSp;
+      DEBUG_LOG(
+          "###@@@@concat: node for termid %zu %s %s already exists, "
+          "reusing\n",
+          termid,
+          naja::DNL::get()
+              ->getDNLTerminalFromID(termid)
+              .getSnlBitTerm()
+              ->getName()
+              .getString()
+              .c_str(),
+          naja::DNL::get()
+              ->getDNLTerminalFromID(termid)
+              .getDNLInstance()
+              .getSNLModel()
+              ->getName()
+              .getString()
+              .c_str());
+      // Reuse ordinary reconvergent table nodes. Real ancestor re-entry is
+      // checked before concatFull by SNLLogicCloud and reported as a logical
+      // loop, so concatBody does not carry a hidden clone escape hatch.
+      newNodeSp = nodeFromId(iter->second);
+      assert(newNodeSp->type == Node::Type::Table);
+      newNodeSp->parentIds.emplace_back(parentId);
+      clearAncestorPathCache();
+      parentSp->childrenIds[leaf.childPos] = newNodeSp->nodeID;
+      if (newNodeSp->childrenIds.size() == 0) {
+        // LCOV_EXCL_START
+        throw std::logic_error("concat: existing node has no children");
+        // LCOV_EXCL_STOP
       }
-    }  // LCOV_EXCL_LINE
-    newNodeSp = std::make_shared<Node>(this, instid, termid, Node::Type::Table);
-    if (!forceFreshTableNode) {
-      arity = newNodeSp->getTruthTable().size();
+      return *newNodeSp;
     }
+    newNodeSp = std::make_shared<Node>(this, instid, termid, Node::Type::Table);
+    arity = newNodeSp->getTruthTable().size();
   } else {
     arity = 1;
     newNodeSp = std::make_shared<Node>(this, instid, termid, Node::Type::P);
   }
 
-  uint32_t newNodeId = forceFreshTableNode ? allocateFreshNode(newNodeSp)
-                                           : allocateNode(newNodeSp);
+  uint32_t newNodeId = allocateNode(newNodeSp);
 
   // Connecting children, skipped if node already existed
 

@@ -55,8 +55,11 @@ public:
       std::shared_ptr<const SNLTruthTable> sharedTruthTable;
     };
 
-    // group 32-bit scalars first
+  // group 32-bit scalars first
   uint32_t nodeID   = std::numeric_limits<uint32_t>::max();
+  // Per-search visited marker for ancestor/path queries. It is mutable because
+  // those queries are logically const, but they stamp nodes with the current
+  // epoch to avoid allocating and clearing a visited set on every lookup.
   mutable uint32_t ancestorVisitEpoch = 0;
   std::vector<uint32_t, tbb::tbb_allocator<uint32_t>> parentIds; // for multiple parents support
 
@@ -131,15 +134,9 @@ public:
       naja::DNL::DNLID termid,
       std::vector<naja::DNL::DNLID>& loopTerms) const;
   bool hasTableTerm(naja::DNL::DNLID termid) const;
-  bool willCloneTableTermForBorderLeaf(size_t borderIndex,
-                                       naja::DNL::DNLID termid) const;
-  void setAllowAncestorTableNodeClones(bool allow) {
-    allowAncestorTableNodeClones_ = allow;
-  }
 
   // allocateNode guarantees id assignment before publishing node in nodes_
   uint32_t allocateNode(std::shared_ptr<Node>& np);
-  uint32_t allocateFreshNode(std::shared_ptr<Node>& np);
 
   // finalize repairs and validates the tree; must be called once after build and before traversal
   // It will remap children/parent ids to canonical ids and throw on unresolved references
@@ -189,7 +186,6 @@ private:
   std::unordered_map<naja::DNL::DNLID, uint32_t> termid2nodeid_;
   mutable uint32_t ancestorSearchEpoch_ = 0;
   mutable std::unordered_map<uint64_t, bool> ancestorPathCache_;
-  bool allowAncestorTableNodeClones_ = false;
 };
 
 } // namespace KEPLER_FORMAL

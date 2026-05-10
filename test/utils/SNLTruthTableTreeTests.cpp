@@ -265,16 +265,6 @@ TEST(SNLTruthTableTreeApiTest, FindAncestorLoopRejectsOutOfRangeBorderIndex) {
   EXPECT_TRUE(loopTerms.empty());
 }
 
-TEST(SNLTruthTableTreeApiTest, WillCloneTableTermRejectsInvalidBorderAndUnknownTerm) {
-  SNLTruthTableTree emptyTree;
-  EXPECT_FALSE(emptyTree.willCloneTableTermForBorderLeaf(0, 42));
-
-  SNLTruthTableTree tree(0, 0, Node::Type::P);
-  ASSERT_GT(tree.getBorderLeavesSize(), 0u);
-  EXPECT_FALSE(tree.hasTableTerm(42));
-  EXPECT_FALSE(tree.willCloneTableTermForBorderLeaf(0, 42));
-}
-
 static std::shared_ptr<Node> makeManualTableNode(
     SNLTruthTableTree& tree,
     naja::DNL::DNLID termID,
@@ -294,15 +284,16 @@ TEST(SNLTruthTableTreeApiTest,
 
   auto disconnected = makeManualTableNode(tree, 99);
   tree.allocateNode(disconnected);
-  EXPECT_FALSE(tree.willCloneTableTermForBorderLeaf(0, 99));
+  std::vector<naja::DNL::DNLID> loopTerms;
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 99, loopTerms));
 
   auto target = makeManualTableNode(tree, 100);
   const uint32_t targetId = tree.allocateNode(target);
   tree.getRoot()->parentIds.emplace_back(targetId);
 
   EXPECT_TRUE(tree.hasTableTerm(100));
-  EXPECT_TRUE(tree.willCloneTableTermForBorderLeaf(0, 100));
-  EXPECT_TRUE(tree.willCloneTableTermForBorderLeaf(0, 100));
+  EXPECT_TRUE(tree.findAncestorLoopForBorderLeaf(0, 100, loopTerms));
+  EXPECT_TRUE(tree.findAncestorLoopForBorderLeaf(0, 100, loopTerms));
 
   auto duplicate = makeManualTableNode(tree, 100);
   EXPECT_EQ(tree.allocateNode(duplicate), targetId);
@@ -340,12 +331,10 @@ TEST(SNLTruthTableTreeApiTest,
   EXPECT_FALSE(loopTerms.empty());
   EXPECT_EQ(loopTerms.front(), 200u);
   EXPECT_EQ(loopTerms.back(), 200u);
-  EXPECT_TRUE(tree.willCloneTableTermForBorderLeaf(0, 200));
 
   std::vector<naja::DNL::DNLID> absentLoopTerms;
   EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 203, absentLoopTerms));
   EXPECT_TRUE(absentLoopTerms.empty());
-  EXPECT_FALSE(tree.willCloneTableTermForBorderLeaf(0, 203));
 }
 
 TEST(SNLTruthTableTreeApiTest,
@@ -365,7 +354,8 @@ TEST(SNLTruthTableTreeApiTest,
   root->parentIds.clear();
   root->parentIds.emplace_back(repeatedId);
   root->parentIds.emplace_back(repeatedId);
-  EXPECT_FALSE(tree.willCloneTableTermForBorderLeaf(0, 302));
+  std::vector<naja::DNL::DNLID> absentLoopTerms;
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 302, absentLoopTerms));
 
   root->parentIds.clear();
   root->parentIds.emplace_back(SNLTruthTableTree::kInvalidId);
