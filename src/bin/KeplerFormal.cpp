@@ -44,13 +44,13 @@ static const char* kBoundaryTermsReport = "boundary_terms.txt";
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
-      "[-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|K_INDUCTION|IMC|PDR>] <netlist1> <netlist2> [<library-file>...] | "
+      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|K_INDUCTION|IMC|PDR>] "
+      "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
-      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|K_INDUCTION|IMC|PDR>] "
+      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] "
       "[--design1 <file...>] [--design2 <file...>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
@@ -82,36 +82,28 @@ enum class VerificationMode {
   SEC,
 };
 
-static std::string toUpperCopy(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-    return static_cast<char>(std::toupper(ch));
-  });
-  return value;
-}
-
 static bool parseVerificationModeToken(const std::string& token,
                                        VerificationMode& mode,
                                        std::string& error) {
-  const std::string normalized = toUpperCopy(token);
-  if (normalized == "LEC") {
+  if (token == "lec") {
     mode = VerificationMode::LEC;
     return true;
   }
-  if (normalized == "SEC") {
+  if (token == "sec") {
     mode = VerificationMode::SEC;
     return true;
   }
-  error = "expected LEC or SEC, got `" + token + "`";
+  error = "expected lec or sec, got `" + token + "`";
   return false;
 }
 
 static const char* verificationModeName(VerificationMode mode) {
   switch (mode) {
     case VerificationMode::SEC:
-      return "SEC";
+      return "sec";
     case VerificationMode::LEC:
     default:
-      return "LEC";
+      return "lec";
   }
 }
 
@@ -120,38 +112,37 @@ static bool parseSecEngineToken(const std::string& token,
                                 std::string& error) {
   // Keep the binary-level selector intentionally small for now so the
   // user-facing SEC modes stay explicit and predictable.
-  const std::string normalized = toUpperCopy(token);
-  if (normalized == "LEGACY") {
+  if (token == "legacy") {
     engine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
     return true;
   }
-  if (normalized == "K_INDUCTION") {
+  if (token == "k_induction") {
     engine = KEPLER_FORMAL::SEC::SecEngine::KInduction;
     return true;
   }
-  if (normalized == "IMC") {
+  if (token == "imc") {
     engine = KEPLER_FORMAL::SEC::SecEngine::Imc;
     return true;
   }
-  if (normalized == "PDR") {
+  if (token == "pdr") {
     engine = KEPLER_FORMAL::SEC::SecEngine::Pdr;
     return true;
   }
-  error = "expected LEGACY, K_INDUCTION, IMC, or PDR, got `" + token + "`";
+  error = "expected legacy, k_induction, imc, or pdr, got `" + token + "`";
   return false;
 }
 
 static const char* secEngineName(KEPLER_FORMAL::SEC::SecEngine engine) {
   switch (engine) {
     case KEPLER_FORMAL::SEC::SecEngine::KInduction:
-      return "K_INDUCTION";
+      return "k_induction";
     case KEPLER_FORMAL::SEC::SecEngine::Imc:
-      return "IMC";
+      return "imc";
     case KEPLER_FORMAL::SEC::SecEngine::Pdr:
-      return "PDR";
+      return "pdr";
     case KEPLER_FORMAL::SEC::SecEngine::Legacy:
     default:
-      return "LEGACY";
+      return "legacy";
   }
 }
 

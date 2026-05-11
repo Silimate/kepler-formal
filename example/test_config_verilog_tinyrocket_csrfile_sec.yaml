@@ -1,5 +1,5 @@
 format: verilog
-verification: SEC
+verification: sec
 max_k: 4
 input_paths:
   - [tinyrocket_csrfile.v, tinyrocket_csrfile_wrapper.v]

@@ -1647,7 +1647,7 @@ TEST(KeplerFormalCliTests, CliHelpPrintsUsage) {
 TEST(KeplerFormalCliTests, ConfigInvalidVerificationModeFails) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: BAD\n");
+      "verification: bad\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
 }
@@ -1655,8 +1655,8 @@ TEST(KeplerFormalCliTests, ConfigInvalidVerificationModeFails) {
 TEST(KeplerFormalCliTests, ConfigInvalidSecEngineFails) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: SEC\n"
-      "sec_engine: BAD\n");
+      "verification: sec\n"
+      "sec_engine: bad\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
 }
@@ -1664,9 +1664,9 @@ TEST(KeplerFormalCliTests, ConfigInvalidSecEngineFails) {
 TEST(KeplerFormalCliTests, ConfigSecEngineMustBeScalar) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "sec_engine:\n"
-      "  - PDR\n");
+      "  - pdr\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
 }
@@ -1679,7 +1679,7 @@ TEST(KeplerFormalCliTests, ConfigExplicitLecVerificationAccepted) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: LEC\n"
+      "verification: lec\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n");
@@ -1693,7 +1693,7 @@ TEST(KeplerFormalCliTests, ConfigVerificationMustBeScalar) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
       "verification:\n"
-      "  - SEC\n");
+      "  - sec\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
 }
@@ -1701,7 +1701,7 @@ TEST(KeplerFormalCliTests, ConfigVerificationMustBeScalar) {
 TEST(KeplerFormalCliTests, ConfigMaxKMustBeScalar) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k:\n"
       "  - 4\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
@@ -1711,7 +1711,7 @@ TEST(KeplerFormalCliTests, ConfigMaxKMustBeScalar) {
 TEST(KeplerFormalCliTests, ConfigSecBoundaryAbstractionMustBeScalar) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "sec_uncomputable_seq_as_boundary:\n"
       "  - false\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
@@ -1722,7 +1722,7 @@ TEST(KeplerFormalCliTests, ConfigInvalidMaxKTokenFails) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: nope\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1737,7 +1737,7 @@ TEST(KeplerFormalCliTests, ConfigEmptyMaxKTokenFails) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: \"\"\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1752,7 +1752,7 @@ TEST(KeplerFormalCliTests, ConfigOutOfRangeMaxKTokenFails) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 999999999999999999999999999999999999\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1788,8 +1788,8 @@ TEST(KeplerFormalCliTests, ConfigSecEngineWithoutSecFails) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: LEC\n"
-      "sec_engine: PDR\n"
+      "verification: lec\n"
+      "sec_engine: pdr\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n");
@@ -1803,7 +1803,7 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAccepted) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1818,8 +1818,8 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithPdrEngine) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
-      "sec_engine: PDR\n"
+      "verification: sec\n"
+      "sec_engine: pdr\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1834,8 +1834,8 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithLegacyEngine) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
-      "sec_engine: LEGACY\n"
+      "verification: sec\n"
+      "sec_engine: legacy\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1850,8 +1850,8 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithKInductionEngine) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
-      "sec_engine: K_INDUCTION\n"
+      "verification: sec\n"
+      "sec_engine: k_induction\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1866,8 +1866,8 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithImcEngine) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
-      "sec_engine: IMC\n"
+      "verification: sec\n"
+      "sec_engine: imc\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1883,7 +1883,7 @@ TEST(KeplerFormalCliTests,
   const auto fixture = createUncomputableSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1902,7 +1902,7 @@ TEST(KeplerFormalCliTests, ConfigSecUnsupportedMismatchLogUsesUnsupportedResult)
   const auto logPath = fixture.tmpDir / "sec_unsupported_mismatch.log";
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1926,7 +1926,7 @@ TEST(KeplerFormalCliTests,
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 2\n"
       "sec_uncomputable_seq_as_boundary: false\n"
       "input_paths:\n"
@@ -1944,7 +1944,7 @@ TEST(KeplerFormalCliTests, ConfigSecIgnoresRenamedInternalState) {
       createEquivalentSequentialNajaIfFixture("state_a", "state_b");
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1972,7 +1972,7 @@ TEST(KeplerFormalCliTests, ConfigSystemVerilogSecVerificationAccepted) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2001,7 +2001,7 @@ TEST(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesMode
   const auto logPath = fixture.tmpDir / "sv_sec_compact_identical.log";
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "compact_mode: true\n"
       "max_k: 4\n"
       "sv_design1_top: top\n"
@@ -2028,7 +2028,7 @@ TEST(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesMode
   }
   const auto flistCfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "compact_mode: true\n"
       "max_k: 4\n"
       "sv_design1_flist: " + flistPath.string() + "\n"
@@ -2092,7 +2092,7 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationWritesDefaultLog) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2108,7 +2108,7 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationWritesDefaultLog) {
     const auto logs = listMiterLogsInCurrentDirectory();
     ASSERT_EQ(logs.size(), 1u);
     const auto contents = readFileContents(runDir / logs.front());
-    EXPECT_NE(contents.find("Verification: SEC"), std::string::npos);
+    EXPECT_NE(contents.find("Verification: sec"), std::string::npos);
     EXPECT_NE(contents.find("SEC proved equivalence at k = 1"), std::string::npos);
   }
 
@@ -2140,7 +2140,7 @@ TEST(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
   const auto logPath = fixture.tmpDir / "sec_partial_coverage.log";
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2168,7 +2168,7 @@ TEST(KeplerFormalCliTests, ConfigSecDifferenceLogIncludesWitnessDetails) {
   const auto logPath = fixture.tmpDir / "sec_difference.log";
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2211,7 +2211,7 @@ TEST(KeplerFormalCliTests, ConfigTinyRocketSecVerificationAccepted) {
 
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 1\n"
       "input_paths:\n"
       "  - " + design.string() + "\n"
@@ -2230,7 +2230,7 @@ TEST(KeplerFormalCliTests, ConfigSecCompactModeAccepted) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "compact_mode: true\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2245,7 +2245,7 @@ TEST(KeplerFormalCliTests, ConfigSecCompactIdenticalInputReusesExtractedModel) {
   const auto logPath = fixture.tmpDir / "sec_compact_identical.log";
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "compact_mode: true\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2268,7 +2268,7 @@ TEST(KeplerFormalCliTests, ConfigSecRejectsScopeExtraction) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "use_scopes: true\n"
       "input_paths:\n"
@@ -2283,7 +2283,7 @@ TEST(KeplerFormalCliTests, ConfigSecRejectsCnfExport) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "cnf_export: true\n"
       "input_paths:\n"
@@ -2299,7 +2299,7 @@ TEST(KeplerFormalCliTests, ConfigSecAcceptsSkippedPoReporting) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "report_skipped_pos: true\n"
       "input_paths:\n"
@@ -2379,7 +2379,7 @@ TEST(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
   }
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "log_file: " + (blockedParent / "sec.log").string() + "\n"
       "input_paths:\n"
@@ -2409,7 +2409,7 @@ TEST(KeplerFormalCliTests, ConfigSecContinuesWhenLogFilePathIsDirectory) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 4\n"
       "log_file: " + fixture.tmpDir.string() + "\n"
       "input_paths:\n"
@@ -2426,7 +2426,7 @@ TEST(KeplerFormalCliTests, CliSecVerificationAcceptedBeforeFormat) {
 
   std::string argv0 = "kepler-formal";
   std::string argv1 = "-v";
-  std::string argv2 = "SEC";
+  std::string argv2 = "sec";
   std::string argv3 = "-k";
   std::string argv4 = "4";
   std::string argv5 = "-naja_if";
@@ -2446,11 +2446,11 @@ TEST(KeplerFormalCliTests, CliSecEngineAcceptedBeforeFormat) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal",
                    "-v",
-                   "SEC",
+                   "sec",
                    "-k",
                    "4",
                    "--sec-engine",
-                   "PDR",
+                   "pdr",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -2464,11 +2464,11 @@ TEST(KeplerFormalCliTests, CliKInductionSecEngineAcceptedBeforeFormat) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal",
                    "-v",
-                   "SEC",
+                   "sec",
                    "-k",
                    "4",
                    "--sec-engine",
-                   "K_INDUCTION",
+                   "k_induction",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -2482,11 +2482,11 @@ TEST(KeplerFormalCliTests, CliImcSecEngineAcceptedBeforeFormat) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal",
                    "-v",
-                   "SEC",
+                   "sec",
                    "-k",
                    "4",
                    "--sec-engine",
-                   "IMC",
+                   "imc",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -2504,7 +2504,7 @@ TEST(KeplerFormalCliTests, CliExplicitLecVerificationAcceptedBeforeFormat) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal",
                    "-v",
-                   "LEC",
+                   "lec",
                    "-verilog",
                    fixture.design0Path.string(),
                    fixture.design1Path.string()}),
@@ -2517,7 +2517,7 @@ TEST(KeplerFormalCliTests, CliMissingVerificationBeforeFormatFails) {
 }
 
 TEST(KeplerFormalCliTests, CliInvalidVerificationBeforeFormatFails) {
-  EXPECT_EQ(runWithArgs({"kepler-formal", "-v", "BAD"}), EXIT_FAILURE);
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-v", "bad"}), EXIT_FAILURE);
 }
 
 TEST(KeplerFormalCliTests, CliMissingMaxKBeforeFormatFails) {
@@ -2543,22 +2543,22 @@ TEST(KeplerFormalCliTests, CliUnrecognizedOptionBeforeFormatFails) {
 }
 
 TEST(KeplerFormalCliTests, CliMissingInputFormatAfterPreOptionsFails) {
-  EXPECT_EQ(runWithArgs({"kepler-formal", "-v", "SEC", "-k", "4"}), EXIT_FAILURE);
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-v", "sec", "-k", "4"}), EXIT_FAILURE);
 }
 
 TEST(KeplerFormalCliTests, CliInvalidSecEngineBeforeFormatFails) {
   EXPECT_EQ(
-      runWithArgs({"kepler-formal", "-v", "SEC", "--sec-engine", "BAD", "-verilog"}),
+      runWithArgs({"kepler-formal", "-v", "sec", "--sec-engine", "bad", "-verilog"}),
       EXIT_FAILURE);
 }
 
 TEST(KeplerFormalCliTests, CliRemovedKInductionAliasesAreRejectedBeforeFormat) {
   const auto fixture = createEquivalentSequentialNajaIfFixture();
-  for (const char* removedAlias : {"KINDUCTION", "CLASSIC_K_INDUCTION"}) {
+  for (const char* removedAlias : {"kinduction", "classic_k_induction"}) {
     EXPECT_EQ(
         runWithArgs({"kepler-formal",
                      "-v",
-                     "SEC",
+                     "sec",
                      "--sec-engine",
                      removedAlias,
                      "-naja_if",
@@ -2576,7 +2576,7 @@ TEST(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedBeforeFormat) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal",
                    "-v",
-                   "SEC",
+                   "sec",
                    "-k",
                    "4",
                    "--sec-uncomputable-seq-boundary",
@@ -2595,7 +2595,7 @@ TEST(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedBeforeFormat) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal",
                    "-v",
-                   "SEC",
+                   "sec",
                    "-k",
                    "4",
                    "--no-sec-uncomputable-seq-boundary",
@@ -2613,7 +2613,7 @@ TEST(KeplerFormalCliTests, CliMissingVerificationAfterFormatFails) {
 
 TEST(KeplerFormalCliTests, CliInvalidVerificationAfterFormatFails) {
   EXPECT_EQ(
-      runWithArgs({"kepler-formal", "-verilog", "--verification", "BAD"}),
+      runWithArgs({"kepler-formal", "-verilog", "--verification", "bad"}),
       EXIT_FAILURE);
 }
 
@@ -2641,13 +2641,13 @@ TEST(KeplerFormalCliTests, CliMissingSecEngineAfterFormatFails) {
 
 TEST(KeplerFormalCliTests, CliSecEngineAcceptedAfterFormat) {
   EXPECT_EQ(
-      runWithArgs({"kepler-formal", "-verilog", "--sec-engine", "PDR"}),
+      runWithArgs({"kepler-formal", "-verilog", "--sec-engine", "pdr"}),
       EXIT_FAILURE);
 }
 
 TEST(KeplerFormalCliTests, CliInvalidSecEngineAfterFormatFails) {
   EXPECT_EQ(
-      runWithArgs({"kepler-formal", "-verilog", "--sec-engine", "BAD"}),
+      runWithArgs({"kepler-formal", "-verilog", "--sec-engine", "bad"}),
       EXIT_FAILURE);
 }
 
@@ -2659,7 +2659,7 @@ TEST(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedAfterFormat) {
       runWithArgs({"kepler-formal",
                    "-naja_if",
                    "-v",
-                   "SEC",
+                   "sec",
                    "-k",
                    "4",
                    "--sec-uncomputable-seq-boundary",
@@ -2678,7 +2678,7 @@ TEST(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedAfterFormat) {
       runWithArgs({"kepler-formal",
                    "-naja_if",
                    "-v",
-                   "SEC",
+                   "sec",
                    "-k",
                    "4",
                    "--no-sec-uncomputable-seq-boundary",
@@ -2707,7 +2707,7 @@ TEST(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 0\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2733,7 +2733,7 @@ TEST(KeplerFormalCliTests, ConfigSecUnsupportedMismatchFails) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
-      "verification: SEC\n"
+      "verification: sec\n"
       "max_k: 1\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"

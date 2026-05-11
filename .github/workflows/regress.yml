@@ -140,10 +140,10 @@ jobs:
     - name: Run TinyRocket CSRFile SEC strategy counterexample examples
       working-directory: ${{github.workspace}}/example
       run: |
-        for engine in KINDUCTION IMC PDR; do
+        for engine in k_induction imc pdr; do
           out="tinyrocket_csrfile_sec_${engine}.out"
           ../build/src/bin/kepler-formal -verilog \
-            -v SEC \
+            -v sec \
             -k 4 \
             --sec-engine "$engine" \
             --design1 tinyrocket_csrfile.v tinyrocket_csrfile_wrapper.v \

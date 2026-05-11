@@ -1,6 +1,6 @@
 # tinyrocket_sec_config.yaml
 format: verilog
-verification: SEC
+verification: sec
 max_k: 1000
 input_paths:
   - tinyrocket.v
@@ -13,4 +13,3 @@ liberty_files:
 log_level: info
 solver: kissat
 report_skipped_pos: true
-
