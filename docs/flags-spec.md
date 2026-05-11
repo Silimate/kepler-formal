@@ -4,6 +4,9 @@ This document captures the current command-line and YAML configuration
 surface accepted by `kepler-formal`.
 
 The stable top-level overview remains in [README.md](../README.md).
+The SEC-specific flag surface is documented separately in
+[sec-flags-spec.md](sec-flags-spec.md). SEC is still under construction, so
+that page describes the current implementation rather than a frozen contract.
 
 ## Binary flags
 

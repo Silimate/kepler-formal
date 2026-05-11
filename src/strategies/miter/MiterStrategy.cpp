@@ -9,34 +9,32 @@
 #include "SNLLogicCloud.h"
 #include "BoolExprCnfWriter.h"
 
-// include Glucose headers (adjust path to your checkout)
 #include "core/Solver.h"
 #include "simp/SimpSolver.h"
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <unordered_map>
-#include "NetlistGraph.h"
+#include <unistd.h>
 #include "SNLEquipotential.h"
 #include "SNLLogicCone.h"
-#include "SNLPath.h"
 #include "../sat/SATSolverWrapper.h"
 
-// For executeCommand
-#include <cstdlib>
 #include <stack>
 
 // spdlog
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_sinks.h>  // ensure console sink is available
 #include <spdlog/spdlog.h>
-
-//#define DEBUG_CHECKS
 
 using namespace naja;
 using namespace naja::NL;
@@ -451,18 +449,6 @@ void ensureLoggerInitialized() {
   }
 }
 
-
-// void executeCommand(const std::string& command) {
-//   ensureLoggerInitialized();
-//   int result = system(command.c_str());
-//   if (result != 0) {
-//     logger->error("Command execution failed: {} (exit code {})", command,
-//                   result);
-//   } else {
-//     logger->debug("Command executed successfully: {}", command);
-//   }
-// }
-
 //
 // A tiny Tseitin-translator from BoolExpr -> Glucose CNF.
 //
@@ -799,15 +785,6 @@ void MiterStrategy::normalizeOutputs(
       }
       if (paths0 != paths1) {
         logger->error("Miter outputs must match in order");
-        // for (size_t i = 0; i < paths0.size(); ++i) {
-        //   naja::NL::SNLPath p0 = naja::NL::SNLPath(
-        //       top0_, paths0[i]);
-        //   naja::NL::SNLPath p1 = naja::NL::SNLPath(
-        //       top1_, paths1[i]);
-        //   throw std::runtime_error("Output " + std::to_string(i) +
-        //                            " mismatch: " + p0.getString() + " vs " +
-        //                            p1.getString());
-        // }
         assert(false && "Miter outputs must match in order");
       }
     }
@@ -871,7 +848,6 @@ bool MiterStrategy::run(bool compact) {
   logger->info("size of PIs in circuit 1: {}", inputs1sort.size());
   logger->info("size of POs in circuit 0: {}", outputs0sort.size());
   logger->info("size of POs in circuit 1: {}", outputs1sort.size());
-  // return false;
   naja::DNL::destroy();
   univ->setTopDesign(top0_);
   builder0_.setInputs(inputs0sort);
@@ -890,7 +866,7 @@ bool MiterStrategy::run(bool compact) {
   univ->setTopDesign(top1_);
   builder1_.setInputs(inputs1sort);
   builder1_.setOutputs(outputs1sort);
-  builder1_.build();  
+  builder1_.build();
   const auto& PIs1 = builder1_.getInputs();
   const auto& POs1 = builder1_.getPOs();
   const auto& outputs1 = builder1_.getOutputs();
@@ -944,15 +920,7 @@ bool MiterStrategy::run(bool compact) {
         "No valid outputs to compare. Miter vacuously equivalent.");
     return true; // vacuously equivalent
   }
-
-  // print all clauses
-  // for (size_t i = 0; i < POs0.size(); ++i) {
-  //   logger->info("PO index {} clause0: {}", i, POs0[i]->toString());
-  // }
-  // for (size_t i = 0; i < POs1.size(); ++i) {
-  //   logger->info("PO index {} clause1: {}", i, POs1[i]->toString());
-  // }
-
+  
   if (dumpPoCnf_) {
     const std::string outDir = dumpPoCnfPath_.empty() ? "po_cnfs" : dumpPoCnfPath_;
     dumpPoCnfs(POs0, outDir, "top0");
@@ -988,7 +956,7 @@ bool MiterStrategy::run(bool compact) {
   solver.addClause({rootVar});
 
   // solve with no assumptions
-  logger->info("SAT solver starting");
+  logger->info("Starting solver");
   bool sat = solver.solve();
   logger->info("SAT solver finished: {}", sat ? "SAT" : "UNSAT");
 
@@ -1061,8 +1029,6 @@ bool MiterStrategy::run(bool compact) {
         }
         failedPOs_.emplace_back(i);
         logger->info("Found difference for PO: {}", i);
-        //logger->info("Clause 0 {}", POs0[i]->toString());
-        //logger->info("Clause 1 {}", POs1[i]->toString());
         // print path of index i
         const auto&path0 = builder0_.getOutputs2OutputsIDs().at(builder0_.getDNLIDforOutput(i));
         std::string pathString = pathKeyToString(path0);
@@ -1084,55 +1050,9 @@ bool MiterStrategy::run(bool compact) {
         for (size_t j = 0; j < topModels.size(); ++j) {
           DNL::destroy();
           NLUniverse::get()->setTopDesign(topModels[j]);
-          // if (j == 0) {
-          //   //logger->info("$$$ 0 term {} of model {}",
-          //   naja::DNL::get()->getDNLTerminalFromID(outputs0[i]).getSnlBitTerm()->getName().getString().c_str(),
-          //   naja::DNL::get()->getDNLTerminalFromID(outputs0[i]).getSnlBitTerm()->getDesign()->getName().getString().c_str());
-          // } else {
-          //   //logger->info("### 0 term {} of model {}",
-          //   naja::DNL::get()->getDNLTerminalFromID(outputs1[i]).getSnlBitTerm()->getName().getString().c_str(),
-          //   naja::DNL::get()->getDNLTerminalFromID(outputs1[i]).getSnlBitTerm()->getDesign()->getName().getString().c_str());
-
-          // }
-          // if (dnls_.size() <= j) {
-          //   dnls_.emplace_back(*naja::DNL::get());
-          // }
           SNLLogicCone cone(j == 0 ? outputs0[i] : outputs1[i], PIs[j],
                             naja::DNL::get());
           cone.run();
-          // std::string dotFileNameEquis(
-          //     std::string(prefix_ + "_" +
-          //     DNL::get()->getDNLTerminalFromID(outputs0[i]).getSnlBitTerm()->getName().getString()
-          //     + std::to_string(outputs0[i]) + "_" +std::to_string(j) +
-          //     std::string(".dot")));
-          // std::string svgFileNameEquis(
-          //     std::string(prefix_ + "_" +
-          //     DNL::get()->getDNLTerminalFromID(outputs0[i]).getSnlBitTerm()->getName().getString()
-          //     + std::to_string(outputs0[i]) + "_" + std::to_string(j) +
-          //     std::string(".svg")));
-          // SnlVisualiser snl2(topModels[j], cone.getEquipotentials());
-          // for (const auto& equi : cone.getEquipotentials()) {
-          //   for (const auto& term : equi.getTerms()) {
-          //     if (j == 0) {
-          //       terms0.insert(term);
-          //       // logger->info("$$$ Term 0: {}", term->getString().c_str());
-          //     } else {
-          //       terms1.insert(term);
-          //       // logger->info("### Term 1: {}", term->getString().c_str());
-          //     }
-          //   }
-          //   for (const auto& termOcc : equi.getInstTermOccurrences()) {
-          //     if (j == 0) {
-          //       insTerms0.insert(termOcc);
-          //       // logger->info("$$$ Inst Term 0: {}",
-          //       // termOcc.getString().c_str());
-          //     } else {
-          //       insTerms1.insert(termOcc);
-          //       // logger->info("### Inst Term 1: {}",
-          //       // termOcc.getString().c_str());
-          //     }
-          //   }
-          // }
           for (const auto& DNLID : cone.getCollectedTerms()) {
             const naja::DNL::DNLTerminalFull& termFull =
                 naja::DNL::get()->getDNLTerminalFromID(DNLID);
@@ -1169,12 +1089,6 @@ bool MiterStrategy::run(bool compact) {
               }
             }
           }
-          // snl2.process();
-          // snl2.getNetlistGraph().dumpDotFile(dotFileNameEquis.c_str());
-          // executeCommand(std::string(std::string("dot -Tsvg ") +
-          //                            dotFileNameEquis + std::string(" -o ") +
-          //                            svgFileNameEquis).c_str());
-          // logger->info("svg file name: {}", svgFileNameEquis);
         }
 
         // find intersection and diff of terms0 and terms1
@@ -1218,14 +1132,6 @@ bool MiterStrategy::run(bool compact) {
             logger->info("Diff 1 term: {}", term1->getString());
           }
         }
-        // print termsDiff
-        // for (const auto& term : termsDiff) {
-        //   if (term->getDirection() ==
-        //   naja::NL::SNLBitTerm::Direction::Output) {
-        //     continue;
-        //   }
-        //   logger->info("Diff term: {}", term->getString());
-        // }
         // find intersection and diff of insTerms0 and insTerms1
         std::set<std::string> insTermsCommon;
         std::set<std::string> insTermsDiff;
@@ -1265,7 +1171,7 @@ bool MiterStrategy::run(bool compact) {
   if (topInit_ != nullptr) {
     univ->setTopDesign(topInit_);
   }
-  // if UNSAT → miter can never be true → outputs identical
+  // UNSAT means the miter can never be true, so the outputs are identical.
   logger->info("Circuits are {}", sat ? "DIFFERENT" : "IDENTICAL");
   return !sat;
 }
@@ -1331,7 +1237,7 @@ bool MiterStrategy::runCompactPOs(const tbb::concurrent_vector<BoolExpr*>& POs0,
   int rootVar = tseitinEncode(solver, miter, node2var, varName2idx);
   solver.addClause({rootVar});
 
-  logger->info("SAT solver starting");
+  logger->info("Starting solver");
   const bool sat = solver.solve();
   logger->info("SAT solver finished: {}", sat ? "SAT" : "UNSAT");
   logger->info("Circuits are {}", sat ? "DIFFERENT" : "IDENTICAL");
@@ -1367,28 +1273,8 @@ BoolExpr* MiterStrategy::buildMiter(
     if (!A[i]->isValid() || !B[i]->isValid()) {
             continue;
     }
-    // bool unSupportedVar = false;
-    // const auto&varSupportA = A[i]->getSupportVars();
-    // for (const auto&var : varSupportA) {
-    //   if (lastCommonVarID_ < var) {
-    //     logger->warn("Unsupported var: {}", var);  
-    //     unSupportedVar = true;
-    //   }
-    // }
-    // const auto&varSupportB = B[i]->getSupportVars();
-    // for (const auto&var : varSupportB) {
-    //   if (lastCommonVarID_ < var) {
-    //     logger->warn("Unsupported var: {}", var);  
-    //     unSupportedVar = true;
-    //   }
-    // }
-    // if (unSupportedVar) {
-    //   logger->warn("buildMiter skipping output index {} due to unsupported variable", i);
-    //   continue;
-    // }
     auto diff = BoolExpr::Xor(A[i], B[i]);
     miter = BoolExpr::Or(miter, diff);
   }
-  // logger->trace("buildMiter produced expression: {}", miter->toString());
   return miter;
 }

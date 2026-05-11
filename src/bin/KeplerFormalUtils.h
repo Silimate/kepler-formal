@@ -3,7 +3,15 @@
 
 #pragma once
 
+#include <filesystem>
 #include <string>
+#include <vector>
 
-// Exposed for tests and for consistent filename handling.
+#include "strategy/SequentialEquivalenceStrategy.h"
+
+// Shared helper for consistent filename handling.
 std::string sanitizeFileToken(const std::string& input);
+
+void writeBoundaryTermsReport(
+    const std::filesystem::path& reportPath,
+    const std::vector<KEPLER_FORMAL::SEC::ExtractedBoundaryReportEntry>& reports);

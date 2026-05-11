@@ -1,0 +1,49 @@
+// Copyright 2024-2026 keplertech.io
+// SPDX-License-Identifier: GPL-3.0-only
+
+#pragma once
+
+#include <cstdlib>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <unistd.h>
+
+namespace KEPLER_FORMAL::SEC {
+
+inline bool isSecDiagEnabled() {
+  return std::getenv("KEPLER_SEC_DIAG") != nullptr;
+}
+
+inline void appendSecDiagPart(std::ostringstream& stream, const char* value) {
+  stream << (value != nullptr ? value : "<null>");
+}
+
+inline void appendSecDiagPart(std::ostringstream& stream, char* value) {
+  stream << (value != nullptr ? value : "<null>");
+}
+
+template <typename T>
+inline void appendSecDiagPart(std::ostringstream& stream, T&& value) {
+  stream << std::forward<T>(value);
+}
+
+template <typename... Args>
+inline void emitSecDiag(Args&&... args) {
+  std::ostringstream stream;
+  (appendSecDiagPart(stream, std::forward<Args>(args)), ...);
+  stream << '\n';
+  const std::string message = stream.str();
+  const char* data = message.data();
+  size_t remaining = message.size();
+  while (remaining > 0) {
+    const ssize_t written = ::write(STDERR_FILENO, data, remaining);
+    if (written <= 0) {
+      break;  // LCOV_EXCL_LINE
+    }
+    data += written;
+    remaining -= static_cast<size_t>(written);
+  }
+}
+
+}  // namespace KEPLER_FORMAL::SEC

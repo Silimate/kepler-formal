@@ -5,6 +5,7 @@
 #include <chrono>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -59,9 +60,9 @@ static std::string get_kepler_bin() {
   }
   const auto root = repoRoot();
   const std::vector<std::filesystem::path> candidates = {
-      root / "build/src/bin/kepler-formal",
       root / "buildR/src/bin/kepler-formal",
       root / "buildD/src/bin/kepler-formal",
+      root / "build/src/bin/kepler-formal",
       root / "src/bin/kepler-formal",
   };
   for (const auto& candidate : candidates) {
@@ -125,6 +126,30 @@ class ScopedCurrentPath {
 
  private:
   std::filesystem::path original_;
+};
+
+class ScopedEnvVar {
+ public:
+  ScopedEnvVar(const char* name, const char* value) : name_(name) {
+    if (const char* current = std::getenv(name)) {
+      hadOriginal_ = true;
+      original_ = current;
+    }
+    setenv(name, value, 1);
+  }
+
+  ~ScopedEnvVar() {
+    if (hadOriginal_) {
+      setenv(name_.c_str(), original_.c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  bool hadOriginal_ = false;
+  std::string original_;
 };
 
 std::vector<uint64_t> getInputFlatDependencies(const SNLDesign* design) {
@@ -707,6 +732,8 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesReportsSkippedNoDriverPO) {
   EXPECT_NE(content.find("floating_net_1"), std::string::npos);
   EXPECT_NE(content.find("report_prop_a="), std::string::npos);
   EXPECT_NE(content.find("report_prop_b="), std::string::npos);
+  EXPECT_NE(content.find("model=PASS0"), std::string::npos);
+  EXPECT_NE(content.find("direction=Input"), std::string::npos);
   EXPECT_NE(content.find("See first encounter of iso="), std::string::npos);
   EXPECT_EQ(countSubstringOccurrences(content, "Skipping PO "), 4u);
 }
@@ -785,6 +812,9 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesReportsSkippedMultiDriverPO) {
   EXPECT_NE(content.find("its iso has multiple drivers"), std::string::npos);
   EXPECT_NE(content.find("LOGIC0"), std::string::npos);
   EXPECT_NE(content.find("LOGIC1"), std::string::npos);
+  EXPECT_NE(content.find("model=PASS1"), std::string::npos);
+  EXPECT_NE(content.find("direction=Output"), std::string::npos);
+  EXPECT_NE(content.find("direction=Input"), std::string::npos);
   EXPECT_EQ(content.find("complex_nets"), std::string::npos);
   EXPECT_EQ(content.find("report_prop_a="), std::string::npos);
   EXPECT_EQ(content.find("report_prop_b="), std::string::npos);
@@ -875,7 +905,156 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesInitializesSkippedPOReportFilesOnlyO
   EXPECT_TRUE(std::filesystem::exists(tempDir_ / "skipped_multi_driver_pos.txt"));
 }
 
-TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
+TEST_F(
+    MiterTests,
+    BuildPrimaryOutputClausesSkipsRequestedInternalOutputWithUndrivenLeafInput) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryPrims =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto* andModel = NLDB0::getOrCreateNInputGate(NLDB0::GateType::And, 2);
+  auto* xnorModel = NLDB0::getOrCreateNInputGate(NLDB0::GateType::Xnor, 2);
+  ASSERT_NE(andModel, nullptr);
+  ASSERT_NE(xnorModel, nullptr);
+
+  std::vector<SNLBitTerm*> andInputs;
+  SNLBitTerm* andOut = nullptr;
+  for (auto* term : andModel->getBitTerms()) {
+    if (term->getDirection() == SNLTerm::Direction::Input) {
+      andInputs.push_back(term);
+    } else {
+      andOut = term;
+    }
+  }
+  ASSERT_EQ(andInputs.size(), 2u);
+  ASSERT_NE(andOut, nullptr);
+
+  std::vector<SNLBitTerm*> xnorInputs;
+  SNLBitTerm* xnorOut = nullptr;
+  for (auto* term : xnorModel->getBitTerms()) {
+    if (term->getDirection() == SNLTerm::Direction::Input) {
+      xnorInputs.push_back(term);
+    } else {
+      xnorOut = term;
+    }
+  }
+  ASSERT_EQ(xnorInputs.size(), 2u);
+  ASSERT_NE(xnorOut, nullptr);
+
+  auto* top = SNLDesign::create(
+      libraryDesigns, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto* topA = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto* topB = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+  auto* topY = SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+
+  auto* xnorInst = SNLInstance::create(top, xnorModel, NLName("xnor0"));
+  auto* andInst = SNLInstance::create(top, andModel, NLName("and0"));
+  auto* netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto* netB = SNLScalarNet::create(top, NLName("net_b"));
+  auto* netXnor = SNLScalarNet::create(top, NLName("net_xnor"));
+  auto* netY = SNLScalarNet::create(top, NLName("net_y"));
+
+  topA->setNet(netA);
+  topB->setNet(netB);
+  topY->setNet(netY);
+  xnorInst->getInstTerm(xnorInputs[0])->setNet(netA);
+  xnorInst->getInstTerm(xnorOut)->setNet(netXnor);
+  andInst->getInstTerm(andInputs[0])->setNet(netXnor);
+  andInst->getInstTerm(andInputs[1])->setNet(netB);
+  andInst->getInstTerm(andOut)->setNet(netY);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  const auto internalOutputID =
+      findDNLTermIDByInstanceAndTerm("and0", andOut->getName().getString().c_str());
+  ASSERT_NE(internalOutputID, naja::DNL::DNLID_MAX);
+
+  const auto inputCountBeforeBuild = builder.getInputs().size();
+  builder.setOutputs({internalOutputID, internalOutputID});
+  ScopedEnvVar noMt("KEPLER_NO_MT", "1");
+  builder.build();
+
+  ASSERT_EQ(builder.getOutputs().size(), 2u);
+  ASSERT_EQ(builder.getPOs().size(), 2u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  ASSERT_NE(builder.getPOs()[1], nullptr);
+  EXPECT_FALSE(builder.getPOs()[0]->isValid());
+  EXPECT_FALSE(builder.getPOs()[1]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  ASSERT_NE(builder.getSkippedOutputs().find(internalOutputID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getSkippedOutputs().at(internalOutputID).reason,
+            BuildPrimaryOutputClauses::SkippedOutputReason::NoDriver);
+}
+
+TEST_F(
+    MiterTests,
+    BuildPrimaryOutputClausesSkipsRequestedInternalMuxSelfFeedback) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto* assignModel = NLDB0::getAssign();
+  auto* muxModel = NLDB0::getMux2();
+  ASSERT_NE(assignModel, nullptr);
+  ASSERT_NE(muxModel, nullptr);
+
+  auto* top = SNLDesign::create(
+      libraryDesigns, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto* topA = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto* topS = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("s"));
+
+  auto* assignInst = SNLInstance::create(top, assignModel, NLName("assign_loop"));
+  auto* muxInst = SNLInstance::create(top, muxModel, NLName("mux_loop"));
+
+  auto* netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto* netS = SNLScalarNet::create(top, NLName("net_s"));
+  auto* netMuxOut = SNLScalarNet::create(top, NLName("net_mux_out"));
+  auto* netAssignOut = SNLScalarNet::create(top, NLName("net_assign_out"));
+
+  topA->setNet(netA);
+  topS->setNet(netS);
+  muxInst->getInstTerm(NLDB0::getMux2InputA()->getBit(0))->setNet(netA);
+  muxInst->getInstTerm(NLDB0::getMux2InputB()->getBit(0))->setNet(netAssignOut);
+  muxInst->getInstTerm(NLDB0::getMux2Select())->setNet(netS);
+  muxInst->getInstTerm(NLDB0::getMux2Output()->getBit(0))->setNet(netMuxOut);
+  assignInst->getInstTerm(NLDB0::getAssignInput())->setNet(netMuxOut);
+  assignInst->getInstTerm(NLDB0::getAssignOutput())->setNet(netAssignOut);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  const auto internalOutputID = findDNLTermIDByInstanceAndTerm(
+      "mux_loop", NLDB0::getMux2Output()->getBit(0)->getName().getString().c_str());
+  ASSERT_NE(internalOutputID, naja::DNL::DNLID_MAX);
+
+  const auto inputCountBeforeBuild = builder.getInputs().size();
+  builder.setOutputs({internalOutputID});
+  builder.build();
+
+  ASSERT_EQ(builder.getOutputs().size(), 1u);
+  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  EXPECT_FALSE(builder.getPOs()[0]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  ASSERT_NE(builder.getSkippedOutputs().find(internalOutputID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getSkippedOutputs().at(internalOutputID).reason,
+            BuildPrimaryOutputClauses::SkippedOutputReason::LogicalLoop);
+}
+
+TEST_F(MiterTests, CachedIsoShortcutDoesNotCreateNewMiterInput) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
   NLLibrary* library =
@@ -892,6 +1071,8 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
       SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("c"));
   auto topOut =
       SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+  auto topAndOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("and_y"));
 
   SNLDesign* andModel =
       SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("AND2"));
@@ -939,6 +1120,7 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
   topInB->setNet(netB);
   topInC->setNet(netC);
   topOut->setNet(netY);
+  topAndOut->setNet(netAnd);
 
   andInst->getInstTerm(andIn0)->setNet(netA);
   andInst->getInstTerm(andIn1)->setNet(netB);
@@ -956,7 +1138,20 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
   builder.collect();
 
   auto* dnl = naja::DNL::get();
-  ASSERT_EQ(builder.getOutputs().size(), 1u);
+  ASSERT_EQ(builder.getOutputs().size(), 2u);
+  const auto findOutputByName = [&](const char* name) {
+    for (auto output : builder.getOutputs()) {
+      const auto& term = dnl->getDNLTerminalFromID(output);
+      if (term.getSnlBitTerm()->getName().getString() == name) {
+        return output;
+      }
+    }
+    return naja::DNL::DNLID_MAX;
+  };
+  const auto topYID = findOutputByName("y");
+  const auto topAndYID = findOutputByName("and_y");
+  ASSERT_NE(topYID, naja::DNL::DNLID_MAX);
+  ASSERT_NE(topAndYID, naja::DNL::DNLID_MAX);
 
   std::vector<bool> isPIs(dnl->getNBterms() + 1, false);
   for (auto input : builder.getInputs()) {
@@ -978,7 +1173,8 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
 
   {
     ScopedReportSkippedPOs reportGuard(false);
-    SNLLogicCloud cloud(builder.getOutputs()[0], isPIs, isPOs);
+    ScopedEnvVar frontierHistory("KEPLER_CAPTURE_FRONTIER_HISTORY", "1");
+    SNLLogicCloud cloud(topYID, isPIs, isPOs);
     cloud.compute();
     EXPECT_EQ(getTermLabels(cloud.getInputs()),
               (std::vector<std::string>{"and0.y", "c"}));
@@ -987,7 +1183,7 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
 
   {
     ScopedReportSkippedPOs reportGuard(true);
-    SNLLogicCloud cloud(builder.getOutputs()[0], isPIs, isPOs);
+    SNLLogicCloud cloud(topYID, isPIs, isPOs);
     cloud.compute();
     EXPECT_EQ(getTermLabels(cloud.getInputs()),
               (std::vector<std::string>{"and0.y", "c"}));
@@ -995,6 +1191,21 @@ TEST_F(MiterTests, ReportingModePreservesCachedIsoShortcutInLogicCloud) {
   }
 
   Tree2BoolExpr::iso2boolExpr_.clear();
+  builder.setRetainDnl(true);
+  builder.setOutputs({topAndYID, topYID});
+  const size_t inputCountBeforeBuild = builder.getInputs().size();
+  {
+    ScopedReportSkippedPOs reportGuard(false);
+    builder.build();
+  }
+  ASSERT_EQ(builder.getPOs().size(), 2u);
+  ASSERT_NE(builder.getPOs()[1], nullptr);
+  EXPECT_TRUE(builder.getPOs()[1]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  EXPECT_EQ(builder.getSkippedOutputs().find(topYID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getPOs()[1]->getSupportVars(),
+            (std::set<size_t>{2, 3, 4}));
   naja::DNL::destroy();
 }
 
@@ -1513,16 +1724,12 @@ TEST_F(MiterTests, TestMiterANDNonConstantWithSequentialElements) {
       std::cout << "PO: " << po->toString() << std::endl;
     }
     printf("%s\n", pc.getPOs()[0]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[0]->toString() == std::string("((6 ∧ 6) ∧ 2)"));
     EXPECT_TRUE(pc.getPOs()[0]->toString() == std::string("2 AND 4"));
     printf("%s\n", pc.getPOs()[1]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[1]->toString() == std::string("(6 ∧ 6)"));
     EXPECT_TRUE(pc.getPOs()[1]->toString() == std::string("4"));
     printf("%s\n", pc.getPOs()[2]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[2]->toString() == std::string("2"));
     EXPECT_TRUE(pc.getPOs()[2]->toString() == std::string("2"));
     printf("%s\n", pc.getPOs()[3]->toString().c_str());
-    //EXPECT_TRUE(miter.getPOs()[3]->toString() == std::string("3"));
     EXPECT_TRUE(pc.getPOs()[3]->toString() == std::string("3"));
   }
 }
@@ -1654,6 +1861,72 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesDoesNotTreatWideMuxInputsAsPOs) {
     outputNames.insert(outputTerm.getSnlBitTerm()->getName().getString());
   }
   EXPECT_EQ(outputNames, (std::set<std::string>{"y0", "y1", "y2", "y3"}));
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesBuildsExplicitInternalOutputRoots) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto* andModel = NLDB0::getOrCreateNInputGate(NLDB0::GateType::And, 2);
+  ASSERT_NE(andModel, nullptr);
+
+  SNLBitTerm* andOut = nullptr;
+  std::vector<SNLBitTerm*> andInputs;
+  for (auto* term : andModel->getBitTerms()) {
+    if (term->getDirection() == SNLTerm::Direction::Input) {
+      andInputs.push_back(term);
+    } else {
+      andOut = term;
+    }
+  }
+  ASSERT_EQ(andInputs.size(), 2u);
+  ASSERT_NE(andOut, nullptr);
+
+  auto* top = SNLDesign::create(
+      libraryDesigns, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto* topA = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto* topB = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b"));
+  auto* topY = SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+
+  auto* inst = SNLInstance::create(top, andModel, NLName("and0"));
+  auto* netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto* netB = SNLScalarNet::create(top, NLName("net_b"));
+  auto* netY = SNLScalarNet::create(top, NLName("net_y"));
+
+  topA->setNet(netA);
+  topB->setNet(netB);
+  topY->setNet(netY);
+  inst->getInstTerm(andInputs[0])->setNet(netA);
+  inst->getInstTerm(andInputs[1])->setNet(netB);
+  inst->getInstTerm(andOut)->setNet(netY);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  const auto internalOutputID =
+      findDNLTermIDByInstanceAndTerm("and0", andOut->getName().getString().c_str());
+  ASSERT_NE(internalOutputID, naja::DNL::DNLID_MAX);
+  EXPECT_TRUE(std::find(
+                  builder.getOutputs().begin(),
+                  builder.getOutputs().end(),
+                  internalOutputID) == builder.getOutputs().end());
+
+  // Guard the SEC structured-memory path: even when the generic collector does
+  // not classify an internal term as a boundary output, the clause builder must
+  // still be able to materialize that explicitly requested root on demand.
+  builder.setOutputs({internalOutputID});
+  builder.build();
+
+  ASSERT_EQ(builder.getOutputs().size(), 1u);
+  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  EXPECT_TRUE(builder.getPOs()[0]->isValid());
+  EXPECT_TRUE(builder.getSkippedOutputs().empty());
 }
 
 TEST_F(MiterTests, WideMuxMiterEquivalent) {
@@ -1892,7 +2165,10 @@ TEST_F(MiterTests, InternalPOAssignCycleIsSkippedAndReported) {
   const std::string content = buffer.str();
   EXPECT_NE(content.find("logical loop"), std::string::npos);
   EXPECT_NE(content.find("loop_terms"), std::string::npos);
+  EXPECT_NE(content.find("model="), std::string::npos);
   EXPECT_NE(content.find("D0"), std::string::npos);
+  EXPECT_NE(content.find("direction=Output"), std::string::npos);
+  EXPECT_NE(content.find("direction=Input"), std::string::npos);
 }
 
 // 1. create a circuit of 2 inputs that drives and AND gate that drives top output

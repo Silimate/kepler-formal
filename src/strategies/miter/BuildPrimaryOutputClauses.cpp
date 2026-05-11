@@ -14,12 +14,10 @@
 #include <fstream>
 #include <mutex>
 #include <ostream>
+#include <sstream>
 #include <string_view>
 #include <thread>
 #include <tbb/global_control.h>
-
-//#define DEBUG_PRINTS
-//#define DEBUG_CHECKS
 
 #ifdef DEBUG_PRINTS
 #define DEBUG_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
@@ -33,22 +31,26 @@ using namespace naja::NL;
 
 namespace {
 
-BuildPrimaryOutputClauses::PathNameIDs getPathNameIDs(const SNLPath& path) {
-  BuildPrimaryOutputClauses::PathNameIDs ids;
-  const auto pathNames = path.getPathNames();
-  ids.reserve(pathNames.size());
-  for (const auto& name : pathNames) {
-    ids.push_back(name.getID());
+constexpr BuildPrimaryOutputClauses::PathComponentID kUnnamedPathComponentTag =
+    BuildPrimaryOutputClauses::PathComponentID{1} << 63;
+
+const char* getSnlDirectionName(SNLBitTerm::Direction direction) {
+  switch (direction) {
+    case SNLBitTerm::Direction::Undefined:
+      return "Undefined";  // LCOV_EXCL_LINE
+    case SNLBitTerm::Direction::Input:
+      return "Input";
+    case SNLBitTerm::Direction::Output:
+      return "Output";
+    case SNLBitTerm::Direction::InOut:
+      return "InOut";  // LCOV_EXCL_LINE
   }
-  return ids;
+  return "Unknown";  // LCOV_EXCL_LINE
 }
 
-BuildPrimaryOutputClauses::PathKey getTerminalPathKey(const DNLTerminalFull& terminal) {
-  auto pathIDs = getPathNameIDs(terminal.getDNLInstance().getPath());
-  pathIDs.push_back(terminal.getSnlBitTerm()->getName().getID());
-  BuildPrimaryOutputClauses::PathObjectIDs objectIDs = {
-      static_cast<NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit())};
-  return {std::move(pathIDs), std::move(objectIDs)};
+std::string getSnlModelName(const DNLTerminalFull& term) {
+  const auto* design = term.getSnlBitTerm()->getDesign();
+  return design ? design->getName().getString() : "<unknown>";
 }
 
 void appendTerminalName(std::ostream& out, const DNLTerminalFull& term) {
@@ -57,7 +59,11 @@ void appendTerminalName(std::ostream& out, const DNLTerminalFull& term) {
     out << path[i].getString() << ".";
   }
   out << term.getSnlBitTerm()->getName().getString()
-      << term.getSnlBitTerm()->getBit();
+      << term.getSnlBitTerm()->getBit()
+      << " (model=" << getSnlModelName(term)
+      << ", direction="
+      << getSnlDirectionName(term.getSnlBitTerm()->getDirection())
+      << ")";
 }
 
 bool shouldReportSkippedPOs() {
@@ -146,7 +152,11 @@ void appendIsoTermName(std::ostream& out, const DNLFull* dnl, DNLID termID) {
     out << path[i].getString() << ".";
   }
   out << term.getSnlBitTerm()->getName().getString()
-      << term.getSnlBitTerm()->getBit();
+      << term.getSnlBitTerm()->getBit()
+      << " (model=" << getSnlModelName(term)
+      << ", direction="
+      << getSnlDirectionName(term.getSnlBitTerm()->getDirection())
+      << ")";
 }
 
 void appendNetReport(std::ostream& out, const SNLBitNet* net) {
@@ -219,6 +229,12 @@ bool containsDependencyBit(const std::vector<uint64_t>& deps, uint64_t orderID) 
   return (deps[chunkIndex] & (uint64_t{1} << (orderID % 64))) != 0;
 }
 
+BuildPrimaryOutputClauses::SkippedOutputInfo makeSkippedOutputInfo(
+    BuildPrimaryOutputClauses::SkippedOutputReason reason,
+    std::string detail) {
+  return {reason, std::move(detail)};
+}
+
 void reportSkippedPO(const DNLFull* dnl,
                      const DNLTerminalFull& term,
                      const char* reason,
@@ -270,6 +286,50 @@ void reportSkippedPO(const DNLFull* dnl,
 }
 
 }  // namespace
+
+BuildPrimaryOutputClauses::PathNameIDs BuildPrimaryOutputClauses::getPathNameIDs(
+    const DNLInstanceFull& instance) const {
+  const auto instanceID = instance.getID();
+  {
+    std::lock_guard<std::mutex> lock(pathNameIDsCacheMutex_);
+    const auto cached = instancePathNameIDsCache_.find(instanceID);
+    if (cached != instancePathNameIDsCache_.end()) {
+      return cached->second;
+    }
+  }
+
+  PathNameIDs ids;
+  const auto pathInstances = instance.getPath().getInstances();
+  ids.reserve(pathInstances.size());
+  for (const auto* pathInstance : pathInstances) {
+    const auto& name = pathInstance->getName();
+    if (!name.empty()) {
+      ids.push_back(static_cast<BuildPrimaryOutputClauses::PathComponentID>(
+          name.getID()));
+      continue;
+    }
+
+    ids.push_back(kUnnamedPathComponentTag |
+                  static_cast<BuildPrimaryOutputClauses::PathComponentID>(
+                      pathInstance->getID()));
+  }
+
+  std::lock_guard<std::mutex> lock(pathNameIDsCacheMutex_);
+  const auto [cached, _] =
+      instancePathNameIDsCache_.emplace(instanceID, std::move(ids));
+  return cached->second;
+}
+
+BuildPrimaryOutputClauses::PathKey
+BuildPrimaryOutputClauses::getTerminalPathKey(
+    const DNLTerminalFull& terminal) const {
+  auto pathIDs = getPathNameIDs(terminal.getDNLInstance());
+  pathIDs.push_back(static_cast<PathComponentID>(
+      terminal.getSnlBitTerm()->getName().getID()));
+  PathObjectIDs objectIDs = {
+      static_cast<NLID::DesignObjectID>(terminal.getSnlBitTerm()->getBit())};
+  return {std::move(pathIDs), std::move(objectIDs)};
+}
 
 std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
   std::vector<DNLID> inputs;
@@ -437,6 +497,7 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
 std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
   std::vector<DNLID> outputs;
   std::set<DNLID> outputsSet;
+  skippedOutputs_.clear();
   auto dnl = get();
   DNLInstanceFull top = dnl->getTop();
 
@@ -581,6 +642,8 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
     if (term.getIsoID() != DNLID_MAX && 
       dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().empty()) {
+      skippedOutputs_[out] = makeSkippedOutputInfo(
+          SkippedOutputReason::NoDriver, "its iso has no drivers");
       reportSkippedPO(
           dnl, term, "its iso has no drivers", kSkippedNoDriverPOReport);
       DEBUG_LOG("Skipping output %s of model %s as it is not connected to any net\n",
@@ -594,6 +657,8 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
     if (term.getIsoID() != DNLID_MAX && 
       dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID()).getDrivers().size() > 1) {
+      skippedOutputs_[out] = makeSkippedOutputInfo(
+          SkippedOutputReason::MultiDriver, "its iso has multiple drivers");
       reportSkippedPO(
           dnl,
           term,
@@ -610,20 +675,17 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectOutputs() {
     }
     outputs.emplace_back(out);
   }
-  //outputs.assign(outputsSet.begin(), outputsSet.end());
   return outputs;
 }
 
 void BuildPrimaryOutputClauses::collect() {
   inputs_ = collectInputs();
-  //sortInputs(); <- cannot sort inputs as it has to respect the inputs vector order
   for (const auto& input : inputs_) {
     PathKey key = getTerminalPathKey(naja::DNL::get()->getDNLTerminalFromID(input));
     inputsMap_[std::move(key)]  =
             input;
   }
   outputs_ = collectOutputs();
-  //sortOutputs(); <- cannot sort as it needs to keep the order for POs_
   for (const auto& output : outputs_) {
     PathKey key = getTerminalPathKey(naja::DNL::get()->getDNLTerminalFromID(output));
     outputsMap_[std::move(key)]  =
@@ -644,7 +706,8 @@ void BuildPrimaryOutputClauses::initVarNames() {
     // Get Truth Table for terminal
     const DNLTerminalFull& tTerm = naja::DNL::get()->getDNLTerminalFromID(inputs_[i]);
     // If direction is input, skip
-    if (!tTerm.isTopPort()) {
+    if (!tTerm.isTopPort() &&
+        tTerm.getSnlBitTerm()->getDirection() != SNLBitTerm::Direction::Input) {
       const auto tt = SNLDesignModeling::getTruthTable(tTerm.getSnlBitTerm()->getDesign(), 
       tTerm.getSnlBitTerm()->getOrderID());
       if (tt.isInitialized()) {
@@ -681,22 +744,11 @@ void BuildPrimaryOutputClauses::initVarNames() {
 }
 
 void BuildPrimaryOutputClauses::build() {
-  //printf("Building primary output clauses\n");
   naja::DNL::get();
   POs_.clear();
   POs_ = tbb::concurrent_vector<BoolExpr*>(outputs_.size());
   initVarNames();
-  // Init var names(counting on the fact that normalization happened before)
-
-  // inputs_ = collectInputs();
-  // sortInputs();
-  // outputs_ = collectOutputs();
-  // sortOutputs();
   size_t processedOutputs = 0;
-  // tbb::task_arena arena(20);
-  //  init arena with automatic number of threads
-  // unsigned hw = std::thread::hardware_concurrency(); 
-  // if (hw == 0) hw = 1; // fallback 
   tbb::task_arena arena(20);
   IsPIs_ = std::vector<bool>(naja::DNL::get()->getNBterms(), false);
   for (auto pi : inputs_) {
@@ -718,6 +770,25 @@ void BuildPrimaryOutputClauses::build() {
     }
     IsPOs_[po] = true;
   }
+
+  std::vector<size_t> representativeForOutput(outputs_.size());
+  std::vector<size_t> representativeOutputs;
+  representativeOutputs.reserve(outputs_.size());
+  std::unordered_map<DNLID, size_t> firstOutputForIso;
+  firstOutputForIso.reserve(outputs_.size());
+  for (size_t i = 0; i < outputs_.size(); ++i) {
+    const DNLID isoID = get()->getDNLTerminalFromID(outputs_[i]).getIsoID();
+    if (isoID != DNLID_MAX) {
+      auto [it, inserted] = firstOutputForIso.emplace(isoID, i);
+      if (!inserted) {
+        representativeForOutput[i] = it->second;
+        continue;
+      }
+    }
+    representativeForOutput[i] = i;
+    representativeOutputs.emplace_back(i);
+  }
+
   auto processOutput = [&](size_t i) {
     DNLID out = outputs_[i];
     #ifdef DEBUG_PRINTS
@@ -734,8 +805,9 @@ void BuildPrimaryOutputClauses::build() {
     DNLID isoID = get()->getDNLTerminalFromID(out).getIsoID();
     DEBUG_LOG("isoID: %zu\n", isoID);
     auto cachedIt = Tree2BoolExpr::iso2boolExpr_.find(isoID);
-    if (cachedIt != Tree2BoolExpr::iso2boolExpr_.end() &&
-        cachedIt->second != nullptr) {
+    if (isoID != DNLID_MAX &&
+        cachedIt != Tree2BoolExpr::iso2boolExpr_.end() &&
+        cachedIt->second != nullptr && cachedIt->second->isValid()) {
       POs_[i] = cachedIt->second;
       #ifdef DEBUG_CHECKS
       assert(POs_[i] != nullptr);
@@ -763,86 +835,64 @@ void BuildPrimaryOutputClauses::build() {
     std::chrono::duration<double> elapsed_seconds_comp = endComp - startComp;
     printf("Computation time for %lu: %f seconds\n", i, elapsed_seconds_comp.count());
     #endif
-    // //cloud.SNLDesignModeling::getTruthTable().print();
-    // std::vector<DNLID> test1;
-    // std::vector<DNLID> test2;
-    // for (auto in : cloud.getAllInputs()) {
-    //   printf("Input in tree cloud: %lu\n", in);
-    //   // if (in >= cloud.getInputs().size()) {
-    //   //   printf("size of inputs in cloud: %lu\n",
-    //   cloud.getInputs().size());
-    //   //   //assert(false && "Input in cloud is out of range");
-    //   // }
-    //  test1.emplace_back(in);
-    // }
-    // for (auto in : cloud.getInputs()) {
-    //   printf("Input in cloud: %lu\n", in);
-    //   test2.emplace_back(in);
-    // }
-    // std::sort(test1.begin(), test1.end());
-    // std::sort(test2.begin(), test2.end());
-    // assert(test1 == test2);
-    // std::vector<std::string> varNames;
-    /*for (auto input : cloud.getInputs()) {
-      DNLTerminalFull term = get()->getDNLTerminalFromID(input);
-      if (term.getSnlTerm() != nullptr) {
-        auto net = term.getSnlTerm()->getNet();
-        if (net != nullptr) {
-          if (net->isConstant0()) {
-            varNames.emplace_back("0");
-            continue;
-          } else if (net->isConstant1()) {
-            varNames.emplace_back("1");
-            continue;
-          }
-        }
-        auto model = const_cast<SNLDesign*>(
-            term.getSnlBitTerm()->getDesign());
-        auto tt = model->SNLDesignModeling::getTruthTable(term.getSnlBitTerm()->getOrderID());
-        if (tt.isInitialized()) {
-          if (tt.all0()) {
-            varNames.emplace_back("0");
-            continue;
-          } else if (tt.all1()) {
-            varNames.emplace_back("1");
-            continue;
-          }
-        }
-      }
-      // find the index of input in inputs_
-      auto it = std::find(inputs_.begin(), inputs_.end(), input);
-      // printf("Input: %s\n",
-      //
-    get()->getDNLTerminalFromID(input).getSnlBitTerm()->getName().getString().c_str());
-      // printf("Model: %s\n",
-      //
-    get()->getDNLTerminalFromID(input).getSnlBitTerm()->getDesign()->getName().getString().c_str());
-      assert(it != inputs_.end());
-      size_t index = std::distance(inputs_.begin(), it);
-      varNames.emplace_back(std::to_string(index + 2)); // +2 to avoid 0 and 1
-    which are reserved for constants
-    }*/
 #ifdef DEBUG_CHECKS
     assert(cloud.SNLDesignModeling::getTruthTable().isInitialized());
 #endif
-    // DEBUG_LOG("Truth Table: %s\n",
-    //           cloud.SNLDesignModeling::getTruthTable().print().c_str());
-    /*std::shared_ptr<BoolExpr> expr = Tree2BoolExpr::convert(
-        cloud.SNLDesignModeling::getTruthTable(), varNames);*/
-    // BoolExpr::getMutex().lock();
-    //  if (POs_.size() - 1 < i) {
-    //    for (size_t j = POs_.size(); j <= i; ++j) {
-    //      POs_.emplace_back(nullptr);
-    //    }
-    //  }
     assert(POs_.size() - 1 >= i);
-    // add run time counter here
     #ifdef DEBUG_CHECKS
     auto startFin = std::chrono::steady_clock::now();    
     #endif
     if (cloud.getTruthTable().isValid()) {
       cloud.getTruthTable().finalize();
     }
+    // LCOV_EXCL_START
+    if (cloud.getTruthTable().isValid()) {
+      auto hasCachedIsoExpression = [](DNLID termID) {
+        if (termID == DNLID_MAX) {
+          return false;
+        }
+        const auto& term = get()->getDNLTerminalFromID(termID);
+        const DNLID termIsoID = term.getIsoID();
+        if (termIsoID == DNLID_MAX) {
+          return false;
+        }
+        const auto cached = Tree2BoolExpr::iso2boolExpr_.find(termIsoID);
+        return cached != Tree2BoolExpr::iso2boolExpr_.end() &&
+               cached->second != nullptr && cached->second->isValid();
+      };
+      DNLID unmappedInput = DNLID_MAX;
+      for (const auto inputTermID : cloud.getInputs()) {
+        if (inputTermID == DNLID_MAX) {
+          continue;  // LCOV_EXCL_LINE
+        }
+        if (inputTermID >= termDNLID2varID_.size() ||
+            termDNLID2varID_[inputTermID] == static_cast<size_t>(-1)) {
+          if (hasCachedIsoExpression(inputTermID)) {
+            continue;
+          }
+          unmappedInput = inputTermID;
+          break;
+        }
+      }
+      if (unmappedInput != DNLID_MAX) {
+        POs_[i] = BoolExpr::createInvalid();
+        std::ostringstream detail;
+        detail << "encountered internal frontier term "
+               << unmappedInput
+               << " that was not collected as a primary input";
+        {
+          std::lock_guard<std::mutex> lock(skippedOutputsMutex_);
+          skippedOutputs_[out] = makeSkippedOutputInfo(
+              SkippedOutputReason::NoDriver, detail.str());
+        }
+        reportSkippedPO(
+            get(),
+            get()->getDNLTerminalFromID(out),
+            detail.str().c_str(),
+            kSkippedNoDriverPOReport);
+      }
+    }
+    // LCOV_EXCL_STOP
     #ifdef DEBUG_CHECKS
     auto endFin = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed_seconds_fin = endFin - startFin;
@@ -851,35 +901,61 @@ void BuildPrimaryOutputClauses::build() {
     #ifdef DEBUG_CHECKS
     auto startConv = std::chrono::steady_clock::now();
     #endif
-    if (cloud.getTruthTable().isValid()) {
+    if (cloud.getTruthTable().isValid() && POs_[i] == nullptr) {
       POs_[i] = Tree2BoolExpr::convert(cloud.getTruthTable(), termDNLID2varID_);
-    } else {
-      POs_[i] = BoolExpr::createInvalid(); 
+    } else if (POs_[i] == nullptr) {
+      POs_[i] = BoolExpr::createInvalid();
+      SkippedOutputReason skipReason = SkippedOutputReason::None;
+      switch (cloud.getSkipReason()) {
+        case SNLLogicCloud::SkipReason::NoDriver:
+          skipReason = SkippedOutputReason::NoDriver;
+          break;
+        case SNLLogicCloud::SkipReason::MultiDriver:
+          skipReason = SkippedOutputReason::MultiDriver;
+          break;
+        case SNLLogicCloud::SkipReason::LogicalLoop:
+          skipReason = SkippedOutputReason::LogicalLoop;
+          break;
+        case SNLLogicCloud::SkipReason::None:  // LCOV_EXCL_LINE
+        default:
+          break;  // LCOV_EXCL_LINE
+      }
+      if (skipReason != SkippedOutputReason::None) {
+        std::lock_guard<std::mutex> lock(skippedOutputsMutex_);
+        skippedOutputs_[out] = makeSkippedOutputInfo(
+            skipReason, cloud.getSkipReasonText());
+      }
     }
     #ifdef DEBUG_CHECKS
     auto endConv = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed_seconds_conv = endConv - startConv;
     printf("Conversion time for %lu: %f seconds\n", i, elapsed_seconds_conv.count());
     #endif
-    cloud.destroy();
-    // BoolExpr::getMutex().unlock();
-    // printf("size of expr: %lu\n", POs_.back()->size());
-    if (isoID != DNLID_MAX) {
+    if (isoID != DNLID_MAX &&
+        POs_[i] != nullptr && POs_[i]->isValid()) {
       // Publish only fully-built expressions; do not expose a placeholder entry.
       auto insertResult = Tree2BoolExpr::iso2boolExpr_.insert({isoID, POs_[i]});
       if (!insertResult.second) {
         POs_[i] = insertResult.first->second;
       }
     }
+    cloud.destroy();
   };
-  Tree2BoolExpr::iso2boolExpr_.clear();
+  struct ScopedIsoCacheReset {
+    ScopedIsoCacheReset() {
+      Tree2BoolExpr::iso2boolExpr_.clear();
+    }
+    ~ScopedIsoCacheReset() {
+      Tree2BoolExpr::iso2boolExpr_.clear();
+    }
+  } scopedIsoCacheReset;
   if (getenv("KEPLER_NO_MT")) {
-    for (size_t i = 0; i < outputs_.size(); ++i) {
+    for (size_t i : representativeOutputs) {
       processOutput(i);
     }
   } else {
     // compute grain safely
-    size_t n = outputs_.size();
+    size_t n = representativeOutputs.size();
     size_t default_grain = 1000;
     size_t computed = (n >= 1000) ? (n / 1000) : 1; // never zero
     size_t grain = std::max<size_t>(computed, default_grain); // or clamp as you prefer
@@ -888,18 +964,30 @@ void BuildPrimaryOutputClauses::build() {
       tbb::blocked_range<DNLID>(0, n, grain),
       [&](const tbb::blocked_range<DNLID>& r) {
         for (DNLID i = r.begin(); i < r.end(); ++i) {
-          processOutput(i);
+          processOutput(representativeOutputs[i]);
         }
       },
       tbb::static_partitioner()
     );
   }
+  for (size_t i = 0; i < outputs_.size(); ++i) {
+    const size_t representative = representativeForOutput[i];
+    if (representative == i) {
+      continue;
+    }
+    POs_[i] = POs_[representative];
+    const auto skippedIt = skippedOutputs_.find(outputs_[representative]);
+    if (skippedIt != skippedOutputs_.end()) {
+      skippedOutputs_[outputs_[i]] = skippedIt->second;
+    }
+  }
   SNLLogicCloud::flushSkippedPOReports();
-  destroy();  // Clean up DNL instance
+  if (!retainDnl_) {
+    destroy();  // Clean up DNL instance unless the caller is batching builds.
+  }
 }
 
 void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
-  //printf("Setting inputs to input IDs mapping\n");
   inputs2inputsIDs_.clear();
   for (const auto& input : inputs_) {
     if (get()->getDNLTerminalFromID(input).isNull()) {
@@ -907,14 +995,8 @@ void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
     }
     const DNLInstanceFull& currentInstance =
         get()->getDNLTerminalFromID(input).getDNLInstance();
-   
-    //std::vector<NLID::DesignObjectID> termIDs;
-    //termIDs.emplace_back(
-    //     get()->getDNLTerminalFromID(input).getSnlBitTerm()->getID());
-    //termIDs.emplace_back(
-    //    get()->getDNLTerminalFromID(input).getSnlBitTerm()->getBit());
     PathKey& pair = inputs2inputsIDs_[input];
-    pair.first = getPathNameIDs(currentInstance.getPath());
+    pair.first = getPathNameIDs(currentInstance);
     pair.first.emplace_back(
         get()->getDNLTerminalFromID(input).getSnlBitTerm()->getName().getID());
     pair.second.emplace_back(
@@ -923,51 +1005,15 @@ void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
 }
 
 void BuildPrimaryOutputClauses::setOutputs2OutputsIDs() {
-  //printf("Setting outputs to output IDs mapping\n");
   outputs2outputsIDs_.clear();
   for (const auto& output : outputs_) {
-    //std::vector<NLID::DesignObjectID> termIDs;
     const DNLInstanceFull& currentInstance =
         get()->getDNLTerminalFromID(output).getDNLInstance();
-    //termIDs.emplace_back(
-    //     get()->getDNLTerminalFromID(output).getSnlBitTerm()->getID());
-    //termIDs
     PathKey& pair = outputs2outputsIDs_[output];
-    pair.first = getPathNameIDs(currentInstance.getPath());
+    pair.first = getPathNameIDs(currentInstance);
     pair.first.emplace_back(
         get()->getDNLTerminalFromID(output).getSnlBitTerm()->getName().getID());
     pair.second.emplace_back(
         get()->getDNLTerminalFromID(output).getSnlBitTerm()->getBit());
   }
 }
-
-// Sort functions are retierd for now as they break the mapping between the 2 circuits, normalize is used instead
-
-// void BuildPrimaryOutputClauses::sortInputs() {
-//   // Sort based on inputs2inputsIDs_ content
-//   std::sort(inputs_.begin(), inputs_.end(),
-//             [this](const DNLID& a, const DNLID& b) {
-//               return inputs2inputsIDs_[a].first < inputs2inputsIDs_[b].first && 
-//                       inputs2inputsIDs_[a].second < inputs2inputsIDs_[b].second;
-//             });
-// }
-
-// void BuildPrimaryOutputClauses::sortOutputs() {
-//   // Sort based on outputs2outputsIDs_ content
-//   std::sort(
-//       outputs_.begin(), outputs_.end(), [this](const DNLID& a, const DNLID& b) {
-//         return outputs2outputsIDs_[a].first < outputs2outputsIDs_[b].first && 
-//                outputs2outputsIDs_[a].second < outputs2outputsIDs_[b].second;
-//       });
-// }
-
-// const naja::NL::SNLTruthTable& BuildPrimaryOutputClauses::getTruthTable(naja::NL::SNLDesign* design, size_t orderID) {
-//   auto designID = design->getID();
-//   auto iter = ttCache_.find({designID, orderID});
-//   if (iter != ttCache_.end()) {
-//     return iter->second;
-//   }
-//   const auto tt = SNLDesignModeling::getTruthTable(design, orderID);
-//   ttCache_[{designID, orderID}] = tt;
-//   return tt;
-// }

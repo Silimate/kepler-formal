@@ -1,10 +1,5 @@
 // Copyright 2024-2026 keplertech.io
 // SPDX-License-Identifier: GPL-3.0-only
-//
-// Annotated version: comments added to explain the flow, data structures,
-// and algorithmic steps. No executable code has been changed; only
-// explanatory comments were inserted and commented-out code blocks
-// that were previously disabled have been removed.
 
 #include "Tree2BoolExpr.h"
 #include "BoolExpr.h"
@@ -20,9 +15,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-// #define DEBUG_CHECKS
-// #define DEBUG_PRINTS
 
 #ifdef DEBUG_PRINTS
 #define DEBUG_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
@@ -289,7 +281,6 @@ BoolExpr* Tree2BoolExpr::convert(
     stack.pop_back();
     const SNLTruthTableTree::Node* node = f.first;
 
-    // isoID is used to map DNL terminals to shared BoolExpr instances.
     naja::DNL::DNLID isoID = naja::DNL::DNLID_MAX;
     if (node->type != SNLTruthTableTree::Node::Type::Input) {
       isoID = naja::DNL::get()->getDNLTerminalFromID(node->data.termid).getIsoID();
@@ -301,11 +292,10 @@ BoolExpr* Tree2BoolExpr::convert(
     if (!visited) {
       // Pre-visit: attempt to reuse an existing BoolExpr from iso2boolExpr_
       // if the node corresponds to a DNL terminal that was already converted.
-      naja::DNL::DNLID isoID = naja::DNL::DNLID_MAX;
-      if (node->type != SNLTruthTableTree::Node::Type::Input) {
-        isoID = naja::DNL::get()->getDNLTerminalFromID(node->data.termid).getIsoID();
+      if (isoID != naja::DNL::DNLID_MAX) {
         auto it = iso2boolExpr_.find(isoID);
-        if (it != iso2boolExpr_.end() && isoID != naja::DNL::DNLID_MAX) {
+        if (it != iso2boolExpr_.end() && it->second != nullptr &&
+            it->second->isValid()) {
           setMemoETS(id, it->second);
         }
       }
@@ -340,6 +330,12 @@ BoolExpr* Tree2BoolExpr::convert(
         assert(node->parentIds.size() == 1);
         SNLTruthTableTree::Node* const parent = node->tree->nodeFromId(node->parentIds[0]).get();
         assert(parent && parent->type == SNLTruthTableTree::Node::Type::P);
+        if (isoID != naja::DNL::DNLID_MAX) {
+          // LCOV_EXCL_START
+          throw std::runtime_error(
+              "Input node unexpectedly has a cacheable iso ID");
+          // LCOV_EXCL_STOP
+        }
         assert(parent->data.termid < varNames.size());
         const auto& name = varNames[parent->data.termid];
         if (name == (size_t)-1) {
@@ -350,46 +346,13 @@ BoolExpr* Tree2BoolExpr::convert(
         // Special handling for constant mappings: 0 -> false, 1 -> true.
         if (name == 0) {
            BoolExpr* expr = BoolExpr::createFalse();
-           // LCOV_EXCL_START
-           // Impossible to catch in unit tests as it is an mt race condition
-           if (isoID != naja::DNL::DNLID_MAX) {
-               auto result = iso2boolExpr_.insert({isoID, expr});
-               if (!result.second) {
-                   // Another thread inserted concurrently.
-                   // Reuse canonical instance (do NOT delete expr; ownership may not be raw).
-                   expr = result.first->second;
-               }
-           }
-           // LCOV_EXCL_STOP
            setMemoETS(id, expr);
         } else if (name == 1) {
            BoolExpr* expr = BoolExpr::createTrue();
-           if (isoID != naja::DNL::DNLID_MAX) {
-              // LCOV_EXCL_START
-              // Impossible to catch in unit tests as it is an mt race condition
-              auto result = iso2boolExpr_.insert({isoID, expr});
-              if (!result.second) {
-                  // Another thread inserted concurrently.
-                  // Reuse canonical instance (do NOT delete expr; ownership may not be raw).
-                  expr = result.first->second;
-              }
-           }
-           // LCOV_EXCL_STOP
            setMemoETS(id, expr);
         } else {
           // Normal variable mapping.
           BoolExpr* expr = BoolExpr::Var(name);
-          if (isoID != naja::DNL::DNLID_MAX) {
-            // LCOV_EXCL_START
-            // Impossible to catch in unit tests as it is an mt race condition
-            auto result = iso2boolExpr_.insert({isoID, expr});
-            if (!result.second) {
-                // Another thread inserted concurrently.
-                // Reuse canonical instance (do NOT delete expr; ownership may not be raw).
-                expr = result.first->second;
-            }
-          }
-          // LCOV_EXCL_STOP
           setMemoETS(id, expr);
         }
       }

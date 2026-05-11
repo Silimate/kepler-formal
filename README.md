@@ -117,6 +117,7 @@ Yaml file example:
 
 ```yaml
 format: verilog
+verification: LEC           # Optional: LEC by default, or SEC
 input_paths:
   - [design0_part1.v, design0_part2.v] # design 0
   - [design1_part1.v, design1_part2.v] # design 1

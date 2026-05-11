@@ -1,4 +1,4 @@
-name: regress-big
+name: cva6lec
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  cva6-compact:
+  cva6-lec:
     runs-on: ubuntu-22.04
 
     steps:
@@ -58,7 +58,7 @@ jobs:
         nproc
         ps -eo pid,%mem,rss,cmd --sort=-rss | head
 
-    - name: Run cva6 compact
+    - name: Run CVA6 LEC compact
       working-directory: ${{github.workspace}}
       run: |
         cd kepler-formal-regress/cva6

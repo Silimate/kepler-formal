@@ -230,9 +230,6 @@ TEST(SNLTruthTableTreeApiTest, FinalizeSimplifyAndDestroyNoThrow) {
   // finalize() should be safe on a simple, already-consistent tree.
   EXPECT_NO_THROW(tree.finalize());
 
-  // simplify() is allowed to be a no-op on such a tree, but must not throw.
-  // EXPECT_NO_THROW(tree.simplify());
-
   // print() should also be safe; we only assert it doesn't throw.
   EXPECT_NO_THROW(tree.print());
 
@@ -253,10 +250,9 @@ TEST(SNLTruthTableTreeApiTest, DefaultConstructionAndMaxIdBehavior) {
   uint32_t maxId = tree.getMaxID();
   EXPECT_GE(maxId, SNLTruthTableTree::kIdOffset - 1);
 
-  // Calling finalize / simplify / print / destroy on an empty tree
+  // Calling finalize / print / destroy on an empty tree
   // should not throw (robust no-op behavior).
   EXPECT_NO_THROW(tree.finalize());
-  // EXPECT_NO_THROW(tree.simplify());
   EXPECT_NO_THROW(tree.print());
   EXPECT_NO_THROW(tree.destroy());
 }
@@ -266,6 +262,105 @@ TEST(SNLTruthTableTreeApiTest, FindAncestorLoopRejectsOutOfRangeBorderIndex) {
   std::vector<naja::DNL::DNLID> loopTerms;
 
   EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 0, loopTerms));
+  EXPECT_TRUE(loopTerms.empty());
+}
+
+static std::shared_ptr<Node> makeManualTableNode(
+    SNLTruthTableTree& tree,
+    naja::DNL::DNLID termID,
+    uint32_t arity = 1,
+    uint64_t mask = 0b10) {
+  auto node = std::make_shared<Node>(0u, &tree);
+  node->type = Node::Type::Table;
+  node->data.termid = termID;
+  node->truthTable = makeMaskTable(arity, mask);
+  return node;
+}
+
+TEST(SNLTruthTableTreeApiTest,
+     AncestorPathCacheCoversLinearLookupReuseAndClear) {
+  SNLTruthTableTree tree(0, 0, Node::Type::P);
+  ASSERT_GT(tree.getBorderLeavesSize(), 0u);
+
+  auto disconnected = makeManualTableNode(tree, 99);
+  tree.allocateNode(disconnected);
+  std::vector<naja::DNL::DNLID> loopTerms;
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 99, loopTerms));
+
+  auto target = makeManualTableNode(tree, 100);
+  const uint32_t targetId = tree.allocateNode(target);
+  tree.getRoot()->parentIds.emplace_back(targetId);
+
+  EXPECT_TRUE(tree.hasTableTerm(100));
+  EXPECT_TRUE(tree.findAncestorLoopForBorderLeaf(0, 100, loopTerms));
+  EXPECT_TRUE(tree.findAncestorLoopForBorderLeaf(0, 100, loopTerms));
+
+  auto duplicate = makeManualTableNode(tree, 100);
+  EXPECT_EQ(tree.allocateNode(duplicate), targetId);
+  EXPECT_EQ(duplicate.get(), target.get());
+
+  auto fresh = makeManualTableNode(tree, 101);
+  const uint32_t freshId = tree.allocateNode(fresh);
+  EXPECT_NE(freshId, targetId);
+}
+
+TEST(SNLTruthTableTreeApiTest,
+     AncestorLoopSearchCoversBranchedHitAndMiss) {
+  SNLTruthTableTree tree(0, 0, Node::Type::P);
+  ASSERT_GT(tree.getBorderLeavesSize(), 0u);
+
+  auto target = makeManualTableNode(tree, 200);
+  auto mid = makeManualTableNode(tree, 201);
+  auto other = makeManualTableNode(tree, 202);
+  auto absent = makeManualTableNode(tree, 203);
+
+  const uint32_t targetId = tree.allocateNode(target);
+  const uint32_t midId = tree.allocateNode(mid);
+  const uint32_t otherId = tree.allocateNode(other);
+  tree.allocateNode(absent);
+
+  auto root = tree.getRoot();
+  root->parentIds.clear();
+  root->parentIds.emplace_back(otherId);
+  root->parentIds.emplace_back(midId);
+  other->parentIds.emplace_back(SNLTruthTableTree::kInvalidId);
+  mid->parentIds.emplace_back(targetId);
+
+  std::vector<naja::DNL::DNLID> loopTerms;
+  EXPECT_TRUE(tree.findAncestorLoopForBorderLeaf(0, 200, loopTerms));
+  EXPECT_FALSE(loopTerms.empty());
+  EXPECT_EQ(loopTerms.front(), 200u);
+  EXPECT_EQ(loopTerms.back(), 200u);
+
+  std::vector<naja::DNL::DNLID> absentLoopTerms;
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 203, absentLoopTerms));
+  EXPECT_TRUE(absentLoopTerms.empty());
+}
+
+TEST(SNLTruthTableTreeApiTest,
+     AncestorSearchHandlesRepeatedAndInvalidParentEdges) {
+  SNLTruthTableTree tree(0, 0, Node::Type::P);
+  ASSERT_GT(tree.getBorderLeavesSize(), 0u);
+
+  auto target = makeManualTableNode(tree, 300);
+  auto repeated = makeManualTableNode(tree, 301);
+  auto absent = makeManualTableNode(tree, 302);
+
+  tree.allocateNode(target);
+  const uint32_t repeatedId = tree.allocateNode(repeated);
+  tree.allocateNode(absent);
+
+  auto root = tree.getRoot();
+  root->parentIds.clear();
+  root->parentIds.emplace_back(repeatedId);
+  root->parentIds.emplace_back(repeatedId);
+  std::vector<naja::DNL::DNLID> absentLoopTerms;
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 302, absentLoopTerms));
+
+  root->parentIds.clear();
+  root->parentIds.emplace_back(SNLTruthTableTree::kInvalidId);
+  std::vector<naja::DNL::DNLID> loopTerms;
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 300, loopTerms));
   EXPECT_TRUE(loopTerms.empty());
 }
 
@@ -363,7 +458,6 @@ TEST(SNLTruthTableTreeApi_Additions, NodeFromId_NodeIdMismatch) {
 
   // Corrupt nodeID to force nodeFromId to return null
   node->nodeID = SNLTruthTableTree::kInvalidId;
-  //EXPECT_EQ(tree.nodeFromId(id).get(), nullptr);
   #ifndef NDEBUG
   EXPECT_DEATH(tree.nodeFromId(id).get(),"sp->nodeID == id");
   #else 
@@ -456,6 +550,25 @@ TEST(SNLTruthTableTreeEval_Additions, EvaluatesInputChildAndReadsTableBit) {
 
   EXPECT_TRUE(parent->eval({false}));
   EXPECT_FALSE(parent->eval({true}));
+}
+
+TEST(SNLTruthTableTreeEval_Additions, EvaluatesNestedTableChild) {
+  SNLTruthTableTree tree;
+
+  auto constantChild = std::make_shared<Node>(0u, &tree);
+  constantChild->type = Node::Type::Table;
+  constantChild->data.termid = 10;
+  constantChild->truthTable = makeMaskTable(0, 0b1);
+  const uint32_t constantChildId = tree.allocateNode(constantChild);
+
+  auto parent = std::make_shared<Node>(0u, &tree);
+  parent->type = Node::Type::Table;
+  parent->data.termid = 11;
+  parent->truthTable = makeMaskTable(1, 0b10);
+  parent->childrenIds.push_back(constantChildId);
+  tree.allocateNode(parent);
+
+  EXPECT_TRUE(parent->eval({}));
 }
 
 TEST(SNLTruthTableTreeAddChild_Additions, AddChildIdRejectsInvalidId) {

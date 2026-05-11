@@ -2,7 +2,10 @@ load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 
 cc_binary(
     name = "kepler-formal",
-    srcs = ["KeplerFormal.cpp"],
+    srcs = [
+        "KeplerFormal.cpp",
+        "KeplerFormalUtils.h",
+    ],
     linkopts = [
         # Statically link what we can for portable release binaries.
         # Cap'n Proto and libstdc++/libgcc are linked statically.
@@ -23,6 +26,7 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         "//src/config:kepler_config",
+        "//src/sec:kepler_sec",
         "//src/scope:scope_extraction",
         "//src/strategies:formal_strategies",
         "@kissat",

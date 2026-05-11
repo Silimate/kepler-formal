@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <atomic>
+#include <unordered_map>
 #include <tbb/tbb_allocator.h>
 #include <unordered_set>
 #include "DNL.h"
@@ -22,9 +23,44 @@ namespace KEPLER_FORMAL {
 class SNLTruthTableTree {
 public:
   struct Node {
-    // group 32-bit scalars first
+    struct TruthTableStorage {
+      TruthTableStorage() = default;
+      TruthTableStorage(const TruthTableStorage&) = default;
+      TruthTableStorage& operator=(const TruthTableStorage&) = default;
+
+      TruthTableStorage& operator=(const SNLTruthTable& table) {
+        localTruthTable = table;
+        sharedTruthTable.reset();
+        return *this;
+      }
+
+      void setShared(std::shared_ptr<const SNLTruthTable> table) {
+        sharedTruthTable = std::move(table);
+        localTruthTable = SNLTruthTable();
+      }
+
+      bool isInitialized() const {
+        return localTruthTable.isInitialized() ||
+               (sharedTruthTable && sharedTruthTable->isInitialized());
+      }
+
+      const SNLTruthTable& get() const {
+        if (localTruthTable.isInitialized() || !sharedTruthTable) {
+          return localTruthTable;
+        }
+        return *sharedTruthTable;
+      }
+
+      SNLTruthTable localTruthTable;
+      std::shared_ptr<const SNLTruthTable> sharedTruthTable;
+    };
+
+  // group 32-bit scalars first
   uint32_t nodeID   = std::numeric_limits<uint32_t>::max();
-  //uint32_t parentId = std::numeric_limits<uint32_t>::max();
+  // Per-search visited marker for ancestor/path queries. It is mutable because
+  // those queries are logically const, but they stamp nodes with the current
+  // epoch to avoid allocating and clearing a visited set on every lookup.
+  mutable uint32_t ancestorVisitEpoch = 0;
   std::vector<uint32_t, tbb::tbb_allocator<uint32_t>> parentIds; // for multiple parents support
 
   // put the 64-bit-aligned items next: union with 64-bit termid,
@@ -36,7 +72,7 @@ public:
 
   bool visited = false; // for traversals
 
-  SNLTruthTable truthTable; 
+  TruthTableStorage truthTable;
 
   SNLTruthTableTree* tree = nullptr; // 8 bytes
   std::vector<uint32_t, tbb::tbb_allocator<uint32_t>> childrenIds; // typically 24 bytes on LP64
@@ -97,6 +133,7 @@ public:
       size_t borderIndex,
       naja::DNL::DNLID termid,
       std::vector<naja::DNL::DNLID>& loopTerms) const;
+  bool hasTableTerm(naja::DNL::DNLID termid) const;
 
   // allocateNode guarantees id assignment before publishing node in nodes_
   uint32_t allocateNode(std::shared_ptr<Node>& np);
@@ -118,7 +155,7 @@ public:
   }
 
 private:
-
+  Node* rawNodeFromId(uint32_t id) const;
   const Node& concatBody(size_t borderIndex,
                          naja::DNL::DNLID instid,
                          naja::DNL::DNLID termid);
@@ -140,6 +177,7 @@ private:
   size_t lastID_ = 2;       // debug counter for nodeID assignment
   static const SNLTruthTable PtableHolder_;
   std::unordered_map<naja::DNL::DNLID, uint32_t> termid2nodeid_;
+  mutable uint32_t ancestorSearchEpoch_ = 0;
 };
 
 } // namespace KEPLER_FORMAL
