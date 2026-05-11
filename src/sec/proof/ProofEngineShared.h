@@ -13,7 +13,7 @@
 namespace KEPLER_FORMAL::SEC {
 
 // Shared helpers used by the explicit SEC proof engines. They keep the
-// low-level SAT/invariant checks in one place so KINDUCTION, IMC, and PDR all
+// low-level SAT/invariant checks in one place so K_INDUCTION, IMC, and PDR all
 // reason about the same extracted transition system.
 
 BoolExpr* buildProofInitFormula(const KInductionProblem& problem);

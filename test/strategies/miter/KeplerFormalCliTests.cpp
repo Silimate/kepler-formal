@@ -1851,7 +1851,7 @@ TEST(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithKInductionEngine) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: SEC\n"
-      "sec_engine: KINDUCTION\n"
+      "sec_engine: K_INDUCTION\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2468,7 +2468,7 @@ TEST(KeplerFormalCliTests, CliKInductionSecEngineAcceptedBeforeFormat) {
                    "-k",
                    "4",
                    "--sec-engine",
-                   "KINDUCTION",
+                   "K_INDUCTION",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -2550,6 +2550,23 @@ TEST(KeplerFormalCliTests, CliInvalidSecEngineBeforeFormatFails) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal", "-v", "SEC", "--sec-engine", "BAD", "-verilog"}),
       EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliRemovedKInductionAliasesAreRejectedBeforeFormat) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  for (const char* removedAlias : {"KINDUCTION", "CLASSIC_K_INDUCTION"}) {
+    EXPECT_EQ(
+        runWithArgs({"kepler-formal",
+                     "-v",
+                     "SEC",
+                     "--sec-engine",
+                     removedAlias,
+                     "-naja_if",
+                     fixture.design0IfPath.string(),
+                     fixture.design1IfPath.string()}),
+        EXIT_FAILURE);
+  }
+  std::filesystem::remove_all(fixture.tmpDir);
 }
 
 TEST(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedBeforeFormat) {

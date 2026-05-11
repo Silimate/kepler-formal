@@ -59,7 +59,7 @@ struct SequentialDesignModel;
 
 // Builds a combined SEC problem from two sequential designs and discharges it
 // with the selected SEC proof engine. "Legacy" preserves the historical hybrid
-// path, while KINDUCTION, IMC, and PDR expose distinct top-level engines over
+// path, while K_INDUCTION, IMC, and PDR expose distinct top-level engines over
 // the same extracted transition system.
 class SequentialEquivalenceStrategy {
  public:

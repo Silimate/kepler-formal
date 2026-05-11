@@ -44,13 +44,13 @@ static const char* kBoundaryTermsReport = "boundary_terms.txt";
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
-      "[-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|KINDUCTION|IMC|PDR>] <netlist1> <netlist2> [<library-file>...] | "
+      "[-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|K_INDUCTION|IMC|PDR>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|KINDUCTION|IMC|PDR>] "
+      "<file...> [--liberty <library-file>...] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|K_INDUCTION|IMC|PDR>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
-      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|KINDUCTION|IMC|PDR>] "
+      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <LEC|SEC>] [-k <max-k>] [--sec-engine <LEGACY|K_INDUCTION|IMC|PDR>] "
       "[--design1 <file...>] [--design2 <file...>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
@@ -125,8 +125,7 @@ static bool parseSecEngineToken(const std::string& token,
     engine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
     return true;
   }
-  if (normalized == "KINDUCTION" || normalized == "K_INDUCTION" ||
-      normalized == "CLASSIC_K_INDUCTION") {
+  if (normalized == "K_INDUCTION") {
     engine = KEPLER_FORMAL::SEC::SecEngine::KInduction;
     return true;
   }
@@ -138,14 +137,14 @@ static bool parseSecEngineToken(const std::string& token,
     engine = KEPLER_FORMAL::SEC::SecEngine::Pdr;
     return true;
   }
-  error = "expected LEGACY, KINDUCTION, IMC, or PDR, got `" + token + "`";
+  error = "expected LEGACY, K_INDUCTION, IMC, or PDR, got `" + token + "`";
   return false;
 }
 
 static const char* secEngineName(KEPLER_FORMAL::SEC::SecEngine engine) {
   switch (engine) {
     case KEPLER_FORMAL::SEC::SecEngine::KInduction:
-      return "KINDUCTION";
+      return "K_INDUCTION";
     case KEPLER_FORMAL::SEC::SecEngine::Imc:
       return "IMC";
     case KEPLER_FORMAL::SEC::SecEngine::Pdr:
