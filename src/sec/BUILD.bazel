@@ -44,11 +44,13 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//src/clauses:kepler_clauses",
         "//src/config:kepler_config",
         "//src/formal:formal_structures",
         "//src/sat:sat_solver_wrapper",
         "//src/strategies:formal_strategies",
         "@naja",
+        "@naja//:naja_extra_headers",
         "@kissat",
     ],
 )
