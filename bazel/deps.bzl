@@ -146,7 +146,7 @@ def _deps_impl(_module_ctx):
         cpptrace_sha256 = "77d689fd7956ff80351a079d83e86a03865dbbe2433b4559cc6cea50bed77390",
         cpptrace_strip_prefix = "cpptrace-{}".format(_CPPTRACE_COMMIT),
         slang_url = "https://github.com/najaeda/slang/archive/{}.tar.gz".format(_SLANG_COMMIT),
-        slang_sha256 = "94bf48b70ee125109c133d91e9d48b4597eca39fb692eec9220937668aff3a99",
+        slang_sha256 = "8253cc083c075bbf21215a07ab4f73814a553f990530089c175fde5db37792e2",
         slang_strip_prefix = "slang-{}".format(_SLANG_COMMIT),
         googletest_url = "https://github.com/google/googletest/archive/{}.tar.gz".format(_GOOGLETEST_COMMIT),
         googletest_sha256 = "745c55415660044610f7fcd3af7a6420d5de16a7dbb9ebfe2e131275676232be",
