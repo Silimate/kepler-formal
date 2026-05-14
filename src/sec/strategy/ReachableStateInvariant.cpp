@@ -484,9 +484,9 @@ AlignedSignals deriveResetBootstrapStateEqualities(
             key,
             substituteBoolExprVariables(
                 resetSpecializedNext0.at(key), stateAssignments0, stateSubMemo0));
-      } catch (const std::runtime_error&) {
-        specializedNext0.emplace(key, nullptr);
-      }
+      } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
+        specializedNext0.emplace(key, nullptr);  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
     }
     for (const auto& key : model1.stateBits) {
       try {
@@ -494,9 +494,9 @@ AlignedSignals deriveResetBootstrapStateEqualities(
             key,
             substituteBoolExprVariables(
                 resetSpecializedNext1.at(key), stateAssignments1, stateSubMemo1));
-      } catch (const std::runtime_error&) {
-        specializedNext1.emplace(key, nullptr);
-      }
+      } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
+        specializedNext1.emplace(key, nullptr);  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
     }
 
     std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownValues0;

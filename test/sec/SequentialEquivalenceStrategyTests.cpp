@@ -3965,6 +3965,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantSkipsSameNamedStartupPairWithConflictingInit) {
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {state0};
+  model0.displayNameByKey.emplace(state0, "same_name_state[0]");
+  model0.initialStateValueByKey.emplace(state0, false);
+
+  SequentialDesignModel model1;
+  model1.stateBits = {state1};
+  model1.displayNameByKey.emplace(state1, "same_name_state[0]");
+  model1.initialStateValueByKey.emplace(state1, true);
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, AlignedSignals{}, AlignedSignals{});
+
+  EXPECT_EQ(invariant.bootstrapCycles, 0u);
+  EXPECT_TRUE(invariant.initialStateCorrespondence.names.empty());
+  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantSkipsBootstrapWhenResetAndInitialStateAreComplete) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
@@ -4050,6 +4073,206 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
   ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
   EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantCoversSatRemapFailureForUnalignedBootstrapInput) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey privateInput0 = makeSignalKey("privateInput0");
+  const SignalKey privateInput1 = makeSignalKey("privateInput1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0, privateInput0};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(privateInput0, 4);
+  model0.inputVarByKey.emplace(state0, 6);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.displayNameByKey.emplace(privateInput0, "private");
+  model0.displayNameByKey.emplace(state0, "state_q[0]");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(4));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1, privateInput1};
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(privateInput1, 5);
+  model1.inputVarByKey.emplace(state1, 7);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.displayNameByKey.emplace(privateInput1, "private");
+  model1.displayNameByKey.emplace(state1, "state_q[0]");
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(5));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state_q[0]"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
+  EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state_q[0]");
+  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantCoversMissingMapBootstrapFallback) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey missingInput0 = makeSignalKey("missingInput0");
+  const SignalKey missingInput1 = makeSignalKey("missingInput1");
+  const SignalKey mappedState0 = makeSignalKey("mappedState0");
+  const SignalKey mappedState1 = makeSignalKey("mappedState1");
+  const SignalKey missingState0 = makeSignalKey("missingState0");
+  const SignalKey missingState1 = makeSignalKey("missingState1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {mappedState0, missingState0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(mappedState0, 4);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.initialStateValueByKey.emplace(missingState0, false);
+  model0.nextStateExprByStateKey.emplace(mappedState0, BoolExpr::Var(4));
+  model0.nextStateExprByStateKey.emplace(missingState0, BoolExpr::createFalse());
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {mappedState1, missingState1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(mappedState1, 5);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.initialStateValueByKey.emplace(missingState1, false);
+  model1.nextStateExprByStateKey.emplace(mappedState1, BoolExpr::Var(5));
+  model1.nextStateExprByStateKey.emplace(missingState1, BoolExpr::createFalse());
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst", "missing"};
+  alignedInputs.keys0 = {rst0, missingInput0};
+  alignedInputs.keys1 = {rst1, missingInput1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"mapped", "missing"};
+  candidateStates.keys0 = {mappedState0, missingState0};
+  candidateStates.keys1 = {mappedState1, missingState1};
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
+  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "missing");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantThrowsAfterMissingBootstrapNextStateExpr) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(state0, 4);
+  model0.displayNameByKey.emplace(rst0, "rst");
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(state1, 5);
+  model1.displayNameByKey.emplace(rst1, "rst");
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
+
+  EXPECT_THROW(
+      static_cast<void>(
+          buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates)),
+      std::out_of_range);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantReportsSatRecoveredBootstrapEquality) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey data0 = makeSignalKey("data0");
+  const SignalKey data1 = makeSignalKey("data1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0, data0};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(data0, 4);
+  model0.inputVarByKey.emplace(state0, 6);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.displayNameByKey.emplace(data0, "data");
+  model0.displayNameByKey.emplace(state0, "state_q[0]");
+  model0.nextStateExprByStateKey.emplace(
+      state0,
+      BoolExpr::And(BoolExpr::Var(6), BoolExpr::Var(4)));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1, data1};
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(data1, 5);
+  model1.inputVarByKey.emplace(state1, 7);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.displayNameByKey.emplace(data1, "data");
+  model1.displayNameByKey.emplace(state1, "state_q[0]");
+  model1.nextStateExprByStateKey.emplace(
+      state1,
+      BoolExpr::Not(BoolExpr::Or(
+          BoolExpr::Not(BoolExpr::Var(7)),
+          BoolExpr::Not(BoolExpr::Var(5)))));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst", "data"};
+  alignedInputs.keys0 = {rst0, data0};
+  alignedInputs.keys1 = {rst1, data1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state_q[0]"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
+
+  testing::internal::CaptureStderr();
+  const auto invariant = buildReachableStateInvariant(
+      model0,
+      model1,
+      alignedInputs,
+      candidateStates,
+      /*secDiagEnabled=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
+  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state_q[0]");
+  EXPECT_NE(
+      stderrOutput.find("sat_recovered_equalities=1"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -4494,6 +4717,22 @@ TEST_F(SequentialEquivalenceStrategyTests,
        BoolExprHelpersCoverNullXorAndInvalidOperators) {
   EXPECT_EQ(remapBoolExprVariables(nullptr, {}), nullptr);
   EXPECT_EQ(substituteBoolExprVariables(nullptr, {}), nullptr);
+  EXPECT_FALSE(isBoolFormulaSatisfiable(
+      nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT));
+  EXPECT_FALSE(isBoolFormulaSatisfiable(
+      BoolExpr::createFalse(), KEPLER_FORMAL::Config::SolverType::KISSAT));
+  EXPECT_TRUE(isBoolFormulaSatisfiable(
+      BoolExpr::createTrue(), KEPLER_FORMAL::Config::SolverType::KISSAT));
+  EXPECT_FALSE(boolFormulaImplies(
+      BoolExpr::createTrue(), nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT));
+  EXPECT_TRUE(boolFormulaImplies(
+      BoolExpr::createFalse(),
+      BoolExpr::Var(2),
+      KEPLER_FORMAL::Config::SolverType::KISSAT));
+  EXPECT_TRUE(boolFormulaImplies(
+      BoolExpr::Var(2),
+      BoolExpr::createTrue(),
+      KEPLER_FORMAL::Config::SolverType::KISSAT));
 
   BoolExpr invalid;
   EXPECT_THROW(
@@ -4504,6 +4743,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* substituted =
       substituteBoolExprVariables(xorExpr, {{2, true}, {3, false}});
   EXPECT_TRUE(substituted->evaluate({}));
+
+  KEPLER_FORMAL::BoolExprCache::Key rawAndWithFalse{
+      KEPLER_FORMAL::Op::AND, 0, BoolExpr::createFalse(), BoolExpr::Var(4)};
+  EXPECT_FALSE(isBoolFormulaSatisfiable(
+      KEPLER_FORMAL::BoolExprCache::getExpression(rawAndWithFalse),
+      KEPLER_FORMAL::Config::SolverType::KISSAT));
 
   EXPECT_THROW(
       static_cast<void>(substituteBoolExprVariables(&invalid, {})),
@@ -5148,6 +5393,72 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionEngineDiagnosticsCoverCounterexampleAndInconclusivePaths) {
+  {
+    KInductionProblem problem;
+    problem.allSymbols = {2};
+    problem.bad = BoolExpr::createTrue();
+    problem.property = BoolExpr::createFalse();
+    problem.inductionProperty = problem.property;
+    problem.inductionBad = problem.bad;
+
+    const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+    testing::internal::CaptureStderr();
+    KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+    const auto result = engine.run(3);
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(result.status, KInductionStatus::Different);
+    EXPECT_EQ(result.bound, 0u);
+    EXPECT_NE(
+        stderrOutput.find("SEC diag: k-induction base k=0 found cex"),
+        std::string::npos);
+  }
+
+  {
+    KInductionProblem problem;
+    problem.state0Symbols = {2};
+    problem.allSymbols = {2};
+    problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+    problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+    problem.initializedStateCount = 1;
+    problem.totalStateCount = 1;
+    problem.bad = BoolExpr::Var(2);
+    problem.property = BoolExpr::Not(problem.bad);
+    problem.inductionProperty = problem.property;
+    problem.inductionBad = problem.bad;
+
+    const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+    testing::internal::CaptureStderr();
+    KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+    const auto result = engine.run(3);
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(result.status, KInductionStatus::Different);
+    EXPECT_EQ(result.bound, 1u);
+    EXPECT_NE(
+        stderrOutput.find("SEC diag: k-induction base k=1 found cex"),
+        std::string::npos);
+  }
+
+  {
+    const auto problem = buildLinearChainSecProblem(6);
+
+    const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+    testing::internal::CaptureStderr();
+    KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+    const auto result = engine.run(4);
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+    EXPECT_EQ(result.bound, 4u);
+    EXPECT_NE(
+        stderrOutput.find("SEC diag: k-induction step k=4 inconclusive"),
+        std::string::npos);
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        IMCEngineProvesEquivalentWithExactInterpolant) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
@@ -5305,6 +5616,67 @@ TEST_F(SequentialEquivalenceStrategyTests,
   SequentialEquivalenceResult result;
 
   EXPECT_EQ(result.outputCoveragePercent(), 0.0);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsCountsSatImpliedOutputEquality) {
+  const SignalKey out = makeSignalKey("out");
+  const SignalKey stateA0 = makeSignalKey("stateA0");
+  const SignalKey stateB0 = makeSignalKey("stateB0");
+  const SignalKey stateA1 = makeSignalKey("stateA1");
+  const SignalKey stateB1 = makeSignalKey("stateB1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {stateA0, stateB0};
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model0.inputVarByKey.emplace(stateA0, 2);
+  model0.inputVarByKey.emplace(stateB0, 3);
+  model0.displayNameByKey.emplace(out, "out[0]");
+  model0.displayNameByKey.emplace(stateA0, "state_a[0]");
+  model0.displayNameByKey.emplace(stateB0, "state_b[0]");
+  model0.initialStateValueByKey.emplace(stateA0, false);
+  model0.initialStateValueByKey.emplace(stateB0, false);
+  model0.nextStateExprByStateKey.emplace(stateA0, BoolExpr::Var(2));
+  model0.nextStateExprByStateKey.emplace(stateB0, BoolExpr::Var(3));
+  model0.observedOutputExprByKey.emplace(
+      out,
+      BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3)));
+
+  SequentialDesignModel model1;
+  model1.stateBits = {stateA1, stateB1};
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model1.inputVarByKey.emplace(stateA1, 4);
+  model1.inputVarByKey.emplace(stateB1, 5);
+  model1.displayNameByKey.emplace(out, "out[0]");
+  model1.displayNameByKey.emplace(stateA1, "state_a[0]");
+  model1.displayNameByKey.emplace(stateB1, "state_b[0]");
+  model1.initialStateValueByKey.emplace(stateA1, false);
+  model1.initialStateValueByKey.emplace(stateB1, false);
+  model1.nextStateExprByStateKey.emplace(stateA1, BoolExpr::Var(4));
+  model1.nextStateExprByStateKey.emplace(stateB1, BoolExpr::Var(5));
+  model1.observedOutputExprByKey.emplace(
+      out,
+      BoolExpr::Not(BoolExpr::Or(
+          BoolExpr::Not(BoolExpr::Var(4)),
+          BoolExpr::Not(BoolExpr::Var(5)))));
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_NE(
+      stdoutOutput.find("sat_implied_outputs=1"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
