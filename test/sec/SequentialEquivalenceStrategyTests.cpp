@@ -5174,7 +5174,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDoesNotConvergeAtFourFramesWithoutInitialConstraint) {
+       PDREngineUsesObservationOnlyFrontierWithoutExplicitInit) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
   problem.allSymbols = {2};
@@ -5188,8 +5188,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(4);
 
-  EXPECT_EQ(result.status, PDRStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -5504,6 +5504,25 @@ TEST_F(SequentialEquivalenceStrategyTests,
       BoolExpr::Not(BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::Var(4))),
       BoolExpr::Not(BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::Var(5))));
   problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
+
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  EXPECT_EQ(result.status, IMCStatus::Equivalent);
+  EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       IMCEngineUsesObservationOnlyFrontierWithoutExplicitInit) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.transitions0.emplace_back(2, BoolExpr::Var(2));
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
 
   IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);

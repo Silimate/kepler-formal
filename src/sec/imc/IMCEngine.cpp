@@ -7,6 +7,7 @@
 
 #include "kinduction/BaseCaseSolver.h"
 #include "imc/ExactInterpolantSynthesizer.h"
+#include "kinduction/InductionStepSolver.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/ProofEngineShared.h"
 
@@ -219,6 +220,14 @@ IMCResult IMCEngine::run(size_t maxK) const {
     if (const auto counterexample = findImcCounterexample(problem_, solverType_, k);
         counterexample.has_value()) {
       return *counterexample;
+    }
+
+    // Large SEC problems can exceed the explicit exact-frontier budget, but the
+    // shared induction step may still close immediately from the same
+    // counterexample-free prefix. Reuse that sound proof before trying the more
+    // expensive explicit frontier construction.
+    if (provesByInduction(problem_, solverType_, k)) {
+      return {IMCStatus::Equivalent, k};
     }
 
     if (initFormula == nullptr) {

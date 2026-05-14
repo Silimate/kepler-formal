@@ -155,12 +155,24 @@ BoolExpr* buildProofInitFormula(const KInductionProblem& problem) {
       hasConstraint = true;
     }
   } else {
+    const bool hasInitialStateRelation =
+        !problem.initialStateEqualityPairs.empty();
     if (problem.initialCondition != nullptr) {
       init = BoolExpr::And(init, problem.initialCondition);
       hasConstraint = true;
     }
     for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
       init = BoolExpr::And(init, buildEqualityFormula(lhsSymbol, rhsSymbol));
+      hasConstraint = true;
+    }
+    const bool needsObservationFrontier =
+        problem.hasSequentialState() && problem.property != nullptr &&
+        ((!problem.hasExplicitInitialState() && !hasInitialStateRelation) ||
+         (problem.hasExplicitInitialState() &&
+          !problem.hasCompleteInitialState() &&
+          !hasInitialStateRelation));
+    if (needsObservationFrontier) {
+      init = BoolExpr::And(init, problem.property);
       hasConstraint = true;
     }
   }
