@@ -106,8 +106,34 @@ run_engine() {
     } >> "${tmp_config}"
 
     echo "Running SEC ${engine} for ${test_name}"
-    "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1
-    cat "${stdout_log}"
+    : > "${stdout_log}"
+    # Stream the tool output as it is produced instead of only dumping it after
+    # completion.  Large SEC/PDR cases can run for minutes between solver
+    # decisions, so emit a lightweight heartbeat to keep GitHub logs obviously
+    # alive and to make a true hang easier to distinguish from solver work.
+    "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
+    local kepler_pid=$!
+    tail -n +1 -f "${stdout_log}" &
+    local tail_pid=$!
+    local kepler_status=0
+    local heartbeat_elapsed=0
+    while kill -0 "${kepler_pid}" 2>/dev/null; do
+      sleep 5
+      heartbeat_elapsed=$((heartbeat_elapsed + 5))
+      if [[ "${heartbeat_elapsed}" -ge 60 ]] &&
+          kill -0 "${kepler_pid}" 2>/dev/null; then
+        printf '[%s] SEC %s for %s is still running...\n' \
+          "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${engine}" "${test_name}"
+        heartbeat_elapsed=0
+      fi
+    done
+    wait "${kepler_pid}" || kepler_status=$?
+    sleep 1
+    kill "${tail_pid}" 2>/dev/null || true
+    wait "${tail_pid}" 2>/dev/null || true
+    if [[ "${kepler_status}" -ne 0 ]]; then
+      return "${kepler_status}"
+    fi
 
     if [[ "${expectation}" == "expect-equivalent" ]]; then
       grep "SEC proved equivalence" "${output_log}"
