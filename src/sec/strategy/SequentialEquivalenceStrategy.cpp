@@ -987,6 +987,7 @@ ReachableStateInvariant integrateReachableStateInvariant(
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
     KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
   BoolExpr* initialCondition = BoolExpr::createTrue();
   applyInitialStateAssignments(
@@ -1000,7 +1001,12 @@ ReachableStateInvariant integrateReachableStateInvariant(
   }
 
   const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
-      model0, model1, alignedInputs, inductiveStateEqualities, secDiagEnabled);
+      model0,
+      model1,
+      alignedInputs,
+      inductiveStateEqualities,
+      secDiagEnabled,
+      solverType);
   for (size_t i = 0; i < reachableInvariant.initialStateCorrespondence.names.size(); ++i) {
     problem.initialStateEqualityPairs.emplace_back(
         state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]),
@@ -1042,6 +1048,7 @@ void buildSecPropertiesAndTransitions(
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
     const RemappedSecExpressions& remapped,
     KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
   const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
       model0,
@@ -1058,10 +1065,12 @@ void buildSecPropertiesAndTransitions(
   }
 
   BoolExpr* property = BoolExpr::createTrue();
-  BoolExpr* inductionProperty = BoolExpr::createTrue();
+  BoolExpr* inductionCore = BoolExpr::createTrue();
+  size_t abstractEquivalentOutputCount = 0;
+  size_t satImpliedOutputCount = 0;
   for (size_t i = 0; i < reachableInvariant.anchoredStateEqualities.names.size(); ++i) {
-    inductionProperty = BoolExpr::And(
-        inductionProperty,
+    inductionCore = BoolExpr::And(
+        inductionCore,
         makeEqualityExpr(
             BoolExpr::Var(
                 state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i])),
@@ -1069,6 +1078,7 @@ void buildSecPropertiesAndTransitions(
                 state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]))));
   }
 
+  BoolExpr* inductionProperty = inductionCore;
   for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
     const auto outputEquality = makeEqualityExpr(
         problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]);
@@ -1081,6 +1091,15 @@ void buildSecPropertiesAndTransitions(
             model1.observedOutputExprByKey.at(key1),
             abstractOutputMap0,
             abstractOutputMap1)) {
+      ++abstractEquivalentOutputCount;
+      continue;
+    }
+    // A proof obligation can omit an output equality only when the current
+    // induction core already excludes every assignment that would violate it.
+    // This catches Boolean-equivalent post-layout cones that are not
+    // structurally identical under the fast abstract-map comparison.
+    if (boolFormulaImplies(inductionCore, outputEquality, solverType)) {
+      ++satImpliedOutputCount;
       continue;
     }
     inductionProperty = BoolExpr::And(inductionProperty, outputEquality);
@@ -1097,15 +1116,20 @@ void buildSecPropertiesAndTransitions(
     printf(
         "SEC diag: property_is_true=%d induction_property_is_true=%d "
         "bad_is_false=%d induction_bad_is_false=%d reset_bootstrap_inputs=%zu "
-        "bootstrap_cycles=%zu bootstrap_equalities=%zu inductive_equalities=%zu\n",
+        "bootstrap_cycles=%zu initial_equalities=%zu bootstrap_equalities=%zu "
+        "inductive_equalities=%zu abstract_equiv_outputs=%zu "
+        "sat_implied_outputs=%zu\n",
         problem.property == BoolExpr::createTrue(),
         problem.inductionProperty == BoolExpr::createTrue(),
         problem.bad == BoolExpr::createFalse(),
         problem.inductionBad == BoolExpr::createFalse(),
         problem.resetBootstrapInputs.size(),
         problem.resetBootstrapCycles,
+        problem.initialStateEqualityPairs.size(),
         problem.bootstrapStateEqualityPairs.size(),
-        problem.inductiveStateEqualityPairs.size());
+        problem.inductiveStateEqualityPairs.size(),
+        abstractEquivalentOutputCount,
+        satImpliedOutputCount);
     fflush(stdout);
   }
 }
@@ -1522,6 +1546,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       symbolSpace.state0Symbols,
       symbolSpace.state1Symbols,
       symbolSpace.problem,
+      solverType_,
       secDiagEnabled);
   buildSecPropertiesAndTransitions(
       model0,
@@ -1533,6 +1558,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       symbolSpace.state1Symbols,
       remapped,
       symbolSpace.problem,
+      solverType_,
       secDiagEnabled);
 
   // Phase 4: hand the fully normalized SEC transition system to the requested

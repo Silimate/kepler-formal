@@ -7,7 +7,10 @@
 #include <cctype>
 #include <cstdio>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
 #include "common/BoolExprUtils.h"
 #include "strategy/StructuralStateInvariant.h"
@@ -28,6 +31,26 @@ namespace {
 bool isConstBoolExpr(BoolExpr* expr, bool value) {
   return expr != nullptr && expr->getOp() == Op::VAR &&
          expr->getId() == static_cast<size_t>(value ? 1 : 0);
+}
+
+bool areSatEquivalentUnderAbstractMaps(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const LocalToAbstractVarMap& abstractMap0,
+    const LocalToAbstractVarMap& abstractMap1,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  try {
+    std::unordered_map<BoolExpr*, BoolExpr*> memo0;
+    std::unordered_map<BoolExpr*, BoolExpr*> memo1;
+    BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
+    BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
+    return boolFormulaImplies(
+        BoolExpr::createTrue(),
+        makeEqualityExpr(remapped0, remapped1),
+        solverType);
+  } catch (const std::runtime_error&) {
+    return false;
+  }
 }
 
 std::string normalizeSignalBaseName(const std::string& name) {
@@ -75,6 +98,150 @@ std::unordered_map<size_t, bool> collectResetAssignments(
   return assignments;
 }
 
+bool haveConflictingInitialValues(
+    const SequentialDesignModel& model0,
+    const SignalKey& key0,
+    const SequentialDesignModel& model1,
+    const SignalKey& key1) {
+  const auto initial0 = model0.initialStateValueByKey.find(key0);
+  const auto initial1 = model1.initialStateValueByKey.find(key1);
+  return initial0 != model0.initialStateValueByKey.end() &&
+         initial1 != model1.initialStateValueByKey.end() &&
+         initial0->second != initial1->second;
+}
+
+std::unordered_map<std::string, std::vector<SignalKey>> groupStatesByDisplayName(
+    const SequentialDesignModel& model) {
+  std::unordered_map<std::string, std::vector<SignalKey>> statesByName;
+  for (const auto& key : model.stateBits) {
+    const auto displayIt = model.displayNameByKey.find(key);
+    if (displayIt == model.displayNameByKey.end()) {
+      continue;
+    }
+    statesByName[displayIt->second].push_back(key);
+  }
+  return statesByName;
+}
+
+void appendStatePairIfUnused(
+    AlignedSignals& states,
+    const std::string& name,
+    const SignalKey& key0,
+    const SignalKey& key1,
+    std::unordered_set<SignalKey, SignalKeyHash>& usedKeys0,
+    std::unordered_set<SignalKey, SignalKeyHash>& usedKeys1) {
+  if (usedKeys0.find(key0) != usedKeys0.end() ||
+      usedKeys1.find(key1) != usedKeys1.end()) {
+    return;
+  }
+
+  states.names.push_back(name);
+  states.keys0.push_back(key0);
+  states.keys1.push_back(key1);
+  usedKeys0.insert(key0);
+  usedKeys1.insert(key1);
+}
+
+AlignedSignals alignSameNamedStatesByDisplayName(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    bool requireInitialCompatibility) {
+  // Exact state display-name matches are useful SEC candidates after
+  // optimization keeps register names but changes surrounding logic. Startup
+  // assumptions must respect explicit init values; bootstrap candidates may be
+  // reset-derived later even if explicit init values differ.
+  const auto statesByName0 = groupStatesByDisplayName(model0);
+  const auto statesByName1 = groupStatesByDisplayName(model1);
+
+  AlignedSignals sameNamedStates;
+  for (const auto& key0 : model0.stateBits) {
+    const auto displayIt = model0.displayNameByKey.find(key0);
+    if (displayIt == model0.displayNameByKey.end()) {
+      continue;
+    }
+
+    const auto countIt0 = statesByName0.find(displayIt->second);
+    const auto countIt1 = statesByName1.find(displayIt->second);
+    if (countIt0 == statesByName0.end() || countIt0->second.size() != 1 ||
+        countIt1 == statesByName1.end() || countIt1->second.size() != 1) {
+      continue;
+    }
+
+    const auto& key1 = countIt1->second.front();
+    if (requireInitialCompatibility &&
+        haveConflictingInitialValues(model0, key0, model1, key1)) {
+      continue;
+    }
+
+    sameNamedStates.names.push_back(displayIt->second);
+    sameNamedStates.keys0.push_back(key0);
+    sameNamedStates.keys1.push_back(key1);
+  }
+  return sameNamedStates;
+}
+
+AlignedSignals alignSameNamedStatesForStartup(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1) {
+  // Startup equalities are frame-0 assumptions, so they are allowed only when
+  // explicit init information does not contradict the name-based pairing.
+  return alignSameNamedStatesByDisplayName(
+      model0, model1, /*requireInitialCompatibility=*/true);
+}
+
+AlignedSignals alignSameNamedStatesForBootstrapCandidates(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1) {
+  // Reset/bootstrap can later prove a pair equal even if frame-0 explicit init
+  // values disagree, so candidate collection itself does not reject those pairs.
+  return alignSameNamedStatesByDisplayName(
+      model0, model1, /*requireInitialCompatibility=*/false);
+}
+
+AlignedSignals mergeStartupCorrespondence(
+    const AlignedSignals& structuralStates,
+    const AlignedSignals& sameNamedStates) {
+  AlignedSignals mergedStates;
+  std::unordered_set<SignalKey, SignalKeyHash> usedKeys0;
+  std::unordered_set<SignalKey, SignalKeyHash> usedKeys1;
+  for (size_t i = 0; i < structuralStates.names.size(); ++i) {
+    appendStatePairIfUnused(
+        mergedStates,
+        structuralStates.names[i],
+        structuralStates.keys0[i],
+        structuralStates.keys1[i],
+        usedKeys0,
+        usedKeys1);
+  }
+  for (size_t i = 0; i < sameNamedStates.names.size(); ++i) {
+    appendStatePairIfUnused(
+        mergedStates,
+        sameNamedStates.names[i],
+        sameNamedStates.keys0[i],
+        sameNamedStates.keys1[i],
+        usedKeys0,
+        usedKeys1);
+  }
+  return mergedStates;
+}
+
+AlignedSignals keepEqualitiesWithStateVariables(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& states) {
+  AlignedSignals filteredStates;
+  for (size_t i = 0; i < states.names.size(); ++i) {
+    if (model0.inputVarByKey.find(states.keys0[i]) == model0.inputVarByKey.end() ||
+        model1.inputVarByKey.find(states.keys1[i]) == model1.inputVarByKey.end()) {
+      continue;
+    }
+    filteredStates.names.push_back(states.names[i]);
+    filteredStates.keys0.push_back(states.keys0[i]);
+    filteredStates.keys1.push_back(states.keys1[i]);
+  }
+  return filteredStates;
+}
+
 AlignedSignals filterStateEqualitiesByInitialValue(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
@@ -102,11 +269,8 @@ AlignedSignals filterStateEqualitiesByInitialCompatibility(
     const AlignedSignals& candidateStates) {
   AlignedSignals compatibleStates;
   for (size_t i = 0; i < candidateStates.names.size(); ++i) {
-    const auto initial0 = model0.initialStateValueByKey.find(candidateStates.keys0[i]);
-    const auto initial1 = model1.initialStateValueByKey.find(candidateStates.keys1[i]);
-    if (initial0 != model0.initialStateValueByKey.end() &&
-        initial1 != model1.initialStateValueByKey.end() &&
-        initial0->second != initial1->second) {
+    if (haveConflictingInitialValues(
+            model0, candidateStates.keys0[i], model1, candidateStates.keys1[i])) {
       continue;
     }
 
@@ -242,7 +406,9 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& candidateStates,
+    const AlignedSignals& startupEqualities,
     size_t cycles,
+    KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
   // Push candidate state equalities through the reset-specialized next-state
   // logic. A pair survives only if both sides either collapse to the same
@@ -263,10 +429,18 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     specialized.reserve(model.stateBits.size());
     std::unordered_map<BoolExpr*, BoolExpr*> memo;
     for (const auto& key : model.stateBits) {
-      specialized.emplace(
-          key,
-          substituteBoolExprVariables(
-              model.nextStateExprByStateKey.at(key), resetAssignments, memo));
+      const auto nextIt = model.nextStateExprByStateKey.find(key);
+      if (nextIt == model.nextStateExprByStateKey.end()) {
+        specialized.emplace(key, nullptr);
+        continue;
+      }
+      try {
+        specialized.emplace(
+            key,
+            substituteBoolExprVariables(nextIt->second, resetAssignments, memo));
+      } catch (const std::runtime_error&) {
+        specialized.emplace(key, nullptr);
+      }
     }
     return specialized;
   };
@@ -274,8 +448,9 @@ AlignedSignals deriveResetBootstrapStateEqualities(
   const auto resetSpecializedNext0 = specializeForReset(model0, resetAssignments0);
   const auto resetSpecializedNext1 = specializeForReset(model1, resetAssignments1);
 
-  AlignedSignals currentEqualities = filterStateEqualitiesByInitialValue(
-      model0, model1, candidateStates);
+  AlignedSignals currentEqualities = mergeStartupCorrespondence(
+      filterStateEqualitiesByInitialValue(model0, model1, candidateStates),
+      startupEqualities);
   std::unordered_map<SignalKey, bool, SignalKeyHash> currentKnownValues0 =
       model0.initialStateValueByKey;
   std::unordered_map<SignalKey, bool, SignalKeyHash> currentKnownValues1 =
@@ -304,16 +479,24 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo0;
     std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo1;
     for (const auto& key : model0.stateBits) {
-      specializedNext0.emplace(
-          key,
-          substituteBoolExprVariables(
-              resetSpecializedNext0.at(key), stateAssignments0, stateSubMemo0));
+      try {
+        specializedNext0.emplace(
+            key,
+            substituteBoolExprVariables(
+                resetSpecializedNext0.at(key), stateAssignments0, stateSubMemo0));
+      } catch (const std::runtime_error&) {
+        specializedNext0.emplace(key, nullptr);
+      }
     }
     for (const auto& key : model1.stateBits) {
-      specializedNext1.emplace(
-          key,
-          substituteBoolExprVariables(
-              resetSpecializedNext1.at(key), stateAssignments1, stateSubMemo1));
+      try {
+        specializedNext1.emplace(
+            key,
+            substituteBoolExprVariables(
+                resetSpecializedNext1.at(key), stateAssignments1, stateSubMemo1));
+      } catch (const std::runtime_error&) {
+        specializedNext1.emplace(key, nullptr);
+      }
     }
 
     std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownValues0;
@@ -335,8 +518,29 @@ AlignedSignals deriveResetBootstrapStateEqualities(
       }
     }
 
-    const auto [abstractMap0, abstractMap1] = buildAbstractTransitionMaps(
-        model0, model1, alignedInputs, currentEqualities);
+    bool abstractMapsBuilt = false;
+    bool abstractMapsAvailable = true;
+    LocalToAbstractVarMap abstractMap0;
+    LocalToAbstractVarMap abstractMap1;
+    size_t satRecoveredEqualities = 0;
+    auto ensureAbstractMaps = [&]() {
+      if (abstractMapsBuilt) {
+        return abstractMapsAvailable;
+      }
+      abstractMapsBuilt = true;
+      const auto mappedCurrentEqualities =
+          keepEqualitiesWithStateVariables(model0, model1, currentEqualities);
+      try {
+        auto maps = buildAbstractTransitionMaps(
+            model0, model1, alignedInputs, mappedCurrentEqualities);
+        abstractMap0 = std::move(maps.first);
+        abstractMap1 = std::move(maps.second);
+      } catch (const std::out_of_range&) {
+        abstractMapsAvailable = false;
+      }
+      return abstractMapsAvailable;
+    };
+
     AlignedSignals nextEqualities;
     for (size_t i = 0; i < candidateStates.names.size(); ++i) {
       const auto& key0 = candidateStates.keys0[i];
@@ -348,12 +552,28 @@ AlignedSignals deriveResetBootstrapStateEqualities(
       if (known0 != nextKnownValues0.end() && known1 != nextKnownValues1.end() &&
           known0->second == known1->second) {
         equalAfterStep = true;
+      } else if (specializedNext0.at(key0) == nullptr ||
+                 specializedNext1.at(key1) == nullptr) {
+        equalAfterStep = false;
+      } else if (!ensureAbstractMaps()) {
+        equalAfterStep = false;
       } else {
         equalAfterStep = areEquivalentUnderAbstractMaps(
             specializedNext0.at(key0),
             specializedNext1.at(key1),
             abstractMap0,
             abstractMap1);
+        if (!equalAfterStep) {
+          equalAfterStep = areSatEquivalentUnderAbstractMaps(
+              specializedNext0.at(key0),
+              specializedNext1.at(key1),
+              abstractMap0,
+              abstractMap1,
+              solverType);
+          if (equalAfterStep) {
+            ++satRecoveredEqualities;
+          }
+        }
       }
 
       if (!equalAfterStep) {
@@ -376,6 +596,13 @@ AlignedSignals deriveResetBootstrapStateEqualities(
           currentEqualities.names.size(),
           currentKnownValues0.size(),
           currentKnownValues1.size());
+      if (satRecoveredEqualities != 0) {
+        fprintf(
+            stderr,
+            "SEC diag: bootstrap step %zu sat_recovered_equalities=%zu\n",
+            step + 1,
+            satRecoveredEqualities);
+      }
       fflush(stderr);
     }
   }
@@ -402,7 +629,8 @@ ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& inductiveStateEqualities,
-    bool secDiagEnabled) {
+    bool secDiagEnabled,
+    KEPLER_FORMAL::Config::SolverType solverType) {
   ReachableStateInvariant invariant;
   // First decide which startup model we have: explicit init, reset bootstrap,
   // both, or neither. That determines how strong the frame-0 correspondence
@@ -412,21 +640,30 @@ ReachableStateInvariant buildReachableStateInvariant(
 
   invariant.bootstrapCycles = defaultResetBootstrapCycles(
       hasResetBootstrap, hasCompleteInitialState(model0, model1));
-  invariant.initialStateCorrespondence = filterStateEqualitiesByInitialCompatibility(
+  const auto structuralStartupCorrespondence = filterStateEqualitiesByInitialCompatibility(
       model0, model1, inductiveStateEqualities);
+  invariant.initialStateCorrespondence = mergeStartupCorrespondence(
+      structuralStartupCorrespondence,
+      alignSameNamedStatesForStartup(model0, model1));
 
   if (hasResetBootstrap) {
-    // Prefer the strongest already-justified correspondence. If none exists at
-    // frame 0, derive one by walking the reset window forward.
-    if (!invariant.initialStateCorrespondence.names.empty()) {
-      invariant.anchoredStateEqualities = invariant.initialStateCorrespondence;
+    // Walk the reset window to find which candidate equalities are true at the
+    // first checked frame. The seed includes startup equalities, but a pair is
+    // promoted only if reset-specialized transition logic proves it survives.
+    if (invariant.bootstrapCycles == 0) {
+      invariant.anchoredStateEqualities = structuralStartupCorrespondence;
     } else {
+      const auto bootstrapCandidateStates = mergeStartupCorrespondence(
+          inductiveStateEqualities,
+          alignSameNamedStatesForBootstrapCandidates(model0, model1));
       invariant.anchoredStateEqualities = deriveResetBootstrapStateEqualities(
           model0,
           model1,
           alignedInputs,
-          inductiveStateEqualities,
+          bootstrapCandidateStates,
+          invariant.initialStateCorrespondence,
           invariant.bootstrapCycles,
+          solverType,
           secDiagEnabled);
     }
 

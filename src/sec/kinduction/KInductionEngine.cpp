@@ -3,6 +3,7 @@
 
 #include "kinduction/KInductionEngine.h"
 
+#include "common/SecDiag.h"
 #include "kinduction/BaseCaseSolver.h"
 #include "kinduction/InductionStepSolver.h"
 
@@ -24,8 +25,17 @@ KInductionEngine::KInductionEngine(
 
 KInductionResult KInductionEngine::run(size_t maxK) const {
   // Handle the purely combinational mismatch case before any unrolling.
+  if (isSecDiagEnabled()) {
+    emitSecDiag("SEC diag: k-induction base k=0 begin");
+  }
   if (auto witness = findBaseCounterexample(0); witness.has_value()) {
+    if (isSecDiagEnabled()) {
+      emitSecDiag("SEC diag: k-induction base k=0 found cex");
+    }
     return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+  }
+  if (isSecDiagEnabled()) {
+    emitSecDiag("SEC diag: k-induction base k=0 unsat");
   }
 
   // If there is no state, the base check already decided the whole problem.
@@ -38,14 +48,30 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
   // when a later output divergence exists even though a small-k induction step
   // happens to be too coarse to expose it yet.
   for (size_t k = 1; k <= maxK; ++k) {
+    if (isSecDiagEnabled()) {
+      emitSecDiag("SEC diag: k-induction base k=", k, " begin");
+    }
     if (auto witness = findBaseCounterexample(k); witness.has_value()) {
+      if (isSecDiagEnabled()) {
+        emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
+      }
       return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+    }
+    if (isSecDiagEnabled()) {
+      emitSecDiag("SEC diag: k-induction base k=", k, " unsat");
+      emitSecDiag("SEC diag: k-induction step k=", k, " begin");
     }
 
     // Induction step: assume the property along a simple path of length k and
     // ask whether the last frame can still be bad.
     if (provesByInduction(k)) {
+      if (isSecDiagEnabled()) {
+        emitSecDiag("SEC diag: k-induction step k=", k, " proved");
+      }
       return {KInductionStatus::Equivalent, k};
+    }
+    if (isSecDiagEnabled()) {
+      emitSecDiag("SEC diag: k-induction step k=", k, " inconclusive");
     }
   }
 

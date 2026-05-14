@@ -3848,6 +3848,25 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BoolFormulaImplicationProvesCommutedConeUnderStateEquality) {
+  BoolExpr* stateEquality = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(4));
+  BoolExpr* outputEquality = makeEqualityExpr(
+      BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3)),
+      BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)));
+  BoolExpr* unrelatedEquality =
+      makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
+
+  EXPECT_TRUE(boolFormulaImplies(
+      stateEquality,
+      outputEquality,
+      KEPLER_FORMAL::Config::getSolverType()));
+  EXPECT_FALSE(boolFormulaImplies(
+      stateEquality,
+      unrelatedEquality,
+      KEPLER_FORMAL::Config::getSolverType()));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ResetBootstrapAutomaticallyExtendsForHiddenShiftPipelines) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -4031,6 +4050,143 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
   ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
   EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantDerivesBootstrapEqualityFromSameNamedResetlessState) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey structural0 = makeSignalKey("structural0");
+  const SignalKey structural1 = makeSignalKey("structural1");
+  const SignalKey resetless0 = makeSignalKey("resetless0");
+  const SignalKey resetless1 = makeSignalKey("resetless1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {structural0, resetless0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(structural0, 4);
+  model0.inputVarByKey.emplace(resetless0, 6);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.displayNameByKey.emplace(structural0, "u_guard.q[0]");
+  model0.displayNameByKey.emplace(resetless0, "text_out[0]$_DFF_P_.QN[0]");
+  model0.nextStateExprByStateKey.emplace(structural0, BoolExpr::Not(BoolExpr::Var(2)));
+  model0.nextStateExprByStateKey.emplace(resetless0, BoolExpr::Var(6));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {structural1, resetless1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(structural1, 5);
+  model1.inputVarByKey.emplace(resetless1, 7);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.displayNameByKey.emplace(structural1, "u_guard.q[0]");
+  model1.displayNameByKey.emplace(resetless1, "text_out[0]$_DFF_P_.QN[0]");
+  model1.nextStateExprByStateKey.emplace(structural1, BoolExpr::Not(BoolExpr::Var(3)));
+  model1.nextStateExprByStateKey.emplace(resetless1, BoolExpr::Var(7));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  // This mirrors post-resize AES: only a small structural guard was inferred as
+  // inductive, while same-named resetless flops still represent the same
+  // startup state. If reset propagation proves the equality survives the
+  // bootstrap window, SEC can safely use it at the first checked frame too.
+  AlignedSignals inductiveStates;
+  inductiveStates.names = {"u_guard.q[0]"};
+  inductiveStates.keys0 = {structural0};
+  inductiveStates.keys1 = {structural1};
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, alignedInputs, inductiveStates);
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 2u);
+  EXPECT_NE(
+      std::find(
+          invariant.initialStateCorrespondence.names.begin(),
+          invariant.initialStateCorrespondence.names.end(),
+          "text_out[0]$_DFF_P_.QN[0]"),
+      invariant.initialStateCorrespondence.names.end());
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 2u);
+  EXPECT_NE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "u_guard.q[0]"),
+      invariant.anchoredStateEqualities.names.end());
+  EXPECT_NE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "text_out[0]$_DFF_P_.QN[0]"),
+      invariant.anchoredStateEqualities.names.end());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantUsesSatToAnchorCommutedBootstrapLogic) {
+  const SignalKey rst0 = makeSignalKey("rst0");
+  const SignalKey rst1 = makeSignalKey("rst1");
+  const SignalKey in0 = makeSignalKey("in0");
+  const SignalKey in1 = makeSignalKey("in1");
+  const SignalKey structural0 = makeSignalKey("structural0");
+  const SignalKey structural1 = makeSignalKey("structural1");
+  const SignalKey resetless0 = makeSignalKey("resetless0");
+  const SignalKey resetless1 = makeSignalKey("resetless1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0, in0};
+  model0.stateBits = {structural0, resetless0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(in0, 8);
+  model0.inputVarByKey.emplace(structural0, 4);
+  model0.inputVarByKey.emplace(resetless0, 6);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.displayNameByKey.emplace(in0, "in");
+  model0.displayNameByKey.emplace(structural0, "u_guard.q[0]");
+  model0.displayNameByKey.emplace(resetless0, "state_q[0]");
+  model0.nextStateExprByStateKey.emplace(structural0, BoolExpr::Not(BoolExpr::Var(2)));
+  model0.nextStateExprByStateKey.emplace(
+      resetless0,
+      BoolExpr::And(BoolExpr::Var(6), BoolExpr::Var(8)));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1, in1};
+  model1.stateBits = {structural1, resetless1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(in1, 9);
+  model1.inputVarByKey.emplace(structural1, 5);
+  model1.inputVarByKey.emplace(resetless1, 7);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.displayNameByKey.emplace(in1, "in");
+  model1.displayNameByKey.emplace(structural1, "u_guard.q[0]");
+  model1.displayNameByKey.emplace(resetless1, "state_q[0]");
+  model1.nextStateExprByStateKey.emplace(structural1, BoolExpr::Not(BoolExpr::Var(3)));
+  model1.nextStateExprByStateKey.emplace(
+      resetless1,
+      BoolExpr::And(BoolExpr::Var(9), BoolExpr::Var(7)));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst", "in"};
+  alignedInputs.keys0 = {rst0, in0};
+  alignedInputs.keys1 = {rst1, in1};
+
+  AlignedSignals inductiveStates;
+  inductiveStates.names = {"u_guard.q[0]"};
+  inductiveStates.keys0 = {structural0};
+  inductiveStates.keys1 = {structural1};
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, alignedInputs, inductiveStates);
+
+  EXPECT_NE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "state_q[0]"),
+      invariant.anchoredStateEqualities.names.end());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -4311,7 +4467,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       model0, model1, AlignedSignals{}, candidateStates);
 
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 3u);
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 2u);
+  EXPECT_TRUE(
+      std::find(
+          invariant.anchoredStateEqualities.names.begin(),
+          invariant.anchoredStateEqualities.names.end(),
+          "invalid") == invariant.anchoredStateEqualities.names.end());
   EXPECT_TRUE(invariant.bootstrapValues0.at(const0));
   EXPECT_TRUE(invariant.bootstrapValues1.at(const1));
   EXPECT_TRUE(invariant.bootstrapValues0.at(xor0));

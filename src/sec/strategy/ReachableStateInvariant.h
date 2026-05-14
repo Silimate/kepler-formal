@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <unordered_map>
 
+#include "../../config/Config.h"
 #include "common/AlignedSignals.h"
 #include "model/SequentialDesignModel.h"
 
@@ -28,6 +29,8 @@ ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& inductiveStateEqualities,
-    bool secDiagEnabled = false);
+    bool secDiagEnabled = false,
+    KEPLER_FORMAL::Config::SolverType solverType =
+        KEPLER_FORMAL::Config::getSolverType());
 
 }  // namespace KEPLER_FORMAL::SEC
