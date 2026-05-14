@@ -1,0 +1,167 @@
+# GitHub Actions workflow to run SEC PDR regressions.
+name: regress-pdr
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  SEC_ENGINE: pdr
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libgtest-dev cmake pkg-config libboost-dev libfl-dev \
+          capnproto libcapnp-dev ninja-build libtbb-dev libspdlog-dev \
+          libboost-iostreams-dev zlib1g-dev
+
+    - name: Checkout submodules
+      run: git submodule update --init --recursive
+
+    - name: Configure CMake
+      run: |
+        cmake -B ${{github.workspace}}/build-sec-regress \
+          -GNinja \
+          -DPYTHON_INTERFACE=OFF \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=20 \
+          -DCMAKE_CXX_FLAGS="-O3 -march=native -ffast-math -flto -DNDEBUG" \
+          -DCMAKE_CXX_FLAGS_RELEASE="-Ofast -march=native -ffast-math -flto -DNDEBUG" \
+          -DCMAKE_EXE_LINKER_FLAGS="-flto"
+
+    - name: Build
+      run: cmake --build ${{github.workspace}}/build-sec-regress --target kepler-formal --config Release
+
+    - name: Clone kepler-formal-regress
+      working-directory: ${{github.workspace}}
+      run: git clone https://github.com/keplertech/kepler-formal-regress
+
+    - name: Run external SEC regressions
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_sec_strategies_regress.sh \
+          cts_aes_asap7_base \
+          "${{github.workspace}}/kepler-formal-regress/cts_aes_asap7_base" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          objects/asap7/aes/base/4_rsz_lec_test.yml \
+          expect-equivalent \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          sky130hd_gcd \
+          "${{github.workspace}}/kepler-formal-regress/sky130hd_gcd" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          objects/sky130hd/gcd/base/4_rsz_lec_test.yml \
+          expect-equivalent \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          nangate45_black_parrot \
+          "${{github.workspace}}/kepler-formal-regress/nangate45_black_parrot" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          objects/nangate45/bp/base/4_rsz_lec_test.yml \
+          expect-equivalent \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          ihp_sg13g2_i2c_gpio_expander \
+          "${{github.workspace}}/kepler-formal-regress/ihp-sg13g2_i2c-gpio-expander" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml \
+          expect-equivalent \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+
+    - name: Run TinyRocket SEC regressions
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_sec_strategies_regress.sh \
+          tinyrocket_naja_if \
+          "${{github.workspace}}" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          regress/tinyrocket_naja_if/config.yaml \
+          expect-equivalent \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          tinyrocket_verilog \
+          "${{github.workspace}}" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          regress/tinyrocket_verilog/config.yaml \
+          expect-equivalent \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+
+    - name: Install najaeda
+      run: pip install najaeda
+
+    - name: Generate TinyRocket edited and CSRFile SEC examples
+      working-directory: ${{github.workspace}}/example
+      run: |
+        python edit.py
+        python extract_tinyrocket_csrfile_sec.py
+
+    - name: Run TinyRocket CSRFile SEC counterexample
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_sec_strategies_regress.sh \
+          tinyrocket_csrfile_sec \
+          "${{github.workspace}}/example" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          test_config_verilog_tinyrocket_csrfile_sec.yaml \
+          expect-different \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+
+    - name: Run TinyRocket SEC self-check
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_sec_strategies_regress.sh \
+          tinyrocket_self_sec \
+          "${{github.workspace}}/example" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          test_config_verilog_tinyrocket_sec.yaml \
+          expect-equivalent \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+
+    - name: Run TinyRocket edited SEC regressions
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_sec_strategies_regress.sh \
+          tinyrocket_naja_if_edited \
+          "${{github.workspace}}" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          regress/tinyrocket_naja_if_edited/config.yaml \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          tinyrocket_verilog_edited \
+          "${{github.workspace}}" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          regress/tinyrocket_verilog_edited/config.yaml \
+          max-k=4 \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
