@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different] [max-k=<n>] [compact]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different] [max-k=<n>] [compact] [engine=<name>]" >&2
   exit 2
 fi
 
@@ -16,6 +16,9 @@ config_path="$4"
 expectation=""
 max_k_override=""
 compact_mode=""
+# By default the helper is useful for local all-engine smoke checks.  CI passes
+# engine=<name> from the split regress workflows so each job owns one strategy.
+engines=(k_induction imc pdr)
 
 for option in "${@:5}"; do
   case "${option}" in
@@ -24,6 +27,18 @@ for option in "${@:5}"; do
       ;;
     compact)
       compact_mode="1"
+      ;;
+    engine=*)
+      engine="${option#engine=}"
+      case "${engine}" in
+        k_induction|imc|pdr)
+          engines=("${engine}")
+          ;;
+        *)
+          echo "Invalid SEC engine override: ${engine}" >&2
+          exit 2
+          ;;
+      esac
       ;;
     max-k=*)
       max_k_override="${option#max-k=}"
@@ -104,6 +119,6 @@ run_engine() {
   )
 }
 
-for engine in k_induction imc pdr; do
+for engine in "${engines[@]}"; do
   run_engine "${engine}"
 done
