@@ -5654,6 +5654,31 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       IMCEngineBatchesFallbackInductionForMultiOutputProblems) {
+  auto problem = buildLinearChainSecProblem(4);
+  problem.observedOutputNames = {"terminal_state", "low_state_bit"};
+  problem.observedOutputExprs0.push_back(BoolExpr::Var(problem.state0Symbols.front()));
+  problem.observedOutputExprs1.push_back(BoolExpr::Var(problem.state1Symbols.front()));
+
+  BoolExpr* property = BoolExpr::createTrue();
+  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
+    property = BoolExpr::And(
+        property,
+        makeEqualityExpr(problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]));
+  }
+  problem.property = BoolExpr::simplify(property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, IMCStatus::Equivalent);
+  EXPECT_EQ(result.bound, 2u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        IMCEngineRemainsInconclusiveAtFourFramesWhenFiveAreNeeded) {
   const auto problem = buildLinearChainSecProblem(6);
 

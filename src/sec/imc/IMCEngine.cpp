@@ -8,6 +8,7 @@
 #include "kinduction/BaseCaseSolver.h"
 #include "imc/ExactInterpolantSynthesizer.h"
 #include "kinduction/InductionStepSolver.h"
+#include "kinduction/OutputBatching.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/ProofEngineShared.h"
 
@@ -184,6 +185,29 @@ std::optional<IMCResult> findImcCounterexample(const KInductionProblem& problem,
   return std::nullopt;
 }
 
+bool provesByOutputBatchedInduction(const KInductionProblem& problem,
+                                    KEPLER_FORMAL::Config::SolverType solverType,
+                                    size_t k) {
+  if (problem.observedOutputExprs0.size() <= 1) {
+    return provesByInduction(problem, solverType, k);
+  }
+
+  // IMC's exact-frontier construction is intentionally bounded for large ASICs.
+  // When that path is too large, the fallback induction proof must still avoid
+  // rebuilding one giant OR-of-all-bads SAT query.  Proving every output batch
+  // by the same k-induction rule is equivalent to proving the full conjunction,
+  // but each query gets a much smaller cone of influence.
+  KInductionProblem batchProblem = problem;
+  for (const auto& [firstOutput, endOutput] :
+       buildSupportBoundedOutputBatches(problem)) {
+    configureOutputBatchProblem(batchProblem, problem, firstOutput, endOutput);
+    if (!provesByInduction(batchProblem, solverType, k)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 IMCEngine::IMCEngine(const KInductionProblem& problem,
@@ -226,7 +250,7 @@ IMCResult IMCEngine::run(size_t maxK) const {
     // shared induction step may still close immediately from the same
     // counterexample-free prefix. Reuse that sound proof before trying the more
     // expensive explicit frontier construction.
-    if (provesByInduction(problem_, solverType_, k)) {
+    if (provesByOutputBatchedInduction(problem_, solverType_, k)) {
       return {IMCStatus::Equivalent, k};
     }
 

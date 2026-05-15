@@ -7,6 +7,7 @@ add_library(kepler_sec STATIC
     imc/ExactInterpolantSynthesizer.cpp
     imc/IMCEngine.cpp
     kinduction/KInductionEngine.cpp
+    kinduction/OutputBatching.cpp
     model/SequentialDesignModel.cpp
     pdr/PDREngine.cpp
     proof/ProofEngineShared.cpp
