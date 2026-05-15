@@ -4,6 +4,7 @@
 #include "common/BoolExprUtils.h"
 
 #include <stdexcept>
+#include <vector>
 
 #include "kinduction/SatEncoding.h"
 
@@ -30,48 +31,82 @@ BoolExpr* remapBoolExprVariables(
     return it->second;
   }
 
-  BoolExpr* remapped = nullptr;
-  switch (root->getOp()) {
-    case Op::VAR: {
-      const size_t id = root->getId();
-      if (id < 2) {
-        remapped = BoolExpr::Var(id);
-        break;
-      }
-      auto it = varMap.find(id);
-      if (it == varMap.end()) {
-        throw std::runtime_error("Missing BoolExpr remap for variable " +
-                                 std::to_string(id));
-      }
-      remapped = BoolExpr::Var(it->second);
-      break;
+  struct StackFrame {
+    BoolExpr* expr = nullptr;
+    bool visited = false;
+  };
+
+  // Large gate-level SEC formulas are often long, hash-consed DAGs.  A
+  // recursive remap is semantically simple, but profiling on BlackParrot-sized
+  // designs showed it consuming substantial time and stack depth before the
+  // SAT engine even sees a query.  This iterative post-order traversal keeps
+  // the same memoized remapping while making the pass linear in the reached
+  // DAG and robust for very deep cones.
+  std::vector<StackFrame> stack;
+  stack.push_back({root, false});
+  while (!stack.empty()) {
+    const StackFrame current = stack.back();
+    stack.pop_back();
+    BoolExpr* node = current.expr;
+    if (node == nullptr || memo.find(node) != memo.end()) {
+      continue;
     }
-    case Op::NOT:
-      remapped = BoolExpr::Not(
-          remapBoolExprVariables(root->getLeft(), varMap, memo));
-      break;
-    case Op::AND:
-      remapped = BoolExpr::And(
-          remapBoolExprVariables(root->getLeft(), varMap, memo),
-          remapBoolExprVariables(root->getRight(), varMap, memo));
-      break;
-    case Op::OR:
-      remapped = BoolExpr::Or(
-          remapBoolExprVariables(root->getLeft(), varMap, memo),
-          remapBoolExprVariables(root->getRight(), varMap, memo));
-      break;
-    case Op::XOR:
-      remapped = BoolExpr::Xor(
-          remapBoolExprVariables(root->getLeft(), varMap, memo),
-          remapBoolExprVariables(root->getRight(), varMap, memo));
-      break;
-    case Op::NONE:
-    default:
+
+    if (node->getOp() == Op::VAR) {
+      const size_t id = node->getId();
+      if (id < 2) {
+        memo.emplace(node, BoolExpr::Var(id));
+      } else {
+        auto it = varMap.find(id);
+        if (it == varMap.end()) {
+          throw std::runtime_error("Missing BoolExpr remap for variable " +
+                                   std::to_string(id));
+        }
+        memo.emplace(node, BoolExpr::Var(it->second));
+      }
+      continue;
+    }
+
+    if (node->getOp() == Op::NONE) {
       throw std::runtime_error("Unsupported BoolExpr operator in remap");
+    }
+
+    if (!current.visited) {
+      stack.push_back({node, true});
+      if (node->getRight() != nullptr &&
+          memo.find(node->getRight()) == memo.end()) {
+        stack.push_back({node->getRight(), false});
+      }
+      if (node->getLeft() != nullptr &&
+          memo.find(node->getLeft()) == memo.end()) {
+        stack.push_back({node->getLeft(), false});
+      }
+      continue;
+    }
+
+    BoolExpr* remapped = nullptr;
+    switch (node->getOp()) {
+      case Op::NOT:
+        remapped = BoolExpr::Not(memo.at(node->getLeft()));
+        break;
+      case Op::AND:
+        remapped = BoolExpr::And(memo.at(node->getLeft()), memo.at(node->getRight()));
+        break;
+      case Op::OR:
+        remapped = BoolExpr::Or(memo.at(node->getLeft()), memo.at(node->getRight()));
+        break;
+      case Op::XOR:
+        remapped = BoolExpr::Xor(memo.at(node->getLeft()), memo.at(node->getRight()));
+        break;
+      case Op::VAR:
+      case Op::NONE:
+      default:
+        throw std::runtime_error("Unsupported BoolExpr operator in remap");
+    }
+    memo.emplace(node, remapped);
   }
 
-  memo.emplace(root, remapped);
-  return remapped;
+  return memo.at(root);
 }
 
 BoolExpr* remapBoolExprVariables(

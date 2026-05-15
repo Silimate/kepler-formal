@@ -5,12 +5,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <optional>
+#include <set>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "common/BoolExprUtils.h"
 #include "strategy/StructuralStateInvariant.h"
@@ -27,6 +31,9 @@ namespace KEPLER_FORMAL::SEC {
 //    facts that later proof engines can rely on.
 
 namespace {
+
+constexpr size_t kBootstrapSatRecoveryCandidateBudget = 1024;
+constexpr size_t kBootstrapSatRecoverySupportBudget = 4096;
 
 bool isConstBoolExpr(BoolExpr* expr, bool value) {
   return expr != nullptr && expr->getOp() == Op::VAR &&
@@ -53,6 +60,13 @@ bool areSatEquivalentUnderAbstractMaps(
   }
 }
 
+bool isWithinBootstrapSatRecoverySupportBudget(BoolExpr* expr0, BoolExpr* expr1) {
+  std::set<size_t> support = expr0->getSupportVars();
+  const auto support1 = expr1->getSupportVars();
+  support.insert(support1.begin(), support1.end());
+  return support.size() <= kBootstrapSatRecoverySupportBudget;
+}
+
 std::string normalizeSignalBaseName(const std::string& name) {
   std::string base = name;
   const auto bracket = base.find('[');
@@ -65,14 +79,35 @@ std::string normalizeSignalBaseName(const std::string& name) {
   return base;
 }
 
-std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+bool hasSuffix(const std::string& value, const std::string& suffix) {
+  return value.size() >= suffix.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::vector<std::string> resetNameCandidates(const std::string& displayName) {
+  // Reset ports frequently carry RTL direction suffixes (`reset_i`, `rst_ni`).
+  // Strip only those common input suffixes before classification so a real
+  // reset is bootstrapped, without broadening the matcher to arbitrary names.
   const std::string normalized = normalizeSignalBaseName(displayName);
-  if (normalized == "RESET" || normalized == "RST") {
-    return true;
+  std::vector<std::string> candidates = {normalized};
+  if (hasSuffix(normalized, "_I")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 2));
   }
-  if (normalized == "RESET_N" || normalized == "RESETN" ||
-      normalized == "RST_N" || normalized == "RSTN") {
-    return false;
+  if (hasSuffix(normalized, "_NI")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 1));
+  }
+  return candidates;
+}
+
+std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+  for (const auto& candidate : resetNameCandidates(displayName)) {
+    if (candidate == "RESET" || candidate == "RST") {
+      return true;
+    }
+    if (candidate == "RESET_N" || candidate == "RESETN" ||
+        candidate == "RST_N" || candidate == "RSTN") {
+      return false;
+    }
   }
   return std::nullopt;
 }
@@ -110,15 +145,30 @@ bool haveConflictingInitialValues(
          initial0->second != initial1->second;
 }
 
-std::unordered_map<std::string, std::vector<SignalKey>> groupStatesByDisplayName(
-    const SequentialDesignModel& model) {
-  std::unordered_map<std::string, std::vector<SignalKey>> statesByName;
+struct StateNameGroup {
+  SignalKey firstKey;
+  size_t count = 0;
+};
+
+using StateNameGroups = std::unordered_map<std::string_view, StateNameGroup>;
+
+StateNameGroups groupStatesByDisplayName(const SequentialDesignModel& model) {
+  StateNameGroups statesByName;
+  statesByName.reserve(model.stateBits.size());
   for (const auto& key : model.stateBits) {
     const auto displayIt = model.displayNameByKey.find(key);
     if (displayIt == model.displayNameByKey.end()) {
       continue;
     }
-    statesByName[displayIt->second].push_back(key);
+    // Keep string_views into the immutable model display-name table. This
+    // preserves content-based matching while avoiding per-state string and
+    // vector allocations on large reset/bootstrap candidate sets.
+    auto [groupIt, inserted] =
+        statesByName.try_emplace(std::string_view(displayIt->second));
+    if (inserted) {
+      groupIt->second.firstKey = key;
+    }
+    ++groupIt->second.count;
   }
   return statesByName;
 }
@@ -145,29 +195,33 @@ void appendStatePairIfUnused(
 AlignedSignals alignSameNamedStatesByDisplayName(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
+    const StateNameGroups& statesByName0,
+    const StateNameGroups& statesByName1,
     bool requireInitialCompatibility) {
   // Exact state display-name matches are useful SEC candidates after
   // optimization keeps register names but changes surrounding logic. Startup
   // assumptions must respect explicit init values; bootstrap candidates may be
   // reset-derived later even if explicit init values differ.
-  const auto statesByName0 = groupStatesByDisplayName(model0);
-  const auto statesByName1 = groupStatesByDisplayName(model1);
-
   AlignedSignals sameNamedStates;
+  const size_t maxPairs = std::min(model0.stateBits.size(), model1.stateBits.size());
+  sameNamedStates.names.reserve(maxPairs);
+  sameNamedStates.keys0.reserve(maxPairs);
+  sameNamedStates.keys1.reserve(maxPairs);
   for (const auto& key0 : model0.stateBits) {
     const auto displayIt = model0.displayNameByKey.find(key0);
     if (displayIt == model0.displayNameByKey.end()) {
       continue;
     }
 
-    const auto countIt0 = statesByName0.find(displayIt->second);
-    const auto countIt1 = statesByName1.find(displayIt->second);
-    if (countIt0 == statesByName0.end() || countIt0->second.size() != 1 ||
-        countIt1 == statesByName1.end() || countIt1->second.size() != 1) {
+    const auto displayName = std::string_view(displayIt->second);
+    const auto countIt0 = statesByName0.find(displayName);
+    const auto countIt1 = statesByName1.find(displayName);
+    if (countIt0 == statesByName0.end() || countIt0->second.count != 1 ||
+        countIt1 == statesByName1.end() || countIt1->second.count != 1) {
       continue;
     }
 
-    const auto& key1 = countIt1->second.front();
+    const auto& key1 = countIt1->second.firstKey;
     if (requireInitialCompatibility &&
         haveConflictingInitialValues(model0, key0, model1, key1)) {
       continue;
@@ -182,20 +236,32 @@ AlignedSignals alignSameNamedStatesByDisplayName(
 
 AlignedSignals alignSameNamedStatesForStartup(
     const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1) {
+    const SequentialDesignModel& model1,
+    const StateNameGroups& statesByName0,
+    const StateNameGroups& statesByName1) {
   // Startup equalities are frame-0 assumptions, so they are allowed only when
   // explicit init information does not contradict the name-based pairing.
   return alignSameNamedStatesByDisplayName(
-      model0, model1, /*requireInitialCompatibility=*/true);
+      model0,
+      model1,
+      statesByName0,
+      statesByName1,
+      /*requireInitialCompatibility=*/true);
 }
 
 AlignedSignals alignSameNamedStatesForBootstrapCandidates(
     const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1) {
+    const SequentialDesignModel& model1,
+    const StateNameGroups& statesByName0,
+    const StateNameGroups& statesByName1) {
   // Reset/bootstrap can later prove a pair equal even if frame-0 explicit init
   // values disagree, so candidate collection itself does not reject those pairs.
   return alignSameNamedStatesByDisplayName(
-      model0, model1, /*requireInitialCompatibility=*/false);
+      model0,
+      model1,
+      statesByName0,
+      statesByName1,
+      /*requireInitialCompatibility=*/false);
 }
 
 AlignedSignals mergeStartupCorrespondence(
@@ -204,6 +270,11 @@ AlignedSignals mergeStartupCorrespondence(
   AlignedSignals mergedStates;
   std::unordered_set<SignalKey, SignalKeyHash> usedKeys0;
   std::unordered_set<SignalKey, SignalKeyHash> usedKeys1;
+  usedKeys0.reserve(structuralStates.keys0.size() + sameNamedStates.keys0.size());
+  usedKeys1.reserve(structuralStates.keys1.size() + sameNamedStates.keys1.size());
+  mergedStates.names.reserve(structuralStates.names.size() + sameNamedStates.names.size());
+  mergedStates.keys0.reserve(structuralStates.keys0.size() + sameNamedStates.keys0.size());
+  mergedStates.keys1.reserve(structuralStates.keys1.size() + sameNamedStates.keys1.size());
   for (size_t i = 0; i < structuralStates.names.size(); ++i) {
     appendStatePairIfUnused(
         mergedStates,
@@ -296,73 +367,173 @@ std::optional<bool> evaluateConstantUnderAssignments(
     return it->second;
   }
 
-  std::optional<bool> value;
-  switch (expr->getOp()) {
-    case Op::VAR:
-      if (expr->getId() < 2) {
-        value = expr->getId() == 1;
-      } else if (const auto it = assignments.find(expr->getId());
-                 it != assignments.end()) {
-        value = it->second;
-      }
-      break;
-    case Op::NOT: {
-      const auto operand =
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
-      if (operand.has_value()) {
-        value = !*operand;
-      }
-      break;
+  struct EvalFrame {
+    BoolExpr* node = nullptr;
+    uint8_t stage = 0;
+  };
+
+  auto childValue = [&](BoolExpr* child) -> std::optional<bool> {
+    if (child == nullptr) {
+      return std::nullopt;
     }
-    case Op::AND: {
-      const auto lhs =
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
-      if (lhs.has_value() && !*lhs) {
-        value = false;
+    if (const auto it = memo.find(child); it != memo.end()) {
+      return it->second;
+    }
+    return std::nullopt;  // LCOV_EXCL_LINE
+  };
+
+  // Reset bootstrap evaluates hundreds of thousands of hash-consed next-state
+  // DAG roots on large ASICs.  Keep the recursive short-circuit semantics, but
+  // use an explicit stack so shared cones are visited once without deep call
+  // stacks before the real proof engine starts.
+  std::vector<EvalFrame> stack{{expr, 0}};
+  while (!stack.empty()) {
+    EvalFrame& frame = stack.back();
+    BoolExpr* node = frame.node;
+    if (node == nullptr || memo.find(node) != memo.end()) {
+      stack.pop_back();
+      continue;
+    }
+
+    switch (node->getOp()) {
+      case Op::VAR: {
+        std::optional<bool> value;
+        if (node->getId() < 2) {
+          value = node->getId() == 1;
+        } else if (const auto it = assignments.find(node->getId());
+                   it != assignments.end()) {
+          value = it->second;
+        }
+        memo.emplace(node, value);
+        stack.pop_back();
         break;
       }
-      const auto rhs =
-          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
-      if (rhs.has_value() && !*rhs) {
-        value = false;
-      } else if (lhs.has_value() && rhs.has_value()) {
-        value = *lhs && *rhs;
-      }
-      break;
-    }
-    case Op::OR: {
-      const auto lhs =
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);
-      if (lhs.has_value() && *lhs) {
-        value = true;
+      case Op::NOT:
+        if (frame.stage == 0) {
+          frame.stage = 1;
+          if (node->getLeft() != nullptr &&
+              memo.find(node->getLeft()) == memo.end()) {
+            stack.push_back({node->getLeft(), 0});
+          }
+          break;
+        }
+        if (const auto operand = childValue(node->getLeft());
+            operand.has_value()) {
+          memo.emplace(node, !*operand);
+        } else {
+          memo.emplace(node, std::nullopt);
+        }
+        stack.pop_back();
         break;
-      }
-      const auto rhs =
-          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);
-      if (rhs.has_value() && *rhs) {
-        value = true;
-      } else if (lhs.has_value() && rhs.has_value()) {
-        value = *lhs || *rhs;
-      }
-      break;
+      case Op::AND:
+        if (frame.stage == 0) {
+          frame.stage = 1;
+          if (node->getLeft() != nullptr &&
+              memo.find(node->getLeft()) == memo.end()) {
+            stack.push_back({node->getLeft(), 0});
+          }
+          break;
+        }
+        if (frame.stage == 1) {
+          const auto lhs = childValue(node->getLeft());
+          if (lhs.has_value() && !*lhs) {
+            memo.emplace(node, false);
+            stack.pop_back();
+            break;
+          }
+          frame.stage = 2;
+          if (node->getRight() != nullptr &&
+              memo.find(node->getRight()) == memo.end()) {
+            stack.push_back({node->getRight(), 0});
+          }
+          break;
+        }
+        {
+          const auto lhs = childValue(node->getLeft());
+          const auto rhs = childValue(node->getRight());
+          if (rhs.has_value() && !*rhs) {
+            memo.emplace(node, false);
+          } else if (lhs.has_value() && rhs.has_value()) {
+            memo.emplace(node, *lhs && *rhs);
+          } else {
+            memo.emplace(node, std::nullopt);
+          }
+          stack.pop_back();
+        }
+        break;
+      case Op::OR:
+        if (frame.stage == 0) {
+          frame.stage = 1;
+          if (node->getLeft() != nullptr &&
+              memo.find(node->getLeft()) == memo.end()) {
+            stack.push_back({node->getLeft(), 0});
+          }
+          break;
+        }
+        if (frame.stage == 1) {
+          const auto lhs = childValue(node->getLeft());
+          if (lhs.has_value() && *lhs) {
+            memo.emplace(node, true);
+            stack.pop_back();
+            break;
+          }
+          frame.stage = 2;
+          if (node->getRight() != nullptr &&
+              memo.find(node->getRight()) == memo.end()) {
+            stack.push_back({node->getRight(), 0});
+          }
+          break;
+        }
+        {
+          const auto lhs = childValue(node->getLeft());
+          const auto rhs = childValue(node->getRight());
+          if (rhs.has_value() && *rhs) {
+            memo.emplace(node, true);
+          } else if (lhs.has_value() && rhs.has_value()) {
+            memo.emplace(node, *lhs || *rhs);
+          } else {
+            memo.emplace(node, std::nullopt);
+          }
+          stack.pop_back();
+        }
+        break;
+      case Op::XOR:
+        if (frame.stage == 0) {
+          frame.stage = 1;
+          if (node->getLeft() != nullptr &&
+              memo.find(node->getLeft()) == memo.end()) {
+            stack.push_back({node->getLeft(), 0});
+          }
+          break;
+        }
+        if (frame.stage == 1) {
+          frame.stage = 2;
+          if (node->getRight() != nullptr &&
+              memo.find(node->getRight()) == memo.end()) {
+            stack.push_back({node->getRight(), 0});
+          }
+          break;
+        }
+        {
+          const auto lhs = childValue(node->getLeft());
+          const auto rhs = childValue(node->getRight());
+          if (lhs.has_value() && rhs.has_value()) {
+            memo.emplace(node, *lhs != *rhs);
+          } else {
+            memo.emplace(node, std::nullopt);
+          }
+          stack.pop_back();
+        }
+        break;
+      case Op::NONE:
+      default:
+        memo.emplace(node, std::nullopt);
+        stack.pop_back();
+        break;
     }
-    case Op::XOR: {
-      const auto lhs =
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);  // LCOV_EXCL_LINE
-      const auto rhs =
-          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);  // LCOV_EXCL_LINE
-      if (lhs.has_value() && rhs.has_value()) {  // LCOV_EXCL_LINE
-        value = *lhs != *rhs;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      break;  // LCOV_EXCL_LINE
-    }
-    case Op::NONE:
-    default:
-      break;
   }
 
-  memo.emplace(expr, value);
-  return value;
+  return memo.at(expr);
 }
 
 std::unordered_map<SignalKey, bool, SignalKeyHash> deriveResetBootstrapStateValues(
@@ -522,6 +693,7 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     bool abstractMapsAvailable = true;
     LocalToAbstractVarMap abstractMap0;
     LocalToAbstractVarMap abstractMap1;
+    AbstractExprPairMemo abstractEquivalenceMemo;
     size_t satRecoveredEqualities = 0;
     auto ensureAbstractMaps = [&]() {
       if (abstractMapsBuilt) {
@@ -541,48 +713,84 @@ AlignedSignals deriveResetBootstrapStateEqualities(
       return abstractMapsAvailable;
     };
 
-    AlignedSignals nextEqualities;
+    struct PendingSatRecovery {
+      size_t candidateIndex = 0;
+      BoolExpr* expr0 = nullptr;
+      BoolExpr* expr1 = nullptr;
+    };
+
+    // SAT recovery is a useful precision boost for small reset/bootstrap
+    // frontiers, but on memory-heavy ASICs it can otherwise become thousands of
+    // independent SAT calls before the real proof starts. Mark cheap/structural
+    // equalities immediately, then spend the SAT budget only on small ambiguous
+    // cases and let the top-level SEC engine handle the large cones in one COI.
+    std::vector<char> equalAfterStep(candidateStates.names.size(), false);
+    std::vector<PendingSatRecovery> pendingSatRecovery;
+    pendingSatRecovery.reserve(
+        std::min(candidateStates.names.size(), kBootstrapSatRecoveryCandidateBudget));
     for (size_t i = 0; i < candidateStates.names.size(); ++i) {
       const auto& key0 = candidateStates.keys0[i];
       const auto& key1 = candidateStates.keys1[i];
 
-      bool equalAfterStep = false;
       const auto known0 = nextKnownValues0.find(key0);
       const auto known1 = nextKnownValues1.find(key1);
       if (known0 != nextKnownValues0.end() && known1 != nextKnownValues1.end() &&
           known0->second == known1->second) {
-        equalAfterStep = true;
+        equalAfterStep[i] = true;
       } else if (specializedNext0.at(key0) == nullptr ||
                  specializedNext1.at(key1) == nullptr) {
-        equalAfterStep = false;
+        equalAfterStep[i] = false;
       } else if (!ensureAbstractMaps()) {
-        equalAfterStep = false;
+        equalAfterStep[i] = false;
       } else {
-        equalAfterStep = areEquivalentUnderAbstractMaps(
+        // The abstract maps are fixed for this bootstrap step.  Keep one
+        // structural-equivalence memo across all candidate states so shared
+        // sub-DAGs in memory-heavy designs are compared once instead of once
+        // per state bit.
+        equalAfterStep[i] = areEquivalentUnderAbstractMaps(
             specializedNext0.at(key0),
             specializedNext1.at(key1),
             abstractMap0,
-            abstractMap1);
-        if (!equalAfterStep) {
-          equalAfterStep = areSatEquivalentUnderAbstractMaps(
-              specializedNext0.at(key0),
-              specializedNext1.at(key1),
-              abstractMap0,
-              abstractMap1,
-              solverType);
-          if (equalAfterStep) {
-            ++satRecoveredEqualities;
-          }
+            abstractMap1,
+            abstractEquivalenceMemo);
+        if (!equalAfterStep[i]) {
+          pendingSatRecovery.push_back(
+              {i, specializedNext0.at(key0), specializedNext1.at(key1)});
         }
       }
+    }
 
-      if (!equalAfterStep) {
+    size_t satSkippedEqualities = 0;
+    if (pendingSatRecovery.size() <= kBootstrapSatRecoveryCandidateBudget) {
+      for (const auto& pending : pendingSatRecovery) {
+        if (!isWithinBootstrapSatRecoverySupportBudget(
+                pending.expr0, pending.expr1)) {
+          ++satSkippedEqualities;
+          continue;
+        }
+        if (areSatEquivalentUnderAbstractMaps(
+                pending.expr0,
+                pending.expr1,
+                abstractMap0,
+                abstractMap1,
+                solverType)) {
+          equalAfterStep[pending.candidateIndex] = true;
+          ++satRecoveredEqualities;
+        }
+      }
+    } else {
+      satSkippedEqualities = pendingSatRecovery.size();
+    }
+
+    AlignedSignals nextEqualities;
+    for (size_t i = 0; i < candidateStates.names.size(); ++i) {
+      if (!equalAfterStep[i]) {
         continue;
       }
 
       nextEqualities.names.push_back(candidateStates.names[i]);
-      nextEqualities.keys0.push_back(key0);
-      nextEqualities.keys1.push_back(key1);
+      nextEqualities.keys0.push_back(candidateStates.keys0[i]);
+      nextEqualities.keys1.push_back(candidateStates.keys1[i]);
     }
 
     currentEqualities = std::move(nextEqualities);
@@ -602,6 +810,13 @@ AlignedSignals deriveResetBootstrapStateEqualities(
             "SEC diag: bootstrap step %zu sat_recovered_equalities=%zu\n",
             step + 1,
             satRecoveredEqualities);
+      }
+      if (satSkippedEqualities != 0) {
+        fprintf(
+            stderr,
+            "SEC diag: bootstrap step %zu sat_recovery_skipped=%zu\n",
+            step + 1,
+            satSkippedEqualities);
       }
       fflush(stderr);
     }
@@ -640,11 +855,13 @@ ReachableStateInvariant buildReachableStateInvariant(
 
   invariant.bootstrapCycles = defaultResetBootstrapCycles(
       hasResetBootstrap, hasCompleteInitialState(model0, model1));
+  const auto statesByName0 = groupStatesByDisplayName(model0);
+  const auto statesByName1 = groupStatesByDisplayName(model1);
   const auto structuralStartupCorrespondence = filterStateEqualitiesByInitialCompatibility(
       model0, model1, inductiveStateEqualities);
   invariant.initialStateCorrespondence = mergeStartupCorrespondence(
       structuralStartupCorrespondence,
-      alignSameNamedStatesForStartup(model0, model1));
+      alignSameNamedStatesForStartup(model0, model1, statesByName0, statesByName1));
 
   if (hasResetBootstrap) {
     // Walk the reset window to find which candidate equalities are true at the
@@ -655,7 +872,8 @@ ReachableStateInvariant buildReachableStateInvariant(
     } else {
       const auto bootstrapCandidateStates = mergeStartupCorrespondence(
           inductiveStateEqualities,
-          alignSameNamedStatesForBootstrapCandidates(model0, model1));
+          alignSameNamedStatesForBootstrapCandidates(
+              model0, model1, statesByName0, statesByName1));
       invariant.anchoredStateEqualities = deriveResetBootstrapStateEqualities(
           model0,
           model1,
@@ -676,6 +894,16 @@ ReachableStateInvariant buildReachableStateInvariant(
     // values agree on both sides.
     invariant.anchoredStateEqualities = filterStateEqualitiesByInitialValue(
         model0, model1, inductiveStateEqualities);
+  } else {
+    // Resetless, init-less SEC still starts from a relational frame-0
+    // correspondence: structurally matched state pairs are assumed equal in the
+    // miter's initial state. Those pairs were selected by the transition
+    // structural invariant, not by name alone, so they are legitimate
+    // strengthening facts for the induction step even when no concrete reset
+    // value exists. Promoting them here lets k-induction prove the real
+    // transition relation instead of rediscovering thousands of state
+    // correspondences through deep output cones.
+    invariant.anchoredStateEqualities = structuralStartupCorrespondence;
   }
 
   return invariant;

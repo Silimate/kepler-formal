@@ -16,19 +16,93 @@ int newSolverLiteral(SATSolverWrapper& solver) {
   return solver.newVar() + 2;
 }
 
+class FrameAliasUnionFind {
+ public:
+  explicit FrameAliasUnionFind(const std::vector<size_t>& symbols) {
+    parent_.reserve(symbols.size());
+    for (const auto symbol : symbols) {
+      parent_.emplace(symbol, symbol);
+    }
+  }
+
+  bool contains(size_t symbol) const {
+    return parent_.find(symbol) != parent_.end();
+  }
+
+  void unite(size_t lhs, size_t rhs) {
+    if (!contains(lhs) || !contains(rhs)) {
+      return;
+    }
+    const size_t lhsRoot = find(lhs);
+    const size_t rhsRoot = find(rhs);
+    if (lhsRoot == rhsRoot) {
+      return;
+    }
+    const size_t representative = std::min(lhsRoot, rhsRoot);
+    const size_t merged = std::max(lhsRoot, rhsRoot);
+    parent_[merged] = representative;
+  }
+
+  size_t find(size_t symbol) {
+    auto it = parent_.find(symbol);
+    if (it == parent_.end()) {
+      throw std::runtime_error("Missing frame alias symbol " +
+                               std::to_string(symbol));
+    }
+    if (it->second != symbol) {
+      it->second = find(it->second);
+    }
+    return it->second;
+  }
+
+ private:
+  std::unordered_map<size_t, size_t> parent_;
+};
+
+FrameSymbolAliases emptyAliases() {
+  return {};
+}
+
 }  // namespace
 
 FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
                                        const std::vector<size_t>& symbols,
-                                       size_t numFrames) {
+                                       size_t numFrames)
+    : FrameVariableStore(solver, symbols, numFrames, emptyAliases()) {}
+
+FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
+                                       const std::vector<size_t>& symbols,
+                                       size_t numFrames,
+                                       const FrameSymbolAliases& aliasesByFrame) {
   // Every symbolic SEC variable gets one SAT literal per time frame.
   for (const auto symbol : symbols) {
-    auto& frameLits = symbolFrameLits_[symbol];
-    frameLits.reserve(numFrames);
-    for (size_t frame = 0; frame < numFrames; ++frame) {
-      frameLits.push_back(newSolverLiteral(solver));
+    symbolFrameLits_[symbol].reserve(numFrames);
+  }
+
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    FrameAliasUnionFind aliases(symbols);
+    if (frame < aliasesByFrame.size()) {
+      for (const auto& [lhs, rhs] : aliasesByFrame[frame]) {
+        aliases.unite(lhs, rhs);
+      }
+    }
+
+    std::unordered_map<size_t, int> litByRepresentative;
+    litByRepresentative.reserve(symbols.size());
+    for (const auto symbol : symbols) {
+      const size_t representative = aliases.find(symbol);
+      auto [litIt, inserted] =
+          litByRepresentative.emplace(representative, 0);
+      if (inserted) {
+        litIt->second = newSolverLiteral(solver);
+      }
+      symbolFrameLits_[symbol].push_back(litIt->second);
     }
   }
+}
+
+bool FrameVariableStore::hasSymbol(size_t symbol) const {
+  return symbolFrameLits_.find(symbol) != symbolFrameLits_.end();
 }
 
 int FrameVariableStore::getLiteral(size_t symbol, size_t frame) const {
@@ -53,20 +127,65 @@ std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
   return leafLits;
 }
 
+std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
+    size_t frame,
+    const std::vector<size_t>& symbols) const {
+  // Large SEC instances can have hundreds of thousands of state bits, while a
+  // single proof obligation usually touches a much smaller cone. Building a
+  // per-formula leaf map keeps the SAT encoder from materializing unused
+  // variables for every frame.
+  std::unordered_map<size_t, int> leafLits;
+  leafLits.reserve(symbols.size());
+  for (const auto symbol : symbols) {
+    if (symbol < 2) {
+      continue;
+    }
+    auto it = symbolFrameLits_.find(symbol);
+    if (it == symbolFrameLits_.end() || frame >= it->second.size()) {
+      throw std::runtime_error("Missing frame variable for symbol " +
+                               std::to_string(symbol));
+    }
+    leafLits.emplace(symbol, it->second[frame]);
+  }
+  return leafLits;
+}
+
+std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
+    size_t frame,
+    const std::set<size_t>& symbols) const {
+  std::unordered_map<size_t, int> leafLits;
+  leafLits.reserve(symbols.size());
+  for (const auto symbol : symbols) {
+    if (symbol < 2) {
+      continue;
+    }
+    auto it = symbolFrameLits_.find(symbol);
+    if (it == symbolFrameLits_.end() || frame >= it->second.size()) {
+      throw std::runtime_error("Missing frame variable for symbol " +
+                               std::to_string(symbol));
+    }
+    leafLits.emplace(symbol, it->second[frame]);
+  }
+  return leafLits;
+}
+
 FrameFormulaEncoder::FrameFormulaEncoder(
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits)
     : solver_(solver), leafLits_(std::move(leafLits)) {}
 
 int FrameFormulaEncoder::getConstLit(bool value) {
-  auto& cache = value ? trueLit_ : falseLit_;
-  if (cache.has_value()) {
-    return *cache;  // LCOV_EXCL_LINE
+  if (trueLit_.has_value()) {
+    return value ? *trueLit_ : -*trueLit_;
   }
   int lit = newSolverLiteral(solver_);
-  solver_.addClause({value ? lit : -lit});
-  cache = lit;
-  return lit;
+  solver_.addClause({lit});
+  trueLit_ = lit;
+  return value ? lit : -lit;
+}
+
+bool FrameFormulaEncoder::isConstLit(int lit, bool value) {
+  return lit == getConstLit(value);
 }
 
 int FrameFormulaEncoder::encode(BoolExpr* expr) {
@@ -121,29 +240,67 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
 
     const int leftLit = node->getLeft() ? nodeToLit_.at(node->getLeft()) : 0;
     const int rightLit = node->getRight() ? nodeToLit_.at(node->getRight()) : 0;
-    const int lit = newSolverLiteral(solver_);
+    int lit = 0;
 
-    // Standard Tseitin clauses for the BoolExpr node at this frame.
+    // Standard Tseitin clauses for the BoolExpr node at this frame.  Before we
+    // emit them, apply literal-level simplifications created by frame aliases
+    // and constants.  Large SEC proofs intentionally alias state pairs that are
+    // assumed equal in a frame; without these reductions, expressions such as
+    // (a XOR a) still become full Tseitin cones and dominate CNF construction.
     switch (node->getOp()) {
       case Op::NOT:
-        solver_.addClause({-lit, -leftLit});
-        solver_.addClause({lit, leftLit});
+        lit = -leftLit;
         break;
       case Op::AND:
-        solver_.addClause({-lit, leftLit});
-        solver_.addClause({-lit, rightLit});
-        solver_.addClause({lit, -leftLit, -rightLit});
+        if (leftLit == rightLit || isConstLit(rightLit, true)) {
+          lit = leftLit;
+        } else if (isConstLit(leftLit, true)) {
+          lit = rightLit;
+        } else if (leftLit == -rightLit || isConstLit(leftLit, false) ||
+                   isConstLit(rightLit, false)) {
+          lit = getConstLit(false);
+        } else {
+          lit = newSolverLiteral(solver_);
+          solver_.addClause({-lit, leftLit});
+          solver_.addClause({-lit, rightLit});
+          solver_.addClause({lit, -leftLit, -rightLit});
+        }
         break;
       case Op::OR:
-        solver_.addClause({-leftLit, lit});
-        solver_.addClause({-rightLit, lit});
-        solver_.addClause({-lit, leftLit, rightLit});
+        if (leftLit == rightLit || isConstLit(rightLit, false)) {
+          lit = leftLit;
+        } else if (isConstLit(leftLit, false)) {
+          lit = rightLit;
+        } else if (leftLit == -rightLit || isConstLit(leftLit, true) ||
+                   isConstLit(rightLit, true)) {
+          lit = getConstLit(true);
+        } else {
+          lit = newSolverLiteral(solver_);
+          solver_.addClause({-leftLit, lit});
+          solver_.addClause({-rightLit, lit});
+          solver_.addClause({-lit, leftLit, rightLit});
+        }
         break;
       case Op::XOR:
-        solver_.addClause({-lit, -leftLit, -rightLit});
-        solver_.addClause({-lit, leftLit, rightLit});
-        solver_.addClause({lit, -leftLit, rightLit});
-        solver_.addClause({lit, leftLit, -rightLit});
+        if (leftLit == rightLit) {
+          lit = getConstLit(false);
+        } else if (leftLit == -rightLit) {
+          lit = getConstLit(true);
+        } else if (isConstLit(leftLit, false)) {
+          lit = rightLit;
+        } else if (isConstLit(rightLit, false)) {
+          lit = leftLit;
+        } else if (isConstLit(leftLit, true)) {
+          lit = -rightLit;
+        } else if (isConstLit(rightLit, true)) {
+          lit = -leftLit;
+        } else {
+          lit = newSolverLiteral(solver_);
+          solver_.addClause({-lit, -leftLit, -rightLit});
+          solver_.addClause({-lit, leftLit, rightLit});
+          solver_.addClause({lit, -leftLit, rightLit});
+          solver_.addClause({lit, leftLit, -rightLit});
+        }
         break;
       case Op::VAR:
       case Op::NONE:

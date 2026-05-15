@@ -10,6 +10,7 @@ add_library(kepler_sec STATIC
     model/SequentialDesignModel.cpp
     pdr/PDREngine.cpp
     proof/ProofEngineShared.cpp
+    proof/TransitionExprResolver.cpp
     kinduction/BaseCaseSolver.cpp
     kinduction/InductionStepSolver.cpp
     kinduction/SatEncoding.cpp

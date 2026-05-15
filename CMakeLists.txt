@@ -27,7 +27,11 @@ include(ExternalProject)
 
 ExternalProject_Add(kissat_external
     SOURCE_DIR ${KISSAT_ROOT}
-    CONFIGURE_COMMAND ./configure --ultimate
+    # Keep Kissat small and quiet for embedded use, but do not use
+    # `--ultimate`: it implies `--no-options`, which compiles out runtime
+    # option storage and prevents SEC from selecting a SAT profile for its
+    # cone-of-influence proof obligations.
+    CONFIGURE_COMMAND ./configure --compact --quiet --no-proofs
     BUILD_COMMAND make
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1

@@ -2517,6 +2517,61 @@ struct RebuiltTransitionArtifacts {
   std::vector<std::pair<naja::DNL::DNLID, SignalKey>> lateAbstractedBoundaryObservedTerms;
 };
 
+template <typename EnqueueStateKey>
+void enqueueStateDependenciesFromFormula(
+    BoolExpr* expr,
+    const std::unordered_set<size_t>& requiredStateVarIDs,
+    std::vector<const BoolExpr*>& stack,
+    std::unordered_set<const BoolExpr*>& scannedDependencyNodes,
+    EnqueueStateKey&& enqueueStateVarID) {
+  if (expr == nullptr || !expr->isValid()) {
+    return;  // LCOV_EXCL_LINE
+  }
+
+  // For SEC dependency discovery we only care about support variables that are
+  // current-state symbols. Calling BoolExpr::getSupportVars() materializes every
+  // top input and state input into a set; on large gate-level designs like
+  // BlackParrot that dominates extraction time and allocation traffic. Walk the
+  // expression DAG directly and enqueue only the state symbols we need. The
+  // scan is global for this extraction pass: once a shared BoolExpr subtree has
+  // been walked, every state variable under it has already been enqueued, so
+  // later outputs can skip that subtree instead of re-traversing it thousands of
+  // times.
+  stack.clear();
+  stack.push_back(expr);
+  while (!stack.empty()) {
+    const BoolExpr* node = stack.back();
+    stack.pop_back();
+    if (node == nullptr) {
+      continue;
+    }
+    if (!scannedDependencyNodes.insert(node).second) {
+      continue;
+    }
+
+    switch (node->getOp()) {
+      case Op::VAR: {
+        if (requiredStateVarIDs.find(node->getId()) != requiredStateVarIDs.end()) {
+          enqueueStateVarID(node->getId());
+        }
+        break;
+      }
+      case Op::NOT:
+        stack.push_back(node->getLeft());
+        break;
+      case Op::AND:
+      case Op::OR:
+      case Op::XOR:
+        stack.push_back(node->getLeft());
+        stack.push_back(node->getRight());
+        break;
+      case Op::NONE:  // LCOV_EXCL_LINE
+      default:
+        break;  // LCOV_EXCL_LINE
+    }
+  }
+}
+
 RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
     ExtractContext& ctx,
     SequentialDesignModel& model,
@@ -2573,12 +2628,15 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
 
   std::unordered_map<size_t, SignalKey> requiredStateKeyByVarID;
   requiredStateKeyByVarID.reserve(model.stateBits.size());
+  std::unordered_set<size_t> requiredStateVarIDs;
+  requiredStateVarIDs.reserve(model.stateBits.size());
   for (const auto& key : model.stateBits) {
     const auto varIt = model.inputVarByKey.find(key);
     if (varIt == model.inputVarByKey.end()) {
       continue;  // LCOV_EXCL_LINE
     }
     requiredStateKeyByVarID.emplace(varIt->second, key);
+    requiredStateVarIDs.insert(varIt->second);
   }
 
   std::unordered_map<SignalKey, size_t, SignalKeyHash> pendingIndexByStateKey;
@@ -2600,6 +2658,11 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
   std::deque<size_t> pendingWorkQueue;
   std::deque<SignalKey> stateDependencyWorkQueue;
   std::unordered_set<SignalKey, SignalKeyHash> expandedStateDependencies;
+  std::vector<const BoolExpr*> dependencyWalkStack;
+  std::unordered_set<const BoolExpr*> scannedDependencyNodes;
+  scannedDependencyNodes.reserve(std::max<size_t>(1024, outputExprByTerm.size() * 16));
+  std::unordered_set<size_t> enqueuedStateVarIDs;
+  enqueuedStateVarIDs.reserve(requiredStateVarIDs.size());
   auto enqueueRequiredStateKey = [&](const SignalKey& key) {
     if (!artifacts.requiredStateKeys.insert(key).second) {
       return;
@@ -2611,17 +2674,26 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
       pendingWorkQueue.push_back(pendingIt->second);
     }
   };
+  auto enqueueRequiredStateVarID = [&](size_t varID) {
+    if (!enqueuedStateVarIDs.insert(varID).second) {
+      return;
+    }
+    const auto stateIt = requiredStateKeyByVarID.find(varID);
+    if (stateIt == requiredStateKeyByVarID.end()) {
+      return;  // LCOV_EXCL_LINE
+    }
+    enqueueRequiredStateKey(stateIt->second);
+  };
   auto enqueueStateDependenciesFromExpr = [&](BoolExpr* expr) {
     if (expr == nullptr || !expr->isValid()) {
       return;  // LCOV_EXCL_LINE
     }
-    for (const auto symbol : expr->getSupportVars()) {
-      const auto stateIt = requiredStateKeyByVarID.find(symbol);
-      if (stateIt == requiredStateKeyByVarID.end()) {
-        continue;
-      }
-      enqueueRequiredStateKey(stateIt->second);
-    }
+    enqueueStateDependenciesFromFormula(
+        expr,
+        requiredStateVarIDs,
+        dependencyWalkStack,
+        scannedDependencyNodes,
+        enqueueRequiredStateVarID);
   };
 
   for (const auto& [_, expr] : model.observedOutputExprByKey) {

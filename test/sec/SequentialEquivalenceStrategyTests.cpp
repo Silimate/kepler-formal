@@ -4076,6 +4076,63 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantRecognizesInputSuffixedResetNames) {
+  const SignalKey reset0 = makeSignalKey("reset0");
+  const SignalKey reset1 = makeSignalKey("reset1");
+  const SignalKey activeLowReset0 = makeSignalKey("activeLowReset0");
+  const SignalKey activeLowReset1 = makeSignalKey("activeLowReset1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+  const SignalKey lowState0 = makeSignalKey("lowState0");
+  const SignalKey lowState1 = makeSignalKey("lowState1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {reset0, activeLowReset0};
+  model0.stateBits = {state0, lowState0};
+  model0.inputVarByKey.emplace(reset0, 2);
+  model0.inputVarByKey.emplace(activeLowReset0, 4);
+  model0.inputVarByKey.emplace(state0, 6);
+  model0.inputVarByKey.emplace(lowState0, 8);
+  model0.displayNameByKey.emplace(reset0, "reset_i");
+  model0.displayNameByKey.emplace(activeLowReset0, "rst_ni");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
+  model0.nextStateExprByStateKey.emplace(lowState0, BoolExpr::Var(4));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {reset1, activeLowReset1};
+  model1.stateBits = {state1, lowState1};
+  model1.inputVarByKey.emplace(reset1, 3);
+  model1.inputVarByKey.emplace(activeLowReset1, 5);
+  model1.inputVarByKey.emplace(state1, 7);
+  model1.inputVarByKey.emplace(lowState1, 9);
+  model1.displayNameByKey.emplace(reset1, "reset_i");
+  model1.displayNameByKey.emplace(activeLowReset1, "rst_ni");
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
+  model1.nextStateExprByStateKey.emplace(lowState1, BoolExpr::Var(5));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"reset_i", "rst_ni"};
+  alignedInputs.keys0 = {reset0, activeLowReset0};
+  alignedInputs.keys1 = {reset1, activeLowReset1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"state", "low_state"};
+  candidateStates.keys0 = {state0, lowState0};
+  candidateStates.keys1 = {state1, lowState1};
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.bootstrapValues0.size(), 2u);
+  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
+  EXPECT_FALSE(invariant.bootstrapValues0.at(lowState0));
+  ASSERT_EQ(invariant.bootstrapValues1.size(), 2u);
+  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
+  EXPECT_FALSE(invariant.bootstrapValues1.at(lowState1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantCoversSatRemapFailureForUnalignedBootstrapInput) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
@@ -5367,6 +5424,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
   EXPECT_LE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionEngineBatchesSmallOutputProofs) {
+  KInductionProblem problem;
+  for (size_t i = 0; i < 40; ++i) {
+    const size_t symbol = 2 + i;
+    problem.allSymbols.push_back(symbol);
+    problem.observedOutputNames.push_back("out" + std::to_string(i));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(symbol));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(symbol));
+  }
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  size_t baseChecks = 0;
+  size_t pos = 0;
+  const std::string needle = "SEC diag: k-induction base k=0 begin";
+  while ((pos = stderrOutput.find(needle, pos)) != std::string::npos) {
+    ++baseChecks;
+    pos += needle.size();
+  }
+
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_EQ(baseChecks, 2u);
+  EXPECT_NE(stderrOutput.find("SEC diag: k-induction problem outputs=40"),
+            std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -921,6 +922,7 @@ RemappedSecExpressions remapSecExpressions(
     const AlignedSignals& alignedOutputs,
     const SharedSecSymbolSpace& symbolSpace,
     KInductionProblem& problem,
+    bool remapTransitions,
     bool secDiagEnabled) {
   RemappedSecExpressions remapped;
   std::unordered_map<BoolExpr*, BoolExpr*> remapMemo0;
@@ -942,24 +944,66 @@ RemappedSecExpressions remapSecExpressions(
   }
   logSecDiagLine(secDiagEnabled, "SEC diag: remapped observed outputs");
 
+  if (remapTransitions) {
+    for (const auto& key : model0.stateBits) {
+      remapped.next0.emplace(
+          key,
+          remapBoolExprVariables(
+              model0.nextStateExprByStateKey.at(key),
+              symbolSpace.localToCombined0,
+              remapMemo0));
+    }
+    for (const auto& key : model1.stateBits) {
+      remapped.next1.emplace(
+          key,
+          remapBoolExprVariables(
+              model1.nextStateExprByStateKey.at(key),
+              symbolSpace.localToCombined1,
+              remapMemo1));
+    }
+    logSecDiagLine(secDiagEnabled, "SEC diag: remapped next-state formulas");
+  } else {
+    logSecDiagLine(
+        secDiagEnabled,
+        "SEC diag: deferred next-state formula remapping for k-induction");
+  }
+  return remapped;
+}
+
+void attachLazyTransitions(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
+    const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
+    std::unordered_map<size_t, size_t>&& localToCombined0,
+    std::unordered_map<size_t, size_t>&& localToCombined1,
+    KInductionProblem& problem) {
+  auto store = std::make_shared<LazyTransitionStore>();
+  store->localToCombinedByDesign[0] = std::move(localToCombined0);
+  store->localToCombinedByDesign[1] = std::move(localToCombined1);
+  store->sourceByStateSymbol.reserve(model0.stateBits.size() + model1.stateBits.size());
+
   for (const auto& key : model0.stateBits) {
-    remapped.next0.emplace(
-        key,
-        remapBoolExprVariables(
-            model0.nextStateExprByStateKey.at(key),
-            symbolSpace.localToCombined0,
-            remapMemo0));
+    const auto symbolIt = state0Symbols.find(key);
+    const auto exprIt = model0.nextStateExprByStateKey.find(key);
+    if (symbolIt == state0Symbols.end() ||
+        exprIt == model0.nextStateExprByStateKey.end()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    store->sourceByStateSymbol.emplace(
+        symbolIt->second, LazyTransitionSource{0, exprIt->second});
   }
   for (const auto& key : model1.stateBits) {
-    remapped.next1.emplace(
-        key,
-        remapBoolExprVariables(
-            model1.nextStateExprByStateKey.at(key),
-            symbolSpace.localToCombined1,
-            remapMemo1));
+    const auto symbolIt = state1Symbols.find(key);
+    const auto exprIt = model1.nextStateExprByStateKey.find(key);
+    if (symbolIt == state1Symbols.end() ||
+        exprIt == model1.nextStateExprByStateKey.end()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    store->sourceByStateSymbol.emplace(
+        symbolIt->second, LazyTransitionSource{1, exprIt->second});
   }
-  logSecDiagLine(secDiagEnabled, "SEC diag: remapped next-state formulas");
-  return remapped;
+  problem.lazyTransitions = std::move(store);
 }
 
 void applyInitialStateAssignments(
@@ -975,6 +1019,11 @@ void applyInitialStateAssignments(
     BoolExpr* literal = BoolExpr::Var(symbolIt->second);
     initialCondition = BoolExpr::And(
         initialCondition, value ? literal : BoolExpr::Not(literal));
+    // Keep the unit reset/init facts separately from the monolithic
+    // initial-condition formula.  The k-induction base solver can then encode
+    // only the init values for state bits that are in the current COI, instead
+    // of dragging the whole design reset cone into every output proof.
+    problem.initialStateAssignments.emplace_back(symbolIt->second, value);
     ++problem.initializedStateCount;
   }
 }
@@ -1057,11 +1106,13 @@ void buildSecPropertiesAndTransitions(
       reachableInvariant.anchoredStateEqualities);
   logSecDiagLine(secDiagEnabled, "SEC diag: built abstract transition maps");
 
-  for (const auto& key : model0.stateBits) {
-    problem.transitions0.emplace_back(state0Symbols.at(key), remapped.next0.at(key));
-  }
-  for (const auto& key : model1.stateBits) {
-    problem.transitions1.emplace_back(state1Symbols.at(key), remapped.next1.at(key));
+  if (problem.lazyTransitions == nullptr) {
+    for (const auto& key : model0.stateBits) {
+      problem.transitions0.emplace_back(state0Symbols.at(key), remapped.next0.at(key));
+    }
+    for (const auto& key : model1.stateBits) {
+      problem.transitions1.emplace_back(state1Symbols.at(key), remapped.next1.at(key));
+    }
   }
 
   BoolExpr* property = BoolExpr::createTrue();
@@ -1102,6 +1153,7 @@ void buildSecPropertiesAndTransitions(
       ++satImpliedOutputCount;
       continue;
     }
+
     inductionProperty = BoolExpr::And(inductionProperty, outputEquality);
   }
 
@@ -1109,6 +1161,8 @@ void buildSecPropertiesAndTransitions(
   problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
   problem.inductionProperty = BoolExpr::simplify(inductionProperty);
   problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
+  problem.inductionPropertyAssumesInductiveStateEqualities =
+      !problem.inductiveStateEqualityPairs.empty();
   problem.description = "SEC property with aligned observed outputs";
   logSecDiagLine(secDiagEnabled, "SEC diag: built SEC and induction properties");
 
@@ -1531,12 +1585,14 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // property plus the induction-friendly variant that some engines consume.
   SharedSecSymbolSpace symbolSpace = buildSharedSecSymbolSpace(
       model0, model1, aligned.inputs, aligned.outputs);
+  const bool useLazyTransitionRemapping = secEngine_ == SecEngine::KInduction;
   const auto remapped = remapSecExpressions(
       model0,
       model1,
       aligned.outputs,
       symbolSpace,
       symbolSpace.problem,
+      !useLazyTransitionRemapping,
       secDiagEnabled);
   const auto reachableInvariant = integrateReachableStateInvariant(
       model0,
@@ -1548,6 +1604,16 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       symbolSpace.problem,
       solverType_,
       secDiagEnabled);
+  if (useLazyTransitionRemapping) {
+    attachLazyTransitions(
+        model0,
+        model1,
+        symbolSpace.state0Symbols,
+        symbolSpace.state1Symbols,
+        std::move(symbolSpace.localToCombined0),
+        std::move(symbolSpace.localToCombined1),
+        symbolSpace.problem);
+  }
   buildSecPropertiesAndTransitions(
       model0,
       model1,

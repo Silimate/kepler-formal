@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory_resource>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -26,59 +28,16 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 using KEPLER_FORMAL::BoolExpr;
+using FingerprintMemo = std::pmr::unordered_map<BoolExpr*, uint64_t>;
 
-struct ExprPairHash {
-  size_t operator()(const std::pair<BoolExpr*, BoolExpr*>& pair) const noexcept {
-    size_t seed = std::hash<const void*>()(pair.first);
-    seed ^= std::hash<const void*>()(pair.second) + 0x9e3779b9 + (seed << 6) +
-            (seed >> 2);
+struct RefinementSignatureHash {
+  size_t operator()(const std::pair<size_t, uint64_t>& signature) const noexcept {
+    size_t seed = std::hash<size_t>()(signature.first);
+    seed ^= std::hash<uint64_t>()(signature.second) + 0x9e3779b9 +
+            (seed << 6) + (seed >> 2);
     return seed;
   }
 };
-
-bool areEquivalentUnderAbstractMapsImpl(
-    BoolExpr* expr0,
-    BoolExpr* expr1,
-    const LocalToAbstractVarMap& abstractMap0,
-    const LocalToAbstractVarMap& abstractMap1,
-    std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool, ExprPairHash>& memo) {
-  if (expr0 == nullptr || expr1 == nullptr) {
-    return expr0 == expr1;
-  }
-
-  const auto key = std::make_pair(expr0, expr1);
-  if (const auto it = memo.find(key); it != memo.end()) {
-    return it->second;
-  }
-
-  bool equivalent = false;
-  if (expr0->getOp() == Op::VAR && expr1->getOp() == Op::VAR) {
-    if (expr0->getId() < 2 || expr1->getId() < 2) {
-      equivalent = expr0->getId() == expr1->getId();
-    } else {
-      const auto it0 = abstractMap0.find(expr0->getId());
-      const auto it1 = abstractMap1.find(expr1->getId());
-      equivalent = it0 != abstractMap0.end() && it1 != abstractMap1.end() &&
-                   it0->second == it1->second;
-    }
-  } else if (expr0->getOp() == expr1->getOp()) {
-    equivalent = areEquivalentUnderAbstractMapsImpl(
-                     expr0->getLeft(),
-                     expr1->getLeft(),
-                     abstractMap0,
-                     abstractMap1,
-                     memo) &&
-                 areEquivalentUnderAbstractMapsImpl(
-                     expr0->getRight(),
-                     expr1->getRight(),
-                     abstractMap0,
-                     abstractMap1,
-                     memo);
-  }
-
-  memo.emplace(key, equivalent);
-  return equivalent;
-}
 
 std::pair<LocalToAbstractVarMap, LocalToAbstractVarMap> buildAbstractTransitionMapsImpl(
     const SequentialDesignModel& model0,
@@ -147,11 +106,11 @@ bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
 
   const auto [abstractMap0, abstractMap1] =
       buildAbstractTransitionMapsImpl(model0, model1, alignedInputs, orderedStates);
+  AbstractExprPairMemo memo;
   for (size_t i = 0; i < orderedStates.names.size(); ++i) {
     const auto& key0 = orderedStates.keys0[i];
     const auto& key1 = orderedStates.keys1[i];
-    std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool, ExprPairHash> memo;
-    if (!areEquivalentUnderAbstractMapsImpl(
+    if (!areEquivalentUnderAbstractMaps(
             model0.nextStateExprByStateKey.at(key0),
             model1.nextStateExprByStateKey.at(key1),
             abstractMap0,
@@ -233,7 +192,7 @@ uint64_t fingerprintExpr(
     BoolExpr* expr,
     const std::unordered_map<size_t, size_t>& inputClasses,
     const std::unordered_map<size_t, size_t>& stateClasses,
-    std::unordered_map<BoolExpr*, uint64_t>& memo) {
+    FingerprintMemo& memo) {
   if (expr == nullptr) {
     return 0;
   }
@@ -241,51 +200,87 @@ uint64_t fingerprintExpr(
     return it->second;
   }
 
-  uint64_t fingerprint = 0;
-  switch (expr->getOp()) {
-    case Op::VAR: {
-      if (expr->getId() < 2) {
-        fingerprint = expr->getId() == 0 ? 7 : 11;
-        break;
-      }
-      if (const auto inputIt = inputClasses.find(expr->getId());
-          inputIt != inputClasses.end()) {
+  struct StackFrame {
+    BoolExpr* node = nullptr;
+    bool visited = false;
+  };
+
+  // Structural matching sees very deep, hash-consed gate-level DAGs on large
+  // ASICs. A recursive fingerprint is easy to read, but it repeatedly burned
+  // CPU and stack in BlackParrot before the actual SEC engine started. This is
+  // the same post-order computation, just explicit and memoized across all
+  // state bits in the current refinement pass.
+  std::vector<StackFrame> stack{{expr, false}};
+  while (!stack.empty()) {
+    const StackFrame current = stack.back();
+    stack.pop_back();
+    BoolExpr* node = current.node;
+    if (node == nullptr || memo.find(node) != memo.end()) {
+      continue;
+    }
+
+    if (node->getOp() == Op::VAR) {
+      uint64_t fingerprint = 0;
+      if (node->getId() < 2) {
+        fingerprint = node->getId() == 0 ? 7 : 11;
+      } else if (const auto inputIt = inputClasses.find(node->getId());
+                 inputIt != inputClasses.end()) {
         fingerprint = combineHashes({13, inputIt->second});
-      } else if (const auto stateIt = stateClasses.find(expr->getId());
+      } else if (const auto stateIt = stateClasses.find(node->getId());
                  stateIt != stateClasses.end()) {
         fingerprint = combineHashes({17, stateIt->second});
       } else {
         fingerprint = 19;
       }
-      break;
+      memo.emplace(node, fingerprint);
+      continue;
     }
-    case Op::NOT:
-      fingerprint = combineHashes(
-          {23, fingerprintExpr(expr->getLeft(), inputClasses, stateClasses, memo)});
-      break;
-    case Op::AND:
-    case Op::OR:
-    case Op::XOR: {
-      uint64_t lhs =
-          fingerprintExpr(expr->getLeft(), inputClasses, stateClasses, memo);
-      uint64_t rhs =
-          fingerprintExpr(expr->getRight(), inputClasses, stateClasses, memo);
-      if (lhs > rhs) {
-        std::swap(lhs, rhs);
+
+    if (node->getOp() == Op::NONE) {
+      memo.emplace(node, 41);
+      continue;
+    }
+
+    if (!current.visited) {
+      stack.push_back({node, true});
+      if (node->getRight() != nullptr &&
+          memo.find(node->getRight()) == memo.end()) {
+        stack.push_back({node->getRight(), false});
       }
-      const uint64_t opTag =
-          expr->getOp() == Op::AND ? 29 : (expr->getOp() == Op::OR ? 31 : 37);
-      fingerprint = combineHashes({opTag, lhs, rhs});
-      break;
+      if (node->getLeft() != nullptr &&
+          memo.find(node->getLeft()) == memo.end()) {
+        stack.push_back({node->getLeft(), false});
+      }
+      continue;
     }
-    case Op::NONE:
-    default:
-      fingerprint = 41;
-      break;
+
+    uint64_t fingerprint = 0;
+    switch (node->getOp()) {
+      case Op::NOT:
+        fingerprint = combineHashes({23, memo.at(node->getLeft())});
+        break;
+      case Op::AND:
+      case Op::OR:
+      case Op::XOR: {
+        uint64_t lhs = memo.at(node->getLeft());
+        uint64_t rhs = memo.at(node->getRight());
+        if (lhs > rhs) {
+          std::swap(lhs, rhs);
+        }
+        const uint64_t opTag =
+            node->getOp() == Op::AND ? 29 : (node->getOp() == Op::OR ? 31 : 37);
+        fingerprint = combineHashes({opTag, lhs, rhs});
+        break;
+      }
+      case Op::VAR:
+      case Op::NONE:
+      default:
+        throw std::runtime_error("Unsupported BoolExpr operator in fingerprint");
+    }
+    memo.emplace(node, fingerprint);
   }
 
-  memo.emplace(expr, fingerprint);
-  return fingerprint;
+  return memo.at(expr);
 }
 
 std::vector<size_t> refineClasses(
@@ -302,7 +297,12 @@ std::vector<size_t> refineClasses(
 
   using RefinementSignature = std::pair<size_t, uint64_t>;
   std::vector<RefinementSignature> signatures(model.stateBits.size());
-  std::unordered_map<BoolExpr*, uint64_t> memo;
+  // Fingerprinting touches millions of shared BoolExpr DAG nodes on large SEC
+  // designs.  A monotonic arena keeps the per-pass memo allocations linear and
+  // cheap, then releases all nodes together when refinement advances.
+  std::pmr::monotonic_buffer_resource memoResource;
+  FingerprintMemo memo{&memoResource};
+  memo.reserve(model.stateBits.size() * 4);
   for (size_t i = 0; i < model.stateBits.size(); ++i) {
     signatures[i] = {
         currentClasses[i],
@@ -317,7 +317,9 @@ std::vector<size_t> refineClasses(
   std::sort(unique.begin(), unique.end());
   unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
 
-  std::map<RefinementSignature, size_t> classBySignature;
+  std::unordered_map<RefinementSignature, size_t, RefinementSignatureHash>
+      classBySignature;
+  classBySignature.reserve(unique.size());
   for (size_t i = 0; i < unique.size(); ++i) {
     classBySignature.emplace(unique[i], i);
   }
@@ -373,7 +375,9 @@ std::vector<StateClassFingerprint> computeFinalFingerprints(
 
   std::vector<StateClassFingerprint> fingerprints;
   fingerprints.reserve(model.stateBits.size());
-  std::unordered_map<BoolExpr*, uint64_t> memo;
+  std::pmr::monotonic_buffer_resource memoResource;
+  FingerprintMemo memo{&memoResource};
+  memo.reserve(model.stateBits.size() * 4);
   for (const auto& key : model.stateBits) {
     fingerprints.push_back(
         {initialStateSignature(model, complementRoles, key),
@@ -407,9 +411,81 @@ bool areEquivalentUnderAbstractMaps(
     BoolExpr* expr1,
     const LocalToAbstractVarMap& abstractMap0,
     const LocalToAbstractVarMap& abstractMap1) {
-  std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool, ExprPairHash> memo;
-  return areEquivalentUnderAbstractMapsImpl(
+  AbstractExprPairMemo memo;
+  return areEquivalentUnderAbstractMaps(
       expr0, expr1, abstractMap0, abstractMap1, memo);
+}
+
+bool areEquivalentUnderAbstractMaps(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const LocalToAbstractVarMap& abstractMap0,
+    const LocalToAbstractVarMap& abstractMap1,
+    AbstractExprPairMemo& memo) {
+  struct StackFrame {
+    BoolExpr* lhs = nullptr;
+    BoolExpr* rhs = nullptr;
+    bool visited = false;
+  };
+
+  std::vector<StackFrame> stack{{expr0, expr1, false}};
+  while (!stack.empty()) {
+    const StackFrame current = stack.back();
+    stack.pop_back();
+    const auto key = std::make_pair(current.lhs, current.rhs);
+    if (memo.find(key) != memo.end()) {
+      continue;
+    }
+
+    if (current.lhs == nullptr || current.rhs == nullptr) {
+      memo.emplace(key, current.lhs == current.rhs);
+      continue;
+    }
+
+    const Op lhsOp = current.lhs->getOp();
+    const Op rhsOp = current.rhs->getOp();
+    if (lhsOp == Op::VAR && rhsOp == Op::VAR) {
+      bool equivalent = false;
+      if (current.lhs->getId() < 2 || current.rhs->getId() < 2) {
+        equivalent = current.lhs->getId() == current.rhs->getId();
+      } else {
+        const auto it0 = abstractMap0.find(current.lhs->getId());
+        const auto it1 = abstractMap1.find(current.rhs->getId());
+        equivalent = it0 != abstractMap0.end() && it1 != abstractMap1.end() &&
+                     it0->second == it1->second;
+      }
+      memo.emplace(key, equivalent);
+      continue;
+    }
+
+    if (lhsOp != rhsOp) {
+      memo.emplace(key, false);
+      continue;
+    }
+
+    if (!current.visited) {
+      stack.push_back({current.lhs, current.rhs, true});
+      const auto rightKey =
+          std::make_pair(current.lhs->getRight(), current.rhs->getRight());
+      if (memo.find(rightKey) == memo.end()) {
+        stack.push_back({current.lhs->getRight(), current.rhs->getRight(), false});
+      }
+      const auto leftKey =
+          std::make_pair(current.lhs->getLeft(), current.rhs->getLeft());
+      if (memo.find(leftKey) == memo.end()) {
+        stack.push_back({current.lhs->getLeft(), current.rhs->getLeft(), false});
+      }
+      continue;
+    }
+
+    const bool leftEquivalent =
+        memo.at(std::make_pair(current.lhs->getLeft(), current.rhs->getLeft()));
+    const bool rightEquivalent =
+        memo.at(std::make_pair(current.lhs->getRight(), current.rhs->getRight()));
+    memo.emplace(key, leftEquivalent && rightEquivalent);
+  }
+
+  return memo.at(std::make_pair(expr0, expr1));
 }
 
 AlignedSignals inferStructurallyEquivalentStatePairs(

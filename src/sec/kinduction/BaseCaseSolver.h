@@ -19,4 +19,14 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k);
 
+// Same bounded transition prefix as findBaseCounterexample(k), but the bad
+// predicate is asserted only on the newest frontier frame. K-induction calls
+// this after previous smaller frontiers were already proved safe, avoiding a
+// repeated OR over old bad frames on every depth.
+std::optional<KInductionResult::CounterexampleWitness>
+findBaseCounterexampleAtFrontier(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k);
+
 }  // namespace KEPLER_FORMAL::SEC

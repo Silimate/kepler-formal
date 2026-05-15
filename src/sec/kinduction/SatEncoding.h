@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -12,6 +13,14 @@
 
 namespace KEPLER_FORMAL::SEC {
 
+// Frame-local equality assumptions can be encoded more efficiently by making
+// both symbolic names point at the same SAT literal in that frame. This is a
+// quotienting of an assumption already present in the proof obligation, not a
+// structural shortcut: if the equality is not assumed for a frame, no alias is
+// installed for that frame.
+using FrameSymbolAliases =
+    std::vector<std::vector<std::pair<size_t, size_t>>>;
+
 // Owns the SAT literals that represent each symbolic SEC variable in each time
 // frame of the unrolled problem.
 class FrameVariableStore {
@@ -19,9 +28,20 @@ class FrameVariableStore {
   FrameVariableStore(SATSolverWrapper& solver,
                      const std::vector<size_t>& symbols,
                      size_t numFrames);
+  FrameVariableStore(SATSolverWrapper& solver,
+                     const std::vector<size_t>& symbols,
+                     size_t numFrames,
+                     const FrameSymbolAliases& aliasesByFrame);
 
+  bool hasSymbol(size_t symbol) const;
   int getLiteral(size_t symbol, size_t frame) const;
   std::unordered_map<size_t, int> makeLeafLits(size_t frame) const;
+  std::unordered_map<size_t, int> makeLeafLits(
+      size_t frame,
+      const std::vector<size_t>& symbols) const;
+  std::unordered_map<size_t, int> makeLeafLits(
+      size_t frame,
+      const std::set<size_t>& symbols) const;
 
  private:
   std::unordered_map<size_t, std::vector<int>> symbolFrameLits_;
@@ -38,12 +58,12 @@ class FrameFormulaEncoder {
 
  private:
   int getConstLit(bool value);
+  bool isConstLit(int lit, bool value);
 
   SATSolverWrapper& solver_;
   std::unordered_map<size_t, int> leafLits_;
   std::unordered_map<BoolExpr*, int> nodeToLit_;
   std::optional<int> trueLit_;
-  std::optional<int> falseLit_;
 };
 
 void addLiteralEquivalence(SATSolverWrapper& solver, int lhs, int rhs);

@@ -58,7 +58,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/asap7/aes/base/4_rsz_lec_test.yml \
           expect-equivalent \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
         bash regress/run_sec_strategies_regress.sh \
@@ -67,7 +66,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/sky130hd/gcd/base/4_rsz_lec_test.yml \
           expect-equivalent \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
         bash regress/run_sec_strategies_regress.sh \
@@ -76,7 +74,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/nangate45/bp/base/4_rsz_lec_test.yml \
           expect-equivalent \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
         bash regress/run_sec_strategies_regress.sh \
@@ -85,7 +82,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml \
           expect-equivalent \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
 
@@ -98,7 +94,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_naja_if/config.yaml \
           expect-equivalent \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
         bash regress/run_sec_strategies_regress.sh \
@@ -107,7 +102,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_verilog/config.yaml \
           expect-equivalent \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
 
@@ -129,7 +123,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           test_config_verilog_tinyrocket_csrfile_sec.yaml \
           expect-different \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
 
@@ -142,7 +135,6 @@ jobs:
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           test_config_verilog_tinyrocket_sec.yaml \
           expect-equivalent \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
 
@@ -154,7 +146,6 @@ jobs:
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_naja_if_edited/config.yaml \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}
         bash regress/run_sec_strategies_regress.sh \
@@ -162,6 +153,5 @@ jobs:
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_verilog_edited/config.yaml \
-          max-k=4 \
           compact \
           engine=${{ env.SEC_ENGINE }}

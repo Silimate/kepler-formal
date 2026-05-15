@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <array>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -11,6 +14,25 @@
 #include "common/SignalKey.h"
 
 namespace KEPLER_FORMAL::SEC {
+
+struct LazyTransitionSource {
+  size_t designIndex = 0;
+  BoolExpr* localExpr = nullptr;
+};
+
+struct LazyTransitionStore {
+  // Large SEC designs can have hundreds of thousands of modeled state bits.
+  // K-induction proves one output cone at a time, so eagerly remapping every
+  // state update into the shared symbol space wastes time and memory before
+  // COI reduction can remove most of it. This store keeps the original local
+  // next-state expressions plus the per-design symbol remap tables; the
+  // k-induction encoders remap only transition equations that are actually
+  // pulled into the current proof cone.
+  std::unordered_map<size_t, LazyTransitionSource> sourceByStateSymbol;
+  std::array<std::unordered_map<size_t, size_t>, 2> localToCombinedByDesign;
+  mutable std::array<std::unordered_map<BoolExpr*, BoolExpr*>, 2> remapMemoByDesign;
+  mutable std::unordered_map<size_t, BoolExpr*> remappedByStateSymbol;
+};
 
 struct KInductionProblem {
   std::vector<SignalKey> environmentInputs;
@@ -20,6 +42,7 @@ struct KInductionProblem {
   std::vector<size_t> inputSymbols;
   size_t resetBootstrapCycles = 0;
   std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
+  std::vector<std::pair<size_t, bool>> initialStateAssignments;
   std::vector<std::pair<size_t, size_t>> initialStateEqualityPairs;
   std::vector<std::pair<size_t, bool>> bootstrapStateAssignments;
   std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
@@ -33,6 +56,7 @@ struct KInductionProblem {
   std::vector<BoolExpr*> observedOutputExprs1;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
   std::vector<std::pair<size_t, BoolExpr*>> transitions1;
+  std::shared_ptr<LazyTransitionStore> lazyTransitions;
   BoolExpr* initialCondition = nullptr;
   size_t initializedStateCount = 0;
   size_t totalStateCount = 0;
@@ -40,6 +64,7 @@ struct KInductionProblem {
   BoolExpr* bad = nullptr;
   BoolExpr* inductionProperty = nullptr;
   BoolExpr* inductionBad = nullptr;
+  bool inductionPropertyAssumesInductiveStateEqualities = false;
   std::string description;
 
   bool hasSequentialState() const {
