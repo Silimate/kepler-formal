@@ -5,6 +5,7 @@
 
 #include <array>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -32,6 +33,12 @@ struct LazyTransitionStore {
   std::array<std::unordered_map<size_t, size_t>, 2> localToCombinedByDesign;
   mutable std::array<std::unordered_map<BoolExpr*, BoolExpr*>, 2> remapMemoByDesign;
   mutable std::unordered_map<size_t, BoolExpr*> remappedByStateSymbol;
+  // Output-batched SEC creates a fresh transition resolver for each PDR slice.
+  // Keep lazy support and size metadata with the shared transition store so
+  // reset-frontier COI rebuilding does not repeatedly walk the same large
+  // source BoolExpr DAGs across batches.
+  mutable std::unordered_map<size_t, std::set<size_t>> supportByStateSymbol;
+  mutable std::unordered_map<size_t, size_t> nodeCountByStateSymbol;
 };
 
 struct KInductionProblem {

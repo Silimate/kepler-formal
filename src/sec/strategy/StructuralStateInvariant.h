@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory_resource>
 #include <unordered_map>
 #include <utility>
 
@@ -24,7 +25,7 @@ struct AbstractExprPairHash {
 };
 
 using AbstractExprPairMemo =
-    std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool, AbstractExprPairHash>;
+    std::pmr::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool, AbstractExprPairHash>;
 
 // Rewrites each design into a shared abstract symbol space where matched SEC
 // inputs and already-correlated state bits use the same variable IDs. This is

@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "kinduction/KInductionProblem.h"
 
@@ -15,10 +17,20 @@ class TransitionExprResolver {
 
   bool contains(size_t stateSymbol) const;
   BoolExpr* at(size_t stateSymbol) const;
+  const std::set<size_t>& support(size_t stateSymbol) const;
+  size_t nodeCount(size_t stateSymbol) const;
+  const std::unordered_set<size_t>& stateSymbols() const;
+  const std::unordered_map<size_t, size_t>& primaryByComplement() const;
 
  private:
   const KInductionProblem& problem_;
   std::unordered_map<size_t, BoolExpr*> eagerByStateSymbol_;
+  mutable std::unordered_map<size_t, std::set<size_t>> supportByStateSymbol_;
+  mutable std::unordered_map<size_t, size_t> nodeCountByStateSymbol_;
+  mutable std::unordered_set<size_t> stateSymbols_;
+  mutable std::unordered_map<size_t, size_t> primaryByComplement_;
+  mutable bool stateSymbolsInitialized_ = false;
+  mutable bool primaryByComplementInitialized_ = false;
 };
 
 }  // namespace KEPLER_FORMAL::SEC

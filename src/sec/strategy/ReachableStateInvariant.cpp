@@ -7,6 +7,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <memory_resource>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -34,6 +36,9 @@ namespace {
 
 constexpr size_t kBootstrapSatRecoveryCandidateBudget = 1024;
 constexpr size_t kBootstrapSatRecoverySupportBudget = 4096;
+
+using ConstantEvalMemo =
+    std::pmr::unordered_map<BoolExpr*, std::optional<bool>>;
 
 bool isConstBoolExpr(BoolExpr* expr, bool value) {
   return expr != nullptr && expr->getOp() == Op::VAR &&
@@ -146,7 +151,7 @@ bool haveConflictingInitialValues(
 }
 
 struct StateNameGroup {
-  SignalKey firstKey;
+  size_t firstIndex = std::numeric_limits<size_t>::max();
   size_t count = 0;
 };
 
@@ -166,7 +171,7 @@ StateNameGroups groupStatesByDisplayName(const SequentialDesignModel& model) {
     auto [groupIt, inserted] =
         statesByName.try_emplace(std::string_view(displayIt->second));
     if (inserted) {
-      groupIt->second.firstKey = key;
+      groupIt->second.firstIndex = &key - model.stateBits.data();
     }
     ++groupIt->second.count;
   }
@@ -221,7 +226,11 @@ AlignedSignals alignSameNamedStatesByDisplayName(
       continue;
     }
 
-    const auto& key1 = countIt1->second.firstKey;
+    if (countIt1->second.firstIndex >= model1.stateBits.size()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+
+    const auto& key1 = model1.stateBits[countIt1->second.firstIndex];
     if (requireInitialCompatibility &&
         haveConflictingInitialValues(model0, key0, model1, key1)) {
       continue;
@@ -359,7 +368,7 @@ size_t defaultResetBootstrapCycles(bool hasResetBootstrap, bool hasCompleteIniti
 std::optional<bool> evaluateConstantUnderAssignments(
     BoolExpr* expr,
     const std::unordered_map<size_t, bool>& assignments,
-    std::unordered_map<BoolExpr*, std::optional<bool>>& memo) {
+    ConstantEvalMemo& memo) {
   if (expr == nullptr) {
     return std::nullopt;
   }
@@ -558,7 +567,12 @@ std::unordered_map<SignalKey, bool, SignalKeyHash> deriveResetBootstrapStateValu
     }
 
     std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownStates;
-    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
+    // The reset-value sweep touches large shared transition DAGs and then
+    // discards the memo at the end of the bootstrap step.  A monotonic arena
+    // avoids per-node malloc/free churn in this pre-proof pass.
+    std::pmr::monotonic_buffer_resource memoResource;
+    ConstantEvalMemo memo{&memoResource};
+    memo.reserve(std::min<size_t>(model.stateBits.size() * 4, 1'000'000));
     for (const auto& key : model.stateBits) {
       const auto value = evaluateConstantUnderAssignments(
           model.nextStateExprByStateKey.at(key), assignments, memo);
@@ -693,7 +707,8 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     bool abstractMapsAvailable = true;
     LocalToAbstractVarMap abstractMap0;
     LocalToAbstractVarMap abstractMap1;
-    AbstractExprPairMemo abstractEquivalenceMemo;
+    std::pmr::monotonic_buffer_resource abstractEquivalenceResource;
+    AbstractExprPairMemo abstractEquivalenceMemo{&abstractEquivalenceResource};
     size_t satRecoveredEqualities = 0;
     auto ensureAbstractMaps = [&]() {
       if (abstractMapsBuilt) {
@@ -844,8 +859,10 @@ ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& inductiveStateEqualities,
+    bool deriveResetBootstrapStrengthening,
     bool secDiagEnabled,
-    KEPLER_FORMAL::Config::SolverType solverType) {
+    KEPLER_FORMAL::Config::SolverType solverType,
+    bool deriveResetBootstrapEqualities) {
   ReachableStateInvariant invariant;
   // First decide which startup model we have: explicit init, reset bootstrap,
   // both, or neither. That determines how strong the frame-0 correspondence
@@ -867,7 +884,14 @@ ReachableStateInvariant buildReachableStateInvariant(
     // Walk the reset window to find which candidate equalities are true at the
     // first checked frame. The seed includes startup equalities, but a pair is
     // promoted only if reset-specialized transition logic proves it survives.
-    if (invariant.bootstrapCycles == 0) {
+    if (!deriveResetBootstrapEqualities) {
+      // PDR validates the concrete reset frontier separately, so it does not
+      // need the expensive reset-specialized sweep that mines additional
+      // post-reset equality lemmas. It still receives the concrete bootstrap
+      // state values below, which are what prevent artificial resetless
+      // startup traces; PDR can then learn only the local equalities it needs.
+      invariant.anchoredStateEqualities = structuralStartupCorrespondence;
+    } else if (invariant.bootstrapCycles == 0) {
       invariant.anchoredStateEqualities = structuralStartupCorrespondence;
     } else {
       const auto bootstrapCandidateStates = mergeStartupCorrespondence(
@@ -885,10 +909,12 @@ ReachableStateInvariant buildReachableStateInvariant(
           secDiagEnabled);
     }
 
-    invariant.bootstrapValues0 =
-        deriveResetBootstrapStateValues(model0, invariant.bootstrapCycles);
-    invariant.bootstrapValues1 =
-        deriveResetBootstrapStateValues(model1, invariant.bootstrapCycles);
+    if (deriveResetBootstrapStrengthening) {
+      invariant.bootstrapValues0 =
+          deriveResetBootstrapStateValues(model0, invariant.bootstrapCycles);
+      invariant.bootstrapValues1 =
+          deriveResetBootstrapStateValues(model1, invariant.bootstrapCycles);
+    }
   } else if (hasExplicitInitialState(model0, model1)) {
     // Without reset, we can only anchor the state pairs whose explicit init
     // values agree on both sides.

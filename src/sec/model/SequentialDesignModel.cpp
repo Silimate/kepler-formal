@@ -9,12 +9,17 @@
 #include <cstdlib>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <set>
 #include <stdexcept>
 #include <unordered_set>
 #include <unordered_map>
+#include <vector>
+#include <tbb/blocked_range.h>
+#include <tbb/enumerable_thread_specific.h>
+#include <tbb/parallel_for.h>
 
 #include "DNL.h"
 #include "NLDB0.h"
@@ -627,46 +632,88 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   return result;
 }
 
-std::optional<size_t> findSkippedStateDependency(
+struct CandidateDependencyScratch {
+  std::vector<const BoolExpr*> stack;
+  std::vector<size_t> dependencies;
+  std::unordered_map<const BoolExpr*, uint32_t> visitedEpochByNode;
+  std::vector<uint32_t> emittedEpochByVarID;
+  uint32_t currentEpoch = 1;
+};
+
+struct ThreadLocalDependencyState {
+  CandidateDependencyScratch scratch;
+  std::vector<std::vector<size_t>> dependenciesBySourceVarID;
+};
+
+const std::vector<size_t>& collectCandidateStateDependenciesFromExpr(
     BoolExpr* expr,
-    const std::unordered_set<size_t>& skippedStateVars,
-    std::unordered_map<BoolExpr*, std::optional<size_t>>& memo) {
+    const std::vector<uint8_t>& isCandidateStateVar,
+    CandidateDependencyScratch& scratch) {
+  scratch.dependencies.clear();
   if (expr == nullptr || !expr->isValid()) {
-    return std::nullopt;  // LCOV_EXCL_LINE
+    return scratch.dependencies;  // LCOV_EXCL_LINE
   }
 
-  if (auto it = memo.find(expr); it != memo.end()) {
-    return it->second;
+  // Skip propagation only needs candidate state support at the current root.
+  // Sampling showed that calling BoolExpr::getSupportVars() here spent most of
+  // the time reallocating temporary visited/support containers for every root.
+  // Reusing epoch-tagged scratch storage keeps the low-memory behavior from the
+  // cache removal while avoiding that repeated allocation churn.
+  if (scratch.currentEpoch == std::numeric_limits<uint32_t>::max()) {
+    scratch.visitedEpochByNode.clear();
+    std::fill(
+        scratch.emittedEpochByVarID.begin(),
+        scratch.emittedEpochByVarID.end(),
+        0);
+    scratch.currentEpoch = 1;
   }
+  const uint32_t epoch = scratch.currentEpoch++;
 
-  std::optional<size_t> dependency;
-  switch (expr->getOp()) {
-    case Op::VAR:
-      if (expr->getId() >= 2 && skippedStateVars.find(expr->getId()) != skippedStateVars.end()) {
-        dependency = expr->getId();
+  scratch.stack.clear();
+  scratch.stack.push_back(expr);
+  while (!scratch.stack.empty()) {
+    const BoolExpr* node = scratch.stack.back();
+    scratch.stack.pop_back();
+    if (node == nullptr) {
+      continue;
+    }
+    auto& visitedEpoch = scratch.visitedEpochByNode[node];
+    if (visitedEpoch == epoch) {
+      continue;
+    }
+    visitedEpoch = epoch;
+
+    switch (node->getOp()) {
+      case Op::VAR: {
+        const size_t symbol = node->getId();
+        if (symbol >= 2 && symbol < isCandidateStateVar.size() &&
+            isCandidateStateVar[symbol] != 0) {
+          if (symbol >= scratch.emittedEpochByVarID.size()) {
+            scratch.emittedEpochByVarID.resize(symbol + 1, 0);
+          }
+          auto& emittedEpoch = scratch.emittedEpochByVarID[symbol];
+          if (emittedEpoch != epoch) {
+            emittedEpoch = epoch;
+            scratch.dependencies.push_back(symbol);
+          }
+        }
+        break;
       }
-      break;
-    case Op::NOT:
-      dependency =
-          findSkippedStateDependency(expr->getLeft(), skippedStateVars, memo);
-      break;
-    case Op::AND:
-    case Op::OR:
-    case Op::XOR:
-      dependency =
-          findSkippedStateDependency(expr->getLeft(), skippedStateVars, memo);
-      if (!dependency.has_value()) {
-        dependency = findSkippedStateDependency(
-            expr->getRight(), skippedStateVars, memo);
-      }
-      break;
-    case Op::NONE:  // LCOV_EXCL_LINE
-    default:
-      break;  // LCOV_EXCL_LINE
+      case Op::NOT:
+        scratch.stack.push_back(node->getLeft());
+        break;
+      case Op::AND:
+      case Op::OR:
+      case Op::XOR:
+        scratch.stack.push_back(node->getLeft());
+        scratch.stack.push_back(node->getRight());
+        break;
+      case Op::NONE:  // LCOV_EXCL_LINE
+      default:
+        break;  // LCOV_EXCL_LINE
+    }
   }
-
-  memo.emplace(expr, dependency);
-  return dependency;
+  return scratch.dependencies;
 }
 
 SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
@@ -1057,14 +1104,30 @@ std::string normalizeSignalBaseName(const std::string& name) {
   return normalizePinName(base);
 }
 
-std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+std::vector<std::string> resetNameCandidates(const std::string& displayName) {
+  // Synthesized-reset inference runs before the final SEC symbol space exists.
+  // Use the same top-port spelling policy as later SEC phases so names such as
+  // `reset_i[0]` and `rst_ni[0]` are classified consistently end-to-end.
   const std::string normalized = normalizeSignalBaseName(displayName);
-  if (normalized == "RESET" || normalized == "RST") {
-    return true;
+  std::vector<std::string> candidates = {normalized};
+  if (hasSuffix(normalized, "_I")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 2));
   }
-  if (normalized == "RESET_N" || normalized == "RESETN" ||
-      normalized == "RST_N" || normalized == "RSTN") {
-    return false;
+  if (hasSuffix(normalized, "_NI")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 1));
+  }
+  return candidates;
+}
+
+std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+  for (const auto& candidate : resetNameCandidates(displayName)) {
+    if (candidate == "RESET" || candidate == "RST") {
+      return true;
+    }
+    if (candidate == "RESET_N" || candidate == "RESETN" ||
+        candidate == "RST_N" || candidate == "RSTN") {
+      return false;
+    }
   }
   return std::nullopt;
 }
@@ -1993,6 +2056,12 @@ void publishNormalizedBoundary(ExtractContext& ctx, SequentialDesignModel& model
     ctx.stateBits.erase(key);
     ctx.environmentInputs.insert(key);
   }
+  // Opaque internal boundary inputs behave exactly like additional SEC
+  // environment inputs: extraction gives them symbolic leaf variables because
+  // the surrounding cone cannot be modeled combinationally, so the published
+  // interface must carry them forward into the shared proof symbol space.
+  ctx.environmentInputs.insert(
+      ctx.internalBoundaryInputKeys.begin(), ctx.internalBoundaryInputKeys.end());
 
   model.topInputKeys.assign(ctx.topInputKeys.begin(), ctx.topInputKeys.end());
   model.topOutputKeys.assign(ctx.topOutputKeys.begin(), ctx.topOutputKeys.end());
@@ -2528,15 +2597,10 @@ void enqueueStateDependenciesFromFormula(
     return;  // LCOV_EXCL_LINE
   }
 
-  // For SEC dependency discovery we only care about support variables that are
-  // current-state symbols. Calling BoolExpr::getSupportVars() materializes every
-  // top input and state input into a set; on large gate-level designs like
-  // BlackParrot that dominates extraction time and allocation traffic. Walk the
-  // expression DAG directly and enqueue only the state symbols we need. The
-  // scan is global for this extraction pass: once a shared BoolExpr subtree has
-  // been walked, every state variable under it has already been enqueued, so
-  // later outputs can skip that subtree instead of re-traversing it thousands of
-  // times.
+  // This frontier walk only needs to know whether a shared subtree has ever
+  // exposed a required state variable. Once a subtree is scanned, every state
+  // variable reachable under it has already been enqueued, so revisiting that
+  // subtree for later roots would be pure duplicate work.
   stack.clear();
   stack.push_back(expr);
   while (!stack.empty()) {
@@ -2550,12 +2614,11 @@ void enqueueStateDependenciesFromFormula(
     }
 
     switch (node->getOp()) {
-      case Op::VAR: {
+      case Op::VAR:
         if (requiredStateVarIDs.find(node->getId()) != requiredStateVarIDs.end()) {
           enqueueStateVarID(node->getId());
         }
         break;
-      }
       case Op::NOT:
         stack.push_back(node->getLeft());
         break;
@@ -2954,6 +3017,28 @@ void applyRebuiltTransitionArtifacts(
 }
 
 void filterUnsupportedAndUnmappedBoundary(ExtractContext& ctx, SequentialDesignModel& model) {
+  {
+    // Any published leaf variable that is not retained as sequential state is a
+    // free SEC environment input, regardless of whether it originated from the
+    // top interface, an opaque internal boundary, or a later abstraction step.
+    // Compact SEC rebuilds the proof problem only from this normalized model,
+    // so leaving such leaves out of the environment interface causes remapped
+    // formulas to reference symbols that the shared proof symbol space never
+    // allocates.
+    std::unordered_set<SignalKey, SignalKeyHash> stateKeys(
+        model.stateBits.begin(), model.stateBits.end());
+    std::unordered_set<SignalKey, SignalKeyHash> publishedInputs(
+        model.environmentInputs.begin(), model.environmentInputs.end());
+    for (const auto& [key, _] : model.inputVarByKey) {
+      if (stateKeys.find(key) != stateKeys.end()) {
+        continue;
+      }
+      if (publishedInputs.insert(key).second) {
+        model.environmentInputs.push_back(key);
+      }
+    }
+  }
+
   // Inputs or state bits can disappear if the underlying BoolExpr builder
   // optimized them away to constants; remove them from the aligned interface.
   auto keepMappedInputs = [&](std::vector<SignalKey>& keys) {
@@ -3008,94 +3093,183 @@ void filterUnsupportedAndUnmappedBoundary(ExtractContext& ctx, SequentialDesignM
 
 void propagateConnectivitySkipsThroughDependencies(SequentialDesignModel& model) {
   std::unordered_map<size_t, SignalKey> stateKeyByVarID;
+  size_t maxCandidateStateVarID = 0;
+  std::deque<size_t> pendingSkippedStateVars;
+  std::unordered_set<size_t> enqueuedSkippedStateVars;
   for (const auto& key : model.stateBits) {
     const auto varIt = model.inputVarByKey.find(key);
     if (varIt == model.inputVarByKey.end()) {
       continue;  // LCOV_EXCL_LINE
     }
     stateKeyByVarID.emplace(varIt->second, key);
+    maxCandidateStateVarID = std::max(maxCandidateStateVarID, varIt->second);
+    if (model.connectivitySkipInfoByKey.find(key) !=
+            model.connectivitySkipInfoByKey.end() &&
+        enqueuedSkippedStateVars.insert(varIt->second).second) {
+      pendingSkippedStateVars.push_back(varIt->second);
+    }
+  }
+  if (pendingSkippedStateVars.empty()) {
+    return;
+  }
+  std::vector<uint8_t> isCandidateStateVar(maxCandidateStateVarID + 1, 0);
+  for (const auto& [varID, _] : stateKeyByVarID) {
+    isCandidateStateVar[varID] = 1;
   }
 
-  bool changed = false;
-  do {
-    changed = false;
-    std::unordered_set<size_t> skippedStateVars;
-    for (const auto& key : model.stateBits) {
-      if (model.connectivitySkipInfoByKey.find(key) == model.connectivitySkipInfoByKey.end()) {
-        continue;
-      }
-      const auto varIt = model.inputVarByKey.find(key);
-      if (varIt != model.inputVarByKey.end()) {
-        skippedStateVars.insert(varIt->second);
+  // Reverse dependencies only need to point back into the already-owned SEC
+  // interface vectors. Storing indexes here avoids copying large SignalKey path
+  // objects into the temporary propagation graph, which sampling showed was
+  // expensive both to allocate and to tear down on BlackParrot.
+  std::vector<std::vector<size_t>> dependentStateIndexesBySourceVarID(
+      isCandidateStateVar.size());
+  std::vector<std::vector<size_t>> dependentOutputIndexesBySourceVarID(
+      isCandidateStateVar.size());
+  auto mergeDependencyIndexMap =
+      [](std::vector<std::vector<size_t>>& destination,
+         const std::vector<std::vector<size_t>>& source) {
+        const size_t limit = std::min(destination.size(), source.size());
+        for (size_t sourceVarID = 0; sourceVarID != limit; ++sourceVarID) {
+          const auto& indexes = source[sourceVarID];
+          if (indexes.empty()) {
+            continue;
+          }
+          auto& mergedIndexes = destination[sourceVarID];
+          mergedIndexes.insert(
+              mergedIndexes.end(), indexes.begin(), indexes.end());
+        }
+  };
+  // Precompute state-to-state and state-to-output dependency edges once. The
+  // previous implementation recursively rescanned large Boolean cones every
+  // time another state became skipped. We still build the reverse edges once,
+  // but we now do it with one support walk per root instead of materializing a
+  // giant exact dependency cache for every BoolExpr node. Sampling also showed
+  // all TBB workers idle here, so the independent per-root scans run in
+  // parallel with per-thread scratch and are merged once at the end.
+  tbb::enumerable_thread_specific<ThreadLocalDependencyState> threadLocalStateDeps;
+  tbb::parallel_for(
+      tbb::blocked_range<size_t>(0, model.stateBits.size()),
+      [&](const tbb::blocked_range<size_t>& range) {
+        auto& localState = threadLocalStateDeps.local();
+        if (localState.scratch.emittedEpochByVarID.size() <
+            isCandidateStateVar.size()) {
+          localState.scratch.emittedEpochByVarID.resize(
+              isCandidateStateVar.size(), 0);
+        }
+        if (localState.dependenciesBySourceVarID.size() !=
+            isCandidateStateVar.size()) {
+          localState.dependenciesBySourceVarID.assign(
+              isCandidateStateVar.size(), {});
+        }
+        for (size_t stateIndex = range.begin(); stateIndex != range.end(); ++stateIndex) {
+          const auto& key = model.stateBits[stateIndex];
+          if (model.connectivitySkipInfoByKey.find(key) !=
+              model.connectivitySkipInfoByKey.end()) {
+            continue;
+          }
+          const auto exprIt = model.nextStateExprByStateKey.find(key);
+          if (exprIt == model.nextStateExprByStateKey.end()) {
+            continue;  // LCOV_EXCL_LINE
+          }
+          const auto dependencies = collectCandidateStateDependenciesFromExpr(
+              exprIt->second, isCandidateStateVar, localState.scratch);
+          for (const auto dependencyVarID : dependencies) {
+            localState.dependenciesBySourceVarID[dependencyVarID].push_back(stateIndex);
+          }
+        }
+      });
+  for (const auto& localState : threadLocalStateDeps) {
+    mergeDependencyIndexMap(
+        dependentStateIndexesBySourceVarID, localState.dependenciesBySourceVarID);
+  }
+
+  tbb::enumerable_thread_specific<ThreadLocalDependencyState> threadLocalOutputDeps;
+  tbb::parallel_for(
+      tbb::blocked_range<size_t>(0, model.allObservedOutputs.size()),
+      [&](const tbb::blocked_range<size_t>& range) {
+        auto& localState = threadLocalOutputDeps.local();
+        if (localState.scratch.emittedEpochByVarID.size() <
+            isCandidateStateVar.size()) {
+          localState.scratch.emittedEpochByVarID.resize(
+              isCandidateStateVar.size(), 0);
+        }
+        if (localState.dependenciesBySourceVarID.size() !=
+            isCandidateStateVar.size()) {
+          localState.dependenciesBySourceVarID.assign(
+              isCandidateStateVar.size(), {});
+        }
+        for (size_t outputIndex = range.begin(); outputIndex != range.end();
+             ++outputIndex) {
+          const auto& key = model.allObservedOutputs[outputIndex];
+          if (model.connectivitySkipInfoByKey.find(key) !=
+              model.connectivitySkipInfoByKey.end()) {
+            continue;
+          }
+          const auto exprIt = model.observedOutputExprByKey.find(key);
+          if (exprIt == model.observedOutputExprByKey.end()) {
+            continue;  // LCOV_EXCL_LINE
+          }
+          const auto dependencies = collectCandidateStateDependenciesFromExpr(
+              exprIt->second, isCandidateStateVar, localState.scratch);
+          for (const auto dependencyVarID : dependencies) {
+            localState.dependenciesBySourceVarID[dependencyVarID].push_back(outputIndex);
+          }
+        }
+      });
+  for (const auto& localState : threadLocalOutputDeps) {
+    mergeDependencyIndexMap(
+        dependentOutputIndexesBySourceVarID, localState.dependenciesBySourceVarID);
+  }
+
+  auto makeDependencySkip = [&](size_t sourceVarID) -> std::optional<ConnectivitySkipInfo> {
+    const auto sourceKeyIt = stateKeyByVarID.find(sourceVarID);
+    if (sourceKeyIt == stateKeyByVarID.end()) {
+      return std::nullopt;  // LCOV_EXCL_LINE
+    }
+    const auto skipInfoIt = model.connectivitySkipInfoByKey.find(sourceKeyIt->second);
+    if (skipInfoIt == model.connectivitySkipInfoByKey.end()) {
+      return std::nullopt;  // LCOV_EXCL_LINE
+    }
+    return ConnectivitySkipInfo{
+        skipInfoIt->second.origin,
+        "Depends on skipped state `" + model.displayNameByKey.at(sourceKeyIt->second) +
+            "` whose cone traces to a " +
+            describeConnectivitySkipOrigin(skipInfoIt->second.origin) + " issue",
+    };
+  };
+
+  while (!pendingSkippedStateVars.empty()) {
+    const size_t skippedVarID = pendingSkippedStateVars.front();
+    pendingSkippedStateVars.pop_front();
+
+    const auto dependencySkip = makeDependencySkip(skippedVarID);
+    if (!dependencySkip.has_value()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+
+    if (skippedVarID < dependentStateIndexesBySourceVarID.size()) {
+      for (const auto dependentStateIndex :
+           dependentStateIndexesBySourceVarID[skippedVarID]) {
+        const auto& dependentKey = model.stateBits[dependentStateIndex];
+        if (!model.connectivitySkipInfoByKey.emplace(dependentKey, *dependencySkip).second) {
+          continue;
+        }
+        const auto varIt = model.inputVarByKey.find(dependentKey);
+        if (varIt != model.inputVarByKey.end() &&
+            enqueuedSkippedStateVars.insert(varIt->second).second) {
+          pendingSkippedStateVars.push_back(varIt->second);
+        }
       }
     }
 
-    std::unordered_map<BoolExpr*, std::optional<size_t>> stateMemo;
-    for (const auto& key : model.stateBits) {
-      if (model.connectivitySkipInfoByKey.find(key) != model.connectivitySkipInfoByKey.end()) {
-        continue;
+    if (skippedVarID < dependentOutputIndexesBySourceVarID.size()) {
+      for (const auto dependentOutputIndex :
+           dependentOutputIndexesBySourceVarID[skippedVarID]) {
+        const auto& dependentKey = model.allObservedOutputs[dependentOutputIndex];
+        model.connectivitySkipInfoByKey.emplace(dependentKey, *dependencySkip);
       }
-      auto exprIt = model.nextStateExprByStateKey.find(key);
-      if (exprIt == model.nextStateExprByStateKey.end()) {
-        continue;  // LCOV_EXCL_LINE
-      }
-      const auto dependency =
-          findSkippedStateDependency(exprIt->second, skippedStateVars, stateMemo);
-      if (!dependency.has_value()) {
-        continue;
-      }
-      const auto sourceKeyIt = stateKeyByVarID.find(*dependency);  // LCOV_EXCL_LINE
-      if (sourceKeyIt == stateKeyByVarID.end()) {  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
-      }
-      const auto skipInfoIt = model.connectivitySkipInfoByKey.find(sourceKeyIt->second);  // LCOV_EXCL_LINE
-      if (skipInfoIt == model.connectivitySkipInfoByKey.end()) {  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
-      }
-      model.connectivitySkipInfoByKey.emplace(  // LCOV_EXCL_LINE
-          key,  // LCOV_EXCL_LINE
-          ConnectivitySkipInfo{  // LCOV_EXCL_LINE
-              skipInfoIt->second.origin,  // LCOV_EXCL_LINE
-              "Depends on skipped state `" + model.displayNameByKey.at(sourceKeyIt->second) +  // LCOV_EXCL_LINE
-                  "` whose cone traces to a " +  // LCOV_EXCL_LINE
-                  describeConnectivitySkipOrigin(skipInfoIt->second.origin) + " issue",  // LCOV_EXCL_LINE
-          });
-      changed = true;  // LCOV_EXCL_LINE
     }
-
-    std::unordered_map<BoolExpr*, std::optional<size_t>> outputMemo;
-    for (const auto& key : model.allObservedOutputs) {
-      if (model.connectivitySkipInfoByKey.find(key) != model.connectivitySkipInfoByKey.end()) {
-        continue;
-      }
-      auto exprIt = model.observedOutputExprByKey.find(key);
-      if (exprIt == model.observedOutputExprByKey.end()) {
-        continue;  // LCOV_EXCL_LINE
-      }
-      const auto dependency =
-          findSkippedStateDependency(exprIt->second, skippedStateVars, outputMemo);
-      if (!dependency.has_value()) {
-        continue;
-      }
-      const auto sourceKeyIt = stateKeyByVarID.find(*dependency);
-      if (sourceKeyIt == stateKeyByVarID.end()) {
-        continue;  // LCOV_EXCL_LINE
-      }
-      const auto skipInfoIt = model.connectivitySkipInfoByKey.find(sourceKeyIt->second);
-      if (skipInfoIt == model.connectivitySkipInfoByKey.end()) {
-        continue;  // LCOV_EXCL_LINE
-      }
-      model.connectivitySkipInfoByKey.emplace(
-          key,
-          ConnectivitySkipInfo{
-              skipInfoIt->second.origin,
-              "Depends on skipped state `" + model.displayNameByKey.at(sourceKeyIt->second) +
-                  "` whose cone traces to a " +
-                  describeConnectivitySkipOrigin(skipInfoIt->second.origin) + " issue",
-          });
-      changed = true;
-    }
-  } while (changed);
+  }
 }
 
 void partitionCoveredSignals(SequentialDesignModel& model) {

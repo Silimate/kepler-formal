@@ -17,6 +17,70 @@ BoolExpr* buildEqualityFormula(size_t lhs, size_t rhs) {
   return makeEqualityExpr(BoolExpr::Var(lhs), BoolExpr::Var(rhs));
 }
 
+std::vector<size_t> sortUniqueSymbols(std::vector<size_t> symbols) {
+  std::sort(symbols.begin(), symbols.end());
+  symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
+  return symbols;
+}
+
+std::vector<size_t> sortUniqueSymbols(std::unordered_set<size_t> symbols) {
+  return sortUniqueSymbols(
+      std::vector<size_t>(symbols.begin(), symbols.end()));
+}
+
+std::vector<size_t> buildFormulaSupportVector(BoolExpr* formula) {
+  std::vector<size_t> support;
+  if (formula == nullptr) {
+    return support;  // LCOV_EXCL_LINE
+  }
+  const auto supportSet = formula->getSupportVars();
+  support.reserve(supportSet.size());
+  for (const auto symbol : supportSet) {
+    support.push_back(symbol);
+  }
+  return support;
+}
+
+const std::vector<size_t>& cachedFormulaSupport(
+    BoolExpr* formula,
+    FormulaSupportCache& supportCache) {
+  auto [it, inserted] = supportCache.emplace(formula, std::vector<size_t>{});
+  if (inserted) {
+    // Invariant validation reuses the same large transition and strengthening
+    // DAGs across several PDR candidates. Cache their support locally to avoid
+    // repeatedly walking and allocating for identical BoolExpr subgraphs.
+    it->second = buildFormulaSupportVector(formula);
+  }
+  return it->second;
+}
+
+void addSupportSymbols(const std::vector<size_t>& support,
+                       std::unordered_set<size_t>& symbols) {
+  for (const auto symbol : support) {
+    if (symbol >= 2) {
+      symbols.insert(symbol);
+    }
+  }
+}
+
+std::unordered_set<size_t> buildCombinedStateSymbolSet(
+    const KInductionProblem& problem);
+
+std::vector<size_t> collectStateSupportSymbols(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& formulaSupport) {
+  std::vector<size_t> support;
+  const auto stateSymbolSet = buildCombinedStateSymbolSet(problem);
+  for (const auto symbol : formulaSupport) {
+    if (stateSymbolSet.find(symbol) != stateSymbolSet.end()) {
+      support.push_back(symbol);
+    }
+  }
+  std::sort(support.begin(), support.end());
+  support.erase(std::unique(support.begin(), support.end()), support.end());
+  return support;
+}
+
 void addComplementedStateRelations(
     SATSolverWrapper& solver,
     const FrameVariableStore& variables,
@@ -24,6 +88,10 @@ void addComplementedStateRelations(
     size_t numFrames) {
   for (size_t frame = 0; frame < numFrames; ++frame) {
     for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {
+      if (!variables.hasSymbol(primarySymbol) ||
+          !variables.hasSymbol(complementedSymbol)) {
+        continue;
+      }
       addLiteralEquivalence(
           solver,
           variables.getLiteral(complementedSymbol, frame),
@@ -75,20 +143,30 @@ std::unordered_set<size_t> buildCombinedStateSymbolSet(
 std::vector<size_t> collectStateSupportSymbols(
     const KInductionProblem& problem,
     BoolExpr* formula) {
-  std::vector<size_t> support;
   if (formula == nullptr) {
-    return support;  // LCOV_EXCL_LINE
+    return {};  // LCOV_EXCL_LINE
   }
+  return collectStateSupportSymbols(problem, buildFormulaSupportVector(formula));
+}
 
-  const auto stateSymbolSet = buildCombinedStateSymbolSet(problem);
-  for (const auto symbol : formula->getSupportVars()) {
-    if (stateSymbolSet.find(symbol) != stateSymbolSet.end()) {
-      support.push_back(symbol);
+void addFormulaSupportSymbols(BoolExpr* formula,
+                              std::unordered_set<size_t>& symbols) {
+  if (formula == nullptr) {
+    return;  // LCOV_EXCL_LINE
+  }
+  addSupportSymbols(buildFormulaSupportVector(formula), symbols);
+}
+
+void addRelevantComplementedStatePartners(
+    const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
+    std::unordered_set<size_t>& symbols) {
+  for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {
+    if (symbols.find(primarySymbol) != symbols.end() ||
+        symbols.find(complementedSymbol) != symbols.end()) {
+      symbols.insert(primarySymbol);
+      symbols.insert(complementedSymbol);
     }
   }
-  std::sort(support.begin(), support.end());
-  support.erase(std::unique(support.begin(), support.end()), support.end());
-  return support;
 }
 
 std::vector<size_t> expandTransitionTargets(
@@ -113,19 +191,51 @@ std::vector<size_t> expandTransitionTargets(
     }  // LCOV_EXCL_LINE
   }
 
-  std::sort(targets.begin(), targets.end());
-  targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
-  return targets;
+  return sortUniqueSymbols(std::move(targets));
+}
+
+std::vector<size_t> inductiveInvariantQuerySymbols(
+    const KInductionProblem& problem,
+    BoolExpr* invariant,
+    const std::unordered_map<size_t, BoolExpr*>& transitionExprByStateSymbol,
+    FormulaSupportCache& supportCache) {
+  std::unordered_set<size_t> symbols;
+  const auto& invariantSupport = cachedFormulaSupport(invariant, supportCache);
+  addSupportSymbols(invariantSupport, symbols);
+
+  const auto targets = expandTransitionTargets(
+      problem,
+      collectStateSupportSymbols(problem, invariantSupport),
+      transitionExprByStateSymbol);
+  for (const auto stateSymbol : targets) {
+    symbols.insert(stateSymbol);
+    addSupportSymbols(
+        cachedFormulaSupport(
+            transitionExprByStateSymbol.at(stateSymbol), supportCache),
+        symbols);
+  }
+
+  // Reset-bootstrap PDR frames are post-reset frames.  If the invariant or the
+  // transition cone mentions reset controls, the inductiveness query must see
+  // the same deasserted reset environment used by PDR's blocking queries.
+  if (problem.resetBootstrapCycles != 0) {
+    for (const auto& [symbol, _] : problem.resetBootstrapInputs) {
+      symbols.insert(symbol);
+    }
+  }
+
+  addRelevantComplementedStatePartners(problem.complementedStatePairs0, symbols);
+  addRelevantComplementedStatePartners(problem.complementedStatePairs1, symbols);
+  return sortUniqueSymbols(std::move(symbols));
 }
 
 void addTransitionRelationForTargets(
     SATSolverWrapper& solver,
     const FrameVariableStore& variables,
     const KInductionProblem& problem,
+    const std::unordered_map<size_t, BoolExpr*>& transitionExprByStateSymbol,
     size_t frame,
     const std::vector<size_t>& requestedTargets) {
-  const auto transitionExprByStateSymbol =
-      buildTransitionExprByStateSymbol(problem);
   const auto encodedTargets = expandTransitionTargets(
       problem, requestedTargets, transitionExprByStateSymbol);
 
@@ -135,6 +245,25 @@ void addTransitionRelationForTargets(
         solver,
         variables.getLiteral(stateSymbol, frame + 1),
         encoder.encode(transitionExprByStateSymbol.at(stateSymbol)));
+  }
+}
+
+void addPostBootstrapResetInputConstraints(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t frame) {
+  if (problem.resetBootstrapCycles == 0) {
+    return;
+  }
+
+  for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
+    if (!variables.hasSymbol(symbol)) {
+      continue;
+    }
+    solver.addClause(
+        {assertedValue ? -variables.getLiteral(symbol, frame)
+                       : variables.getLiteral(symbol, frame)});
   }
 }
 
@@ -321,23 +450,49 @@ bool isInductiveInvariant(
     const KInductionProblem& problem,
     BoolExpr* invariant,
     KEPLER_FORMAL::Config::SolverType solverType) {
+  FormulaSupportCache supportCache;
+  return isInductiveInvariant(problem, invariant, solverType, supportCache);
+}
+
+bool isInductiveInvariant(
+    const KInductionProblem& problem,
+    BoolExpr* invariant,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    FormulaSupportCache& supportCache) {
   if (invariant == nullptr) {
     return false;  // LCOV_EXCL_LINE
   }
 
+  const auto transitionExprByStateSymbol =
+      buildTransitionExprByStateSymbol(problem);
+  const auto querySymbols =
+      inductiveInvariantQuerySymbols(
+          problem, invariant, transitionExprByStateSymbol, supportCache);
+  const auto& invariantSupport = cachedFormulaSupport(invariant, supportCache);
+  const auto invariantStateSupport =
+      collectStateSupportSymbols(problem, invariantSupport);
+
   SATSolverWrapper solver(solverType);
-  FrameVariableStore variables(solver, problem.allSymbols, 2);
+  FrameVariableStore variables(solver, querySymbols, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
+  addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
   // Only next-state symbols read by the candidate invariant need transition
   // equations. Encoding every flop transition here made PDR's immediate
   // invariant validation scale like a full-design induction proof even when
   // the candidate touched a small cone.
   addTransitionRelationForTargets(
-      solver, variables, problem, 0, collectStateSupportSymbols(problem, invariant));
+      solver,
+      variables,
+      problem,
+      transitionExprByStateSymbol,
+      0,
+      invariantStateSupport);
 
-  FrameFormulaEncoder currentEncoder(solver, variables.makeLeafLits(0));
-  FrameFormulaEncoder nextEncoder(solver, variables.makeLeafLits(1));
+  FrameFormulaEncoder currentEncoder(
+      solver, variables.makeLeafLits(0, invariantSupport));
+  FrameFormulaEncoder nextEncoder(
+      solver, variables.makeLeafLits(1, invariantSupport));
   solver.addClause({currentEncoder.encode(invariant)});
   solver.addClause({nextEncoder.encode(BoolExpr::Not(invariant))});
   return !solver.solve();

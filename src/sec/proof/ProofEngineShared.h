@@ -16,6 +16,8 @@ namespace KEPLER_FORMAL::SEC {
 // low-level SAT/invariant checks in one place so K_INDUCTION, IMC, and PDR all
 // reason about the same extracted transition system.
 
+using FormulaSupportCache = std::unordered_map<BoolExpr*, std::vector<size_t>>;
+
 BoolExpr* buildProofInitFormula(const KInductionProblem& problem);
 
 size_t nextFreshProofSymbol(const KInductionProblem& problem);
@@ -57,5 +59,11 @@ bool isInductiveInvariant(
     const KInductionProblem& problem,
     BoolExpr* invariant,
     KEPLER_FORMAL::Config::SolverType solverType);
+
+bool isInductiveInvariant(
+    const KInductionProblem& problem,
+    BoolExpr* invariant,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    FormulaSupportCache& supportCache);
 
 }  // namespace KEPLER_FORMAL::SEC

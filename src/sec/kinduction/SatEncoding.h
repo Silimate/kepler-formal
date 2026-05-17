@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
+#include <memory_resource>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -53,16 +56,38 @@ class FrameFormulaEncoder {
  public:
   FrameFormulaEncoder(SATSolverWrapper& solver,
                       std::unordered_map<size_t, int> leafLits);
+  FrameFormulaEncoder(SATSolverWrapper& solver,
+                      std::unordered_map<size_t, int> leafLits,
+                      size_t expectedNodeHint);
+  FrameFormulaEncoder(SATSolverWrapper& solver,
+                      std::unordered_map<size_t, int> leafLits,
+                      bool createMissingLeaves);
+  FrameFormulaEncoder(SATSolverWrapper& solver,
+                      std::unordered_map<size_t, int> leafLits,
+                      bool createMissingLeaves,
+                      size_t expectedNodeHint);
 
   int encode(BoolExpr* expr);
+  const std::unordered_map<size_t, int>& leafLits() const;
 
  private:
+  void reserveNodeCache();
+  void cacheEncodedLiteral(BoolExpr* node, int lit);
   int getConstLit(bool value);
   bool isConstLit(int lit, bool value);
 
   SATSolverWrapper& solver_;
   std::unordered_map<size_t, int> leafLits_;
-  std::unordered_map<BoolExpr*, int> nodeToLit_;
+  bool createMissingLeaves_ = false;
+  size_t expectedNodeHint_ = 0;
+  // PDR creates many short-lived encoders while asking predecessor queries.
+  // A normal unordered_map allocates one node at a time for every BoolExpr DAG
+  // node in each query. The monotonic arena keeps those temporary allocations
+  // local to the encoder and releases them in one shot when the query ends.
+  std::array<std::byte, 16 * 1024> nodeArenaBuffer_{};
+  std::pmr::monotonic_buffer_resource nodeArena_;
+  std::pmr::unordered_map<BoolExpr*, int> nodeToLit_;
+  size_t nodeMapReservedEntries_ = 0;
   std::optional<int> trueLit_;
 };
 

@@ -16,8 +16,7 @@ namespace {
 // but proving one output per solver call repeats setup work hundreds of times.
 // These limits keep nearby outputs together while preventing one batch from
 // dragging most of the design into one SAT cone.
-constexpr size_t kMaxOutputBatchSize = 32;
-constexpr size_t kOutputBatchSupportLimit = 512;
+constexpr OutputBatchingLimits kDefaultOutputBatchingLimits;
 
 void appendOutputSupport(const KInductionProblem& problem,
                          size_t outputIndex,
@@ -34,10 +33,16 @@ void appendOutputSupport(const KInductionProblem& problem,
 
 std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
     const KInductionProblem& problem) {
+  return buildSupportBoundedOutputBatches(problem, kDefaultOutputBatchingLimits);
+}
+
+std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
+    const KInductionProblem& problem,
+    const OutputBatchingLimits& limits) {
   std::vector<std::pair<size_t, size_t>> batches;
   size_t firstOutput = 0;
   std::unordered_set<size_t> batchSupport;
-  batchSupport.reserve(kOutputBatchSupportLimit);
+  batchSupport.reserve(limits.outputBatchSupportLimit);
 
   while (firstOutput < problem.observedOutputExprs0.size()) {
     size_t endOutput = firstOutput;
@@ -48,9 +53,9 @@ std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
 
       const bool batchAlreadyHasOutput = endOutput > firstOutput;
       const bool exceedsCount =
-          endOutput - firstOutput + 1 > kMaxOutputBatchSize;
+          endOutput - firstOutput + 1 > limits.maxOutputBatchSize;
       const bool exceedsSupport =
-          candidateSupport.size() > kOutputBatchSupportLimit;
+          candidateSupport.size() > limits.outputBatchSupportLimit;
       if (batchAlreadyHasOutput && (exceedsCount || exceedsSupport)) {
         break;
       }

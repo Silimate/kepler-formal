@@ -3,12 +3,14 @@
 
 #include "kinduction/SatEncoding.h"
 
-#include <stack>
+#include <algorithm>
 #include <stdexcept>
 
 namespace KEPLER_FORMAL::SEC {
 
 namespace {
+
+constexpr size_t kMaxSolverTseitinReserveHint = 65536;
 
 int newSolverLiteral(SATSolverWrapper& solver) {
   // BoolExpr reserves 0/1 for false/true, so fresh SAT literals start above
@@ -74,6 +76,12 @@ FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
                                        const std::vector<size_t>& symbols,
                                        size_t numFrames,
                                        const FrameSymbolAliases& aliasesByFrame) {
+  // The store knows the frame-variable count before any clause is emitted.
+  // Reserving it up front is especially helpful for PDR, which creates many
+  // small solvers and otherwise makes Kissat repeatedly grow its variable
+  // arrays while transition Tseitin clauses are being streamed in.
+  solver.reserveVars(symbols.size() * numFrames);
+
   // Every symbolic SEC variable gets one SAT literal per time frame.
   for (const auto symbol : symbols) {
     symbolFrameLits_[symbol].reserve(numFrames);
@@ -172,7 +180,83 @@ std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
 FrameFormulaEncoder::FrameFormulaEncoder(
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits)
-    : solver_(solver), leafLits_(std::move(leafLits)) {}
+    : FrameFormulaEncoder(solver, std::move(leafLits), false, 0) {}
+
+FrameFormulaEncoder::FrameFormulaEncoder(
+    SATSolverWrapper& solver,
+    std::unordered_map<size_t, int> leafLits,
+    size_t expectedNodeHint)
+    : FrameFormulaEncoder(solver, std::move(leafLits), false, expectedNodeHint) {}
+
+FrameFormulaEncoder::FrameFormulaEncoder(
+    SATSolverWrapper& solver,
+    std::unordered_map<size_t, int> leafLits,
+    bool createMissingLeaves)
+    : FrameFormulaEncoder(solver, std::move(leafLits), createMissingLeaves, 0) {}
+
+FrameFormulaEncoder::FrameFormulaEncoder(
+    SATSolverWrapper& solver,
+    std::unordered_map<size_t, int> leafLits,
+    bool createMissingLeaves,
+    size_t expectedNodeHint)
+    : solver_(solver),
+      leafLits_(std::move(leafLits)),
+      createMissingLeaves_(createMissingLeaves),
+      expectedNodeHint_(expectedNodeHint),
+      nodeArena_(nodeArenaBuffer_.data(), nodeArenaBuffer_.size()),
+      nodeToLit_(&nodeArena_) {
+  reserveNodeCache();
+}
+
+const std::unordered_map<size_t, int>& FrameFormulaEncoder::leafLits() const {
+  return leafLits_;
+}
+
+void FrameFormulaEncoder::reserveNodeCache() {
+  // The support leaf count is a useful lower bound for the number of formula
+  // DAG nodes this encoder will touch. Reserving a few times that amount avoids
+  // repeated hash-table growth and Kissat variable-vector growth on large
+  // transition cones while keeping small unit-test encoders compact.
+  size_t expectedNodes = leafLits_.size() < 80 ? 256 : leafLits_.size() * 3;
+  if (expectedNodeHint_ != 0) {
+    // PDR often encodes deep transition cones with a relatively small leaf
+    // support.  When the caller already knows the DAG size, reserve for that
+    // shape up front so the monotonic per-query arena does not accumulate old
+    // bucket arrays through repeated unordered_map rehashes.
+    const size_t hintedNodes =
+        expectedNodeHint_ + std::max(expectedNodeHint_ / 8, static_cast<size_t>(256));
+    expectedNodes = std::max(expectedNodes, hintedNodes);
+  }
+  nodeToLit_.reserve(expectedNodes);
+  nodeMapReservedEntries_ = expectedNodes;
+  // Do not mirror this full DAG estimate into Kissat.  A PDR predecessor query
+  // creates a fresh solver for one local cube, and Kissat's reserve call zeros
+  // several internal arrays up to the requested variable count.  On wide ASIC
+  // transition cones the estimate can be millions of nodes, so eager solver
+  // reservation spent more time clearing memory than proving the query.
+  //
+  // Still give Kissat a bounded Tseitin head start.  BlackParrot PDR profiles
+  // showed the opposite extreme after removing the full reserve: the encoder
+  // spent most of its time growing Kissat vectors one variable at a time while
+  // streaming a large-but-local transition cone.  Capping the hint preserves
+  // the memory fix while avoiding the hottest incremental-growth path.
+  solver_.reserveAdditionalVars(
+      std::min(expectedNodes, kMaxSolverTseitinReserveHint));
+}
+
+void FrameFormulaEncoder::cacheEncodedLiteral(BoolExpr* node, int lit) {
+  const size_t desiredEntries = nodeToLit_.size() + 1;
+  if (desiredEntries > nodeMapReservedEntries_) {
+    // Grow the encoder DAG cache geometrically. This keeps large memory
+    // transition encodings from rehashing on every small increment while also
+    // avoiding a separate full-DAG prepass before every PDR target.
+    nodeMapReservedEntries_ =
+        desiredEntries +
+        std::max(desiredEntries / 2, static_cast<size_t>(4096));
+    nodeToLit_.reserve(nodeMapReservedEntries_);
+  }
+  nodeToLit_.emplace(node, lit);
+}
 
 int FrameFormulaEncoder::getConstLit(bool value) {
   if (trueLit_.has_value()) {
@@ -199,12 +283,13 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
   };
 
   // Encode iteratively so large BoolExpr DAGs do not rely on recursion depth.
-  std::stack<StackFrame> stack;
-  stack.push({expr, false});
+  std::vector<StackFrame> stack;
+  stack.reserve(256);
+  stack.push_back({expr, false});
 
   while (!stack.empty()) {
-    auto current = stack.top();
-    stack.pop();
+    auto current = stack.back();
+    stack.pop_back();
     BoolExpr* node = current.expr;
 
     if (nodeToLit_.find(node) != nodeToLit_.end()) {
@@ -213,27 +298,30 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
 
     if (node->getOp() == Op::VAR) {
       if (node->getId() == 0) {
-        nodeToLit_.emplace(node, getConstLit(false));
+        cacheEncodedLiteral(node, getConstLit(false));
       } else if (node->getId() == 1) {
-        nodeToLit_.emplace(node, getConstLit(true));
+        cacheEncodedLiteral(node, getConstLit(true));
       } else {
         auto it = leafLits_.find(node->getId());
         if (it == leafLits_.end()) {
-          throw std::runtime_error("Missing leaf literal for symbol " +
-                                   std::to_string(node->getId()));
+          if (!createMissingLeaves_) {
+            throw std::runtime_error("Missing leaf literal for symbol " +
+                                     std::to_string(node->getId()));
+          }
+          it = leafLits_.emplace(node->getId(), newSolverLiteral(solver_)).first;
         }
-        nodeToLit_.emplace(node, it->second);
+        cacheEncodedLiteral(node, it->second);
       }
       continue;
     }
 
     if (!current.visited) {
-      stack.push({node, true});
+      stack.push_back({node, true});
       if (node->getRight()) {
-        stack.push({node->getRight(), false});
+        stack.push_back({node->getRight(), false});
       }
       if (node->getLeft()) {
-        stack.push({node->getLeft(), false});
+        stack.push_back({node->getLeft(), false});
       }
       continue;
     }
@@ -308,7 +396,7 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
         throw std::runtime_error("Unsupported BoolExpr operator in frame encoder");
     }
 
-    nodeToLit_.emplace(node, lit);
+    cacheEncodedLiteral(node, lit);
   }
 
   return nodeToLit_.at(expr);

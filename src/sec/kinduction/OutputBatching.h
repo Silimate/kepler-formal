@@ -11,12 +11,21 @@
 
 namespace KEPLER_FORMAL::SEC {
 
+struct OutputBatchingLimits {
+  size_t maxOutputBatchSize = 32;
+  size_t outputBatchSupportLimit = 512;
+};
+
 // Build small SEC output slices that can be proved independently and combined.
 // Each slice is still a real SEC property: the full conjunction is valid iff
 // every sliced conjunction is valid.  The split only gives the SAT encoders a
 // tighter cone of influence for each query.
 std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
     const KInductionProblem& problem);
+
+std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
+    const KInductionProblem& problem,
+    const OutputBatchingLimits& limits);
 
 // Reuse the large shared SEC problem object while replacing only the observed
 // output/property slice.  This avoids copying all state, transition, and memory

@@ -63,15 +63,16 @@ mkdir -p "${output_dir}"
 run_engine() {
   local engine="$1"
   local tmp_config="${output_dir}/config.${engine}.yaml"
-  local output_log="${output_dir}/${engine}.log"
   local stdout_log="${output_dir}/${engine}.stdout"
 
   (
     cd "${case_dir}"
-    # SEC currently rejects CNF-export options, and every engine needs its own
-    # log/config pair. Keep the design, library, solver, and max_k settings from
-    # the original regression config, then override only the verification mode
-    # and the selected top-level SEC strategy.
+    # SEC currently rejects CNF-export options. Keep the design, library,
+    # solver, and max_k settings from the original regression config, then
+    # override only the verification mode and the selected top-level SEC
+    # strategy.  Do not force a log_file here: repeated local regress runs are
+    # easier to inspect when kepler-formal keeps its own per-run log naming
+    # instead of reusing one fixed engine log path.
     awk -v max_k_override="${max_k_override}" -v compact_mode="${compact_mode}" '
       /^[[:space:]]*verification:/ { next }
       /^[[:space:]]*sec_engine:/ { next }
@@ -94,7 +95,6 @@ run_engine() {
     ' "${config_path}" > "${tmp_config}"
     {
       echo
-      echo "log_file: ${output_log}"
       echo "verification: sec"
       echo "sec_engine: ${engine}"
       if [[ -n "${max_k_override}" ]]; then
@@ -136,11 +136,11 @@ run_engine() {
     fi
 
     if [[ "${expectation}" == "expect-equivalent" ]]; then
-      grep "SEC proved equivalence" "${output_log}"
+      grep "SEC proved equivalence" "${stdout_log}"
     elif [[ "${expectation}" == "expect-different" ]]; then
-      grep "SEC found a counterexample" "${output_log}"
+      grep "SEC found a counterexample" "${stdout_log}"
     else
-      grep -E "SEC proved equivalence|SEC found a counterexample" "${output_log}"
+      grep -E "SEC proved equivalence|SEC found a counterexample" "${stdout_log}"
     fi
   )
 }

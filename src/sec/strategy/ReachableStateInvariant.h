@@ -29,8 +29,10 @@ ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& inductiveStateEqualities,
+    bool deriveResetBootstrapStrengthening = true,
     bool secDiagEnabled = false,
     KEPLER_FORMAL::Config::SolverType solverType =
-        KEPLER_FORMAL::Config::getSolverType());
+        KEPLER_FORMAL::Config::getSolverType(),
+    bool deriveResetBootstrapEqualities = true);
 
 }  // namespace KEPLER_FORMAL::SEC

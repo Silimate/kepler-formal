@@ -16,17 +16,23 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "DNL.h"
 #include "NLUniverse.h"
 #include "SNLPath.h"
 #include "common/BoolExprUtils.h"
 #include "common/AlignedSignals.h"
+#include "common/SecDiag.h"
 #include "imc/ExactInterpolantSynthesizer.h"
 #include "imc/IMCEngine.h"
+#include "kinduction/BaseCaseSolver.h"
 #include "kinduction/KInductionEngine.h"
+#include "kinduction/OutputBatching.h"
 #include "model/SequentialDesignModel.h"
 #include "pdr/PDREngine.h"
+#include "proof/TransitionExprResolver.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/StructuralStateInvariant.h"
 
@@ -99,14 +105,36 @@ std::string normalizeSignalBaseName(const std::string& name) {
   return base;
 }
 
-std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+bool hasSuffix(const std::string& value, const std::string& suffix) {
+  return value.size() >= suffix.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::vector<std::string> resetNameCandidates(const std::string& displayName) {
+  // The shared SEC symbol space sees user-visible top-input names such as
+  // `reset_i[0]`.  Match the same reset spelling policy as the reachable-state
+  // pass so a reset discovered during model analysis remains available when
+  // bootstrap constraints are converted to shared SAT symbols.
   const std::string normalized = normalizeSignalBaseName(displayName);
-  if (normalized == "RESET" || normalized == "RST") {
-    return true;
+  std::vector<std::string> candidates = {normalized};
+  if (hasSuffix(normalized, "_I")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 2));
   }
-  if (normalized == "RESET_N" || normalized == "RESETN" ||
-      normalized == "RST_N" || normalized == "RSTN") {
-    return false;
+  if (hasSuffix(normalized, "_NI")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 1));
+  }
+  return candidates;
+}
+
+std::optional<bool> getResetAssertionValue(const std::string& displayName) {
+  for (const auto& candidate : resetNameCandidates(displayName)) {
+    if (candidate == "RESET" || candidate == "RST") {
+      return true;
+    }
+    if (candidate == "RESET_N" || candidate == "RESETN" ||
+        candidate == "RST_N" || candidate == "RSTN") {
+      return false;
+    }
   }
   return std::nullopt;
 }
@@ -718,6 +746,43 @@ void logSecDiagLine(bool secDiagEnabled, const char* message) {
   fflush(stderr);
 }
 
+bool pdrStrategyStatsEnabled() {
+  return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
+}
+
+void emitPdrStrategyStageStats(
+    bool enabled,
+    size_t batchIndex,
+    size_t firstOutput,
+    size_t endOutput,
+    const char* stage,
+    size_t transitionClosureLimit,
+    size_t predecessorProjectionLimit,
+    size_t badCubeLimit,
+    const KInductionProblem& batch) {
+  if (!enabled) {
+    return;
+  }
+
+  // These stage markers are intentionally coarse: when a large SEC/PDR run is
+  // sampled, they identify which CEGAR retry owns the following predecessor SAT
+  // traffic without flooding the log with every query.
+  emitSecDiag(
+      "SEC PDR stats: strategy batch=", batchIndex,
+      " outputs=[", firstOutput, ",", endOutput, ")",
+      " stage=", stage,
+      " closure_limit=", transitionClosureLimit,
+      " projection_limit=", predecessorProjectionLimit,
+      " bad_cube_limit=", badCubeLimit,
+      " transitions=", batch.transitions0.size() + batch.transitions1.size(),
+      " init_assignments=", batch.initialStateAssignments.size(),
+      " bootstrap_assignments=", batch.bootstrapStateAssignments.size(),
+      " init_equalities=", batch.initialStateEqualityPairs.size(),
+      " bootstrap_equalities=", batch.bootstrapStateEqualityPairs.size(),
+      " inductive_equalities=", batch.inductiveStateEqualityPairs.size(),
+      " observed_outputs=", batch.observedOutputExprs0.size());
+}
+
 void appendAbstractedSequentialBoundaries(
     const SequentialDesignModel& model,
     const char* designPrefix,
@@ -982,6 +1047,9 @@ void attachLazyTransitions(
   store->localToCombinedByDesign[0] = std::move(localToCombined0);
   store->localToCombinedByDesign[1] = std::move(localToCombined1);
   store->sourceByStateSymbol.reserve(model0.stateBits.size() + model1.stateBits.size());
+  store->remappedByStateSymbol.reserve(model0.stateBits.size() + model1.stateBits.size());
+  store->remapMemoByDesign[0].reserve(model0.stateBits.size());
+  store->remapMemoByDesign[1].reserve(model1.stateBits.size());
 
   for (const auto& key : model0.stateBits) {
     const auto symbolIt = state0Symbols.find(key);
@@ -1037,6 +1105,8 @@ ReachableStateInvariant integrateReachableStateInvariant(
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
     KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
+    bool deriveResetBootstrapStrengthening,
+    bool deriveResetBootstrapEqualities,
     bool secDiagEnabled) {
   BoolExpr* initialCondition = BoolExpr::createTrue();
   applyInitialStateAssignments(
@@ -1054,8 +1124,10 @@ ReachableStateInvariant integrateReachableStateInvariant(
       model1,
       alignedInputs,
       inductiveStateEqualities,
+      deriveResetBootstrapStrengthening,
       secDiagEnabled,
-      solverType);
+      solverType,
+      deriveResetBootstrapEqualities);
   for (size_t i = 0; i < reachableInvariant.initialStateCorrespondence.names.size(); ++i) {
     problem.initialStateEqualityPairs.emplace_back(
         state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]),
@@ -1074,6 +1146,18 @@ ReachableStateInvariant integrateReachableStateInvariant(
   }
 
   problem.resetBootstrapCycles = reachableInvariant.bootstrapCycles;
+  if (problem.resetBootstrapInputs.empty()) {
+    // The reachable-state pass works on each extracted model and can recognize
+    // reset-looking local inputs before the final shared SEC symbol space is
+    // assembled. PDR/KI/IMC can only run a reset-bootstrap proof when that
+    // reset also exists as an aligned environment input with one shared symbol.
+    // If no such symbol was created, keep the proof in normal initial-frontier
+    // mode so the initial state/equality facts remain active instead of being
+    // replaced by an unconstrained "bootstrap" frontier.
+    problem.resetBootstrapCycles = 0;
+    problem.bootstrapStateAssignments.clear();
+    problem.bootstrapStateEqualityPairs.clear();
+  }
   for (size_t i = 0; i < reachableInvariant.anchoredStateEqualities.names.size(); ++i) {
     problem.inductiveStateEqualityPairs.emplace_back(
         state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
@@ -1213,67 +1297,607 @@ SequentialEquivalenceResult runPdrSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
-  KInductionEngine baseline(problem, solverType);
-  const auto baselineResult = baseline.run(0);
-  switch (baselineResult.status) {
-    case KInductionStatus::Equivalent:
-      return makeSecResult(
-          SequentialEquivalenceStatus::Equivalent,
-          baselineResult.bound,
-          "",
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    case KInductionStatus::Different:
-      return makeSecResult(  // LCOV_EXCL_LINE
-          SequentialEquivalenceStatus::Different,
-          baselineResult.bound,  // LCOV_EXCL_LINE
-          formatCounterexampleWitness(baselineResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
-    case KInductionStatus::Inconclusive:
-    default:
-      break;
+  // PDR still needs the cheap frame-0 mismatch check before growing frames, but
+  // it should not invoke the full k-induction top engine with max_k=0.  A
+  // bounded engine run at k=0 is necessarily inconclusive for sequential
+  // problems, which made the output-batching fallback split every output and
+  // repeat the same BMC setup hundreds of times before PDR even started.
+  if (auto witness = SEC::findBaseCounterexample(problem, solverType, 0);
+      witness.has_value()) {
+    const KInductionResult witnessResult{
+        KInductionStatus::Different, witness->badFrame, std::move(witness)};
+    return makeSecResult(  // LCOV_EXCL_LINE
+        SequentialEquivalenceStatus::Different,
+        witnessResult.bound,  // LCOV_EXCL_LINE
+        formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
+        outputCoverage,  // LCOV_EXCL_LINE
+        abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+        extractedBoundaryReports);  // LCOV_EXCL_LINE
   }
 
-  PDREngine pdrEngine(problem, solverType);
-  const auto pdrResult = pdrEngine.run(maxK);
-  switch (pdrResult.status) {
-    case PDRStatus::Equivalent:
-      return makeSecResult(
-          SequentialEquivalenceStatus::Equivalent,
-          pdrResult.bound,
-          "",
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    case PDRStatus::Different: {
-      KInductionEngine witnessEngine(problem, solverType);  // LCOV_EXCL_LINE
-      const auto witnessResult = witnessEngine.run(pdrResult.bound);  // LCOV_EXCL_LINE
-      const std::string details =
-          witnessResult.status == KInductionStatus::Different  // LCOV_EXCL_LINE
-              ? formatCounterexampleWitness(witnessResult, model0, model1, top0, top1)  // LCOV_EXCL_LINE
-              : "PDR found a counterexample at k = " +  // LCOV_EXCL_LINE
-                    std::to_string(pdrResult.bound);  // LCOV_EXCL_LINE
-      return makeSecResult(  // LCOV_EXCL_LINE
-          SequentialEquivalenceStatus::Different,
-          pdrResult.bound,  // LCOV_EXCL_LINE
-          details,  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    case PDRStatus::Inconclusive:  // LCOV_EXCL_LINE
-    default:
-      return makeSecResult(  // LCOV_EXCL_LINE
-          SequentialEquivalenceStatus::Inconclusive,
-          pdrResult.bound,  // LCOV_EXCL_LINE
-          "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
+  if (problem.combinedStateSymbols().empty()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        0,
+        "",
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
+
+  auto filterPairsToSupport =
+      [](const std::vector<std::pair<size_t, size_t>>& source,
+         std::vector<std::pair<size_t, size_t>>& target,
+         const std::unordered_set<size_t>& support) {
+        target.clear();
+        for (const auto& pair : source) {
+          if (support.find(pair.first) != support.end() ||
+              support.find(pair.second) != support.end()) {
+            target.push_back(pair);
+          }
+        }
+      };
+
+  auto filterAssignmentsToSupport =
+      [](const std::vector<std::pair<size_t, bool>>& source,
+         std::vector<std::pair<size_t, bool>>& target,
+         const std::unordered_set<size_t>& support) {
+        target.clear();
+        for (const auto& assignment : source) {
+          if (support.find(assignment.first) != support.end()) {
+            target.push_back(assignment);
+          }
+        }
+      };
+
+  auto rebuildPdrBatchStrengthening = [](KInductionProblem& batch) {
+    BoolExpr* inductionProperty = BoolExpr::createTrue();
+    for (const auto& [lhsSymbol, rhsSymbol] : batch.inductiveStateEqualityPairs) {
+      inductionProperty = BoolExpr::And(
+          inductionProperty,
+          makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));
+    }
+    for (size_t i = 0; i < batch.observedOutputExprs0.size(); ++i) {
+      inductionProperty = BoolExpr::And(
+          inductionProperty,
+          makeEqualityExpr(
+              batch.observedOutputExprs0[i], batch.observedOutputExprs1[i]));
+    }
+
+    // PDR consumes this only as a candidate frame-strengthening lemma. The
+    // engine validates both Init => lemma and lemma /\ T => lemma' before the
+    // formula can constrain any bad-cube or predecessor query.
+    batch.inductionProperty = BoolExpr::simplify(inductionProperty);
+    batch.inductionBad = BoolExpr::simplify(BoolExpr::Not(batch.inductionProperty));
+    batch.inductionPropertyAssumesInductiveStateEqualities =
+        !batch.inductiveStateEqualityPairs.empty();
+  };
+
+  TransitionExprResolver pdrBatchTransitionByState(problem);
+  const auto& pdrBatchPrimaryByComplement =
+      pdrBatchTransitionByState.primaryByComplement();
+
+  auto computePdrBatchSupportClosure = [&](const KInductionProblem& batch,
+                                           size_t transitionClosureLimit) {
+    if (batch.property == nullptr) {
+      return std::unordered_set<size_t>{};  // LCOV_EXCL_LINE
+    }
+    const auto propertySupport = batch.property->getSupportVars();
+    std::unordered_set<size_t> support(propertySupport.begin(), propertySupport.end());
+    std::unordered_set<size_t> expandedTransitionStates;
+    std::vector<size_t> worklist;
+
+    auto enqueueTransitionState = [&](size_t symbol) {
+      if (!pdrBatchTransitionByState.contains(symbol)) {
+        if (const auto primaryIt = pdrBatchPrimaryByComplement.find(symbol);
+            primaryIt != pdrBatchPrimaryByComplement.end()) {
+          symbol = primaryIt->second;
+        } else {
+          return;
+        }
+      }
+      support.insert(symbol);
+      if (expandedTransitionStates.insert(symbol).second) {
+        worklist.push_back(symbol);
+      }
+    };
+
+    for (const auto propertySymbol : propertySupport) {
+      enqueueTransitionState(propertySymbol);
+    }
+    for (size_t cursor = 0;
+         cursor < worklist.size() &&
+         support.size() < transitionClosureLimit;
+         ++cursor) {
+      for (const auto dependency : pdrBatchTransitionByState.support(worklist[cursor])) {
+        if (support.insert(dependency).second) {
+          enqueueTransitionState(dependency);
+        }
+      }
+    }
+    return support;
+  };
+
+  auto prunePdrBatchStrengthening = [&](KInductionProblem& batch,
+                                        size_t transitionClosureLimit) {
+    auto support =
+        computePdrBatchSupportClosure(batch, transitionClosureLimit);
+
+    // A PDR output slice should not inherit every state-equality/reset fact in
+    // an ASIC-size SEC problem. Keep only the relational startup and inductive
+    // facts connected to the current property through a bounded transition
+    // cone. One-step pruning is too weak for PDR because predecessor blocking
+    // walks backwards through multiple transition layers; the bounded closure
+    // keeps those real dependencies without reintroducing the full-design
+    // million-symbol relational init surface.
+    filterPairsToSupport(
+        problem.initialStateEqualityPairs, batch.initialStateEqualityPairs, support);
+    filterPairsToSupport(
+        problem.bootstrapStateEqualityPairs, batch.bootstrapStateEqualityPairs, support);
+    filterPairsToSupport(
+        problem.inductiveStateEqualityPairs, batch.inductiveStateEqualityPairs, support);
+    filterAssignmentsToSupport(
+        problem.initialStateAssignments, batch.initialStateAssignments, support);
+    filterAssignmentsToSupport(
+        problem.bootstrapStateAssignments, batch.bootstrapStateAssignments, support);
+    for (const auto& pair : batch.initialStateEqualityPairs) {
+      support.insert(pair.first);
+      support.insert(pair.second);
+    }
+    for (const auto& pair : batch.bootstrapStateEqualityPairs) {
+      support.insert(pair.first);
+      support.insert(pair.second);
+    }
+    for (const auto& pair : batch.inductiveStateEqualityPairs) {
+      support.insert(pair.first);
+      support.insert(pair.second);
+    }
+    for (const auto& assignment : batch.initialStateAssignments) {
+      support.insert(assignment.first);
+    }
+    for (const auto& assignment : batch.bootstrapStateAssignments) {
+      support.insert(assignment.first);
+    }
+    rebuildPdrBatchStrengthening(batch);
+
+    if (batch.lazyTransitions != nullptr) {
+      auto& store = *batch.lazyTransitions;
+      batch.transitions0.clear();
+      batch.transitions1.clear();
+      constexpr size_t kMaxEagerRemappedPdrBatchTransitions = 1024;
+      if (support.size() > kMaxEagerRemappedPdrBatchTransitions) {
+        // Keep large ASIC batches lazy.  Sampling on BlackParrot showed that
+        // eagerly remapping a 12k-symbol support closure built more than a
+        // million transition DAG nodes before the first PDR SAT query.  The
+        // transition resolver still has the exact support closure above, and
+        // will remap only the transitions that PDR actually encodes.
+        return;
+      }
+      batch.transitions0.reserve(support.size());
+      batch.transitions1.reserve(support.size());
+
+      // Sampling on BlackParrot showed the proof spending time lazily remapping
+      // next-state expressions inside predecessor queries. Once the batch cone
+      // is already pruned to the output support closure, remap those relevant
+      // transitions eagerly here so PDR reuses them across all obligations in
+      // the batch instead of materializing them piecemeal during SAT queries.
+      for (const auto symbol : support) {
+        const auto sourceIt = store.sourceByStateSymbol.find(symbol);
+        if (sourceIt == store.sourceByStateSymbol.end()) {
+          continue;
+        }
+
+        BoolExpr* remapped = nullptr;
+        if (const auto cachedIt = store.remappedByStateSymbol.find(symbol);
+            cachedIt != store.remappedByStateSymbol.end()) {
+          remapped = cachedIt->second;
+        } else {
+          const LazyTransitionSource& source = sourceIt->second;
+          remapped = remapBoolExprVariables(
+              source.localExpr,
+              store.localToCombinedByDesign[source.designIndex],
+              store.remapMemoByDesign[source.designIndex]);
+          store.remappedByStateSymbol.emplace(symbol, remapped);
+        }
+
+        if (sourceIt->second.designIndex == 0) {
+          batch.transitions0.emplace_back(symbol, remapped);
+        } else {
+          batch.transitions1.emplace_back(symbol, remapped);
+        }
+      }
+    }
+  };
+
+  auto prunePdrBatchRelations = [&](KInductionProblem& batch,
+                                    size_t transitionClosureLimit) {
+    prunePdrBatchStrengthening(batch, transitionClosureLimit);
+  };
+
+  // PDR is still proving real PDR obligations, but wide ASIC SEC properties are
+  // better handled as output-cone slices. This keeps reset-bootstrap F[0]
+  // strengthening and blocking queries local to a small property instead of
+  // materializing every observed output in one frame.
+  //
+  // Keep each PDR batch bounded, but do not prove one output per engine run.
+  // BlackParrot sampling showed the one-output mode repeating the same
+  // reset-frontier and PDR blocking work hundreds of times.  A moderate batch
+  // still proves a real conjunction slice. If projected PDR finds a
+  // counterexample on a multi-output slice, escalate PDR precision first and
+  // avoid broad concrete-BMC validation until the final exact retry.
+  constexpr OutputBatchingLimits kPdrOutputBatchingLimits{16, 512};
+  constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
+  constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
+  std::vector<std::pair<size_t, size_t>> outputBatches =
+      buildSupportBoundedOutputBatches(problem, kPdrOutputBatchingLimits);
+  KInductionProblem batchProblem = problem;
+  size_t provedBound = 0;
+  const bool emitPdrStageStats = pdrStrategyStatsEnabled();
+  for (size_t batchIndex = 0; batchIndex < outputBatches.size(); ++batchIndex) {
+    const auto [firstOutput, endOutput] = outputBatches[batchIndex];
+    configureOutputBatchProblem(batchProblem, problem, firstOutput, endOutput);
+    prunePdrBatchRelations(batchProblem, kPdrBatchTransitionClosureLimit);
+    // ASIC SEC runs need smaller carried predecessor obligations than the
+    // standalone PDR engine default.  This does not change the PDR proof rule:
+    // every learned clause is still justified by an UNSAT predecessor query,
+    // and every reported counterexample is still checked by concrete BMC.
+    constexpr size_t kSecPdrPredecessorProjectionLimit = 4;
+    constexpr size_t kProjectedPdrPredecessorQueryBudget = 5000;
+    emitPdrStrategyStageStats(
+        emitPdrStageStats,
+        batchIndex,
+        firstOutput,
+        endOutput,
+        "initial",
+        kPdrBatchTransitionClosureLimit,
+        kSecPdrPredecessorProjectionLimit,
+        kSecPdrPredecessorProjectionLimit,
+        batchProblem);
+    PDREngine pdrEngine(
+        batchProblem,
+        solverType,
+        kSecPdrPredecessorProjectionLimit,
+        kSecPdrPredecessorProjectionLimit,
+        /*useExactFrameClauses=*/false,
+        kProjectedPdrPredecessorQueryBudget,
+        /*refineProjectedCounterexamples=*/false,
+        PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+        /*learnValidatedBadFormulaClauses=*/false,
+        /*useExactResetFrontierChecks=*/false);
+    const auto pdrResult = pdrEngine.run(maxK, true);
+    switch (pdrResult.status) {
+      case PDRStatus::Equivalent:
+        provedBound = std::max(provedBound, pdrResult.bound);
+        break;
+      case PDRStatus::Different: {
+        constexpr size_t kMaxPdrConcreteValidationOutputs = 1;
+        KInductionProblem validationProblem = problem;
+        configureOutputBatchProblem(
+            validationProblem, problem, firstOutput, endOutput);
+        std::optional<KInductionResult::CounterexampleWitness> witness;
+        if (endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
+          witness = SEC::findBaseCounterexampleAtFrontier(
+              validationProblem, solverType, pdrResult.bound);
+        }
+        if (!witness.has_value()) {
+          // ASIC cones can still produce an abstract trace when the local
+          // relation slice is too small. Retry the same output batch with more
+          // relation / predecessor context before concrete validation. This
+          // keeps the proof as real PDR over the conjunction slice while
+          // avoiding the measured 598-pass one-output loop on BlackParrot. Any
+          // reported difference is still accepted only after concrete BMC
+          // validation below.
+          // The initial 4-literal projection can be too abstract on a widened
+          // ASIC relation, but BlackParrot measurements showed that jumping
+          // straight to 64 literals creates a large level-1 blocked-predecessor
+          // enumeration loop. Use an intermediate precision step before the
+          // later exact retries.
+          constexpr size_t kModeratePdrPredecessorProjectionLimit = 16;
+          // Exact-frame retries need more predecessor context than the
+          // moderate projection to avoid abstract counterexamples, but fully
+          // unbounded predecessor cubes were measured to enumerate thousands of
+          // adjacent SAT models on BlackParrot. Use this bounded midpoint for
+          // exact-frame passes.
+          constexpr size_t kExactFramePdrPredecessorProjectionLimit = 32;
+          // Projected CEGAR stages are allowed to be inconclusive. If they
+          // keep finding abstract SAT predecessors without strengthening the
+          // frames, stop that stage and move to the stronger exact-frame PDR
+          // retry instead of enumerating the same projected space for minutes.
+          KInductionProblem refinedBatchProblem = problem;
+          configureOutputBatchProblem(
+              refinedBatchProblem, problem, firstOutput, endOutput);
+          prunePdrBatchRelations(
+              refinedBatchProblem, kRefinedPdrBatchTransitionClosureLimit);
+
+          // If concrete BMC rejects the first projected trace, first widen the
+          // relation slice while keeping predecessor cubes small. Sampling on
+          // BlackParrot showed that widening predecessor cubes before the
+          // relation makes PDR enumerate thousands of exact level-1
+          // predecessors. A wider relation can remove the abstraction that
+          // produced the trace without abandoning the compact PDR obligation
+          // shape that keeps ASIC proofs tractable.
+          emitPdrStrategyStageStats(
+              emitPdrStageStats,
+              batchIndex,
+              firstOutput,
+              endOutput,
+              "widened_relation",
+              kRefinedPdrBatchTransitionClosureLimit,
+              kSecPdrPredecessorProjectionLimit,
+              kSecPdrPredecessorProjectionLimit,
+              refinedBatchProblem);
+          PDREngine refinedPdrEngine(
+              refinedBatchProblem,
+              solverType,
+              kSecPdrPredecessorProjectionLimit,
+              kSecPdrPredecessorProjectionLimit,
+              /*useExactFrameClauses=*/false,
+              kProjectedPdrPredecessorQueryBudget,
+              /*refineProjectedCounterexamples=*/false,
+              PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+              /*learnValidatedBadFormulaClauses=*/false,
+              /*useExactResetFrontierChecks=*/false);
+          const auto refinedPdrResult = refinedPdrEngine.run(maxK, true);
+          if (refinedPdrResult.status == PDRStatus::Equivalent) {
+            provedBound = std::max(provedBound, refinedPdrResult.bound);
+            break;
+          }
+          if (refinedPdrResult.status == PDRStatus::Different) {
+            std::optional<KInductionResult::CounterexampleWitness> refinedWitness;
+            if (endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
+              refinedWitness = SEC::findBaseCounterexampleAtFrontier(
+                  validationProblem, solverType, refinedPdrResult.bound);
+            }
+            if (refinedWitness.has_value()) {
+              const KInductionResult witnessResult{
+                  KInductionStatus::Different,
+                  refinedPdrResult.bound,
+                  std::move(refinedWitness)};
+              return makeSecResult(
+                  SequentialEquivalenceStatus::Different,
+                  refinedPdrResult.bound,
+                  formatCounterexampleWitness(
+                      witnessResult, model0, model1, top0, top1),
+                  outputCoverage,
+                  abstractedSequentialBoundaries,
+                  extractedBoundaryReports);
+            }
+          }
+          // If the wider relation still finds only an abstract trace, grow the
+          // predecessor projection moderately on that same relation.  This is
+          // a precision refinement, not a proof shortcut; any reported
+          // difference is still validated by concrete BMC below.
+          KInductionProblem widenedBatchProblem = refinedBatchProblem;
+          emitPdrStrategyStageStats(
+              emitPdrStageStats,
+              batchIndex,
+              firstOutput,
+              endOutput,
+              "widened_relation_moderate_projection",
+              kRefinedPdrBatchTransitionClosureLimit,
+              kModeratePdrPredecessorProjectionLimit,
+              kModeratePdrPredecessorProjectionLimit,
+              widenedBatchProblem);
+          PDREngine widenedPdrEngine(
+              widenedBatchProblem,
+              solverType,
+              kModeratePdrPredecessorProjectionLimit,
+              kModeratePdrPredecessorProjectionLimit,
+              /*useExactFrameClauses=*/false,
+              kProjectedPdrPredecessorQueryBudget,
+              /*refineProjectedCounterexamples=*/false,
+              PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+              /*learnValidatedBadFormulaClauses=*/false,
+              /*useExactResetFrontierChecks=*/false);
+          const auto widenedPdrResult = widenedPdrEngine.run(maxK, true);
+          if (widenedPdrResult.status == PDRStatus::Equivalent) {
+            provedBound = std::max(provedBound, widenedPdrResult.bound);
+            break;
+          }
+          if (widenedPdrResult.status == PDRStatus::Different) {
+            std::optional<KInductionResult::CounterexampleWitness> widenedWitness;
+            if (endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
+              widenedWitness = SEC::findBaseCounterexampleAtFrontier(
+                  validationProblem, solverType, widenedPdrResult.bound);
+            }
+            if (widenedWitness.has_value()) {
+              const KInductionResult witnessResult{
+                  KInductionStatus::Different,
+                  widenedPdrResult.bound,
+                  std::move(widenedWitness)};
+              return makeSecResult(
+                  SequentialEquivalenceStatus::Different,
+                  widenedPdrResult.bound,
+                  formatCounterexampleWitness(
+                      witnessResult, model0, model1, top0, top1),
+                  outputCoverage,
+                  abstractedSequentialBoundaries,
+                  extractedBoundaryReports);
+            }
+          }
+          // Last retry on the widened relation slice: keep the complete
+          // learned frame, but keep carried predecessor cubes bounded. Sampling
+          // on BlackParrot showed that unbounded predecessor cubes made exact
+          // PDR enumerate thousands of adjacent full SAT models; exact frame
+          // clauses are the part that removes stale abstract predecessors.
+          emitPdrStrategyStageStats(
+              emitPdrStageStats,
+              batchIndex,
+              firstOutput,
+              endOutput,
+              "widened_relation_exact",
+              kRefinedPdrBatchTransitionClosureLimit,
+              kExactFramePdrPredecessorProjectionLimit,
+              kExactFramePdrPredecessorProjectionLimit,
+              widenedBatchProblem);
+          PDREngine exactPdrEngine(
+              widenedBatchProblem,
+              solverType,
+              kExactFramePdrPredecessorProjectionLimit,
+              kExactFramePdrPredecessorProjectionLimit,
+              /*useExactFrameClauses=*/true,
+              /*maxPredecessorQueries=*/0,
+              /*refineProjectedCounterexamples=*/false,
+              PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+              /*learnValidatedBadFormulaClauses=*/false,
+              /*useExactResetFrontierChecks=*/false);
+          const auto exactPdrResult = exactPdrEngine.run(maxK, true);
+          if (exactPdrResult.status == PDRStatus::Equivalent) {
+            provedBound = std::max(provedBound, exactPdrResult.bound);
+            break;
+          }
+          if (exactPdrResult.status == PDRStatus::Different) {
+            std::optional<KInductionResult::CounterexampleWitness> exactWitness;
+            if (endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
+              exactWitness = SEC::findBaseCounterexampleAtFrontier(
+                  validationProblem, solverType, exactPdrResult.bound);
+            }
+            if (exactWitness.has_value()) {
+              const KInductionResult witnessResult{
+                  KInductionStatus::Different,
+                  exactPdrResult.bound,
+                  std::move(exactWitness)};
+              return makeSecResult(
+                  SequentialEquivalenceStatus::Different,
+                  exactPdrResult.bound,
+                  formatCounterexampleWitness(
+                      witnessResult, model0, model1, top0, top1),
+                  outputCoverage,
+                  abstractedSequentialBoundaries,
+                  extractedBoundaryReports);
+            }
+          }
+          // If the exact-frame retry over the widened-but-still-pruned relation
+          // remains abstract, give the same output slice one final pass over
+          // its full transition relation. Keep predecessor cubes bounded for
+          // the same reason as above: every learned clause is still validated
+          // by a predecessor SAT query, while concrete BMC validates any
+          // reported counterexample.
+          KInductionProblem fullExactBatchProblem = problem;
+          configureOutputBatchProblem(
+              fullExactBatchProblem, problem, firstOutput, endOutput);
+          // Keep the full transition relation for this output slice during the
+          // final exact retry, but do not reintroduce unrelated
+          // startup/induction facts from the rest of the SEC problem. Those
+          // global relations are useful for broad proofs, yet they can dominate
+          // SAT encoding once this last retry is focused on a bounded slice.
+          prunePdrBatchStrengthening(
+              fullExactBatchProblem, kRefinedPdrBatchTransitionClosureLimit);
+          emitPdrStrategyStageStats(
+              emitPdrStageStats,
+              batchIndex,
+              firstOutput,
+              endOutput,
+              "full_exact_strengthening_pruned",
+              kRefinedPdrBatchTransitionClosureLimit,
+              kExactFramePdrPredecessorProjectionLimit,
+              kExactFramePdrPredecessorProjectionLimit,
+              fullExactBatchProblem);
+          PDREngine fullExactPdrEngine(
+              fullExactBatchProblem,
+              solverType,
+              kExactFramePdrPredecessorProjectionLimit,
+              kExactFramePdrPredecessorProjectionLimit,
+              /*useExactFrameClauses=*/true,
+              /*maxPredecessorQueries=*/0,
+              // This is the last SEC/PDR precision stage. Earlier projected
+              // stages defer candidate validation to concrete BMC so they can
+              // escalate quickly; the final exact-frame stage must instead
+              // learn from a rejected abstract candidate and keep proving.
+              /*refineProjectedCounterexamples=*/true,
+              // BlackParrot sampling showed the final stage was spending
+              // minutes minimizing already-small six-literal root cubes. Once
+              // exact bounded reachability proves the root cube unreachable,
+              // learning that cube directly is still sound and avoids several
+              // extra expensive step-2 SAT queries per rejected candidate.
+              /*maxBoundedRootGeneralizationAttempts=*/0,
+              // After BMC rejects a small state-only bad predicate, learn all
+              // of its bad-assignment clauses at once. This keeps the final
+              // PDR retry from enumerating each bad valuation separately.
+              /*learnValidatedBadFormulaClauses=*/true,
+              // In SEC mode every reported difference is validated by a
+              // concrete bounded-prefix check before it escapes this strategy.
+              // Keep final PDR over the reset-frontier over-approximation
+              // instead of spending the sampled runtime in per-cube exact
+              // reset-image queries; proving the over-approximation safe is
+              // still sound for the concrete design pair.
+              /*useExactResetFrontierChecks=*/false);
+          const auto fullExactPdrResult = fullExactPdrEngine.run(maxK, true);
+          if (fullExactPdrResult.status == PDRStatus::Equivalent) {
+            provedBound = std::max(provedBound, fullExactPdrResult.bound);
+            break;
+          }
+          if (fullExactPdrResult.status == PDRStatus::Different) {
+            auto fullExactWitness = SEC::findBaseCounterexampleAtFrontier(
+                validationProblem, solverType, fullExactPdrResult.bound);
+            if (fullExactWitness.has_value()) {
+              const KInductionResult witnessResult{
+                  KInductionStatus::Different,
+                  fullExactPdrResult.bound,
+                  std::move(fullExactWitness)};
+              return makeSecResult(
+                  SequentialEquivalenceStatus::Different,
+                  fullExactPdrResult.bound,
+                  formatCounterexampleWitness(
+                      witnessResult, model0, model1, top0, top1),
+                  outputCoverage,
+                  abstractedSequentialBoundaries,
+                  extractedBoundaryReports);
+            }
+          }
+          if (endOutput - firstOutput > 1) {
+            // If all precision stages still find only abstract traces for a
+            // wide batch, refine the property partition and keep proving
+            // smaller slices. This is a CEGAR-style PDR refinement: no result
+            // is accepted without concrete validation.
+            const size_t midOutput = firstOutput + (endOutput - firstOutput) / 2;
+            outputBatches.emplace_back(firstOutput, midOutput);
+            outputBatches.emplace_back(midOutput, endOutput);
+            break;
+          }
+          const std::string outputName =
+              firstOutput < problem.observedOutputNames.size()
+                  ? problem.observedOutputNames[firstOutput]
+                  : std::to_string(firstOutput);  // LCOV_EXCL_LINE
+          return makeSecResult(
+              SequentialEquivalenceStatus::Inconclusive,
+              pdrResult.bound,
+              "PDR reached an abstract counterexample that concrete BMC did not "
+              "validate for output `" +
+                  outputName + "` at k = " + std::to_string(pdrResult.bound),
+              outputCoverage,
+              abstractedSequentialBoundaries,
+              extractedBoundaryReports);
+        }
+        const KInductionResult witnessResult{
+            KInductionStatus::Different, pdrResult.bound, std::move(witness)};
+        return makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            pdrResult.bound,
+            formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+      }
+      case PDRStatus::Inconclusive:
+      default:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Inconclusive,
+            pdrResult.bound,
+            "Reached max_k without a proof or counterexample",
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+    }
+  }
+
+  return makeSecResult(
+      SequentialEquivalenceStatus::Equivalent,
+      provedBound,
+      "",
+      outputCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
 }
 
 SequentialEquivalenceResult runKInductionSecEngine(
@@ -1585,7 +2209,13 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // property plus the induction-friendly variant that some engines consume.
   SharedSecSymbolSpace symbolSpace = buildSharedSecSymbolSpace(
       model0, model1, aligned.inputs, aligned.outputs);
-  const bool useLazyTransitionRemapping = secEngine_ == SecEngine::KInduction;
+  // KI and PDR both work on small COI slices of a potentially huge SEC
+  // problem. Keep next-state formulas in their extracted-model symbol space
+  // until the proof engine actually asks for a transition; otherwise PDR
+  // materializes the full ASIC transition relation before output batching can
+  // prune it.
+  const bool useLazyTransitionRemapping =
+      secEngine_ == SecEngine::KInduction || secEngine_ == SecEngine::Pdr;
   const auto remapped = remapSecExpressions(
       model0,
       model1,
@@ -1594,6 +2224,16 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       symbolSpace.problem,
       !useLazyTransitionRemapping,
       secDiagEnabled);
+  // KI / IMC consume explicit post-reset state values directly. SEC/PDR keeps
+  // the reset cycle/input model and validates startup candidates with concrete
+  // BMC / reset-frontier checks, so it can avoid the sampled full-design sweep
+  // that tries to constant-evaluate every state bit before the first PDR query.
+  const bool deriveResetBootstrapStrengthening = secEngine_ != SecEngine::Pdr;
+  // PDR validates frame-strengthening lemmas on demand. Keep the concrete
+  // reset/bootstrap values for correctness, but do not mine every additional
+  // reset-derived equality before PDR starts; BlackParrot samples showed that
+  // pass dominating runtime before the first PDR query.
+  const bool deriveResetBootstrapEqualities = secEngine_ != SecEngine::Pdr;
   const auto reachableInvariant = integrateReachableStateInvariant(
       model0,
       model1,
@@ -1603,6 +2243,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       symbolSpace.state1Symbols,
       symbolSpace.problem,
       solverType_,
+      deriveResetBootstrapStrengthening,
+      deriveResetBootstrapEqualities,
       secDiagEnabled);
   if (useLazyTransitionRemapping) {
     attachLazyTransitions(

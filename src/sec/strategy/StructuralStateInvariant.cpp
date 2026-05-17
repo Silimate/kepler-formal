@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory_resource>
 #include <stdexcept>
@@ -106,7 +107,8 @@ bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
 
   const auto [abstractMap0, abstractMap1] =
       buildAbstractTransitionMapsImpl(model0, model1, alignedInputs, orderedStates);
-  AbstractExprPairMemo memo;
+  std::pmr::monotonic_buffer_resource memoResource;
+  AbstractExprPairMemo memo{&memoResource};
   for (size_t i = 0; i < orderedStates.names.size(); ++i) {
     const auto& key0 = orderedStates.keys0[i];
     const auto& key1 = orderedStates.keys1[i];
@@ -171,6 +173,64 @@ uint64_t combineHashes(std::initializer_list<uint64_t> parts) {
   return hash;
 }
 
+size_t saturatedMultiply(size_t lhs, size_t rhs) {
+  if (lhs != 0 && rhs > std::numeric_limits<size_t>::max() / lhs) {
+    return std::numeric_limits<size_t>::max();  // LCOV_EXCL_LINE
+  }
+  return lhs * rhs;
+}
+
+size_t initialFingerprintMemoReserve(const SequentialDesignModel& model) {
+  // Structural matching fingerprints all state next-state DAGs in one pass.
+  // The number of state roots is only a lower bound, but reserving a practical
+  // fan-in multiplier avoids the PMR table retaining several obsolete bucket
+  // arrays as it grows through a large ASIC transition graph.
+  return std::max(
+      static_cast<size_t>(4096),
+      saturatedMultiply(model.nextStateExprByStateKey.size(), static_cast<size_t>(64)));
+}
+
+void reserveFingerprintMemo(FingerprintMemo& memo,
+                            size_t& reservedEntries,
+                            size_t desiredEntries) {
+  if (desiredEntries <= reservedEntries) {
+    return;
+  }
+  reservedEntries =
+      desiredEntries + std::max(desiredEntries / 2, static_cast<size_t>(4096));
+  memo.reserve(reservedEntries);
+}
+
+void cacheFingerprint(FingerprintMemo& memo,
+                      size_t& reservedEntries,
+                      BoolExpr* node,
+                      uint64_t fingerprint) {
+  reserveFingerprintMemo(memo, reservedEntries, memo.size() + 1);
+  memo.emplace(node, fingerprint);
+}
+
+void reserveAbstractExprPairMemo(AbstractExprPairMemo& memo,
+                                 size_t desiredEntries) {
+  const auto capacity =
+      static_cast<size_t>(memo.bucket_count() * memo.max_load_factor());
+  if (desiredEntries <= capacity) {
+    return;
+  }
+
+  // This memo is shared across many reset/bootstrap equality candidates. Grow
+  // it deliberately instead of relying on unordered_map's small incremental
+  // rehashes, which became visible before PDR even reached its SAT loop.
+  memo.reserve(
+      desiredEntries + std::max(desiredEntries / 2, static_cast<size_t>(4096)));
+}
+
+void cacheAbstractEquivalence(AbstractExprPairMemo& memo,
+                              const std::pair<BoolExpr*, BoolExpr*>& key,
+                              bool equivalent) {
+  reserveAbstractExprPairMemo(memo, memo.size() + 1);
+  memo.emplace(key, equivalent);
+}
+
 uint64_t initialStateSignature(
     const SequentialDesignModel& model,
     const std::unordered_map<SignalKey, char, SignalKeyHash>& complementRoles,
@@ -192,7 +252,8 @@ uint64_t fingerprintExpr(
     BoolExpr* expr,
     const std::unordered_map<size_t, size_t>& inputClasses,
     const std::unordered_map<size_t, size_t>& stateClasses,
-    FingerprintMemo& memo) {
+    FingerprintMemo& memo,
+    size_t& memoReservedEntries) {
   if (expr == nullptr) {
     return 0;
   }
@@ -232,12 +293,12 @@ uint64_t fingerprintExpr(
       } else {
         fingerprint = 19;
       }
-      memo.emplace(node, fingerprint);
+      cacheFingerprint(memo, memoReservedEntries, node, fingerprint);
       continue;
     }
 
     if (node->getOp() == Op::NONE) {
-      memo.emplace(node, 41);
+      cacheFingerprint(memo, memoReservedEntries, node, 41);
       continue;
     }
 
@@ -277,7 +338,7 @@ uint64_t fingerprintExpr(
       default:
         throw std::runtime_error("Unsupported BoolExpr operator in fingerprint");
     }
-    memo.emplace(node, fingerprint);
+    cacheFingerprint(memo, memoReservedEntries, node, fingerprint);
   }
 
   return memo.at(expr);
@@ -302,7 +363,8 @@ std::vector<size_t> refineClasses(
   // cheap, then releases all nodes together when refinement advances.
   std::pmr::monotonic_buffer_resource memoResource;
   FingerprintMemo memo{&memoResource};
-  memo.reserve(model.stateBits.size() * 4);
+  size_t memoReservedEntries = initialFingerprintMemoReserve(model);
+  memo.reserve(memoReservedEntries);
   for (size_t i = 0; i < model.stateBits.size(); ++i) {
     signatures[i] = {
         currentClasses[i],
@@ -310,7 +372,8 @@ std::vector<size_t> refineClasses(
             model.nextStateExprByStateKey.at(model.stateBits[i]),
             inputClasses,
             stateClasses,
-            memo)};
+            memo,
+            memoReservedEntries)};
   }
 
   std::vector<RefinementSignature> unique = signatures;
@@ -377,7 +440,8 @@ std::vector<StateClassFingerprint> computeFinalFingerprints(
   fingerprints.reserve(model.stateBits.size());
   std::pmr::monotonic_buffer_resource memoResource;
   FingerprintMemo memo{&memoResource};
-  memo.reserve(model.stateBits.size() * 4);
+  size_t memoReservedEntries = initialFingerprintMemoReserve(model);
+  memo.reserve(memoReservedEntries);
   for (const auto& key : model.stateBits) {
     fingerprints.push_back(
         {initialStateSignature(model, complementRoles, key),
@@ -385,7 +449,8 @@ std::vector<StateClassFingerprint> computeFinalFingerprints(
              model.nextStateExprByStateKey.at(key),
              inputClasses,
              stateClasses,
-             memo)});
+             memo,
+             memoReservedEntries)});
   }
   return fingerprints;
 }
@@ -411,7 +476,8 @@ bool areEquivalentUnderAbstractMaps(
     BoolExpr* expr1,
     const LocalToAbstractVarMap& abstractMap0,
     const LocalToAbstractVarMap& abstractMap1) {
-  AbstractExprPairMemo memo;
+  std::pmr::monotonic_buffer_resource memoResource;
+  AbstractExprPairMemo memo{&memoResource};
   return areEquivalentUnderAbstractMaps(
       expr0, expr1, abstractMap0, abstractMap1, memo);
 }
@@ -438,7 +504,7 @@ bool areEquivalentUnderAbstractMaps(
     }
 
     if (current.lhs == nullptr || current.rhs == nullptr) {
-      memo.emplace(key, current.lhs == current.rhs);
+      cacheAbstractEquivalence(memo, key, current.lhs == current.rhs);
       continue;
     }
 
@@ -454,12 +520,12 @@ bool areEquivalentUnderAbstractMaps(
         equivalent = it0 != abstractMap0.end() && it1 != abstractMap1.end() &&
                      it0->second == it1->second;
       }
-      memo.emplace(key, equivalent);
+      cacheAbstractEquivalence(memo, key, equivalent);
       continue;
     }
 
     if (lhsOp != rhsOp) {
-      memo.emplace(key, false);
+      cacheAbstractEquivalence(memo, key, false);
       continue;
     }
 
@@ -482,7 +548,7 @@ bool areEquivalentUnderAbstractMaps(
         memo.at(std::make_pair(current.lhs->getLeft(), current.rhs->getLeft()));
     const bool rightEquivalent =
         memo.at(std::make_pair(current.lhs->getRight(), current.rhs->getRight()));
-    memo.emplace(key, leftEquivalent && rightEquivalent);
+    cacheAbstractEquivalence(memo, key, leftEquivalent && rightEquivalent);
   }
 
   return memo.at(std::make_pair(expr0, expr1));
