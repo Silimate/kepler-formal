@@ -28,7 +28,14 @@ public:
     Unknown,
   };
 
-  explicit SATSolverWrapper(KEPLER_FORMAL::Config::SolverType type = KEPLER_FORMAL::Config::SolverType::GLUCOSE)
+  static KEPLER_FORMAL::Config::SolverType assumptionSolverTypeFor(
+      KEPLER_FORMAL::Config::SolverType chosenSolverType) {
+    return chosenSolverType == KEPLER_FORMAL::Config::SolverType::GLUCOSE
+               ? KEPLER_FORMAL::Config::SolverType::GLUCOSE
+               : KEPLER_FORMAL::Config::SolverType::CADICAL;
+  }
+
+  explicit SATSolverWrapper(KEPLER_FORMAL::Config::SolverType type = KEPLER_FORMAL::Config::SolverType::CADICAL)
     : solverType_(type) {
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       glucoseSolver_ = std::make_unique<Glucose::SimpSolver>();

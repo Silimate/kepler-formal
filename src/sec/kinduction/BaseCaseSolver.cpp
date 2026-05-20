@@ -2139,8 +2139,8 @@ CachedResetFrontierSolver& getCachedResetFrontierPrefixSolver(
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t maxTargetFrame) {
-  (void)solverType;
-  const auto cachedSolverType = KEPLER_FORMAL::Config::SolverType::CADICAL;
+  const auto cachedSolverType =
+      SATSolverWrapper::assumptionSolverTypeFor(solverType);
   const std::string key =
       resetFrontierSolverCacheKey(
           cachedSolverType,
@@ -2281,7 +2281,8 @@ proveResetSummaryFrontierCubeUnreachable(
   // assumptions; rebuilding it dominated BlackParrot PDR samples.
   CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
       data,
-      KEPLER_FORMAL::Config::SolverType::CADICAL,
+      SATSolverWrapper::assumptionSolverTypeFor(
+          KEPLER_FORMAL::Config::getSolverType()),
       normalizedCube,
       data.bootstrapFrames);
   const auto assumptions = stateCubeAssumptionLits(
@@ -2327,7 +2328,8 @@ collectResetSummarySingletonFrontierBlockers(
 
   CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
       data,
-      KEPLER_FORMAL::Config::SolverType::CADICAL,
+      SATSolverWrapper::assumptionSolverTypeFor(
+          KEPLER_FORMAL::Config::getSolverType()),
       cube,
       data.bootstrapFrames);
   for (const auto& literal : cube) {
@@ -2610,14 +2612,14 @@ CachedResetFrontierSolver& getCachedResetFrontierSolver(
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t targetFrame) {
-  (void)solverType;
   // Reset-frontier checks are dominated by repeated neighboring cube queries.
   // Use the assumption-capable solver here even when the main SEC run selected
   // Kissat: otherwise every cube value has to be encoded as unit clauses in a
   // separate cached solver, which BlackParrot sampling showed growing to
   // multi-GB retained solver caches before PDR made progress.
   const bool encodeCubeAsUnitClauses = false;
-  const auto cachedSolverType = KEPLER_FORMAL::Config::SolverType::CADICAL;
+  const auto cachedSolverType =
+      SATSolverWrapper::assumptionSolverTypeFor(solverType);
   const std::string key =
       resetFrontierSolverCacheKey(
           cachedSolverType, targetFrame, cube, encodeCubeAsUnitClauses);
@@ -3065,9 +3067,7 @@ bool isStateCubeReachableAtResetFrontierOneShot(
   }
 
   const auto assumptionSolverType =
-      solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
-          ? KEPLER_FORMAL::Config::SolverType::CADICAL
-          : solverType;
+      SATSolverWrapper::assumptionSolverTypeFor(solverType);
   auto solver = buildResetFrontierSolver(
       data,
       assumptionSolverType,

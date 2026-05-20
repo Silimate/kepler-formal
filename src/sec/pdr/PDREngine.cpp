@@ -7917,10 +7917,12 @@ std::optional<StateCube> findValidatedPredecessorCore(
       exactFrameClauses,
       nullptr);
 
-  // CaDiCaL is used here only as an UNSAT-core oracle over the target
-  // literals. Any proposed smaller cube is revalidated below with the normal
-  // PDR predecessor query before it can become a learned frame clause.
-  SATSolverWrapper coreSolver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  // Use an assumption-capable solver here only as an UNSAT-core oracle over
+  // the target literals. Any proposed smaller cube is revalidated below with
+  // the normal PDR predecessor query before it can become a learned frame
+  // clause.
+  SATSolverWrapper coreSolver(
+      SATSolverWrapper::assumptionSolverTypeFor(solverType));
   coreSolver.configureForSecPdrQuery(solverSymbols.size());
   FrameVariableStore variables(coreSolver, solverSymbols, 1);
   addComplementedStateRelations(
