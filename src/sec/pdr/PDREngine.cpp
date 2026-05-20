@@ -435,10 +435,12 @@ constexpr unsigned kTransitionImpossibleResetCoreConflictLimit = 20000;
 // spurious roots instead of rediscovering them one valuation at a time.
 // The exact post-reset predecessor precheck is valuable when one concrete
 // reset-image query can replace many abstract F[0] predecessor/refinement
-// loops. AES sampling showed that skipping a 113-support target made PDR
-// enumerate hundreds of 108-literal reset cubes, so keep this high enough for
-// medium ASIC cones while still avoiding full-design reset-image probes.
-constexpr size_t kMaxExactResetPrecheckTransitionSupport = 256;
+// loops. The original Glucose-backed assumption flow needed a tight cap, but
+// CaDiCaL can reuse the cached reset-frontier assumption solver cheaply enough
+// for the wider BlackParrot cones that otherwise enumerate thousands of
+// abstract predecessors.
+constexpr size_t kMaxGlucoseExactResetPrecheckTransitionSupport = 256;
+constexpr size_t kMaxCadicalExactResetPrecheckTransitionSupport = 4096;
 constexpr size_t kDefaultPdrStatsInterval = 1000;
 constexpr size_t kInitialPdrStatsQueries = 20;
 // PDR can use inferred state correspondences as an ordinary frame invariant,
@@ -797,6 +799,18 @@ size_t maxProjectedFrameRefinementsBeforeExactRetry() {
   return envSizeLimitOrDefault(
       "KEPLER_SEC_PDR_PROJECTED_FRAME_REFINEMENT_LIMIT",
       kDefaultMaxProjectedFrameRefinementsBeforeExactRetry);
+}
+
+size_t maxExactResetPrecheckTransitionSupport(
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  const auto assumptionSolverType =
+      SATSolverWrapper::assumptionSolverTypeFor(solverType);
+  const size_t defaultLimit =
+      assumptionSolverType == KEPLER_FORMAL::Config::SolverType::GLUCOSE
+          ? kMaxGlucoseExactResetPrecheckTransitionSupport
+          : kMaxCadicalExactResetPrecheckTransitionSupport;
+  return envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_EXACT_RESET_PRECHECK_SUPPORT_LIMIT", defaultLimit);
 }
 
 size_t nextPdrPredecessorQueryNumber() {
@@ -7419,6 +7433,8 @@ std::optional<StateCube> findPredecessorCube(
   const size_t statsQueryNumber = nextPdrPredecessorQueryNumber();
   const bool emitStatsForQuery = shouldEmitPdrStats(statsQueryNumber);
   const bool predecessorQueryIsAlreadyExact = predecessorProjectionLimit == 0;
+  const size_t exactResetPrecheckSupportLimit =
+      maxExactResetPrecheckTransitionSupport(solverType);
 
   // This reset-frontier precheck is an optional accelerator for projected PDR
   // queries: it can reject fake F[0] predecessors before they become root
@@ -7429,8 +7445,7 @@ std::optional<StateCube> findPredecessorCube(
       !predecessorQueryIsAlreadyExact &&
       level == 0 && problem.resetBootstrapCycles != 0 &&
       resetFrontierCache != nullptr &&
-      transitionSupportSymbols.size() <=
-          kMaxExactResetPrecheckTransitionSupport) {
+      transitionSupportSymbols.size() <= exactResetPrecheckSupportLimit) {
     // F[0] is a compact summary of the concrete post-reset image. Asking only
     // the abstract F[0] predecessor query can enumerate thousands of fake
     // reset states one refinement clause at a time. The exact reset-frontier
@@ -7461,6 +7476,7 @@ std::optional<StateCube> findPredecessorCube(
           " encoded_targets=", encodedTargets.size(),
           " transition_support=", transitionSupportSymbols.size(),
           " projection_limit=", predecessorProjectionLimit,
+          " support_limit=", exactResetPrecheckSupportLimit,
           " exact_reset_frontier=1 result=",
           hasConcreteResetPredecessor ? "sat" : "unsat");
     }
@@ -7478,6 +7494,7 @@ std::optional<StateCube> findPredecessorCube(
         " encoded_targets=", encodedTargets.size(),
         " transition_support=", transitionSupportSymbols.size(),
         " projection_limit=", predecessorProjectionLimit,
+        " support_limit=", exactResetPrecheckSupportLimit,
         " exact_reset_frontier=",
         useExactResetFrontierChecks ? "skipped" : "disabled");
   }
@@ -8252,6 +8269,27 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
       (cube.size() > kLargeBlockedCubeGeneralizationThreshold ||
        (cube.size() >= kMinMediumCubePredecessorCoreTargetSize &&
         blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport));
+  if (level == 1 && resetFrontierCache != nullptr &&
+      problem.resetBootstrapCycles != 0) {
+    // A failed exact reset-frontier predecessor precheck already proved that
+    // this F1 target has no concrete post-reset predecessor. Reuse the
+    // CaDiCaL failed-assumption core recorded by that check before the generic
+    // broad-support guard falls back to learning the whole cube verbatim.
+    if (const auto resetCore =
+            findPdrResetUnreachableCoreForCube(*resetFrontierCache, cube, 1);
+        resetCore.has_value() && resetCore->size() < cube.size()) {
+      if (pdrStatsEnabled()) {
+        emitSecDiag(
+            "SEC PDR stats: reset-predecessor core ",
+            "cube=", cube.size(),
+            "->", resetCore->size(),
+            " level=", level,
+            " support=", blockedCubeSupportSize,
+            " hash=", cubeFingerprint(*resetCore));
+      }
+      return *resetCore;
+    }
+  }
   if (shouldTryPredecessorCore) {
     // For wide blockers, ask the SAT solver for the actual predecessor UNSAT
     // reason before spending bounded chunk-dropping checks. BlackParrot samples

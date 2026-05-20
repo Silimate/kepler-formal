@@ -9203,7 +9203,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineSkipsExactResetPrecheckForWideTransitionSupport) {
+       PDREngineSkipsExactResetPrecheckAboveConfiguredSupportLimit) {
   KInductionProblem problem;
   constexpr size_t y = 2;
   constexpr size_t reset = 100;
@@ -9233,6 +9233,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar exactResetPrecheckLimit(
+      "KEPLER_SEC_PDR_EXACT_RESET_PRECHECK_SUPPORT_LIMIT", "256");
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);

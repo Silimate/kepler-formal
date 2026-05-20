@@ -1591,12 +1591,13 @@ SequentialEquivalenceResult runPdrSecEngine(
     const bool finalSliceUsesBadFormulaValidation =
         endOutput - firstOutput <=
         kPdrOutputBatchingLimits.maxOutputBatchSize;
-    // In SEC mode every reported difference is validated by a concrete
-    // bounded-prefix check before it escapes this strategy. Keep final PDR over
-    // the reset-frontier over-approximation instead of spending ASIC runtime in
-    // per-cube exact reset-image queries; proving the over-approximation safe
-    // is still sound for the concrete design pair.
-    const bool finalSliceUsesResetFrontier = false;
+    // Glucose-backed assumption checks were previously too expensive for the
+    // BlackParrot final repair, so this stage stayed on the abstract reset
+    // frontier and then enumerated many neighboring bad assignments. CaDiCaL
+    // supports assumptions efficiently enough to use the exact reset-frontier
+    // core cache here: concrete F[0] blockers cut off those abstract roots
+    // before the exact-frame PDR loop walks thousands of SAT predecessors.
+    const bool finalSliceUsesResetFrontier = true;
     const size_t finalPdrPredecessorProjectionLimit =
         kFinalExactPdrPredecessorProjectionLimit;
     const size_t finalPdrBadCubeStateLimit =
