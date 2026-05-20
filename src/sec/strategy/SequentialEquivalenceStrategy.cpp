@@ -1626,6 +1626,26 @@ SequentialEquivalenceResult runPdrSecEngine(
         /*useExactResetFrontierChecks=*/finalSliceUsesResetFrontier);
     const auto fullExactPdrResult = fullExactPdrEngine.run(maxK, true);
     if (fullExactPdrResult.status == PDRStatus::Equivalent) {
+      if (finalBatchCanValidateConcrete) {
+        if (auto fullExactWitness = SEC::findBaseCounterexample(
+                validationProblem, solverType, maxK);
+            fullExactWitness.has_value()) {
+          const KInductionResult witnessResult{
+              KInductionStatus::Different,
+              fullExactWitness->badFrame,
+              std::move(fullExactWitness)};
+          FinalPdrStageOutcome outcome;
+          outcome.terminalResult = makeSecResult(
+              SequentialEquivalenceStatus::Different,
+              witnessResult.bound,
+              formatCounterexampleWitness(
+                  witnessResult, model0, model1, top0, top1),
+              outputCoverage,
+              abstractedSequentialBoundaries,
+              extractedBoundaryReports);
+          return outcome;
+        }
+      }
       provedBound = std::max(provedBound, fullExactPdrResult.bound);
       FinalPdrStageOutcome outcome;
       outcome.equivalent = true;

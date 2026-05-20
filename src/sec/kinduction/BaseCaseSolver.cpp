@@ -2724,12 +2724,6 @@ bool isStateCubeReachableAtResetFrontier(
     return false;
   }
   if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
-    if (resetSummaryPrecheckProvesUnreachable(
-            data, solverType, normalizedCube, postBootstrapSteps)) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
-      return false;
-    }
-
     // Cached-assumption validation is PDR's hot reset-frontier path. Before
     // constructing the exact Glucose assumption solver, try the same weakened
     // startup-equality COI used by one-shot validation. The relaxed query only
@@ -2803,6 +2797,12 @@ bool isStateCubeReachableAtResetFrontier(
           relaxedSolver->coi.solverSymbols.size(),
           " transition_targets=",
           relaxedTransitionTargets);
+    }
+
+    if (resetSummaryPrecheckProvesUnreachable(
+            data, solverType, normalizedCube, postBootstrapSteps)) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+      return false;
     }
   }
   if (resetFrontierAssumptionSolvesDisabled()) {
@@ -2946,12 +2946,6 @@ bool isStateCubeReachableAtResetFrontierOneShot(
     return false;
   }
   if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
-    if (resetSummaryPrecheckProvesUnreachable(
-            data, solverType, normalizedCube, postBootstrapSteps)) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
-      return false;
-    }
-
     // First try a weakened COI that does not close the startup equality
     // components.  This is safe only as an UNSAT precheck: removing equality
     // constraints can create spurious SAT witnesses, but if the relaxed query
@@ -3027,6 +3021,12 @@ bool isStateCubeReachableAtResetFrontierOneShot(
           relaxedSolver->coi.solverSymbols.size(),
           " transition_targets=",
           relaxedTransitionTargets);
+    }
+
+    if (resetSummaryPrecheckProvesUnreachable(
+            data, solverType, normalizedCube, postBootstrapSteps)) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+      return false;
     }
   }
   if (resetFrontierAssumptionSolvesDisabled()) {

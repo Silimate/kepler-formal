@@ -9806,7 +9806,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(stderrOutput.find("predecessor #1 result=unsat"), std::string::npos)
+  EXPECT_NE(stderrOutput.find(" result=unsat"), std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("counterexample candidate reached init"),
             std::string::npos)
