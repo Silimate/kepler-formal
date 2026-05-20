@@ -43,7 +43,7 @@ constexpr size_t kMaxResetSummaryPrecheckSymbols = 200000;
 constexpr size_t kMaxResetSummaryPrecheckTransitionTargets = 200000;
 // This summary query is the cheap alternative to the full reset-frontier
 // fallback. BlackParrot PDR samples showed 65k-symbol summary proofs giving up
-// after the old tiny cap, then falling into 600k+ symbol exact Glucose
+// after the old tiny cap, then falling into 600k+ symbol exact assumption
 // assumption solves. Spend the bounded effort here where the COI is smaller.
 constexpr unsigned kResetSummaryPrecheckConflictLimit = 5000;
 constexpr unsigned kResetSummaryFrontierProofConflictLimit = 2000;
@@ -1913,7 +1913,7 @@ extractUnreachableCoreFromCachedResetFrontierSolver(
             stateCubeAssumptionLits(*cached.variables, candidate, targetFrame));
       };
 
-  // Glucose reports a valid conflict subset, not a guaranteed-minimal one.
+  // The assumption solver reports a valid conflict subset, not a guaranteed-minimal one.
   // Minimize it exactly with the same cached reset-frontier solver; the result
   // becomes a stronger PDR F[0] refinement and a reusable cache entry for later
   // neighboring cubes.
@@ -2140,7 +2140,7 @@ CachedResetFrontierSolver& getCachedResetFrontierPrefixSolver(
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t maxTargetFrame) {
   (void)solverType;
-  const auto cachedSolverType = KEPLER_FORMAL::Config::SolverType::GLUCOSE;
+  const auto cachedSolverType = KEPLER_FORMAL::Config::SolverType::CADICAL;
   const std::string key =
       resetFrontierSolverCacheKey(
           cachedSolverType,
@@ -2281,7 +2281,7 @@ proveResetSummaryFrontierCubeUnreachable(
   // assumptions; rebuilding it dominated BlackParrot PDR samples.
   CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
       data,
-      KEPLER_FORMAL::Config::SolverType::GLUCOSE,
+      KEPLER_FORMAL::Config::SolverType::CADICAL,
       normalizedCube,
       data.bootstrapFrames);
   const auto assumptions = stateCubeAssumptionLits(
@@ -2327,7 +2327,7 @@ collectResetSummarySingletonFrontierBlockers(
 
   CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
       data,
-      KEPLER_FORMAL::Config::SolverType::GLUCOSE,
+      KEPLER_FORMAL::Config::SolverType::CADICAL,
       cube,
       data.bootstrapFrames);
   for (const auto& literal : cube) {
@@ -2617,7 +2617,7 @@ CachedResetFrontierSolver& getCachedResetFrontierSolver(
   // separate cached solver, which BlackParrot sampling showed growing to
   // multi-GB retained solver caches before PDR made progress.
   const bool encodeCubeAsUnitClauses = false;
-  const auto cachedSolverType = KEPLER_FORMAL::Config::SolverType::GLUCOSE;
+  const auto cachedSolverType = KEPLER_FORMAL::Config::SolverType::CADICAL;
   const std::string key =
       resetFrontierSolverCacheKey(
           cachedSolverType, targetFrame, cube, encodeCubeAsUnitClauses);
@@ -2725,7 +2725,7 @@ bool isStateCubeReachableAtResetFrontier(
   }
   if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
     // Cached-assumption validation is PDR's hot reset-frontier path. Before
-    // constructing the exact Glucose assumption solver, try the same weakened
+    // constructing the exact assumption solver, try the same weakened
     // startup-equality COI used by one-shot validation. The relaxed query only
     // drops equality closure, so UNSAT remains a sound proof; SAT simply falls
     // through to the exact cached solver below. This is deliberately bounded:
@@ -2898,7 +2898,7 @@ bool isStateCubeReachableAtResetFrontier(
       // The solve above already produced a failed-assumption core.  Reuse it
       // directly instead of launching a second exact minimization loop: AES
       // PDR samples showed wide F[0] reset cubes spending their runtime inside
-      // that duplicate Glucose search, while the failed core is already a
+      // that duplicate assumption search, while the failed core is already a
       // sound reset-frontier blocker and still reusable for neighboring cubes.
       if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
               cached, normalizedCube, targetFrame);
@@ -3066,7 +3066,7 @@ bool isStateCubeReachableAtResetFrontierOneShot(
 
   const auto assumptionSolverType =
       solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
-          ? KEPLER_FORMAL::Config::SolverType::GLUCOSE
+          ? KEPLER_FORMAL::Config::SolverType::CADICAL
           : solverType;
   auto solver = buildResetFrontierSolver(
       data,
@@ -3357,8 +3357,8 @@ bool anyStateCubeReachableAtResetFrontier(
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::vector<std::pair<size_t, bool>>>& cubes,
     size_t postBootstrapSteps,
-    long long glucoseConflictLimit,
-    long long glucosePropagationLimit) {
+    long long conflictLimit,
+    long long propagationLimit) {
   std::vector<std::vector<std::pair<size_t, bool>>> normalizedCubes;
   normalizedCubes.reserve(cubes.size());
   for (auto cube : cubes) {
@@ -3417,7 +3417,7 @@ bool anyStateCubeReachableAtResetFrontier(
         stateCubeAssumptionLits(*solver.variables, cube, targetFrame);
     const auto status =
         solver.solver->solveWithAssumptionsStatus(
-            assumptions, glucoseConflictLimit, glucosePropagationLimit);
+            assumptions, conflictLimit, propagationLimit);
     if (status == SATSolverWrapper::SolveStatus::Sat) {
       return true;
     }

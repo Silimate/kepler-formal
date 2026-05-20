@@ -13,6 +13,7 @@ target_link_libraries(kepler-formal
     naja_dnl
     naja_opt
     kissat
+    cadical
     formal_strategies
     scope_extraction
     yaml-cpp

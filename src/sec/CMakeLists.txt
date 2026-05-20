@@ -29,4 +29,5 @@ target_link_libraries(kepler_sec
       naja_dnl
       naja_nl
       kissat
+      cadical
 )

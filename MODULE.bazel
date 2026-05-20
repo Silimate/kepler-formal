@@ -30,4 +30,4 @@ register_toolchains(
 # The cmake flow uses git submodules (thirdparty/) directly.
 # See docs/bcr-roadmap.md for the full BCR publication plan.
 deps = use_extension("//bazel:deps.bzl", "deps")
-use_repo(deps, "glucose", "kissat", "naja")
+use_repo(deps, "cadical", "glucose", "kissat", "naja")

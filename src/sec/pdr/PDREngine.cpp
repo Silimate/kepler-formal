@@ -79,7 +79,7 @@ constexpr size_t kMaxDeepSmallCubeResetSymbolicLiterals = 2;
 constexpr size_t kMaxDeepResetExpressionCanonicalizeNodes = 8192;
 // AES PDR samples produced reset-unreachable root cubes with 108 literals.
 // They were too wide for the old toy cap and fell back to the exact
-// reset-frontier Glucose-assumption query, which dominated runtime. The
+// reset-frontier assumption query, which dominated runtime. The
 // expression shortcut is still guarded by support/expansion caps below; this
 // cube cap only prevents pathologically huge clauses from being tried.
 constexpr size_t kMaxResetSpecializedExpressionCube = 128;
@@ -150,7 +150,7 @@ constexpr size_t kCachedConcreteValidationMinDepth = 2;
 constexpr size_t kCachedConcreteValidationMinCubeLiterals = 3;
 // If cheap reset facts already prove all but a couple of concrete root
 // validation frames, do not open the broad shared-prefix assumption solver.
-// Sampled BlackParrot leaves got stuck in Glucose on that shape; exact
+// Sampled BlackParrot leaves got stuck in assumption solving on that shape; exact
 // per-frame unit-clause queries keep the remaining proof local.
 constexpr size_t kMaxSparseConcreteReachabilityPerFrameChecks = 2;
 // Final multi-output SEC batches should not spend minutes repairing or
@@ -221,7 +221,7 @@ constexpr size_t kMaxResetFrontierBatchedBadFormulaFrame = 2;
 constexpr size_t kMaxResetFrontierBatchedBadFormulaSupport = 16;
 // Target-frame bad-formula validation is an optional CEGAR repair. Sampling
 // BlackParrot showed even a handful of exact target-frame reset-frontier probes
-// spending minutes in Glucose. Keep this repair on the cheap reset/PDR-core
+// spending minutes in assumption solving. Keep this repair on the cheap reset/PDR-core
 // path; exact projected-counterexample validation remains available outside the
 // eager bad-formula loop.
 constexpr size_t kMaxPartialTargetResetFrontierBadFormulaFrame = 8;
@@ -241,7 +241,7 @@ constexpr size_t kMaxPerOutputValidatedBadFormulaRepairOutputs = 16;
 constexpr size_t kMaxBatchResetCubeValidatedBadFormulaClauses = 2048;
 // Exact reset-frontier validation of every state-only bad assignment is useful
 // for small local predicates. BlackParrot samples showed 32/64-clause output
-// leaves spending their runtime in one hard Glucose assumption query after most
+// leaves spending their runtime in one hard assumption query after most
 // clauses were already handled by reset-specialized conflicts. For larger
 // batches, keep the exact cheap conflicts and let ordinary PDR handle the rest.
 constexpr size_t kMaxExactResetCubeValidatedBadFormulaClauses = 16;
@@ -268,7 +268,7 @@ constexpr size_t kMaxBadFormulaRepairResetSymbolicStates = 8192;
 constexpr size_t kMaxBadFormulaRepairResetSymbolicExprs = 65536;
 // After cheap reset-specialized repair, a few residual state-only bad
 // assignments may remain. A later BlackParrot sample caught this optional
-// residual batch spending the wall in Glucose assumption solving, so keep this
+// residual batch spending the wall in assumption solving, so keep this
 // path disabled and let ordinary PDR/root-cube validation populate exact cores
 // only for candidates it actually needs.
 constexpr size_t kMaxResidualExactResetCubeValidatedBadFormulaClauses = 0;
@@ -360,7 +360,7 @@ constexpr size_t kVeryLargeBlockedCubeGeneralizationBypassThreshold = 96;
 // blocked cube, so learn the proven cube verbatim there.
 constexpr size_t kMaxPredecessorCoreGeneralizationLevel = 2;
 constexpr long long kPredecessorCoreConflictLimit = 10000;
-// Glucose's final conflict can be too coarse to use directly as a target-cube
+// The solver's final conflict can be too coarse to use directly as a target-cube
 // core in the PDR predecessor oracle. When that happens, stay inside the same
 // already-built target-context solver and shrink the full target assumption set
 // by deletion. These checks reuse the solver; unlike ordinary cube
@@ -3611,7 +3611,7 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
   // UNSAT here is a sound reset-frontier conflict, while SAT merely falls back
   // to the exact concrete reset unroll below.
   // This shortcut performs one reset-image UNSAT query. AES sampling showed
-  // Glucose assumption solving spending minutes here just to recover a smaller
+  // assumption solving spending minutes here just to recover a smaller
   // failed-assumption core, so keep the proof as a Kissat one-shot query and
   // learn the full cube when the query is UNSAT.
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
@@ -7917,10 +7917,10 @@ std::optional<StateCube> findValidatedPredecessorCore(
       exactFrameClauses,
       nullptr);
 
-  // Glucose is used here only as an UNSAT-core oracle over the target
+  // CaDiCaL is used here only as an UNSAT-core oracle over the target
   // literals. Any proposed smaller cube is revalidated below with the normal
   // PDR predecessor query before it can become a learned frame clause.
-  SATSolverWrapper coreSolver(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
+  SATSolverWrapper coreSolver(KEPLER_FORMAL::Config::SolverType::CADICAL);
   coreSolver.configureForSecPdrQuery(solverSymbols.size());
   FrameVariableStore variables(coreSolver, solverSymbols, 1);
   addComplementedStateRelations(
@@ -7972,7 +7972,7 @@ std::optional<StateCube> findValidatedPredecessorCore(
   for (const auto& [assumptionLit, cubeLiteral] : assumptionPairs) {
     assumptions.push_back(assumptionLit);
     literalByAssumption.emplace(assumptionLit, cubeLiteral);
-    // Glucose reports final conflicts in solver-literal polarity. Map both
+    // Assumption-core solvers may report final conflicts in solver-literal polarity. Map both
     // signs back to the requested cube literal and let exact revalidation below
     // decide whether the proposed core is usable.
     literalByAssumption.emplace(-assumptionLit, cubeLiteral);

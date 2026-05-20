@@ -830,13 +830,15 @@ int KeplerFormalMain(int argc, char** argv) {
           verilogPreprocessing = cfg["verilog_preprocessing"].as<bool>();
         }
 
-        // solver (glucose | kissat)
+        // solver (glucose | kissat | cadical)
         if (cfg["solver"] && cfg["solver"].IsScalar()) {
           std::string solver = cfg["solver"].as<std::string>();
           if (solver == "glucose") {
             KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::GLUCOSE);
           } else if (solver == "kissat") {
             KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::KISSAT);
+          } else if (solver == "cadical") {
+            KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::CADICAL);
           } else {
             SPDLOG_CRITICAL("Unrecognized solver in config: {}", solver);
             return EXIT_FAILURE;
@@ -1178,8 +1180,13 @@ int KeplerFormalMain(int argc, char** argv) {
   KEPLER_FORMAL::Config::setReportSkippedPOs(reportSkippedPOs);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(
       secTreatUncomputableSeqAsBoundary);
-  SPDLOG_INFO("Solver: {}",
-              solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");
+  const char* solverName =
+      solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
+          ? "KISSAT"
+          : (solverType == KEPLER_FORMAL::Config::SolverType::CADICAL
+                 ? "CADICAL"
+                 : "GLUCOSE");
+  SPDLOG_INFO("Solver: {}", solverName);
   SPDLOG_INFO("Verification: {}", verificationModeName(verificationMode));
   if (verificationMode == VerificationMode::SEC) {
     SPDLOG_INFO("SEC max_k: {}", secMaxK);

@@ -103,8 +103,9 @@ naja_repo = repository_rule(
 )
 
 # Pinned dependency versions (commit SHAs from thirdparty/ submodules).
-# To update: change the commit, run `bazel fetch @glucose @kissat @naja`
+# To update: change the commit, run `bazel fetch @cadical @glucose @kissat @naja`
 # to verify, then update the sha256 hashes.
+_CADICAL_COMMIT = "7b99c07f0bcab5824a5a3ce62c7066554017f641"
 _GLUCOSE_COMMIT = "7f887abba7cf13636a5ac2d28653668a20a91b25"
 _KISSAT_COMMIT = "8af8e56f174b778aef3aa45af9f739b2a5f492c2"
 _NAJA_COMMIT = "cb35df2298b61325ce5c16552f94d6e02a2ae7c8"
@@ -115,6 +116,14 @@ _SLANG_COMMIT = "aedd7bc0394e5621340be94ed58def33d74ac677"
 _GOOGLETEST_COMMIT = "52eb8108c5bdec04579160ae17225d66034bd723"
 
 def _deps_impl(_module_ctx):
+    http_archive(
+        name = "cadical",
+        url = "https://github.com/arminbiere/cadical/archive/{}.tar.gz".format(_CADICAL_COMMIT),
+        sha256 = "d89bad4091f2203980ab30fdac14be874a4aca9b716cbcc132f5c7283b6fd987",
+        strip_prefix = "cadical-{}".format(_CADICAL_COMMIT),
+        build_file = Label("//bazel:cadical.BUILD.bazel"),
+    )
+
     http_archive(
         name = "glucose",
         url = "https://github.com/audemard/glucose/archive/{}.tar.gz".format(_GLUCOSE_COMMIT),

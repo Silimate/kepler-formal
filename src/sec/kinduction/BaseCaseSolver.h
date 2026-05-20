@@ -125,7 +125,7 @@ void primeResetFrontierReachabilitySolver(
 // Same exact bounded-prefix check as the cached API above, but encodes the
 // queried cube as unit clauses in a fresh solver. This is intentionally used
 // for isolated final PDR candidate validation, where BlackParrot sampling
-// showed a single incremental Glucose assumption query dominating runtime.
+// showed a single incremental assumption query dominating runtime.
 bool isStateCubeReachableAtResetFrontierOneShot(
     const ResetFrontierReachabilityContext& context,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -163,8 +163,8 @@ bool anyStateCubeReachableAtResetFrontier(
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::vector<std::pair<size_t, bool>>>& cubes,
     size_t postBootstrapSteps,
-    long long glucoseConflictLimit,
-    long long glucosePropagationLimit);
+    long long conflictLimit,
+    long long propagationLimit);
 
 // Returns a smaller cube that is still unreachable at the requested
 // reset/bootstrap frontier, when the assumption-capable reset solver can

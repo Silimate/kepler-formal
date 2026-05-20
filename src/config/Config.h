@@ -10,7 +10,8 @@ class Config {
 public:
   enum SolverType {
     KISSAT,
-    GLUCOSE
+    GLUCOSE,
+    CADICAL
   };
 
   // Delete copy/move to enforce singleton semantics
