@@ -199,8 +199,19 @@ FrameFormulaEncoder::FrameFormulaEncoder(
     std::unordered_map<size_t, int> leafLits,
     bool createMissingLeaves,
     size_t expectedNodeHint)
+    : FrameFormulaEncoder(
+          solver, std::move(leafLits), nullptr, createMissingLeaves,
+          expectedNodeHint) {}
+
+FrameFormulaEncoder::FrameFormulaEncoder(
+    SATSolverWrapper& solver,
+    std::unordered_map<size_t, int> leafLits,
+    const std::unordered_map<size_t, size_t>* symbolMap,
+    bool createMissingLeaves,
+    size_t expectedNodeHint)
     : solver_(solver),
       leafLits_(std::move(leafLits)),
+      symbolMap_(symbolMap),
       createMissingLeaves_(createMissingLeaves),
       expectedNodeHint_(expectedNodeHint),
       nodeArena_(nodeArenaBuffer_.data(), nodeArenaBuffer_.size()),
@@ -210,6 +221,19 @@ FrameFormulaEncoder::FrameFormulaEncoder(
 
 const std::unordered_map<size_t, int>& FrameFormulaEncoder::leafLits() const {
   return leafLits_;
+}
+
+size_t FrameFormulaEncoder::mappedSymbol(size_t symbol) const {
+  if (symbolMap_ == nullptr || symbol < 2) {
+    return symbol;
+  }
+  const auto mappedIt = symbolMap_->find(symbol);
+  if (mappedIt == symbolMap_->end()) {
+    throw std::runtime_error(
+        "Missing frame encoder symbol remap for variable " +
+        std::to_string(symbol));
+  }
+  return mappedIt->second;
 }
 
 void FrameFormulaEncoder::reserveNodeCache() {
@@ -302,13 +326,14 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
       } else if (node->getId() == 1) {
         cacheEncodedLiteral(node, getConstLit(true));
       } else {
-        auto it = leafLits_.find(node->getId());
+        const size_t symbol = mappedSymbol(node->getId());
+        auto it = leafLits_.find(symbol);
         if (it == leafLits_.end()) {
           if (!createMissingLeaves_) {
             throw std::runtime_error("Missing leaf literal for symbol " +
-                                     std::to_string(node->getId()));
+                                     std::to_string(symbol));
           }
-          it = leafLits_.emplace(node->getId(), newSolverLiteral(solver_)).first;
+          it = leafLits_.emplace(symbol, newSolverLiteral(solver_)).first;
         }
         cacheEncodedLiteral(node, it->second);
       }

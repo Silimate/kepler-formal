@@ -67,20 +67,17 @@ run_engine() {
 
   (
     cd "${case_dir}"
-    # SEC currently rejects CNF-export options. Keep the design, library,
-    # solver, and max_k settings from the original regression config, then
-    # override only the verification mode and the selected top-level SEC
-    # strategy.  Do not force a log_file here: repeated local regress runs are
-    # easier to inspect when kepler-formal keeps its own per-run log naming
-    # instead of reusing one fixed engine log path.
+    # SEC currently rejects CNF-export options. Keep the design, library, and
+    # solver settings from the original regression config, then override only
+    # the verification mode and selected SEC strategy. Drop LEC max_k by
+    # default: PDR proves by frame convergence and the split SEC regressions
+    # should not accidentally inherit toy bounded-check depths such as k=4.
+    # Do not force a log_file here: repeated local regress runs are easier to
+    # inspect when kepler-formal keeps its own per-run log naming.
     awk -v max_k_override="${max_k_override}" -v compact_mode="${compact_mode}" '
       /^[[:space:]]*verification:/ { next }
       /^[[:space:]]*sec_engine:/ { next }
-      /^[[:space:]]*max_k:/ {
-        if (max_k_override != "") {
-          next
-        }
-      }
+      /^[[:space:]]*max_k:/ { next }
       /^[[:space:]]*compact_mode:/ {
         if (compact_mode != "") {
           next

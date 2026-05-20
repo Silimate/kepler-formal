@@ -1,10 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <cstdlib>
 #include <initializer_list>
+#include <limits>
 #include <stdexcept>
 #include <memory>
 
@@ -19,6 +21,11 @@ extern "C" {
 
 class SATSolverWrapper {
 public:
+  enum class SolveStatus {
+    Sat,
+    Unsat,
+    Unknown,
+  };
 
   explicit SATSolverWrapper(KEPLER_FORMAL::Config::SolverType type = KEPLER_FORMAL::Config::SolverType::GLUCOSE)
     : solverType_(type) {
@@ -159,18 +166,49 @@ public:
 
  public:
   bool solve() {
+    return solveStatus() == SolveStatus::Sat;
+  }
+
+  SolveStatus solveStatus() {
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
-      return glucoseSolver_->solve();
+      return glucoseSolver_->solve() ? SolveStatus::Sat : SolveStatus::Unsat;
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       int res = kissat_solve(static_cast<kissat*>(kissatSolver_));
-      return res == 10; // 10 = SAT, 20 = UNSAT
+      if (res == 10) { // 10 = SAT
+        return SolveStatus::Sat;
+      }
+      if (res == 20) { // 20 = UNSAT
+        return SolveStatus::Unsat;
+      }
+      return SolveStatus::Unknown;
     }
     // LCOV_EXCL_START
     throw std::runtime_error("Unknown solver type");
     // LCOV_EXCL_STOP
   }
 
-  bool solveWithAssumptions(const std::vector<int>& assumptions) {
+  SolveStatus solveWithKissatResourceLimits(
+      unsigned conflictLimit,
+      unsigned decisionLimit =
+          std::numeric_limits<unsigned>::max()) {
+    if (solverType_ != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      throw std::runtime_error(
+          "Kissat resource limits requested for non-Kissat solver");
+    }
+    auto* solver = static_cast<kissat*>(kissatSolver_);
+    if (conflictLimit != std::numeric_limits<unsigned>::max()) {
+      kissat_set_conflict_limit(solver, conflictLimit);
+    }
+    if (decisionLimit != std::numeric_limits<unsigned>::max()) {
+      kissat_set_decision_limit(solver, decisionLimit);
+    }
+    return solveStatus();
+  }
+
+  SolveStatus solveWithAssumptionsStatus(
+      const std::vector<int>& assumptions,
+      int64_t glucoseConflictLimit = -1,
+      int64_t glucosePropagationLimit = -1) {
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       Glucose::vec<Glucose::Lit> glucoseAssumptions;
       for (int lit : assumptions) {
@@ -191,25 +229,51 @@ public:
         glucoseAssumptions.push((lit > 0) ? Glucose::mkLit(var)
                                           : ~Glucose::mkLit(var));
       }
+      if (glucoseConflictLimit >= 0 || glucosePropagationLimit >= 0) {
+        if (glucoseConflictLimit >= 0) {
+          glucoseSolver_->setConfBudget(glucoseConflictLimit);
+        }
+        if (glucosePropagationLimit >= 0) {
+          glucoseSolver_->setPropBudget(glucosePropagationLimit);
+        }
+        const auto result = glucoseSolver_->solveLimited(
+            glucoseAssumptions,
+            /*do_simp=*/false,
+            /*turn_off_simp=*/true);
+        glucoseSolver_->budgetOff();
+        if (Glucose::toInt(result) == 0) {
+          return SolveStatus::Sat;
+        }
+        if (Glucose::toInt(result) == 1) {
+          return SolveStatus::Unsat;
+        }
+        return SolveStatus::Unknown;
+      }
       // Repeated CEGAR reachability checks reuse the same solver and vary only
       // assumptions. Running variable elimination on each assumption solve
       // dominates those small queries, so keep this path in plain CDCL mode.
       return glucoseSolver_->solve(
-          glucoseAssumptions,
-          /*do_simp=*/false,
-          /*turn_off_simp=*/true);
+                 glucoseAssumptions,
+                 /*do_simp=*/false,
+                 /*turn_off_simp=*/true)
+                 ? SolveStatus::Sat
+                 : SolveStatus::Unsat;
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       // This vendored Kissat exposes only the partial IPASIR API and has no
       // assumption call. Callers that need repeated assumption solves should use
       // Glucose for that local incremental query.
       if (assumptions.empty()) {
-        return solve();
+        return solveStatus();
       }
       throw std::runtime_error("Kissat assumptions are not available in this build");
     }
     // LCOV_EXCL_START
     throw std::runtime_error("Unknown solver type");
     // LCOV_EXCL_STOP
+  }
+
+  bool solveWithAssumptions(const std::vector<int>& assumptions) {
+    return solveWithAssumptionsStatus(assumptions) == SolveStatus::Sat;
   }
 
   std::vector<int> failedAssumptions() const {
@@ -358,6 +422,48 @@ public:
     setKissatOptionOrThrow(solver, "otfs", 0);
 
     (void)coneSymbols;
+    setKissatOptionOrThrow(solver, "preprocess", 0);
+    setKissatOptionOrThrow(solver, "simplify", 0);
+    setKissatOptionOrThrow(solver, "preprocesscongruence", 0);
+    setKissatOptionOrThrow(solver, "preprocessprobe", 0);
+    setKissatOptionOrThrow(solver, "congruence", 0);
+    setKissatOptionOrThrow(solver, "probe", 0);
+    setKissatOptionOrThrow(solver, "probeinit", 0);
+    setKissatOptionOrThrow(solver, "eliminateinit", 0);
+  }
+
+  void configureForSecResetExpressionProof(size_t coneSymbols = 0) {
+    if (solverType_ != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      return;
+    }
+
+    auto* solver = static_cast<kissat*>(kissatSolver_);
+    // Reset-expression checks are optional local UNSAT proofs over the
+    // symbolic reset image.  They are reached only after PDR has produced a
+    // candidate startup conflict, so use Kissat's proof-oriented stable mode
+    // instead of the SAT-oriented predecessor-walk profile.  AES sampling
+    // showed otherwise useful 500-symbol reset-image proofs spending their
+    // runtime in focused CDCL propagation.
+    setKissatOptionOrThrow(solver, "stable", 2);
+    setKissatOptionOrThrow(solver, "target", 1);
+    setKissatOptionOrThrow(solver, "rephase", 0);
+    setKissatOptionOrThrow(solver, "walkeffort", 0);
+    setKissatOptionOrThrow(solver, "lucky", 0);
+    setKissatOptionOrThrow(solver, "luckyearly", 0);
+    setKissatOptionOrThrow(solver, "luckylate", 0);
+    // These local proofs are already bounded by an engine-level conflict
+    // limit. Sampling the AES reset-image proof with a larger cap showed the
+    // extra time going into recursive learned-clause shrinking/minimization
+    // rather than useful propagation, so keep this shortcut on a cheap CDCL
+    // path and let UNKNOWN fall through to exact validation.
+    setKissatOptionOrThrow(solver, "minimize", 0);
+    setKissatOptionOrThrow(solver, "shrink", 0);
+
+    (void)coneSymbols;
+    // Reset-expression solvers are short-lived and rebuilt for each PDR
+    // candidate.  Sampling showed even moderate AES reset-image proofs spending
+    // most wall time in speculative probe/sweep/kitten preprocessing, so keep
+    // these local proof solvers on a direct CDCL path for every cone size.
     setKissatOptionOrThrow(solver, "preprocess", 0);
     setKissatOptionOrThrow(solver, "simplify", 0);
     setKissatOptionOrThrow(solver, "preprocesscongruence", 0);

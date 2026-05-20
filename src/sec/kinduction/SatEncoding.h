@@ -66,11 +66,17 @@ class FrameFormulaEncoder {
                       std::unordered_map<size_t, int> leafLits,
                       bool createMissingLeaves,
                       size_t expectedNodeHint);
+  FrameFormulaEncoder(SATSolverWrapper& solver,
+                      std::unordered_map<size_t, int> leafLits,
+                      const std::unordered_map<size_t, size_t>* symbolMap,
+                      bool createMissingLeaves,
+                      size_t expectedNodeHint);
 
   int encode(BoolExpr* expr);
   const std::unordered_map<size_t, int>& leafLits() const;
 
  private:
+  size_t mappedSymbol(size_t symbol) const;
   void reserveNodeCache();
   void cacheEncodedLiteral(BoolExpr* node, int lit);
   int getConstLit(bool value);
@@ -78,6 +84,7 @@ class FrameFormulaEncoder {
 
   SATSolverWrapper& solver_;
   std::unordered_map<size_t, int> leafLits_;
+  const std::unordered_map<size_t, size_t>* symbolMap_ = nullptr;
   bool createMissingLeaves_ = false;
   size_t expectedNodeHint_ = 0;
   // PDR creates many short-lived encoders while asking predecessor queries.

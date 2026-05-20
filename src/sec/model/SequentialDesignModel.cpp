@@ -1157,6 +1157,22 @@ void inferSynthesizedResetInitialStateValues(SequentialDesignModel& model) {
     return;
   }
 
+  auto resetInitInferenceNodeLimit = []() {
+    constexpr size_t kDefaultResetSpecializedExprNodesForInitInference = 200000;
+    const char* valueText =
+        std::getenv("KEPLER_SEC_RESET_INIT_INFERENCE_NODE_LIMIT");
+    if (valueText == nullptr || *valueText == '\0') {
+      return kDefaultResetSpecializedExprNodesForInitInference;
+    }
+    const auto value = std::strtoull(valueText, nullptr, 10);
+    if (value == 0) {
+      return kDefaultResetSpecializedExprNodesForInitInference;
+    }
+    return value > std::numeric_limits<size_t>::max()
+               ? std::numeric_limits<size_t>::max()
+               : static_cast<size_t>(value);
+  };
+
   auto countUniqueExprNodes =
       [](const std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash>& exprByKey) {
         std::unordered_set<BoolExpr*> visited;
@@ -1197,10 +1213,12 @@ void inferSynthesizedResetInitialStateValues(SequentialDesignModel& model) {
             nextStateIt->second, resetAssignments, resetSubstitutionMemo));
   }
   // Synthesized reset inference is only a proof-strengthening heuristic. Cap
-  // the specialized DAG size aggressively so large SoCs do not spend most of
-  // SEC extraction time trying to derive explicit reset values for every
-  // register when the proof can proceed without them.
-  constexpr size_t kMaxResetSpecializedExprNodesForInitInference = 50000;
+  // the specialized DAG size so very large SoCs do not spend most of SEC
+  // extraction deriving reset values, while still allowing measured ASIC-size
+  // reset cones to seed PDR's frame-0 frontier once instead of repeatedly
+  // proving the same reset-image facts through SAT.
+  const size_t maxResetSpecializedExprNodesForInitInference =
+      resetInitInferenceNodeLimit();
   const size_t resetSpecializedExprNodes =
       countUniqueExprNodes(resetSpecializedNextStateByKey);
   if (std::getenv("KEPLER_SEC_DIAG") != nullptr) {
@@ -1208,18 +1226,18 @@ void inferSynthesizedResetInitialStateValues(SequentialDesignModel& model) {
         stderr,  // LCOV_EXCL_LINE
         "SEC diag: reset-specialized next-state nodes=%zu limit=%zu states=%zu\n",
         resetSpecializedExprNodes,  // LCOV_EXCL_LINE
-        kMaxResetSpecializedExprNodesForInitInference,
+        maxResetSpecializedExprNodesForInitInference,
         model.stateBits.size());  // LCOV_EXCL_LINE
     fflush(stderr);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   if (resetSpecializedExprNodes >
-      kMaxResetSpecializedExprNodesForInitInference) {
+      maxResetSpecializedExprNodesForInitInference) {
     if (std::getenv("KEPLER_SEC_DIAG") != nullptr) {
       fprintf(  // LCOV_EXCL_LINE
           stderr,  // LCOV_EXCL_LINE
           "SEC diag: skip synthesized init inference for %zu reset-specialized nodes (limit=%zu)\n",
           resetSpecializedExprNodes,  // LCOV_EXCL_LINE
-          kMaxResetSpecializedExprNodesForInitInference);
+          maxResetSpecializedExprNodesForInitInference);
       fflush(stderr);  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     return;

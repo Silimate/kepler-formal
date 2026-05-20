@@ -6,10 +6,16 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "kinduction/KInductionProblem.h"
 
 namespace KEPLER_FORMAL::SEC {
+
+struct TransitionExprView {
+  BoolExpr* expr = nullptr;
+  const std::unordered_map<size_t, size_t>* symbolMap = nullptr;
+};
 
 class TransitionExprResolver {
  public:
@@ -17,7 +23,13 @@ class TransitionExprResolver {
 
   bool contains(size_t stateSymbol) const;
   BoolExpr* at(size_t stateSymbol) const;
+  TransitionExprView expressionView(size_t stateSymbol) const;
   const std::set<size_t>& support(size_t stateSymbol) const;
+  void collectSupportForTargets(
+      const std::vector<size_t>& stateSymbols,
+      const std::unordered_set<size_t>& knownStateSymbols,
+      std::unordered_set<size_t>& stateSupport,
+      std::unordered_set<size_t>& allSupport) const;
   size_t nodeCount(size_t stateSymbol) const;
   const std::unordered_set<size_t>& stateSymbols() const;
   const std::unordered_map<size_t, size_t>& primaryByComplement() const;

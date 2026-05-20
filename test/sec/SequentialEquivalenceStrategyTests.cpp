@@ -4933,6 +4933,52 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ResetExpressionProofProfileDisablesSpeculativePreprocessingForModerateProofs) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  solver.configureForSecResetExpressionProof(/*coneSymbols=*/1000);
+
+  // Sampling on AES PDR showed moderate reset-expression UNSAT checks spending
+  // their wall time in Kissat's probe/sweep/kitten preprocessing. These checks
+  // are short-lived local proofs, so the PDR profile should avoid speculative
+  // simplification even below the generic large-cone threshold.
+  auto* kissatSolver = static_cast<kissat*>(solver.getSolver());
+  EXPECT_EQ(kissat_get_option(kissatSolver, "preprocess"), 0);
+  EXPECT_EQ(kissat_get_option(kissatSolver, "simplify"), 0);
+  EXPECT_EQ(kissat_get_option(kissatSolver, "preprocesscongruence"), 0);
+  EXPECT_EQ(kissat_get_option(kissatSolver, "preprocessprobe"), 0);
+  EXPECT_EQ(kissat_get_option(kissatSolver, "congruence"), 0);
+  EXPECT_EQ(kissat_get_option(kissatSolver, "probe"), 0);
+  EXPECT_EQ(kissat_get_option(kissatSolver, "probeinit"), 0);
+  EXPECT_EQ(kissat_get_option(kissatSolver, "eliminateinit"), 0);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KissatResourceLimitedSolveReportsUnknownInsteadOfUnsat) {
+  SATSolverWrapper limitedSolver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  limitedSolver.configureForSecResetExpressionProof();
+  const int x = limitedSolver.newVar() + 2;
+  const int y = limitedSolver.newVar() + 2;
+  limitedSolver.addClause({x, y});
+  limitedSolver.addClause({-x, y});
+
+  // Optional PDR shortcuts may cap Kissat work. A limit hit must be observable
+  // as UNKNOWN so callers do not accidentally learn a bogus UNSAT cube.
+  EXPECT_EQ(
+      limitedSolver.solveWithKissatResourceLimits(
+          std::numeric_limits<unsigned>::max(),
+          /*decisionLimit=*/0),
+      SATSolverWrapper::SolveStatus::Unknown);
+
+  SATSolverWrapper unboundedSolver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  unboundedSolver.configureForSecResetExpressionProof();
+  const int ux = unboundedSolver.newVar() + 2;
+  const int uy = unboundedSolver.newVar() + 2;
+  unboundedSolver.addClause({ux, uy});
+  unboundedSolver.addClause({-ux, uy});
+  EXPECT_EQ(unboundedSolver.solveStatus(), SATSolverWrapper::SolveStatus::Sat);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverFindsCombinationalCounterexampleAtFrameZero) {
   KInductionProblem problem;
   problem.environmentInputNames = {"in"};
@@ -4954,6 +5000,75 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(witness->inputTrace[0].frame, 0u);
   ASSERT_EQ(witness->outputMismatches.size(), 1u);
   EXPECT_EQ(witness->outputMismatches[0].signal, "out");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverExistenceFrontierKeepsMultiOutputBatchTogether) {
+  KInductionProblem problem;
+  problem.observedOutputNames = {"out0", "out1"};
+  problem.inputSymbols = {2, 3};
+  problem.allSymbols = {2, 3};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(2), BoolExpr::Var(3)};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(hasBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  size_t diagCount = 0;
+  size_t pos = 0;
+  while ((pos = stderrOutput.find("SEC diag: k-induction base coi", pos)) !=
+         std::string::npos) {
+    ++diagCount;
+    ++pos;
+  }
+  EXPECT_EQ(diagCount, 1u) << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverPdrProofOnlyDoesNotChaseUnrelatedStartupEqualityChain) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  problem.state0Symbols = {x, y};
+  problem.allSymbols = {x, y};
+  problem.initialStateAssignments = {{y, false}};
+  problem.initializedStateCount = 1;
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(y));
+  problem.transitions0.emplace_back(x, BoolExpr::Var(y));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionBad = problem.bad;
+  problem.inductionProperty = problem.property;
+
+  size_t previous = y;
+  for (size_t i = 0; i < 128; ++i) {
+    const size_t symbol = 4 + i;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.initialStateEqualityPairs.emplace_back(previous, symbol);
+    previous = symbol;
+  }
+  problem.totalStateCount = problem.state0Symbols.size();
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_TRUE(provesNoBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(stderrOutput.find("solver_symbols=2"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("transition_targets=1"), std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -5400,7 +5515,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineUsesPredecessorCoresForMediumHighSupportBlockedCubes) {
   KInductionProblem problem;
-  constexpr size_t kTargetStateCount = 16;
+  constexpr size_t kTargetStateCount = 12;
   constexpr size_t kSupportStateCount = 40;
   constexpr size_t firstStateSymbol = 2;
   constexpr size_t firstSupportSymbol = firstStateSymbol + kTargetStateCount;
@@ -5426,14 +5541,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
     init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
     bad = BoolExpr::And(bad, BoolExpr::Var(symbol));
     problem.initialStateAssignments.push_back({symbol, false});
-    // The first eight target bits keep the cheap seed reachable. The remaining
+    // The first four target bits keep the cheap seed reachable. The remaining
     // target bits depend on a broad support cone that is false in the startup
-    // frontier, matching the measured BlackParrot 37-49 literal level-zero
-    // blockers that were too small for the old "wide-only" predecessor-core
-    // gate but still expensive to encode one by one.
+    // frontier, matching the measured AES 12-literal, 113-support level-zero
+    // blockers that were too small for the old medium predecessor-core gate
+    // but still expensive to learn one neighboring valuation at a time.
     problem.transitions0.emplace_back(
         symbol,
-        index < 8
+        index < 4
             ? BoolExpr::createTrue()
             : BoolExpr::And(BoolExpr::Var(symbol), wideSupport));
   }
@@ -5459,7 +5574,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
-      stderrOutput.find("predecessor core target=16->1 source_level=0"),
+      stderrOutput.find("predecessor core target=12->1 source_level=0"),
       std::string::npos)
       << stderrOutput;
 }
@@ -6488,6 +6603,1905 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesCheapResetConstantFactsWhenExactResetChecksAreDisabled) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.inputSymbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{4, false}};
+  problem.bootstrapStateAssignments = {{2, false}};
+  problem.transitions0.emplace_back(2, BoolExpr::And(BoolExpr::Var(4), BoolExpr::Var(3)));
+  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1)
+          .has_value());
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_EQ(stderrOutput.find("post_bootstrap_steps=1"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetSpecializedRelationsBeforeExactRootResetFrontier) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t reset = 5;
+  problem.state0Symbols = {x, y, w};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Not(BoolExpr::Var(y)), BoolExpr::Var(w))));
+  // The reset transition creates y == w at the F[0] frontier, but neither bit
+  // is a reset constant.  This guards the sampled ASIC path where exact deeper
+  // reset checks are disabled, yet PDR should still learn the abstract F[0]
+  // predecessor is outside the concrete post-reset image before doing a wide
+  // root-cube validation query.
+  problem.transitions0.emplace_back(y, BoolExpr::Var(w));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(w));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("post_bootstrap_steps=1"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetSpecializedExpressionSatBeforeExactRootResetFrontier) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a = 5;
+  constexpr size_t b = 6;
+  constexpr size_t reset = 7;
+  problem.state0Symbols = {x, y, w, a, b};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, a, b, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  // y and w reset to equivalent XNOR forms that are not reduced by the cheap
+  // structural implication rules. This keeps the test focused on the bounded
+  // expression-SAT shortcut instead of the faster syntactic reset proofs.
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::Or(
+          BoolExpr::And(BoolExpr::Var(a), BoolExpr::Var(b)),
+          BoolExpr::And(BoolExpr::Not(BoolExpr::Var(a)), BoolExpr::Not(BoolExpr::Var(b)))));
+  problem.transitions0.emplace_back(
+      w,
+      BoolExpr::Not(BoolExpr::Xor(BoolExpr::Var(a), BoolExpr::Var(b))));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized expression conflict"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized expression solver_profile=reset_expression"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineCanonicalizesInitialEqualitiesBeforeResetExpressionSatCap) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t reset = 5;
+  constexpr size_t firstA = 6;
+  constexpr size_t parityWidth = 385;
+  constexpr size_t firstB = firstA + parityWidth;
+
+  problem.state0Symbols = {x, y, w};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, reset};
+  std::vector<size_t> aSymbols;
+  std::vector<size_t> bSymbols;
+  aSymbols.reserve(parityWidth);
+  bSymbols.reserve(parityWidth);
+  for (size_t index = 0; index < parityWidth; ++index) {
+    const size_t a = firstA + index;
+    const size_t b = firstB + index;
+    aSymbols.push_back(a);
+    bSymbols.push_back(b);
+    problem.state0Symbols.push_back(a);
+    problem.state0Symbols.push_back(b);
+    problem.allSymbols.push_back(a);
+    problem.allSymbols.push_back(b);
+    problem.initialStateEqualityPairs.emplace_back(a, b);
+    problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+    problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  }
+
+  auto leftAssociatedXor = [](const std::vector<size_t>& symbols) {
+    BoolExpr* expr = BoolExpr::Var(symbols.front());
+    for (size_t index = 1; index < symbols.size(); ++index) {
+      expr = BoolExpr::Xor(expr, BoolExpr::Var(symbols[index]));
+    }
+    return expr;
+  };
+  auto rightAssociatedXor = [](const std::vector<size_t>& symbols) {
+    BoolExpr* expr = BoolExpr::Var(symbols.back());
+    for (size_t index = symbols.size() - 1; index-- > 0;) {
+      expr = BoolExpr::Xor(BoolExpr::Var(symbols[index]), expr);
+    }
+    return expr;
+  };
+
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  // The two parity cones are equivalent only after substituting the initial
+  // SEC equality pairs a[i] == b[i]. Raw support closure contains both sides
+  // and crosses the reset-expression SAT cap; the shortcut must canonicalize
+  // those equalities before applying the cap so it can prove the contradiction
+  // locally instead of falling into the sampled wide reset-frontier query.
+  problem.transitions0.emplace_back(y, leftAssociatedXor(aSymbols));
+  problem.transitions0.emplace_back(w, rightAssociatedXor(bSymbols));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized expression conflict"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("via=affine_xor"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solver_profile=pdr"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("miss reason=full_sat_support_cap cube=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineStructurallyBlocksAffineXorResetExpressionConflict) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t reset = 5;
+  constexpr size_t firstA = 6;
+  constexpr size_t parityWidth = 96;
+  constexpr size_t firstB = firstA + parityWidth;
+
+  problem.state0Symbols = {x, y, w};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, reset};
+  std::vector<size_t> aSymbols;
+  std::vector<size_t> bSymbols;
+  aSymbols.reserve(parityWidth);
+  bSymbols.reserve(parityWidth);
+  for (size_t index = 0; index < parityWidth; ++index) {
+    const size_t a = firstA + index;
+    const size_t b = firstB + index;
+    aSymbols.push_back(a);
+    bSymbols.push_back(b);
+    problem.state0Symbols.push_back(a);
+    problem.state0Symbols.push_back(b);
+    problem.allSymbols.push_back(a);
+    problem.allSymbols.push_back(b);
+    problem.initialStateEqualityPairs.emplace_back(a, b);
+    problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+    problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  }
+
+  auto leftAssociatedXor = [](const std::vector<size_t>& symbols) {
+    BoolExpr* expr = BoolExpr::Var(symbols.front());
+    for (size_t index = 1; index < symbols.size(); ++index) {
+      expr = BoolExpr::Xor(expr, BoolExpr::Var(symbols[index]));
+    }
+    return expr;
+  };
+  auto rightAssociatedXor = [](const std::vector<size_t>& symbols) {
+    BoolExpr* expr = BoolExpr::Var(symbols.back());
+    for (size_t index = symbols.size() - 1; index-- > 0;) {
+      expr = BoolExpr::Xor(BoolExpr::Var(symbols[index]), expr);
+    }
+    return expr;
+  };
+
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  problem.transitions0.emplace_back(y, leftAssociatedXor(aSymbols));
+  problem.transitions0.emplace_back(w, rightAssociatedXor(bSymbols));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar proofConflictLimit(
+      "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT", "0");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // This guards the AES-sized parity shape sampled in PDR: equivalent XOR
+  // reset cones can be only associatively different after SEC init equality
+  // substitution.  The structural affine-XOR pass should learn the conflict
+  // without relying on the optional reset-expression SAT shortcut.
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("via=affine_xor"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=2"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineMinimizesResetSpecializedExpressionSatConflictToPair) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t e0 = 5;
+  constexpr size_t e1 = 6;
+  constexpr size_t a = 7;
+  constexpr size_t b = 8;
+  constexpr size_t reset = 9;
+  problem.state0Symbols = {x, y, w, e0, e1, a, b};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, e0, e1, a, b, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  BoolExpr* badDriver = BoolExpr::And(
+      BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w))),
+      BoolExpr::And(BoolExpr::Var(e0), BoolExpr::Var(e1)));
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(reset)), badDriver));
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::And(
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Var(b)),
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Not(BoolExpr::Var(b)))));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(e0, BoolExpr::Var(e0));
+  problem.transitions0.emplace_back(e1, BoolExpr::Var(e1));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/32,
+      /*preciseBadCubeStateLimit=*/32,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("via=pair_probe"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("->2 via=pair_probe"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineOrdersResetExpressionPairProbesBySupport) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t e0 = 5;
+  constexpr size_t a = 6;
+  constexpr size_t b = 7;
+  constexpr size_t reset = 8;
+  constexpr size_t firstWideLeaf = 9;
+  constexpr size_t wideLeafCount = 12;
+  problem.state0Symbols = {x, y, w, e0, a, b};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, e0, a, b, reset};
+  for (size_t index = 0; index < wideLeafCount; ++index) {
+    const size_t symbol = firstWideLeaf + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(
+              BoolExpr::And(BoolExpr::Var(y), BoolExpr::Var(w)),
+              BoolExpr::Not(BoolExpr::Var(e0)))));
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::And(
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Var(b)),
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Not(BoolExpr::Var(b)))));
+  problem.transitions0.emplace_back(w, BoolExpr::Not(BoolExpr::Var(a)));
+  BoolExpr* wideExpr = BoolExpr::Var(firstWideLeaf);
+  for (size_t index = 1; index < wideLeafCount; ++index) {
+    wideExpr =
+        BoolExpr::Xor(wideExpr, BoolExpr::Var(firstWideLeaf + index));
+  }
+  problem.transitions0.emplace_back(e0, wideExpr);
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  for (size_t index = 0; index < wideLeafCount; ++index) {
+    const size_t symbol = firstWideLeaf + index;
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/32,
+      /*preciseBadCubeStateLimit=*/32,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  // The conflicting pair is same-valued but has tiny support; the opposite
+  // valued pairs pull in the wide e0 cone.  Probe support first so sampled AES
+  // failures do not spend time proving wide SAT distractor pairs.
+  EXPECT_NE(
+      stderrOutput.find(
+          "reset-specialized expression solve cube=2 target_step=1 support=2 "),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("via=pair_probe"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=2 support=13"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=2 support=14"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineContinuesResetExpressionPairProbesPastSatDistractors) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t d0 = 3;
+  constexpr size_t d1 = 4;
+  constexpr size_t d2 = 5;
+  constexpr size_t d3 = 6;
+  constexpr size_t y = 7;
+  constexpr size_t w = 8;
+  constexpr size_t p0 = 9;
+  constexpr size_t p1 = 10;
+  constexpr size_t p2 = 11;
+  constexpr size_t p3 = 12;
+  constexpr size_t a = 13;
+  constexpr size_t b = 14;
+  constexpr size_t reset = 15;
+  problem.state0Symbols = {x, d0, d1, d2, d3, y, w, p0, p1, p2, p3, a, b};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {
+      x, d0, d1, d2, d3, y, w, p0, p1, p2, p3, a, b, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(
+              BoolExpr::And(BoolExpr::Var(d0), BoolExpr::Var(d1)),
+              BoolExpr::And(
+                  BoolExpr::And(BoolExpr::Var(d2), BoolExpr::Var(d3)),
+                  BoolExpr::And(BoolExpr::Var(y),
+                                BoolExpr::Not(BoolExpr::Var(w)))))));
+  problem.transitions0.emplace_back(d0, BoolExpr::Var(p0));
+  problem.transitions0.emplace_back(d1, BoolExpr::Var(p1));
+  problem.transitions0.emplace_back(d2, BoolExpr::Var(p2));
+  problem.transitions0.emplace_back(d3, BoolExpr::Var(p3));
+  problem.transitions0.emplace_back(y, BoolExpr::Xor(BoolExpr::Var(a), BoolExpr::Var(b)));
+  problem.transitions0.emplace_back(
+      w,
+      BoolExpr::Or(
+          BoolExpr::And(BoolExpr::Var(a), BoolExpr::Not(BoolExpr::Var(b))),
+          BoolExpr::And(BoolExpr::Not(BoolExpr::Var(a)), BoolExpr::Var(b))));
+  problem.transitions0.emplace_back(p0, BoolExpr::Var(p0));
+  problem.transitions0.emplace_back(p1, BoolExpr::Var(p1));
+  problem.transitions0.emplace_back(p2, BoolExpr::Var(p2));
+  problem.transitions0.emplace_back(p3, BoolExpr::Var(p3));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/32,
+      /*preciseBadCubeStateLimit=*/32,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  // Boolean-equivalent but structurally different reset expressions should
+  // still shrink a wide reset cube through the SAT pair-probe path before any
+  // exact reset-frontier query is needed.
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized expression conflict cube=7->2 via=pair_probe"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFindsResetExpressionTripleConflictWhenPairsAreSat) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t z = 5;
+  constexpr size_t d = 6;
+  constexpr size_t a = 7;
+  constexpr size_t b = 8;
+  constexpr size_t reset = 9;
+  problem.state0Symbols = {x, y, w, z, d, a, b};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, z, d, a, b, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(
+              BoolExpr::And(BoolExpr::Var(y), BoolExpr::Var(w)),
+              BoolExpr::And(BoolExpr::Var(z), BoolExpr::Var(d)))));
+  problem.transitions0.emplace_back(y, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(b));
+  problem.transitions0.emplace_back(z, BoolExpr::Xor(BoolExpr::Var(a), BoolExpr::Var(b)));
+  problem.transitions0.emplace_back(d, BoolExpr::Var(d));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/32,
+      /*preciseBadCubeStateLimit=*/32,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  // a=1, b=1, and a^b=1 is impossible, but every pair of those literals is
+  // satisfiable.  The triple probe should learn that smaller reset-image
+  // conflict before the optional full-cube SAT fallback.
+  EXPECT_NE(
+      stderrOutput.find(
+          "reset-specialized expression conflict cube=5->3 via=triple_probe"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+KInductionProblem makeWideResetExpressionSatShortcutProblem(
+    size_t wideLeafCount) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a = 5;
+  constexpr size_t reset = 6;
+  constexpr size_t firstWideLeaf = 7;
+  problem.state0Symbols = {x, y, w, a};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, a, reset};
+  for (size_t index = 0; index < wideLeafCount; ++index) {
+    const size_t symbol = firstWideLeaf + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Var(w))));
+  BoolExpr* wideExpr = BoolExpr::Var(firstWideLeaf);
+  for (size_t index = 1; index < wideLeafCount; ++index) {
+    wideExpr =
+        BoolExpr::Xor(wideExpr, BoolExpr::Var(firstWideLeaf + index));
+  }
+  problem.transitions0.emplace_back(y, wideExpr);
+  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  for (size_t index = 0; index < wideLeafCount; ++index) {
+    const size_t symbol = firstWideLeaf + index;
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  return problem;
+}
+
+KInductionProblem makeWideMultiLiteralResetExpressionSatShortcutProblem(
+    size_t wideLeafCount) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t extra0 = 5;
+  constexpr size_t extra1 = 6;
+  constexpr size_t a = 7;
+  constexpr size_t reset = 8;
+  constexpr size_t firstWideLeaf = 9;
+  problem.state0Symbols = {x, y, w, extra0, extra1, a};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, extra0, extra1, a, reset};
+  for (size_t index = 0; index < wideLeafCount; ++index) {
+    const size_t symbol = firstWideLeaf + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  BoolExpr* rootCubeDriver = BoolExpr::And(
+      BoolExpr::Var(y),
+      BoolExpr::And(BoolExpr::Var(w), BoolExpr::Var(extra0)));
+  rootCubeDriver = BoolExpr::And(rootCubeDriver, BoolExpr::Var(extra1));
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(reset)), rootCubeDriver));
+  BoolExpr* wideExpr = BoolExpr::Var(firstWideLeaf);
+  for (size_t index = 1; index < wideLeafCount; ++index) {
+    wideExpr =
+        BoolExpr::Xor(wideExpr, BoolExpr::Var(firstWideLeaf + index));
+  }
+  problem.transitions0.emplace_back(y, wideExpr);
+  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(extra0, BoolExpr::Var(extra0));
+  problem.transitions0.emplace_back(extra1, BoolExpr::Var(extra1));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  for (size_t index = 0; index < wideLeafCount; ++index) {
+    const size_t symbol = firstWideLeaf + index;
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  return problem;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineAttemptsModerateWideResetExpressionSatShortcut) {
+  KInductionProblem problem =
+      makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/128);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  (void)engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // AES sampling kept useful support-129/135 reset-image pair proofs. This
+  // guarded case keeps only local proof shapes eligible for the
+  // reset-expression SAT path; whether the particular cube is SAT or UNSAT
+  // remains a solver result.
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized expression solve"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("support=129"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("miss reason=full_sat_support_cap"),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSkipsResetExpressionShortcutWhenResourceLimitHits) {
+  KInductionProblem problem =
+      makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/128);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar proofConflictLimit(
+      "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT", "0");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  (void)engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Reset-expression SAT is an optional shortcut. If Kissat hits the local
+  // resource cap, PDR must report a miss and continue through the normal
+  // validation/refinement path instead of treating UNKNOWN as UNSAT.
+  EXPECT_NE(
+      stderrOutput.find("miss reason=solver_resource_limit"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression conflict"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSkipsBroadMultiLiteralResetExpressionSatShortcut) {
+  KInductionProblem problem =
+      makeWideMultiLiteralResetExpressionSatShortcutProblem(
+          /*wideLeafCount=*/600);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  (void)engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Sampling showed that admitting broad four-literal reset-image cubes into
+  // the full SAT shortcut simply moved the wall from exact reset-frontier BMC
+  // into Kissat.  Pair/triple probes are still allowed above, but the complete
+  // multi-literal SAT fallback must stay below the smaller support cap.
+  EXPECT_NE(
+      stderrOutput.find("miss reason=full_sat_support_cap"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=5 support=603"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSkipsHighSupportSmallResetExpressionSatShortcut) {
+  KInductionProblem problem =
+      makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/900);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  (void)engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The useful sampled AES shortcuts had support 129/135. Wider small cubes
+  // still fall through before opening Kissat, so this optional proof path
+  // cannot become a whole-chip SAT query.
+  EXPECT_NE(
+      stderrOutput.find("miss reason=full_sat_support_cap"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=3 support=901"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesOneShotResetValidationForFinalRootCegar) {
+  KInductionProblem problem =
+      makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/900);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  (void)engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Final projected-counterexample repair asks small root-cube reachability
+  // questions. Sampled AES runs showed the cached Glucose assumption path
+  // spending the wall time before learning any reset-frontier fact, so this
+  // path uses the one-shot unit-clause validator instead.
+  EXPECT_NE(
+      stderrOutput.find("mode=one_shot_unit_clauses"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("mode=cached_assumptions"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized concrete-frame conflict"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSkipsVeryWideResetExpressionSatShortcut) {
+  KInductionProblem problem =
+      makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/1032);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  (void)engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Reset-expression SAT is only a shortcut.  If the local reset support is
+  // broader than the bounded ASIC-sized proof path and no cheap relation proof
+  // applies, skip the optional SAT query and let the caller's exact
+  // validation/refinement path decide.
+  EXPECT_NE(
+      stderrOutput.find("miss reason=full_sat_support_cap"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=2 support=1033"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFiltersUnrelatedStartupEqualitiesFromResetExpressionSat) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a = 5;
+  constexpr size_t b = 6;
+  constexpr size_t reset = 7;
+  constexpr size_t firstUnrelated = 8;
+  constexpr size_t unrelatedPairs = 16;
+  problem.state0Symbols = {x, y, w, a, b};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, a, b, reset};
+  for (size_t index = 0; index < unrelatedPairs; ++index) {
+    const size_t lhs = firstUnrelated + index * 2;
+    const size_t rhs = lhs + 1;
+    problem.state0Symbols.push_back(lhs);
+    problem.state1Symbols.push_back(rhs);
+    problem.allSymbols.push_back(lhs);
+    problem.allSymbols.push_back(rhs);
+    problem.initialStateEqualityPairs.emplace_back(lhs, rhs);
+  }
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::And(
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Var(b)),
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Not(BoolExpr::Var(b)))));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  // The reset cube depends only on a and b.  Unrelated startup equalities must
+  // not be streamed into the per-cube SAT fallback.  The pair probe may prove
+  // the conflict before the full cube is queried, but the local proof should
+  // still stay restricted to the actual reset-expression support.
+  EXPECT_NE(
+      stderrOutput.find(
+          "reset-specialized expression solve cube=2 target_step=1 support=2 "
+          "initial_equalities=0 bootstrap_equalities=0"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFiltersUnrelatedBootstrapEqualitiesFromResetExpressionSat) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a = 5;
+  constexpr size_t b = 6;
+  constexpr size_t reset = 7;
+  constexpr size_t unrelated0 = 8;
+  constexpr size_t unrelated1 = 9;
+  constexpr size_t unrelatedLeaf0 = 10;
+  constexpr size_t unrelatedLeaf1 = 11;
+  problem.state0Symbols = {x, y, w, a, b, unrelated0, unrelatedLeaf0};
+  problem.state1Symbols = {unrelated1, unrelatedLeaf1};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {
+      x, y, w, a, b, reset, unrelated0, unrelated1, unrelatedLeaf0,
+      unrelatedLeaf1};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateEqualityPairs = {{unrelated0, unrelated1}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::And(
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Var(b)),
+          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Not(BoolExpr::Var(b)))));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  problem.transitions0.emplace_back(unrelated0, BoolExpr::Var(unrelatedLeaf0));
+  problem.transitions1.emplace_back(unrelated1, BoolExpr::Var(unrelatedLeaf1));
+  problem.transitions0.emplace_back(unrelatedLeaf0, BoolExpr::Var(unrelatedLeaf0));
+  problem.transitions1.emplace_back(unrelatedLeaf1, BoolExpr::Var(unrelatedLeaf1));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  // Bootstrap equality expressions are valid reset-frontier constraints, but
+  // unrelated ones must not pull extra reset cones into a local cube proof.
+  EXPECT_NE(
+      stderrOutput.find(
+          "reset-specialized expression solve cube=2 target_step=1 support=2 "
+          "initial_equalities=0 bootstrap_equalities=0"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetSpecializedInitialEqualitiesBeforeExactRootResetFrontier) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a0 = 5;
+  constexpr size_t a1 = 6;
+  constexpr size_t reset = 7;
+  problem.state0Symbols = {x, y, a0};
+  problem.state1Symbols = {w, a1};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, a0, a1, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.initialStateEqualityPairs = {{a0, a1}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  // The post-reset relation y == w is not visible in the reset expressions
+  // alone: y depends on a0 and w depends on a1. It becomes provable only after
+  // applying the SEC frame-0 equality a0 == a1. AES samples hit this shape as a
+  // tiny root cube that otherwise fell into the expensive concrete reset-frontier
+  // SAT unroll.
+  problem.transitions0.emplace_back(y, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(w, BoolExpr::Var(a1));
+  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized expression conflict"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetSpecializedBootstrapEqualitiesBeforeExpressionSat) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a0 = 5;
+  constexpr size_t a1 = 6;
+  constexpr size_t reset = 7;
+  problem.state0Symbols = {x, y, a0};
+  problem.state1Symbols = {w, a1};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, a0, a1, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateEqualityPairs = {{a0, a1}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  // The reset cube y=1,w=0 is excluded by the post-bootstrap equality
+  // a0 == a1 after substituting y'=a0 and w'=a1. This should be detected as a
+  // relation conflict before invoking the broader reset-expression SAT query.
+  problem.transitions0.emplace_back(y, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(w, BoolExpr::Var(a1));
+  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("via=bootstrap_relation"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solver_profile=pdr"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineRewritesBootstrapEqualitiesInsideResetExpressions) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a0 = 5;
+  constexpr size_t a1 = 6;
+  constexpr size_t shared = 7;
+  constexpr size_t reset = 8;
+  problem.state0Symbols = {x, y, a0, shared};
+  problem.state1Symbols = {w, a1};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, a0, a1, shared, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateEqualityPairs = {{a0, a1}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  // y and w are not directly equal expressions. They become equal only after
+  // rewriting the children a0/a1 through the bootstrap equality, matching the
+  // AES reset-image shape that sampled inside the exact reset-frontier SAT
+  // unroll.
+  problem.transitions0.emplace_back(
+      y, BoolExpr::And(BoolExpr::Var(a0), BoolExpr::Var(shared)));
+  problem.transitions1.emplace_back(
+      w, BoolExpr::And(BoolExpr::Var(a1), BoolExpr::Var(shared)));
+  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
+  problem.transitions0.emplace_back(shared, BoolExpr::Var(shared));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar proofConflictLimit(
+      "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT", "0");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("via=bootstrap_rewrite"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetExpressionImplicationBeforeExactFrontier) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t guard = 3;
+  constexpr size_t payload = 4;
+  constexpr size_t a0 = 5;
+  constexpr size_t a1 = 6;
+  constexpr size_t reset = 7;
+  problem.state0Symbols = {x, guard, payload, a0};
+  problem.state1Symbols = {a1};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, guard, payload, a0, a1, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateEqualityPairs = {{a0, a1}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(
+              BoolExpr::Not(BoolExpr::Var(guard)),
+              BoolExpr::Var(payload))));
+  // payload' implies guard' after rewriting a0/a1 through the bootstrap
+  // equality. The cube guard=0,payload=1 is therefore impossible, but the
+  // expressions are not equivalent, so the reset-specialized proof must learn
+  // the implication structurally instead of falling into the exact SAT unroll.
+  problem.transitions0.emplace_back(guard, BoolExpr::Var(a0));
+  problem.transitions0.emplace_back(
+      payload, BoolExpr::And(BoolExpr::Var(a1), BoolExpr::Var(payload)));
+  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar proofConflictLimit(
+      "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT", "0");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("via=bootstrap_rewrite_implication"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-specialized expression solve cube=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetSpecializedExpressionSatForWideRootCubes) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t a0 = 5;
+  constexpr size_t a1 = 6;
+  constexpr size_t reset = 7;
+  constexpr size_t firstExtra = 8;
+  constexpr size_t extraCount = 9;
+
+  problem.state0Symbols = {x, y, a0};
+  problem.state1Symbols = {w, a1};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, a0, a1, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.initialStateEqualityPairs = {{a0, a1}};
+
+  BoolExpr* rootCubeDriver =
+      BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)));
+  for (size_t index = 0; index < extraCount; ++index) {
+    const size_t symbol = firstExtra + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+    rootCubeDriver = BoolExpr::And(rootCubeDriver, BoolExpr::Var(symbol));
+  }
+
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(reset)), rootCubeDriver));
+  // This wide root cube is reset-unreachable only after substituting the reset
+  // expressions y'=a0 and w'=a1 and applying the SEC frame-0 equality a0 == a1.
+  // AES produced the same shape with 108 literals; falling back to exact
+  // reset-frontier SAT there was the sampled runtime wall.
+  problem.transitions0.emplace_back(y, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(w, BoolExpr::Var(a1));
+  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
+  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
+  problem.bad = BoolExpr::Var(x);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/32,
+      /*preciseBadCubeStateLimit=*/32,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("reset-specialized expression conflict"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineCanonicalizesResetSpecializedExpressionsBeforeSat) {
+  KInductionProblem problem;
+  constexpr size_t x0 = 2;
+  constexpr size_t x1 = 3;
+  constexpr size_t y = 4;
+  constexpr size_t w = 5;
+  constexpr size_t e0 = 6;
+  constexpr size_t e1 = 7;
+  constexpr size_t a = 8;
+  constexpr size_t b = 9;
+  constexpr size_t reset = 10;
+
+  problem.state0Symbols = {x0, x1, y, w, e0, e1, a, b};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x0, x1, y, w, e0, e1, a, b, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  const auto gatedBad =
+      [&](BoolExpr* extra) {
+        return BoolExpr::And(
+            BoolExpr::Not(BoolExpr::Var(reset)),
+            BoolExpr::And(
+                BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w))),
+                extra));
+      };
+  problem.transitions0.emplace_back(x0, gatedBad(BoolExpr::Var(e0)));
+  problem.transitions0.emplace_back(x1, gatedBad(BoolExpr::Var(e1)));
+  // Both bad predecessors are reset-unreachable for the same reason:
+  // y' = a | (a & b) is Boolean-equivalent to w' = a. The sampled AES run was
+  // spending time in the reset-specialized SAT fallback for this shape, so the
+  // canonical pass should learn the conflict before invoking that solver.
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::Or(BoolExpr::Var(a),
+                   BoolExpr::And(BoolExpr::Var(a), BoolExpr::Var(b))));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(e0, BoolExpr::Var(e0));
+  problem.transitions0.emplace_back(e1, BoolExpr::Var(e1));
+  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
+  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
+  problem.bad = BoolExpr::Or(BoolExpr::Var(x0), BoolExpr::Var(x1));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/32,
+      /*preciseBadCubeStateLimit=*/32,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("via=canonical"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineValidatedBadFormulaLearningRepairsBeforePostBootstrapPrecheck) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.inputSymbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{4, false}};
+  problem.bootstrapStateAssignments = {{2, false}};
+  problem.transitions0.emplace_back(2, BoolExpr::And(BoolExpr::Var(4), BoolExpr::Var(3)));
+  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/true,
+      /*useExactResetFrontierChecks=*/true);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find(
+          "refined projected counterexample with validated bad-formula clauses"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("k-induction base coi"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineExactResetFrontierBlocksBeforeRootMinimization) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t z = 5;
+  constexpr size_t reset = 6;
+  problem.state0Symbols = {x, y, w, z};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, z, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  // The concrete reset step creates y == w, but that relation is intentionally
+  // not summarized in F0. Exact reset-frontier predecessor checks should block
+  // the abstract predecessor before PDR learns a root obligation and starts any
+  // optional root-cube minimization work.
+  problem.transitions0.emplace_back(y, BoolExpr::Var(w));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(w));
+  problem.transitions0.emplace_back(z, BoolExpr::Var(z));
+  problem.bad = BoolExpr::And(BoolExpr::Var(x), BoolExpr::Var(z));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(stderrOutput.find("post_bootstrap_steps=1"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("exact_reset_frontier=1 result=unsat"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset-frontier core"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("post_bootstrap_steps=0 frames=2 "
+                        "solver_symbols=5 transition_targets=4 cube_literals=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSkipsExactResetPrecheckForUnprojectedPredecessorQuery) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t z = 5;
+  constexpr size_t reset = 6;
+  problem.state0Symbols = {x, y, w, z};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, z, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  problem.transitions0.emplace_back(y, BoolExpr::Var(w));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(w));
+  problem.transitions0.emplace_back(z, BoolExpr::Var(z));
+  problem.bad = BoolExpr::And(BoolExpr::Var(x), BoolExpr::Var(z));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/0,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("exact_reset_frontier=skipped"),
+      std::string::npos)
+      << stderrOutput;
+  // In unprojected mode the normal predecessor SAT query is already exact.
+  // Do not spend the sampled AES wall time on an extra one-step reset-image
+  // query before that exact predecessor query has a chance to run.
+  EXPECT_EQ(
+      stderrOutput.find("reset frontier cube coi post_bootstrap_steps=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineValidatedLearningKeepsRootResetFrontierRefinementDisabled) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t w = 4;
+  constexpr size_t z = 5;
+  constexpr size_t reset = 6;
+  problem.state0Symbols = {x, y, w, z};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, w, z, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
+  problem.transitions0.emplace_back(y, BoolExpr::Var(w));
+  problem.transitions0.emplace_back(w, BoolExpr::Var(w));
+  problem.transitions0.emplace_back(z, BoolExpr::Var(z));
+  problem.bad = BoolExpr::And(BoolExpr::Var(x), BoolExpr::Var(z));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/true,
+      /*useExactResetFrontierChecks=*/true);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find(
+          "refined projected counterexample with validated bad-formula clauses"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset frontier cube coi post_bootstrap_steps=0"),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("reset-frontier core"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ResetFrontierReachabilityExtractsSmallUnreachableCubeCore) {
   KInductionProblem problem;
   constexpr size_t resetForcedLow = 2;
@@ -6595,6 +8609,300 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilitySkipsDanglingInitialEqualityTails) {
+  KInductionProblem problem;
+  constexpr size_t y = 2;
+  constexpr size_t x = 3;
+  constexpr size_t equalityTailBase = 100;
+  constexpr size_t equalityTailLength = 20;
+  problem.state0Symbols = {y, x};
+  problem.allSymbols = {y, x};
+  for (size_t offset = 0; offset < equalityTailLength; ++offset) {
+    const size_t symbol = equalityTailBase + offset;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+  problem.transitions0.emplace_back(y, BoolExpr::Var(x));
+  problem.transitions0.emplace_back(x, BoolExpr::Var(x));
+  problem.initialStateEqualityPairs.emplace_back(x, equalityTailBase);
+  for (size_t offset = 1; offset < equalityTailLength; ++offset) {
+    problem.initialStateEqualityPairs.emplace_back(
+        equalityTailBase + offset - 1, equalityTailBase + offset);
+  }
+
+  const TransitionExprResolver transitionByState(problem);
+  const auto context =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+
+  // The equality tail is existential-only: no cube literal, transition, or
+  // initial assignment observes the far end.  Closing the whole tail is exact
+  // but wasteful; AES PDR samples showed these dangling relational tails
+  // inflating final reset-frontier SAT queries.
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_TRUE(isStateCubeReachableAtResetFrontierOneShot(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      std::vector<std::pair<size_t, bool>>{{y, true}},
+      1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(stderrOutput.find("solver_symbols=2"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilityRelaxedPostBootstrapOneShotCanAvoidExactCoi) {
+  KInductionProblem problem;
+  constexpr size_t observed = 2;
+  constexpr size_t bootstrapGuard = 3;
+  constexpr size_t reset = 4;
+  constexpr size_t equalityTailBase = 100;
+  constexpr size_t equalityTailLength = 32;
+  problem.state0Symbols = {observed, bootstrapGuard};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {observed, bootstrapGuard, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateAssignments = {{bootstrapGuard, false}};
+  problem.transitions0.emplace_back(observed, BoolExpr::Var(bootstrapGuard));
+  problem.transitions0.emplace_back(bootstrapGuard, BoolExpr::Var(bootstrapGuard));
+  for (size_t offset = 0; offset < equalityTailLength; ++offset) {
+    const size_t symbol = equalityTailBase + offset;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  problem.bootstrapStateEqualityPairs.emplace_back(
+      bootstrapGuard, equalityTailBase);
+  for (size_t offset = 1; offset < equalityTailLength; ++offset) {
+    problem.bootstrapStateEqualityPairs.emplace_back(
+        equalityTailBase + offset - 1, equalityTailBase + offset);
+  }
+
+  const TransitionExprResolver transitionByState(problem);
+  const auto context =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(isStateCubeReachableAtResetFrontierOneShot(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      std::vector<std::pair<size_t, bool>>{{observed, true}},
+      1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The relaxed precheck drops only startup equality closure, so UNSAT remains
+  // a sound reset-frontier proof. It should avoid opening the exact COI that
+  // would pull the whole bootstrap equality tail into this local contradiction.
+  EXPECT_NE(
+      stderrOutput.find("reset frontier relaxed one-shot cube coi"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset frontier one-shot cube coi"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilityRelaxedPostBootstrapCachedCanAvoidExactCoi) {
+  KInductionProblem problem;
+  constexpr size_t observed = 2;
+  constexpr size_t bootstrapGuard = 3;
+  constexpr size_t reset = 4;
+  constexpr size_t equalityTailBase = 100;
+  constexpr size_t equalityTailLength = 32;
+  problem.state0Symbols = {observed, bootstrapGuard};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {observed, bootstrapGuard, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateAssignments = {{bootstrapGuard, false}};
+  problem.transitions0.emplace_back(observed, BoolExpr::Var(bootstrapGuard));
+  problem.transitions0.emplace_back(bootstrapGuard, BoolExpr::Var(bootstrapGuard));
+  for (size_t offset = 0; offset < equalityTailLength; ++offset) {
+    const size_t symbol = equalityTailBase + offset;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  problem.bootstrapStateEqualityPairs.emplace_back(
+      bootstrapGuard, equalityTailBase);
+  for (size_t offset = 1; offset < equalityTailLength; ++offset) {
+    problem.bootstrapStateEqualityPairs.emplace_back(
+        equalityTailBase + offset - 1, equalityTailBase + offset);
+  }
+
+  const TransitionExprResolver transitionByState(problem);
+  const auto context =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(isStateCubeReachableAtResetFrontier(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      std::vector<std::pair<size_t, bool>>{{observed, true}},
+      1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Cached-assumption validation is the PDR hot path. It should use the same
+  // sound relaxed UNSAT precheck as one-shot validation before opening the
+  // wider exact Glucose assumption solver sampled in AES.
+  EXPECT_NE(
+      stderrOutput.find("reset frontier relaxed cached cube coi"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset frontier cube coi"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilitySkipsBroadRelaxedCachedPrecheck) {
+  KInductionProblem problem;
+  constexpr size_t observed = 2;
+  constexpr size_t reset = 3;
+  constexpr size_t supportBase = 100;
+  constexpr size_t supportCount = 300;
+  problem.state0Symbols = {observed};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {observed, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+
+  BoolExpr* observedNext = BoolExpr::createFalse();
+  for (size_t offset = 0; offset < supportCount; ++offset) {
+    const size_t symbol = supportBase + offset;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+    observedNext = BoolExpr::Or(observedNext, BoolExpr::Var(symbol));
+  }
+  problem.transitions0.emplace_back(observed, observedNext);
+
+  const TransitionExprResolver transitionByState(problem);
+  const auto context =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_TRUE(isStateCubeReachableAtResetFrontier(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      std::vector<std::pair<size_t, bool>>{{observed, true}},
+      1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The relaxed precheck is only a local UNSAT shortcut. If it still pulls a
+  // broad transition surface, skip solving it and fall through to the exact
+  // cached reset-frontier query instead of creating an unbounded PDR wall.
+  EXPECT_NE(
+      stderrOutput.find(
+          "reset frontier relaxed cached precheck skipped reason=coi_cap"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("reset frontier cube coi"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilityUsesValidatedFrameInvariantAfterStartup) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t z = 4;
+  constexpr size_t reset = 5;
+  problem.state0Symbols = {x, y, z};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, z, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::Not(makeEqualityExpr(BoolExpr::Var(y), BoolExpr::Var(z))));
+  problem.transitions0.emplace_back(y, BoolExpr::Var(y));
+  problem.transitions0.emplace_back(z, BoolExpr::Var(z));
+
+  const TransitionExprResolver transitionByState(problem);
+  const std::vector<std::pair<size_t, bool>> targetCube = {{x, true}};
+  const auto plainContext =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+  ASSERT_TRUE(isStateCubeReachableAtResetFrontierOneShot(
+      *plainContext,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      targetCube,
+      1));
+
+  // PDR validates the invariant separately before passing it into this helper.
+  // The bounded transition prefix is unchanged, but from the startup frontier
+  // onward y==z makes x unreachable one post-bootstrap step later.
+  BoolExpr* frameInvariant =
+      makeEqualityExpr(BoolExpr::Var(y), BoolExpr::Var(z));
+  const auto invariantContext =
+      makeResetFrontierReachabilityContext(
+          problem, transitionByState, frameInvariant);
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(isStateCubeReachableAtResetFrontierOneShot(
+      *invariantContext,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      targetCube,
+      1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
+      stderrOutput.find("frame_invariant_symbols=2"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilityRejectsTransitiveKnownFactConflictBeforeSat) {
+  KInductionProblem problem;
+  constexpr size_t stateA = 2;
+  constexpr size_t stateB = 3;
+  constexpr size_t stateC = 4;
+  constexpr size_t reset = 5;
+  problem.state0Symbols = {stateA, stateB, stateC};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {stateA, stateB, stateC, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  // The reset frontier contains a == b and b == c, so a != c is impossible
+  // even though no direct equality pair mentions both cube literals.
+  problem.bootstrapStateEqualityPairs = {{stateA, stateB}, {stateB, stateC}};
+
+  const TransitionExprResolver transitionByState(problem);
+  const auto context =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(isStateCubeReachableAtResetFrontier(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      std::vector<std::pair<size_t, bool>>{{stateA, true}, {stateC, false}},
+      0));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
+      stderrOutput.find("reset frontier known facts exclude cube"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset frontier cube coi"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ResetFrontierReachabilityReusesCachedUnreachableCores) {
   KInductionProblem problem;
   constexpr size_t resetForcedLow = 2;
@@ -6689,7 +8997,107 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_NE(
+      stderrOutput.find("reset frontier relaxed cached cube coi"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset frontier cube coi"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilityUsesPriorCoreAsSafePrefixBlocker) {
+  KInductionProblem problem;
+  constexpr size_t resetForcedLow = 2;
+  constexpr size_t reset = 3;
+  problem.state0Symbols = {resetForcedLow};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {resetForcedLow, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(
+      resetForcedLow,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::Var(resetForcedLow)));
+
+  const TransitionExprResolver transitionByState(problem);
+  const auto context =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+  const std::vector<std::pair<size_t, bool>> unreachableCube = {
+      {resetForcedLow, true}};
+
+  ASSERT_FALSE(isStateCubeReachableAtResetFrontier(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      unreachableCube,
+      0));
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(isStateCubeReachableAtResetFrontier(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      unreachableCube,
+      1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
+      stderrOutput.find("reset frontier previous unreachable blockers=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ResetFrontierReachabilityCachesPostBootstrapOneShotFailures) {
+  KInductionProblem problem;
+  constexpr size_t resetForcedLow = 2;
+  constexpr size_t neighborState = 3;
+  constexpr size_t reset = 4;
+  problem.state0Symbols = {resetForcedLow, neighborState};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {resetForcedLow, neighborState, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateAssignments = {{resetForcedLow, false}};
+  problem.transitions0.emplace_back(
+      resetForcedLow,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          BoolExpr::Var(resetForcedLow)));
+  problem.transitions0.emplace_back(neighborState, BoolExpr::Var(neighborState));
+
+  const TransitionExprResolver transitionByState(problem);
+  const auto context =
+      makeResetFrontierReachabilityContext(problem, transitionByState);
+  const std::vector<std::pair<size_t, bool>> unreachableCube = {
+      {resetForcedLow, true}, {neighborState, false}};
+
+  // One-shot PDR prechecks at post-bootstrap depths must populate the shared
+  // unreachable-core cache too; otherwise a repeated target rebuilds the same
+  // reset COI instead of taking the cheap cache hit.
+  ASSERT_FALSE(isStateCubeReachableAtResetFrontierOneShot(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      unreachableCube,
+      1));
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(isStateCubeReachableAtResetFrontier(
+      *context,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      unreachableCube,
+      1));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
       stderrOutput.find("reset frontier cached unreachable core hit"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset frontier cube coi"),
       std::string::npos)
       << stderrOutput;
 }
@@ -6800,7 +9208,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   constexpr size_t y = 2;
   constexpr size_t reset = 100;
   constexpr size_t supportBase = 200;
-  constexpr size_t supportCount = 80;
+  constexpr size_t supportCount = 300;
   problem.state0Symbols.push_back(y);
   problem.allSymbols.push_back(y);
   BoolExpr* nextY = BoolExpr::createFalse();
@@ -7274,8 +9682,135 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
+      stderrOutput.find(
+          "concrete cube reachability begin cube=2 max_step=2 "
+          "mode=one_shot_unit_clauses"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find(
+          "concrete cube reachability begin cube=2 max_step=2 "
+          "mode=cached_assumptions"),
+      std::string::npos);
+  EXPECT_NE(
       stderrOutput.find("refined projected counterexample bad_frame=2 root_cube=2->2 checks=0"),
       std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetSpecializedConcreteFrameConflictBeforeBmcUnroll) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t gate = 4;
+  constexpr size_t badState = 5;
+  constexpr size_t reset = 6;
+  problem.state0Symbols = {x, y, gate, badState};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {x, y, gate, badState, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.transitions0.emplace_back(x, BoolExpr::Not(BoolExpr::Var(reset)));
+  problem.transitions0.emplace_back(y, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(gate, BoolExpr::Not(BoolExpr::Var(reset)));
+  problem.transitions0.emplace_back(
+      badState,
+      BoolExpr::And(
+          BoolExpr::And(BoolExpr::Var(x), BoolExpr::Var(y)),
+          BoolExpr::Var(gate)));
+  problem.bad = BoolExpr::And(BoolExpr::Var(badState), BoolExpr::Var(gate));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find(
+          "concrete cube reachability step step=1 result=unsat"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("one-shot cube coi post_bootstrap_steps=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesCheckedResetFramePropertyWithStructuredInitFacts) {
+  KInductionProblem problem;
+  constexpr size_t badState = 2;
+  constexpr size_t eqLhs = 3;
+  constexpr size_t eqRhs = 4;
+  constexpr size_t reset = 5;
+
+  problem.state0Symbols = {badState, eqLhs, eqRhs};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {badState, eqLhs, eqRhs, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  // This unrelated structured fact makes PDR use the sparse structured-init
+  // path. The regression was that this path skipped the checked F[0] property.
+  problem.bootstrapStateEqualityPairs = {{eqLhs, eqRhs}};
+  problem.transitions0.emplace_back(
+      badState,
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(reset)), BoolExpr::Var(badState)));
+  problem.transitions0.emplace_back(eqLhs, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(eqRhs, BoolExpr::createFalse());
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/0,
+      /*preciseBadCubeStateLimit=*/1,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/false,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(stderrOutput.find("predecessor #1 result=unsat"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("counterexample candidate reached init"),
+            std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -7425,6 +9960,95 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find(" clauses=2"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineRepairsBroadValidatedBadFormulaLearningPerOutput) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  auto makeConjunction = [](const std::vector<size_t>& symbols) {
+    BoolExpr* expr = BoolExpr::createTrue();
+    for (const auto symbol : symbols) {
+      expr = BoolExpr::And(expr, BoolExpr::Var(symbol));
+    }
+    return BoolExpr::simplify(expr);
+  };
+
+  std::vector<BoolExpr*> outputs;
+  size_t nextSymbol = 2;
+  for (size_t output = 0; output < 10; ++output) {
+    const size_t base = nextSymbol;
+    nextSymbol += 7;
+    std::vector<size_t> group;
+    group.reserve(6);
+    for (size_t offset = 0; offset < 6; ++offset) {
+      const size_t symbol = base + offset;
+      group.push_back(symbol);
+      problem.state0Symbols.push_back(symbol);
+      problem.allSymbols.push_back(symbol);
+      problem.initialStateAssignments.push_back({symbol, false});
+      init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    }
+
+    // One permanently false bit keeps every per-output conjunction unreachable,
+    // while the projected bad cube remains small enough to exercise PDR's
+    // concrete root-cube refinement after broad bad-formula validation is
+    // deliberately skipped.
+    problem.transitions0.emplace_back(base + 0, BoolExpr::createTrue());
+    problem.transitions0.emplace_back(base + 1, BoolExpr::createFalse());
+    problem.transitions0.emplace_back(base + 2, BoolExpr::createTrue());
+    problem.transitions0.emplace_back(base + 3, BoolExpr::createTrue());
+    problem.transitions0.emplace_back(base + 4, BoolExpr::createTrue());
+    problem.transitions0.emplace_back(base + 5, BoolExpr::createTrue());
+
+    outputs.push_back(makeConjunction(group));
+    problem.observedOutputNames.push_back("o" + std::to_string(output));
+  }
+
+  problem.observedOutputExprs0 = outputs;
+  problem.observedOutputExprs1.assign(outputs.size(), BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = BoolExpr::createFalse();
+  for (auto* outputExpr : outputs) {
+    problem.bad = BoolExpr::Or(problem.bad, outputExpr);
+  }
+  problem.bad = BoolExpr::simplify(problem.bad);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 3)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("skipped broad bad-formula validation"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "per-output validated bad-formula clauses bad_frame=1 outputs=1 clauses=1"),
+      std::string::npos)
       << stderrOutput;
 }
 

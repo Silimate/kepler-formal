@@ -28,6 +28,64 @@ namespace {
 constexpr size_t kMaxResetFrontierCachedSolvers = 64;
 constexpr size_t kMinResetFrontierCoreChecks = 64;
 constexpr size_t kMaxResetFrontierCachedCoresPerFrame = 4096;
+constexpr size_t kMaxPreviousResetFrontierBlockersPerQuery = 64;
+// The relaxed post-bootstrap query is only a shortcut before the exact
+// reset-frontier solver. Sampling AES PDR showed this shortcut can become the
+// wall when it fails to shrink the COI, so keep it local and resource-bounded.
+constexpr size_t kMaxRelaxedResetFrontierPrecheckSymbols = 256;
+constexpr size_t kMaxRelaxedResetFrontierPrecheckTransitionTargets = 128;
+constexpr unsigned kRelaxedResetFrontierPrecheckConflictLimit = 10000;
+// BlackParrot PDR samples showed the full reset-frontier fallback exploding to
+// hundreds of thousands of symbols while the reset-summary query stayed much
+// smaller (about 90k symbols / 88k transition targets at the slow frontier).
+// Let that exact UNSAT precheck run before opening the full prefix.
+constexpr size_t kMaxResetSummaryPrecheckSymbols = 200000;
+constexpr size_t kMaxResetSummaryPrecheckTransitionTargets = 200000;
+// This summary query is the cheap alternative to the full reset-frontier
+// fallback. BlackParrot PDR samples showed 65k-symbol summary proofs giving up
+// after the old tiny cap, then falling into 600k+ symbol exact Glucose
+// assumption solves. Spend the bounded effort here where the COI is smaller.
+constexpr unsigned kResetSummaryPrecheckConflictLimit = 5000;
+constexpr unsigned kResetSummaryFrontierProofConflictLimit = 2000;
+constexpr unsigned kResetSummarySingletonProofConflictLimit = 1000;
+constexpr long long kResetFrontierCachedAssumptionConflictLimit = 10000;
+constexpr long long kResetFrontierBatchProofPropagationLimit = 250000;
+constexpr size_t kMaxResetSummaryFrontierBlockers = 256;
+constexpr size_t kMaxResetSummaryRefinements = 4;
+constexpr size_t kMaxResetSummaryFrontierCubeLiterals = 100000;
+constexpr size_t kMaxResetSummaryFrontierProofCubeLiterals = 8192;
+constexpr size_t kMaxResetSummaryFrontierProofSymbols = 20000;
+constexpr size_t kMaxResetSummaryFrontierProofTransitionTargets = 20000;
+constexpr size_t kMaxResetSummaryBulkSingletonBlockers = 128;
+constexpr size_t kMaxResetSummaryCachedCois = 64;
+// PDR often proves all but one concrete reset frame through cheap cached cores
+// before asking the exact bounded fallback. In that sparse case a prefix query
+// that targets every frame widens the COI unnecessarily; use exact per-step
+// solvers while only a couple of frames remain.
+constexpr size_t kMaxSparseResetFrontierPerStepChecks = 2;
+// Transition node counts are only reserve hints for FrameFormulaEncoder.
+// BlackParrot reset-frontier sampling showed exact counting across ~86k
+// transition targets dominating the whole query before any CNF was emitted.
+// Keep exact hints for local cones and skip the prepass for ASIC-sized groups;
+// the encoder still grows its cache geometrically while emitting the same CNF.
+constexpr size_t kMaxExactTransitionNodeCountHintTargets = 512;
+
+bool resetFrontierAssumptionSolvesDisabled() {
+  return std::getenv("KEPLER_SEC_PDR_DISABLE_RESET_FRONTIER_ASSUMPTIONS") !=
+         nullptr;
+}
+
+SATSolverWrapper::SolveStatus solveResetFrontierUnitClauseQuery(
+    SATSolverWrapper& solver,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    int64_t conflictLimit) {
+  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+      conflictLimit >= 0) {
+    return solver.solveWithKissatResourceLimits(
+        static_cast<unsigned>(conflictLimit));
+  }
+  return solver.solveStatus();
+}
 
 enum class InitialConstraintMode {
   None,
@@ -66,6 +124,7 @@ InitialConstraintMode determineInitialConstraintMode(const KInductionProblem& pr
 
 struct BaseCaseCoi {
   std::vector<std::vector<size_t>> transitionTargetsByFrame;
+  std::vector<std::vector<size_t>> requiredStateSymbolsByFrame;
   std::vector<size_t> solverSymbols;
   std::unordered_set<size_t> solverSymbolSet;
 };
@@ -78,6 +137,11 @@ struct CachedResetFrontierSolver {
       KEPLER_FORMAL::Config::SolverType::KISSAT;
   size_t targetFrame = 0;
   bool cubeEncodedAsUnitClauses = false;
+};
+
+struct CachedResetSummaryCoi {
+  BaseCaseCoi coi;
+  size_t transitionTargets = 0;
 };
 
 std::unordered_map<size_t, size_t> buildPrimaryByComplementSymbol(
@@ -135,9 +199,14 @@ struct EqualityIndex {
 struct ResetFrontierReachabilityContextData {
   ResetFrontierReachabilityContextData(
       const KInductionProblem& problem,
-      const TransitionExprResolver& transitionByState)
+      const TransitionExprResolver& transitionByState,
+      BoolExpr* frameInvariant = nullptr)
       : problem(problem),
         transitionByState(transitionByState),
+        frameInvariant(frameInvariant),
+        frameInvariantSupport(frameInvariant != nullptr
+                                  ? frameInvariant->getSupportVars()
+                                  : std::set<size_t>{}),
         bootstrapFrames(resetBootstrapFrames(problem)),
         initialMode(bootstrapFrames == 0 ? determineInitialConstraintMode(problem)
                                          : InitialConstraintMode::None),
@@ -147,6 +216,11 @@ struct ResetFrontierReachabilityContextData {
 
   const KInductionProblem& problem;
   const TransitionExprResolver& transitionByState;
+  // Optional caller-validated invariant for frames at and after the concrete
+  // startup frontier. PDR proves this separately before using it here; the
+  // reset-frontier BMC only consumes it as an extra exact reachable-state fact.
+  BoolExpr* frameInvariant = nullptr;
+  std::set<size_t> frameInvariantSupport;
   size_t bootstrapFrames = 0;
   InitialConstraintMode initialMode = InitialConstraintMode::None;
   std::unordered_map<size_t, size_t> primaryByComplement;
@@ -158,6 +232,12 @@ struct ResetFrontierReachabilityContextData {
   // values through SAT assumptions.
   mutable std::unordered_map<std::string, std::unique_ptr<CachedResetFrontierSolver>>
       cachedSolvers;
+  // Shared-prefix reset-frontier queries check one cube against every concrete
+  // post-bootstrap frame up to a depth. The COI depends only on the cube
+  // symbols and max frame, so cache that exact solver separately from the
+  // single-frontier cache and vary literal values through assumptions.
+  mutable std::unordered_map<std::string, std::unique_ptr<CachedResetFrontierSolver>>
+      cachedPrefixSolvers;
   // Exact reset-frontier UNSAT cores are reusable across neighboring cubes:
   // once core C is proven unreachable, every later cube containing C is also
   // unreachable. BlackParrot PDR sampling showed thousands of repeated
@@ -167,6 +247,11 @@ struct ResetFrontierReachabilityContextData {
       size_t,
       std::vector<std::vector<std::pair<size_t, bool>>>>
       unreachableCoresByTargetFrame;
+  // The reset-summary precheck is often asked about neighboring cubes that
+  // share the same support at the same post-bootstrap depth. Its COI is
+  // support-only, so cache it separately from SAT solvers and vary values later.
+  mutable std::unordered_map<std::string, CachedResetSummaryCoi>
+      cachedResetSummaryCois;
 };
 
 std::unordered_set<size_t> buildStateSymbolSet(const KInductionProblem& problem) {
@@ -200,6 +285,16 @@ std::vector<size_t> sortedSymbols(const std::unordered_set<size_t>& symbols) {
   return sorted;
 }
 
+std::vector<std::vector<size_t>> sortedFrameStates(
+    const std::vector<std::unordered_set<size_t>>& requiredStates) {
+  std::vector<std::vector<size_t>> sorted;
+  sorted.reserve(requiredStates.size());
+  for (const auto& frameStates : requiredStates) {
+    sorted.push_back(sortedSymbols(frameStates));
+  }
+  return sorted;
+}
+
 std::set<size_t> formulaSupportOrThrow(BoolExpr* formula, const char* context) {
   if (formula == nullptr) {
     throw std::runtime_error(
@@ -227,33 +322,6 @@ void addFormulaSupport(BoolExpr* formula, std::unordered_set<size_t>& output) {
     return;
   }
   for (const auto symbol : formula->getSupportVars()) {
-    if (symbol >= 2) {
-      output.insert(symbol);
-    }
-  }
-}
-
-void addTransitionStateSupport(
-    const TransitionExprResolver& transitionByState,
-    size_t stateSymbol,
-    const std::unordered_set<size_t>& stateSymbols,
-    std::unordered_set<size_t>& output) {
-  // TransitionExprResolver already caches each next-state cone support.  The
-  // reset-frontier checks used by PDR can issue many tiny COI queries, so
-  // reusing this cache avoids repeatedly walking and allocating support sets
-  // for the same ASIC-size transition formula.
-  for (const auto symbol : transitionByState.support(stateSymbol)) {
-    if (stateSymbols.find(symbol) != stateSymbols.end()) {
-      output.insert(symbol);
-    }
-  }
-}
-
-void addTransitionSupport(
-    const TransitionExprResolver& transitionByState,
-    size_t stateSymbol,
-    std::unordered_set<size_t>& output) {
-  for (const auto symbol : transitionByState.support(stateSymbol)) {
     if (symbol >= 2) {
       output.insert(symbol);
     }
@@ -331,6 +399,18 @@ FrameSymbolAliases buildResetFrontierFrameAliases(
   return aliasesByFrame;
 }
 
+FrameSymbolAliases buildResetSummaryFrameAliases(
+    const ResetFrontierReachabilityContextData& context,
+    const BaseCaseCoi& coi,
+    size_t numFrames) {
+  FrameSymbolAliases aliasesByFrame(numFrames);
+  if (!aliasesByFrame.empty()) {
+    aliasesByFrame[0] =
+        context.bootstrapEqualities.pairsWithin(coi.solverSymbolSet);
+  }
+  return aliasesByFrame;
+}
+
 std::vector<size_t> expandTransitionTargets(
     const std::unordered_set<size_t>& requestedTargets,
     const TransitionExprResolver& transitionByState,
@@ -389,7 +469,8 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
                              size_t bootstrapFrames,
                              size_t firstBadFrame,
                              size_t internalK,
-                             bool constrainPreviouslySafeFrames) {
+                             bool constrainPreviouslySafeFrames,
+                             bool closeStartupEqualityDependencies) {
   // Cone-of-influence reduction for the base query. The original formula is
   // still the same bounded counterexample check, but we avoid allocating and
   // constraining state bits that cannot influence any checked bad output.
@@ -442,7 +523,9 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(internalK);
   for (size_t frame = internalK; frame > 0; --frame) {
-    if (bootstrapFrames != 0 && frame == bootstrapFrames) {
+    if (closeStartupEqualityDependencies &&
+        bootstrapFrames != 0 &&
+        frame == bootstrapFrames) {
       closeFrameEqualityDependencies(
           problem.bootstrapStateEqualityPairs, requiredStates[frame]);
     }
@@ -451,13 +534,14 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
         transitionByState,
         primaryByComplement);
     transitionTargetsByFrame[frame - 1] = targets;
-    for (const auto target : targets) {
-      addTransitionStateSupport(
-          transitionByState, target, stateSymbols, requiredStates[frame - 1]);
-    }
+    transitionByState.collectSupportForTargets(
+        targets, stateSymbols, requiredStates[frame - 1], solverSymbols);
   }
 
-  closeFrameEqualityDependencies(problem.initialStateEqualityPairs, requiredStates[0]);
+  if (closeStartupEqualityDependencies) {
+    closeFrameEqualityDependencies(
+        problem.initialStateEqualityPairs, requiredStates[0]);
+  }
 
   for (const auto& frameStates : requiredStates) {
     solverSymbols.insert(frameStates.begin(), frameStates.end());
@@ -465,7 +549,6 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
   for (const auto& targets : transitionTargetsByFrame) {
     for (const auto target : targets) {
       solverSymbols.insert(target);
-      addTransitionSupport(transitionByState, target, solverSymbols);
     }
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
@@ -473,15 +556,18 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
 
   BaseCaseCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
+  coi.requiredStateSymbolsByFrame = sortedFrameStates(requiredStates);
   coi.solverSymbols = sortedSymbols(solverSymbols);
   coi.solverSymbolSet.insert(coi.solverSymbols.begin(), coi.solverSymbols.end());
   return coi;
 }
 
-BaseCaseCoi buildStateCubeReachabilityCoi(
+BaseCaseCoi buildStateCubeReachabilityCoiForTargetFrames(
     const ResetFrontierReachabilityContextData& context,
     size_t targetFrame,
-    const std::vector<std::pair<size_t, bool>>& cube) {
+    const std::vector<std::pair<size_t, bool>>& cube,
+    const std::vector<size_t>& targetFrames,
+    bool closeStartupEqualityDependencies) {
   // This is the same bounded transition prefix as the normal base case, but
   // the target is a state cube rather than the SEC bad formula.  PDR calls this
   // when a level-0 obligation may be an artifact of the abstract bootstrap
@@ -498,7 +584,22 @@ BaseCaseCoi buildStateCubeReachabilityCoi(
   for (const auto& [symbol, _] : cube) {
     solverSymbols.insert(symbol);
     if (stateSymbols.find(symbol) != stateSymbols.end()) {
-      requiredStates[targetFrame].insert(symbol);
+      for (const auto target : targetFrames) {
+        if (target <= targetFrame) {
+          requiredStates[target].insert(symbol);
+        }
+      }
+    }
+  }
+  if (context.frameInvariant != nullptr) {
+    // The caller has already proved this invariant on the PDR startup frontier
+    // and through one post-reset transition. Encode it only from that concrete
+    // frontier onward; pre-reset frames may intentionally violate it while
+    // reset is still asserting.
+    addFormulaSupport(context.frameInvariant, solverSymbols);
+    for (size_t frame = context.bootstrapFrames; frame <= targetFrame; ++frame) {
+      addFormulaStateSupport(
+          context.frameInvariant, stateSymbols, requiredStates[frame]);
     }
   }
 
@@ -513,7 +614,8 @@ BaseCaseCoi buildStateCubeReachabilityCoi(
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(targetFrame);
   for (size_t frame = targetFrame; frame > 0; --frame) {
-    if (context.bootstrapFrames != 0 && frame == context.bootstrapFrames) {
+    if (closeStartupEqualityDependencies &&
+        context.bootstrapFrames != 0 && frame == context.bootstrapFrames) {
       context.bootstrapEqualities.close(requiredStates[frame]);
     }
     auto targets = expandTransitionTargets(
@@ -521,13 +623,13 @@ BaseCaseCoi buildStateCubeReachabilityCoi(
         transitionByState,
         context.primaryByComplement);
     transitionTargetsByFrame[frame - 1] = targets;
-    for (const auto target : targets) {
-      addTransitionStateSupport(
-          transitionByState, target, stateSymbols, requiredStates[frame - 1]);
-    }
+    transitionByState.collectSupportForTargets(
+        targets, stateSymbols, requiredStates[frame - 1], solverSymbols);
   }
 
-  context.initialEqualities.close(requiredStates[0]);
+  if (closeStartupEqualityDependencies) {
+    context.initialEqualities.close(requiredStates[0]);
+  }
 
   for (const auto& frameStates : requiredStates) {
     solverSymbols.insert(frameStates.begin(), frameStates.end());
@@ -535,7 +637,6 @@ BaseCaseCoi buildStateCubeReachabilityCoi(
   for (const auto& targets : transitionTargetsByFrame) {
     for (const auto target : targets) {
       solverSymbols.insert(target);
-      addTransitionSupport(transitionByState, target, solverSymbols);
     }
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
@@ -543,6 +644,97 @@ BaseCaseCoi buildStateCubeReachabilityCoi(
 
   BaseCaseCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
+  coi.requiredStateSymbolsByFrame = sortedFrameStates(requiredStates);
+  coi.solverSymbols = sortedSymbols(solverSymbols);
+  coi.solverSymbolSet.insert(coi.solverSymbols.begin(), coi.solverSymbols.end());
+  return coi;
+}
+
+BaseCaseCoi buildStateCubeReachabilityCoi(
+    const ResetFrontierReachabilityContextData& context,
+    size_t targetFrame,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    bool closeStartupEqualityDependencies) {
+  return buildStateCubeReachabilityCoiForTargetFrames(
+      context,
+      targetFrame,
+      cube,
+      std::vector<size_t>{targetFrame},
+      closeStartupEqualityDependencies);
+}
+
+BaseCaseCoi buildStateCubePrefixReachabilityCoi(
+    const ResetFrontierReachabilityContextData& context,
+    size_t maxTargetFrame,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    bool closeStartupEqualityDependencies) {
+  std::vector<size_t> targetFrames;
+  targetFrames.reserve(maxTargetFrame + 1 - context.bootstrapFrames);
+  for (size_t frame = context.bootstrapFrames; frame <= maxTargetFrame; ++frame) {
+    targetFrames.push_back(frame);
+  }
+  return buildStateCubeReachabilityCoiForTargetFrames(
+      context,
+      maxTargetFrame,
+      cube,
+      targetFrames,
+      closeStartupEqualityDependencies);
+}
+
+BaseCaseCoi buildResetSummaryCubeReachabilityCoi(
+    const ResetFrontierReachabilityContextData& context,
+    size_t postBootstrapSteps,
+    const std::vector<std::pair<size_t, bool>>& cube) {
+  const auto& problem = context.problem;
+  const auto& transitionByState = context.transitionByState;
+  const auto& stateSymbols = transitionByState.stateSymbols();
+  std::vector<std::unordered_set<size_t>> requiredStates(postBootstrapSteps + 1);
+  std::unordered_set<size_t> solverSymbols;
+  solverSymbols.reserve(1024);
+  for (const auto& [symbol, _] : problem.resetBootstrapInputs) {
+    solverSymbols.insert(symbol);
+  }
+  for (const auto& [symbol, _] : cube) {
+    solverSymbols.insert(symbol);
+    if (stateSymbols.find(symbol) != stateSymbols.end()) {
+      requiredStates[postBootstrapSteps].insert(symbol);
+    }
+  }
+  if (context.frameInvariant != nullptr) {
+    addFormulaSupport(context.frameInvariant, solverSymbols);
+    for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {
+      addFormulaStateSupport(
+          context.frameInvariant, stateSymbols, requiredStates[frame]);
+    }
+  }
+
+  std::vector<std::vector<size_t>> transitionTargetsByFrame(postBootstrapSteps);
+  for (size_t frame = postBootstrapSteps; frame > 0; --frame) {
+    auto targets = expandTransitionTargets(
+        requiredStates[frame],
+        transitionByState,
+        context.primaryByComplement);
+    transitionTargetsByFrame[frame - 1] = targets;
+    transitionByState.collectSupportForTargets(
+        targets, stateSymbols, requiredStates[frame - 1], solverSymbols);
+  }
+
+  context.bootstrapEqualities.close(requiredStates[0]);
+
+  for (const auto& frameStates : requiredStates) {
+    solverSymbols.insert(frameStates.begin(), frameStates.end());
+  }
+  for (const auto& targets : transitionTargetsByFrame) {
+    for (const auto target : targets) {
+      solverSymbols.insert(target);
+    }
+  }
+  addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
+  addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+
+  BaseCaseCoi coi;
+  coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
+  coi.requiredStateSymbolsByFrame = sortedFrameStates(requiredStates);
   coi.solverSymbols = sortedSymbols(solverSymbols);
   coi.solverSymbolSet.insert(coi.solverSymbols.begin(), coi.solverSymbols.end());
   return coi;
@@ -711,6 +903,21 @@ void addInitialConstraints(SATSolverWrapper& solver,
   }
 }
 
+void addResetFrontierFrameInvariantConstraints(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const ResetFrontierReachabilityContextData& context,
+    size_t targetFrame) {
+  if (context.frameInvariant == nullptr) {
+    return;
+  }
+  for (size_t frame = context.bootstrapFrames; frame <= targetFrame; ++frame) {
+    FrameFormulaEncoder encoder(
+        solver, variables.makeLeafLits(frame, context.frameInvariantSupport));
+    solver.addClause({encoder.encode(context.frameInvariant)});
+  }
+}
+
 size_t countTransitionTargets(
     const std::vector<std::vector<size_t>>& transitionTargetsByFrame) {
   size_t count = 0;
@@ -787,6 +994,19 @@ void addStateCubeAssumptions(SATSolverWrapper& solver,
   }
 }
 
+void addBlockedStateCubeClause(SATSolverWrapper& solver,
+                               const FrameVariableStore& variables,
+                               const std::vector<std::pair<size_t, bool>>& cube,
+                               size_t frame) {
+  std::vector<int> clause;
+  clause.reserve(cube.size());
+  for (const auto& [symbol, value] : cube) {
+    const int literal = variables.getLiteral(symbol, frame);
+    clause.push_back(value ? -literal : literal);
+  }
+  solver.addClause(clause);
+}
+
 void addTransitionRelation(SATSolverWrapper& solver,
                            const FrameVariableStore& variables,
                            const TransitionExprResolver& transitionByState,
@@ -795,13 +1015,48 @@ void addTransitionRelation(SATSolverWrapper& solver,
   // All transition formulas in one frame are slices of the same combinational
   // next-state network. Reusing a frame encoder lets shared BoolExpr DAG nodes
   // produce one Tseitin literal instead of being re-encoded once per state bit.
-  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
+  struct EncodingGroup {
+    const std::unordered_map<size_t, size_t>* symbolMap = nullptr;
+    std::vector<size_t> stateSymbols;
+  };
+  std::vector<EncodingGroup> groups;
+  groups.reserve(3);
   for (const auto stateSymbol : targets) {
-    BoolExpr* expr = transitionByState.at(stateSymbol);
-    addLiteralEquivalence(
+    const TransitionExprView view = transitionByState.expressionView(stateSymbol);
+    auto groupIt = std::find_if(
+        groups.begin(),
+        groups.end(),
+        [&](const EncodingGroup& group) {
+          return group.symbolMap == view.symbolMap;
+        });
+    if (groupIt == groups.end()) {
+      groups.push_back(EncodingGroup{view.symbolMap, {stateSymbol}});
+    } else {
+      groupIt->stateSymbols.push_back(stateSymbol);
+    }
+  }
+
+  for (const auto& group : groups) {
+    size_t expectedNodes = 0;
+    if (group.stateSymbols.size() <= kMaxExactTransitionNodeCountHintTargets) {
+      for (const auto stateSymbol : group.stateSymbols) {
+        expectedNodes += transitionByState.nodeCount(stateSymbol);
+      }
+    }
+    FrameFormulaEncoder encoder(
         solver,
-        variables.getLiteral(stateSymbol, frame + 1),
-        encoder.encode(expr));
+        variables.makeLeafLits(frame),
+        group.symbolMap,
+        false,
+        expectedNodes);
+    for (const auto stateSymbol : group.stateSymbols) {
+      const TransitionExprView view =
+          transitionByState.expressionView(stateSymbol);
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(stateSymbol, frame + 1),
+          encoder.encode(view.expr));
+    }
   }
 }
 
@@ -932,14 +1187,95 @@ KInductionResult::CounterexampleWitness buildCounterexampleWitness(
 
 namespace {
 
+enum class BaseCaseSolverProfile {
+  SecConeProof,
+  PdrValidation,
+  PdrValidationProofOnly,
+};
+
 std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImpl(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k,
+    std::optional<size_t> exactPublicBadFrame,
+    bool localizeMultiOutputFrontier = true,
+    BaseCaseSolverProfile solverProfile = BaseCaseSolverProfile::SecConeProof);
+
+KInductionProblem makeSingleObservedOutputProblem(
+    const KInductionProblem& problem,
+    size_t outputIndex) {
+  KInductionProblem single = problem;
+  single.observedOutputs =
+      outputIndex < problem.observedOutputs.size()
+          ? std::vector<SignalKey>{problem.observedOutputs[outputIndex]}
+          : std::vector<SignalKey>{};
+  single.observedOutputNames =
+      outputIndex < problem.observedOutputNames.size()
+          ? std::vector<std::string>{problem.observedOutputNames[outputIndex]}
+          : std::vector<std::string>{};
+  single.observedOutputExprs0 = {problem.observedOutputExprs0[outputIndex]};
+  single.observedOutputExprs1 = {problem.observedOutputExprs1[outputIndex]};
+
+  BoolExpr* outputBad = BoolExpr::simplify(
+      BoolExpr::Xor(
+          single.observedOutputExprs0.front(),
+          single.observedOutputExprs1.front()));
+  single.bad = outputBad;
+  single.property = BoolExpr::Not(outputBad);
+  single.inductionBad = outputBad;
+  single.inductionProperty = single.property;
+  return single;
+}
+
+std::optional<KInductionResult::CounterexampleWitness>
+findPerOutputBaseCounterexampleAtFrontier(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k,
     std::optional<size_t> exactPublicBadFrame) {
+  if (!exactPublicBadFrame.has_value() ||
+      problem.observedOutputExprs0.size() <= 1 ||
+      problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {
+    return std::nullopt;
+  }
+
+  // Exact SEC validation asks whether any observed output is bad at one frame.
+  // Solving the whole batch OR can force the SAT solver to reason across
+  // unrelated output cones.  Match PDR's bad-cube search and validate each
+  // output independently; the disjunction is SAT iff one per-output query is.
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    KInductionProblem single =
+        makeSingleObservedOutputProblem(problem, output);
+    if (auto witness = findBaseCounterexampleImpl(
+            single, solverType, k, exactPublicBadFrame);
+        witness.has_value()) {
+      return witness;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImpl(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k,
+    std::optional<size_t> exactPublicBadFrame,
+    bool localizeMultiOutputFrontier,
+    BaseCaseSolverProfile solverProfile) {
+  if (localizeMultiOutputFrontier &&
+      exactPublicBadFrame.has_value() &&
+      problem.observedOutputExprs0.size() > 1 &&
+      problem.observedOutputExprs0.size() == problem.observedOutputExprs1.size()) {
+    return findPerOutputBaseCounterexampleAtFrontier(
+        problem, solverType, k, exactPublicBadFrame);
+  }
+
   const size_t bootstrapFrames = resetBootstrapFrames(problem);
   const size_t internalK = k + bootstrapFrames;
-  const bool constrainPreviouslySafeFrames = exactPublicBadFrame.has_value();
+  const bool constrainPreviouslySafeFrames =
+      exactPublicBadFrame.has_value() &&
+      solverProfile != BaseCaseSolverProfile::PdrValidation &&
+      solverProfile != BaseCaseSolverProfile::PdrValidationProofOnly;
   const InitialConstraintMode initialMode =
       bootstrapFrames == 0 ? determineInitialConstraintMode(problem)
                            : InitialConstraintMode::None;
@@ -972,7 +1308,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
       bootstrapFrames,
       firstBadFrame,
       internalK,
-      constrainPreviouslySafeFrames);
+      constrainPreviouslySafeFrames,
+      solverProfile != BaseCaseSolverProfile::PdrValidationProofOnly);
   emitBaseCaseCoiDiag(
       problem,
       coi,
@@ -985,7 +1322,20 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
       problem, coi, internalK + 1, bootstrapFrames);
 
   SATSolverWrapper solver(solverType);
-  solver.configureForSecConeProof(coi.solverSymbols.size());
+  if (solverProfile == BaseCaseSolverProfile::PdrValidation ||
+      solverProfile == BaseCaseSolverProfile::PdrValidationProofOnly) {
+    // PDR calls this helper as a short-lived exact CEGAR validation. It asks
+    // only whether bad is reachable at this frontier: older public bad frames
+    // were checked or learned by earlier PDR refinements, and re-encoding them
+    // as a safe-prefix constraint made AES spend minutes inside SAT search.
+    // Use the PDR query profile here as well: samples on the regress PDR flow
+    // showed these medium-sized validation BMCs spending their time in Kissat's
+    // standalone preprocessing/probing, while PDR only needs a quick SAT/UNSAT
+    // answer to decide which learned bad-formula clauses to add.
+    solver.configureForSecPdrQuery(coi.solverSymbols.size());
+  } else {
+    solver.configureForSecConeProof(coi.solverSymbols.size());
+  }
   FrameVariableStore variables(
       solver, coi.solverSymbols, internalK + 1, aliasesByFrame);
   addResetBootstrapConstraints(solver, variables, problem, internalK + 1);
@@ -1065,6 +1415,48 @@ findBaseCounterexampleAtFrontier(
   return findBaseCounterexampleImpl(problem, solverType, k, k);
 }
 
+bool hasBaseCounterexampleAtFrontier(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  return findBaseCounterexampleImpl(
+      problem,
+      solverType,
+      k,
+      k,
+      /*localizeMultiOutputFrontier=*/false,
+      BaseCaseSolverProfile::PdrValidation)
+      .has_value();
+}
+
+bool provesNoBaseCounterexampleAtFrontier(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  return !findBaseCounterexampleImpl(
+              problem,
+              solverType,
+              k,
+              k,
+              /*localizeMultiOutputFrontier=*/false,
+              BaseCaseSolverProfile::PdrValidationProofOnly)
+              .has_value();
+}
+
+bool provesNoBaseCounterexampleAtFrontierWithSecConeProof(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  return !findBaseCounterexampleImpl(
+              problem,
+              solverType,
+              k,
+              k,
+              /*localizeMultiOutputFrontier=*/false,
+              BaseCaseSolverProfile::SecConeProof)
+              .has_value();
+}
+
 bool isStateCubeReachableAtResetFrontier(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -1090,10 +1482,29 @@ bool isStateCubeReachableAtResetFrontier(
 std::shared_ptr<ResetFrontierReachabilityContext>
 makeResetFrontierReachabilityContext(
     const KInductionProblem& problem,
-    const TransitionExprResolver& transitionByState) {
+    const TransitionExprResolver& transitionByState,
+    BoolExpr* frameInvariant) {
   return std::make_shared<ResetFrontierReachabilityContext>(
       std::make_shared<ResetFrontierReachabilityContextData>(
-          problem, transitionByState));
+          problem, transitionByState, frameInvariant));
+}
+
+void rememberResetFrontierUnreachableCore(
+    const ResetFrontierReachabilityContextData& data,
+    size_t targetFrame,
+    std::vector<std::pair<size_t, bool>> core);
+
+void rememberResetFrontierUnreachableCube(
+    const ResetFrontierReachabilityContext& context,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t postBootstrapSteps) {
+  if (cube.empty()) {
+    return;
+  }
+
+  const auto& data = *context.data;
+  const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;
+  rememberResetFrontierUnreachableCore(data, targetFrame, cube);
 }
 
 std::vector<size_t> sortedCubeSymbols(
@@ -1140,6 +1551,35 @@ std::string resetFrontierSolverCacheKey(
   return key;
 }
 
+const CachedResetSummaryCoi& getCachedResetSummaryCubeReachabilityCoi(
+    const ResetFrontierReachabilityContextData& data,
+    size_t postBootstrapSteps,
+    const std::vector<std::pair<size_t, bool>>& cube) {
+  const std::string key =
+      resetFrontierSolverCacheKey(
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          postBootstrapSteps,
+          cube,
+          /*includeCubeValues=*/false);
+  if (const auto it = data.cachedResetSummaryCois.find(key);
+      it != data.cachedResetSummaryCois.end()) {
+    return it->second;
+  }
+
+  if (data.cachedResetSummaryCois.size() >= kMaxResetSummaryCachedCois) {
+    data.cachedResetSummaryCois.clear();
+  }
+
+  CachedResetSummaryCoi cached;
+  cached.coi =
+      buildResetSummaryCubeReachabilityCoi(data, postBootstrapSteps, cube);
+  cached.transitionTargets =
+      countTransitionTargets(cached.coi.transitionTargetsByFrame);
+  auto [it, _] =
+      data.cachedResetSummaryCois.emplace(key, std::move(cached));
+  return it->second;
+}
+
 std::vector<int> stateCubeAssumptionLits(
     const FrameVariableStore& variables,
     const std::vector<std::pair<size_t, bool>>& cube,
@@ -1169,6 +1609,137 @@ std::vector<std::pair<size_t, bool>> normalizedAssignmentCube(
   std::sort(cube.begin(), cube.end());
   cube.erase(std::unique(cube.begin(), cube.end()), cube.end());
   return cube;
+}
+
+class ParityUnionFind {
+ public:
+  void addEquality(size_t lhs, size_t rhs) { unite(lhs, rhs, false); }
+
+  void addComplement(size_t lhs, size_t rhs) { unite(lhs, rhs, true); }
+
+  std::optional<bool> xorRelation(size_t lhs, size_t rhs) {
+    if (parent_.find(lhs) == parent_.end() ||
+        parent_.find(rhs) == parent_.end()) {
+      return std::nullopt;
+    }
+    const auto lhsRoot = find(lhs);
+    const auto rhsRoot = find(rhs);
+    if (lhsRoot.first != rhsRoot.first) {
+      return std::nullopt;
+    }
+    return lhsRoot.second ^ rhsRoot.second;
+  }
+
+  std::pair<size_t, bool> findWithParity(size_t symbol) {
+    return find(symbol);
+  }
+
+ private:
+  void ensure(size_t symbol) {
+    if (parent_.find(symbol) == parent_.end()) {
+      parent_.emplace(symbol, symbol);
+      parityToParent_.emplace(symbol, false);
+    }
+  }
+
+  std::pair<size_t, bool> find(size_t symbol) {
+    ensure(symbol);
+    const auto parent = parent_[symbol];
+    const auto parity = parityToParent_[symbol];
+    if (parent == symbol) {
+      return {symbol, false};
+    }
+    const auto root = find(parent);
+    parent_[symbol] = root.first;
+    parityToParent_[symbol] = parity ^ root.second;
+    return {parent_[symbol], parityToParent_[symbol]};
+  }
+
+  void unite(size_t lhs, size_t rhs, bool inverted) {
+    const auto lhsRoot = find(lhs);
+    const auto rhsRoot = find(rhs);
+    if (lhsRoot.first == rhsRoot.first) {
+      return;
+    }
+    parent_[lhsRoot.first] = rhsRoot.first;
+    // value(lhs) xor value(rhs) must equal `inverted`.
+    parityToParent_[lhsRoot.first] =
+        lhsRoot.second ^ rhsRoot.second ^ inverted;
+  }
+
+  std::unordered_map<size_t, size_t> parent_;
+  std::unordered_map<size_t, bool> parityToParent_;
+};
+
+std::optional<std::vector<std::pair<size_t, bool>>>
+knownResetFrontierConflictCore(
+    const ResetFrontierReachabilityContextData& data,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t postBootstrapSteps) {
+  if (cube.empty() || postBootstrapSteps != 0) {
+    return std::nullopt;
+  }
+
+  const bool usesBootstrapFrontier = data.bootstrapFrames != 0;
+  const auto& assignments = usesBootstrapFrontier
+                                ? data.problem.bootstrapStateAssignments
+                                : data.problem.initialStateAssignments;
+  const auto& equalities = usesBootstrapFrontier
+                               ? data.problem.bootstrapStateEqualityPairs
+                               : data.problem.initialStateEqualityPairs;
+  if (assignments.empty() && equalities.empty() &&
+      data.problem.complementedStatePairs0.empty() &&
+      data.problem.complementedStatePairs1.empty()) {
+    return std::nullopt;
+  }
+
+  ParityUnionFind relations;
+  for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
+    relations.addEquality(lhsSymbol, rhsSymbol);
+  }
+  for (const auto& [primarySymbol, complementedSymbol] :
+       data.problem.complementedStatePairs0) {
+    relations.addComplement(primarySymbol, complementedSymbol);
+  }
+  for (const auto& [primarySymbol, complementedSymbol] :
+       data.problem.complementedStatePairs1) {
+    relations.addComplement(primarySymbol, complementedSymbol);
+  }
+
+  std::unordered_map<size_t, bool> rootAssignments;
+  rootAssignments.reserve(assignments.size());
+  for (const auto& [symbol, value] : assignments) {
+    const auto [root, parity] = relations.findWithParity(symbol);
+    const bool rootValue = value ^ parity;
+    if (const auto it = rootAssignments.find(root);
+        it != rootAssignments.end() && it->second != rootValue) {
+      continue;
+    }
+    rootAssignments.emplace(root, rootValue);
+  }
+
+  std::unordered_map<size_t, std::pair<bool, std::pair<size_t, bool>>>
+      cubeValueByRoot;
+  cubeValueByRoot.reserve(cube.size());
+  for (const auto& literal : cube) {
+    const auto [root, parity] = relations.findWithParity(literal.first);
+    const auto assignment = rootAssignments.find(root);
+    const bool rootValue = literal.second ^ parity;
+    if (assignment != rootAssignments.end() &&
+        assignment->second != rootValue) {
+      return std::vector<std::pair<size_t, bool>>{literal};
+    }
+    if (const auto it = cubeValueByRoot.find(root);
+        it != cubeValueByRoot.end()) {
+      if (it->second.first != rootValue) {
+        return normalizedAssignmentCube({it->second.second, literal});
+      }
+      continue;
+    }
+    cubeValueByRoot.emplace(root, std::pair{rootValue, literal});
+  }
+
+  return std::nullopt;
 }
 
 std::optional<std::vector<std::pair<size_t, bool>>>
@@ -1205,6 +1776,51 @@ bool assignmentCubeContains(
     const std::vector<std::pair<size_t, bool>>& cube,
     const std::vector<std::pair<size_t, bool>>& core) {
   return std::includes(cube.begin(), cube.end(), core.begin(), core.end());
+}
+
+bool cubeSymbolsAreInSolverCoi(
+    const BaseCaseCoi& coi,
+    const std::vector<std::pair<size_t, bool>>& cube) {
+  return std::all_of(
+      cube.begin(),
+      cube.end(),
+      [&](const auto& literal) {
+        return coi.solverSymbolSet.find(literal.first) !=
+               coi.solverSymbolSet.end();
+      });
+}
+
+size_t addPreviousResetFrontierBlockers(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const ResetFrontierReachabilityContextData& data,
+    const BaseCaseCoi& coi,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t targetFrame) {
+  size_t added = 0;
+  for (size_t frame = 0;
+       frame < targetFrame &&
+       added < kMaxPreviousResetFrontierBlockersPerQuery;
+       ++frame) {
+    const auto coresIt = data.unreachableCoresByTargetFrame.find(frame);
+    if (coresIt == data.unreachableCoresByTargetFrame.end()) {
+      continue;
+    }
+    for (const auto& core : coresIt->second) {
+      if (!assignmentCubeContains(cube, core) ||
+          !cubeSymbolsAreInSolverCoi(coi, core)) {
+        continue;
+      }
+      // The cached core was already proved unreachable at this concrete
+      // reset/bootstrap frame. Reusing it as a safe-prefix clause is redundant
+      // with the exact prefix semantics, but it gives the next post-bootstrap
+      // query the same learned fact without rebuilding the previous SAT proof.
+      addBlockedStateCubeClause(solver, variables, core, frame);
+      ++added;
+      break;
+    }
+  }
+  return added;
 }
 
 std::optional<std::vector<std::pair<size_t, bool>>>
@@ -1336,11 +1952,111 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolver(
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t targetFrame,
-    bool encodeCubeAsUnitClauses) {
+    bool encodeCubeAsUnitClauses,
+    bool closeStartupEqualityDependencies = true) {
   auto cached = std::make_unique<CachedResetFrontierSolver>();
   cached->solverType = solverType;
   cached->targetFrame = targetFrame;
-  cached->coi = buildStateCubeReachabilityCoi(data, targetFrame, cube);
+  cached->coi = buildStateCubeReachabilityCoi(
+      data, targetFrame, cube, closeStartupEqualityDependencies);
+  const FrameSymbolAliases aliasesByFrame =
+      buildResetFrontierFrameAliases(data, cached->coi, targetFrame + 1);
+
+  const auto& problem = data.problem;
+  cached->solver = std::make_unique<SATSolverWrapper>(solverType);
+  // Reset-frontier checks run inside PDR's blocking loop. Sampled AES runs
+  // showed the one-shot query spending its time in Kissat probing/sweeping
+  // before any refinement could be learned, so use the same CDCL-oriented
+  // profile regardless of whether the cube is encoded as clauses or
+  // assumptions.
+  cached->solver->configureForSecPdrQuery(cached->coi.solverSymbols.size());
+  cached->variables = std::make_unique<FrameVariableStore>(
+      *cached->solver,
+      cached->coi.solverSymbols,
+      targetFrame + 1,
+      aliasesByFrame);
+  addResetBootstrapConstraints(
+      *cached->solver, *cached->variables, problem, targetFrame + 1);
+  addInitialConstraints(
+      *cached->solver,
+      *cached->variables,
+      problem,
+      cached->coi.solverSymbolSet,
+      data.initialMode);
+  addComplementedStateRelations(
+      *cached->solver,
+      *cached->variables,
+      problem.complementedStatePairs0,
+      cached->coi.solverSymbolSet,
+      targetFrame + 1);
+  addComplementedStateRelations(
+      *cached->solver,
+      *cached->variables,
+      problem.complementedStatePairs1,
+      cached->coi.solverSymbolSet,
+      targetFrame + 1);
+  addInitialStateEqualities(
+      *cached->solver, *cached->variables, data, cached->coi.solverSymbolSet);
+  addResetFrontierFrameInvariantConstraints(
+      *cached->solver, *cached->variables, data, targetFrame);
+
+  for (size_t frame = 0; frame < targetFrame; ++frame) {
+    addTransitionRelation(
+        *cached->solver,
+        *cached->variables,
+        data.transitionByState,
+        cached->coi.transitionTargetsByFrame[frame],
+        frame);
+  }
+  if (data.bootstrapFrames != 0) {
+    addBootstrapStateAssignments(
+        *cached->solver,
+        *cached->variables,
+        problem,
+        cached->coi.solverSymbolSet,
+        data.bootstrapFrames);
+    addBootstrapStateEqualities(
+        *cached->solver,
+        *cached->variables,
+        data,
+        cached->coi.solverSymbolSet,
+        data.bootstrapFrames);
+  }
+  const size_t previousBlockers = addPreviousResetFrontierBlockers(
+      *cached->solver,
+      *cached->variables,
+      data,
+      cached->coi,
+      cube,
+      targetFrame);
+  if (previousBlockers != 0 && isKInductionCoiDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: reset frontier previous unreachable blockers=",
+        previousBlockers,
+        " target_frame=",
+        targetFrame);
+  }
+
+  cached->cubeEncodedAsUnitClauses = encodeCubeAsUnitClauses;
+  if (cached->cubeEncodedAsUnitClauses) {
+    for (const auto& [symbol, value] : cube) {
+      const int literal = cached->variables->getLiteral(symbol, targetFrame);
+      cached->solver->addClause({value ? literal : -literal});
+    }
+  }
+  return cached;
+}
+
+std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolverForCoi(
+    const ResetFrontierReachabilityContextData& data,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    BaseCaseCoi coi,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t targetFrame) {
+  auto cached = std::make_unique<CachedResetFrontierSolver>();
+  cached->solverType = solverType;
+  cached->targetFrame = targetFrame;
+  cached->coi = std::move(coi);
   const FrameSymbolAliases aliasesByFrame =
       buildResetFrontierFrameAliases(data, cached->coi, targetFrame + 1);
 
@@ -1374,6 +2090,8 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolver(
       targetFrame + 1);
   addInitialStateEqualities(
       *cached->solver, *cached->variables, data, cached->coi.solverSymbolSet);
+  addResetFrontierFrameInvariantConstraints(
+      *cached->solver, *cached->variables, data, targetFrame);
 
   for (size_t frame = 0; frame < targetFrame; ++frame) {
     addTransitionRelation(
@@ -1397,15 +2115,494 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolver(
         cached->coi.solverSymbolSet,
         data.bootstrapFrames);
   }
+  const size_t previousBlockers = addPreviousResetFrontierBlockers(
+      *cached->solver,
+      *cached->variables,
+      data,
+      cached->coi,
+      cube,
+      targetFrame);
+  if (previousBlockers != 0 && isKInductionCoiDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: reset frontier previous unreachable blockers=",
+        previousBlockers,
+        " target_frame=",
+        targetFrame);
+  }
 
-  cached->cubeEncodedAsUnitClauses = encodeCubeAsUnitClauses;
-  if (cached->cubeEncodedAsUnitClauses) {
-    for (const auto& [symbol, value] : cube) {
-      const int literal = cached->variables->getLiteral(symbol, targetFrame);
-      cached->solver->addClause({value ? literal : -literal});
+  cached->cubeEncodedAsUnitClauses = false;
+  return cached;
+}
+
+CachedResetFrontierSolver& getCachedResetFrontierPrefixSolver(
+    const ResetFrontierReachabilityContextData& data,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t maxTargetFrame) {
+  (void)solverType;
+  const auto cachedSolverType = KEPLER_FORMAL::Config::SolverType::GLUCOSE;
+  const std::string key =
+      resetFrontierSolverCacheKey(
+          cachedSolverType,
+          maxTargetFrame,
+          cube,
+          /*includeCubeValues=*/false);
+  if (const auto it = data.cachedPrefixSolvers.find(key);
+      it != data.cachedPrefixSolvers.end()) {
+    return *it->second;
+  }
+
+  const auto cubeSymbols = sortedCubeSymbols(cube);
+  for (const auto& [_, cached] : data.cachedPrefixSolvers) {
+    if (cached->solverType == cachedSolverType &&
+        cached->targetFrame == maxTargetFrame &&
+        !cached->cubeEncodedAsUnitClauses &&
+        solverContainsCubeSymbols(*cached, cubeSymbols)) {
+      if (isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset frontier prefix solver superset cache hit ",
+            "target_frame=",
+            maxTargetFrame,
+            " cube_literals=",
+            cube.size(),
+            " solver_symbols=",
+            cached->coi.solverSymbols.size());
+      }
+      return *cached;
     }
   }
-  return cached;
+
+  if (data.cachedPrefixSolvers.size() >= kMaxResetFrontierCachedSolvers) {
+    data.cachedPrefixSolvers.clear();
+  }
+
+  auto cached = buildResetFrontierSolverForCoi(
+      data,
+      cachedSolverType,
+      buildStateCubePrefixReachabilityCoi(
+          data,
+          maxTargetFrame,
+          cube,
+          /*closeStartupEqualityDependencies=*/true),
+      cube,
+      maxTargetFrame);
+  auto [it, inserted] =
+      data.cachedPrefixSolvers.emplace(key, std::move(cached));
+  (void)inserted;
+  return *it->second;
+}
+
+std::optional<std::vector<std::pair<size_t, bool>>>
+extractResetSummaryFrontierCube(
+    const ResetFrontierReachabilityContextData& data,
+    const SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const BaseCaseCoi& coi) {
+  std::vector<std::pair<size_t, bool>> cube;
+  if (coi.requiredStateSymbolsByFrame.empty()) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+  for (const auto symbol : coi.requiredStateSymbolsByFrame.front()) {
+    cube.emplace_back(
+        symbol, solver.getLiteralValue(variables.getLiteral(symbol, 0)));
+    if (cube.size() > kMaxResetSummaryFrontierCubeLiterals) {
+      return std::nullopt;
+    }
+  }
+  return normalizedAssignmentCube(std::move(cube));
+}
+
+CachedResetFrontierSolver& getCachedResetFrontierSolver(
+    const ResetFrontierReachabilityContextData& data,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t targetFrame);
+
+std::optional<std::vector<std::pair<size_t, bool>>>
+proveResetSummaryFrontierCubeUnreachable(
+    const ResetFrontierReachabilityContextData& data,
+    const std::vector<std::pair<size_t, bool>>& cube) {
+  const auto normalizedCube = normalizedAssignmentCube(cube);
+  if (normalizedCube.empty()) {
+    return std::nullopt;
+  }
+
+  if (const auto knownCore = knownResetFrontierConflictCore(
+          data, normalizedCube, /*postBootstrapSteps=*/0);
+      knownCore.has_value()) {
+    rememberResetFrontierUnreachableCore(
+        data, data.bootstrapFrames, *knownCore);
+    return knownCore;
+  }
+  if (const auto cachedCore = findCachedResetFrontierUnreachableCore(
+          data, data.bootstrapFrames, normalizedCube);
+      cachedCore.has_value()) {
+    return cachedCore;
+  }
+  if (normalizedCube.size() > kMaxResetSummaryFrontierProofCubeLiterals) {
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset summary frontier proof skipped reason=cube_cap ",
+          "frontier_cube=",
+          normalizedCube.size(),
+          " max_literals=",
+          kMaxResetSummaryFrontierProofCubeLiterals);
+    }
+    return std::nullopt;
+  }
+
+  const BaseCaseCoi frontierCoi =
+      buildStateCubeReachabilityCoi(
+          data,
+          data.bootstrapFrames,
+          normalizedCube,
+          /*closeStartupEqualityDependencies=*/true);
+  const size_t frontierTransitionTargets =
+      countTransitionTargets(frontierCoi.transitionTargetsByFrame);
+  if (frontierCoi.solverSymbols.size() >
+          kMaxResetSummaryFrontierProofSymbols ||
+      frontierTransitionTargets >
+          kMaxResetSummaryFrontierProofTransitionTargets) {
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset summary frontier proof skipped reason=coi_cap ",
+          "frontier_cube=",
+          normalizedCube.size(),
+          " solver_symbols=",
+          frontierCoi.solverSymbols.size(),
+          " transition_targets=",
+          frontierTransitionTargets);
+    }
+    return std::nullopt;
+  }
+
+  // Summary CEGAR can ask many neighboring frontier questions with the same
+  // symbol support. Reuse the exact reset-frontier solver and vary only the
+  // assumptions; rebuilding it dominated BlackParrot PDR samples.
+  CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
+      data,
+      KEPLER_FORMAL::Config::SolverType::GLUCOSE,
+      normalizedCube,
+      data.bootstrapFrames);
+  const auto assumptions = stateCubeAssumptionLits(
+      *solver.variables, normalizedCube, data.bootstrapFrames);
+  const auto status = solver.solver->solveWithAssumptionsStatus(
+      assumptions, kResetSummaryFrontierProofConflictLimit);
+  if (status == SATSolverWrapper::SolveStatus::Sat) {
+    return std::nullopt;
+  }
+  if (status == SATSolverWrapper::SolveStatus::Unknown) {
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset summary frontier proof resource_limit ",
+          "frontier_cube=",
+          normalizedCube.size(),
+          " solver_symbols=",
+          solver.coi.solverSymbols.size(),
+          " transition_targets=",
+          frontierTransitionTargets);
+    }
+    return std::nullopt;
+  }
+
+  auto core = failedAssumptionCoreFromLastResetFrontierSolve(
+      solver, normalizedCube, data.bootstrapFrames);
+  if (!core.has_value()) {
+    core = normalizedCube;
+  }
+  rememberResetFrontierUnreachableCore(data, data.bootstrapFrames, *core);
+  return core;
+}
+
+std::vector<std::vector<std::pair<size_t, bool>>>
+collectResetSummarySingletonFrontierBlockers(
+    const ResetFrontierReachabilityContextData& data,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    const std::vector<std::vector<std::pair<size_t, bool>>>& existingBlockers,
+    size_t maxNewBlockers) {
+  std::vector<std::vector<std::pair<size_t, bool>>> blockers;
+  if (maxNewBlockers == 0) {
+    return blockers;
+  }
+
+  CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
+      data,
+      KEPLER_FORMAL::Config::SolverType::GLUCOSE,
+      cube,
+      data.bootstrapFrames);
+  for (const auto& literal : cube) {
+    if (blockers.size() >= maxNewBlockers) {
+      break;
+    }
+
+    std::vector<std::pair<size_t, bool>> singleton{literal};
+    if (std::any_of(
+            existingBlockers.begin(),
+            existingBlockers.end(),
+            [&](const auto& existing) {
+              return assignmentCubeContains(singleton, existing);
+            }) ||
+        std::any_of(
+            blockers.begin(),
+            blockers.end(),
+            [&](const auto& existing) {
+              return assignmentCubeContains(singleton, existing);
+            })) {
+      continue;
+    }
+
+    const auto status = solver.solver->solveWithAssumptionsStatus(
+        stateCubeAssumptionLits(
+            *solver.variables, singleton, data.bootstrapFrames),
+        kResetSummarySingletonProofConflictLimit);
+    if (status != SATSolverWrapper::SolveStatus::Unsat) {
+      continue;
+    }
+
+    rememberResetFrontierUnreachableCore(
+        data, data.bootstrapFrames, singleton);
+    blockers.push_back(std::move(singleton));
+  }
+  return blockers;
+}
+
+bool resetSummaryPrecheckProvesUnreachable(
+    const ResetFrontierReachabilityContextData& data,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t postBootstrapSteps) {
+  if (resetFrontierAssumptionSolvesDisabled()) {
+    return false;
+  }
+  if (data.bootstrapFrames == 0 || postBootstrapSteps == 0) {
+    return false;
+  }
+  if (solverType != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+    return false;
+  }
+
+  const auto& cachedCoi =
+      getCachedResetSummaryCubeReachabilityCoi(data, postBootstrapSteps, cube);
+  const BaseCaseCoi& coi = cachedCoi.coi;
+  const size_t transitionTargets = cachedCoi.transitionTargets;
+  if (isKInductionCoiDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: reset summary one-shot cube coi "
+        "post_bootstrap_steps=",
+        postBootstrapSteps,
+        " frames=",
+        postBootstrapSteps + 1,
+        " solver_symbols=",
+        coi.solverSymbols.size(),
+        " transition_targets=",
+        transitionTargets,
+        " cube_literals=",
+        cube.size(),
+        " frame_invariant_symbols=",
+        data.frameInvariantSupport.size());
+  }
+
+  if (coi.solverSymbols.size() > kMaxResetSummaryPrecheckSymbols ||
+      transitionTargets > kMaxResetSummaryPrecheckTransitionTargets) {
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset summary one-shot precheck skipped "
+          "reason=coi_cap post_bootstrap_steps=",
+          postBootstrapSteps,
+          " solver_symbols=",
+          coi.solverSymbols.size(),
+          " transition_targets=",
+          transitionTargets);
+    }
+    return false;
+  }
+
+  const auto& problem = data.problem;
+  std::vector<std::vector<std::pair<size_t, bool>>> frontierBlockers;
+  auto appendFrontierBlocker =
+      [&](const std::vector<std::pair<size_t, bool>>& blocker) {
+        if (frontierBlockers.size() >= kMaxResetSummaryFrontierBlockers) {
+          return false;
+        }
+        if (std::any_of(
+                frontierBlockers.begin(),
+                frontierBlockers.end(),
+                [&](const auto& existing) {
+                  return assignmentCubeContains(blocker, existing);
+                })) {
+          return false;
+        }
+        frontierBlockers.push_back(blocker);
+        return true;
+      };
+  if (const auto coresIt =
+          data.unreachableCoresByTargetFrame.find(data.bootstrapFrames);
+      coresIt != data.unreachableCoresByTargetFrame.end()) {
+    for (const auto& core : coresIt->second) {
+      if (frontierBlockers.size() >= kMaxResetSummaryFrontierBlockers) {
+        break;
+      }
+      if (!cubeSymbolsAreInSolverCoi(coi, core)) {
+        continue;
+      }
+      appendFrontierBlocker(core);
+    }
+    if (!frontierBlockers.empty() && isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset summary frontier blockers=",
+          frontierBlockers.size(),
+          " post_bootstrap_steps=",
+          postBootstrapSteps);
+    }
+  }
+
+  for (size_t refinement = 0; refinement <= kMaxResetSummaryRefinements;
+       ++refinement) {
+    SATSolverWrapper solver(solverType);
+    solver.configureForSecPdrQuery(coi.solverSymbols.size());
+    const FrameSymbolAliases aliasesByFrame =
+        buildResetSummaryFrameAliases(data, coi, postBootstrapSteps + 1);
+    FrameVariableStore variables(
+        solver, coi.solverSymbols, postBootstrapSteps + 1, aliasesByFrame);
+
+    for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
+      for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {
+        solver.addClause(
+            {assertedValue ? -variables.getLiteral(symbol, frame)
+                           : variables.getLiteral(symbol, frame)});
+      }
+    }
+    addComplementedStateRelations(
+        solver,
+        variables,
+        problem.complementedStatePairs0,
+        coi.solverSymbolSet,
+        postBootstrapSteps + 1);
+    addComplementedStateRelations(
+        solver,
+        variables,
+        problem.complementedStatePairs1,
+        coi.solverSymbolSet,
+        postBootstrapSteps + 1);
+    addBootstrapStateAssignments(
+        solver, variables, problem, coi.solverSymbolSet, 0);
+    addBootstrapStateEqualities(
+        solver, variables, data, coi.solverSymbolSet, 0);
+    for (const auto& blocker : frontierBlockers) {
+      // Summary frame 0 is the already-validated concrete reset/bootstrap
+      // frontier.  Any exact blocker learned there is a safe constraint for
+      // this weaker summary query and can make it prove UNSAT without opening
+      // the full post-reset SAT unroll again.
+      addBlockedStateCubeClause(solver, variables, blocker, 0);
+    }
+    if (data.frameInvariant != nullptr) {
+      for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {
+        FrameFormulaEncoder encoder(
+            solver, variables.makeLeafLits(frame, data.frameInvariantSupport));
+        solver.addClause({encoder.encode(data.frameInvariant)});
+      }
+    }
+
+    for (size_t frame = 0; frame < postBootstrapSteps; ++frame) {
+      addTransitionRelation(
+          solver,
+          variables,
+          data.transitionByState,
+          coi.transitionTargetsByFrame[frame],
+          frame);
+    }
+    for (const auto& [symbol, value] : cube) {
+      const int literal = variables.getLiteral(symbol, postBootstrapSteps);
+      solver.addClause({value ? literal : -literal});
+    }
+
+    const SATSolverWrapper::SolveStatus status =
+        solver.solveWithKissatResourceLimits(
+            kResetSummaryPrecheckConflictLimit);
+    if (status == SATSolverWrapper::SolveStatus::Unsat) {
+      if (refinement != 0 && isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset summary CEGAR proved unreachable "
+            "post_bootstrap_steps=",
+            postBootstrapSteps,
+            " refinements=",
+            refinement,
+            " frontier_blockers=",
+            frontierBlockers.size());
+      }
+      return true;
+    }
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {
+      if (isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset summary one-shot precheck resource_limit "
+            "post_bootstrap_steps=",
+            postBootstrapSteps,
+            " solver_symbols=",
+            coi.solverSymbols.size(),
+            " transition_targets=",
+            transitionTargets);
+      }
+      return false;
+    }
+    if (refinement == kMaxResetSummaryRefinements ||
+        frontierBlockers.size() >= kMaxResetSummaryFrontierBlockers) {
+      return false;
+    }
+
+    const auto frontierCube =
+        extractResetSummaryFrontierCube(data, solver, variables, coi);
+    if (!frontierCube.has_value()) {
+      if (isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset summary refinement skipped reason=frontier_cap "
+            "post_bootstrap_steps=",
+            postBootstrapSteps,
+            " max_literals=",
+            kMaxResetSummaryFrontierCubeLiterals);
+      }
+      return false;
+    }
+    const auto blocker =
+        proveResetSummaryFrontierCubeUnreachable(data, *frontierCube);
+    if (!blocker.has_value()) {
+      return false;
+    }
+    size_t addedBlockers = appendFrontierBlocker(*blocker) ? 1 : 0;
+    if (blocker->size() == 1 &&
+        frontierBlockers.size() < kMaxResetSummaryFrontierBlockers) {
+      const size_t remainingBlockers =
+          kMaxResetSummaryFrontierBlockers - frontierBlockers.size();
+      const auto singletonBlockers =
+          collectResetSummarySingletonFrontierBlockers(
+              data,
+              *frontierCube,
+              frontierBlockers,
+              std::min(
+                  kMaxResetSummaryBulkSingletonBlockers,
+                  remainingBlockers));
+      for (const auto& singleton : singletonBlockers) {
+        if (appendFrontierBlocker(singleton)) {
+          ++addedBlockers;
+        }
+      }
+    }
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset summary learned frontier blocker ",
+          "post_bootstrap_steps=",
+          postBootstrapSteps,
+          " refinement=",
+          refinement + 1,
+          " frontier_cube=",
+          frontierCube->size(),
+          " blocker=",
+          blocker->size(),
+          " added=",
+          addedBlockers);
+    }
+  }
+  return false;  // LCOV_EXCL_LINE
 }
 
 CachedResetFrontierSolver& getCachedResetFrontierSolver(
@@ -1464,11 +2661,30 @@ CachedResetFrontierSolver& getCachedResetFrontierSolver(
   return *it->second;
 }
 
-bool isStateCubeReachableAtResetFrontier(
+void primeResetFrontierReachabilitySolver(
     const ResetFrontierReachabilityContext& context,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t postBootstrapSteps) {
+  if (cube.empty()) {
+    return;
+  }
+
+  const auto& data = *context.data;
+  const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;
+  const auto normalizedCube = normalizedAssignmentCube(cube);
+  (void)getCachedResetFrontierSolver(
+      data, solverType, normalizedCube, targetFrame);
+}
+
+bool isStateCubeReachableAtResetFrontier(
+    const ResetFrontierReachabilityContext& context,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t postBootstrapSteps,
+    bool usePostBootstrapPrechecks,
+    int64_t startupConflictLimit,
+    int64_t startupPropagationLimit) {
   if (cube.empty()) {
     return true;
   }
@@ -1491,6 +2707,139 @@ bool isStateCubeReachableAtResetFrontier(
     }
     return false;
   }
+  if (const auto knownCore = knownResetFrontierConflictCore(
+          data, normalizedCube, postBootstrapSteps);
+      knownCore.has_value()) {
+    rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset frontier known facts exclude cube ",
+          "post_bootstrap_steps=",
+          postBootstrapSteps,
+          " core_literals=",
+          knownCore->size(),
+          " cube_literals=",
+          normalizedCube.size());
+    }
+    return false;
+  }
+  if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
+    if (resetSummaryPrecheckProvesUnreachable(
+            data, solverType, normalizedCube, postBootstrapSteps)) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+      return false;
+    }
+
+    // Cached-assumption validation is PDR's hot reset-frontier path. Before
+    // constructing the exact Glucose assumption solver, try the same weakened
+    // startup-equality COI used by one-shot validation. The relaxed query only
+    // drops equality closure, so UNSAT remains a sound proof; SAT simply falls
+    // through to the exact cached solver below. This is deliberately bounded:
+    // if the relaxed COI is still broad, or Kissat cannot decide it quickly,
+    // the shortcut is abandoned rather than becoming the PDR wall itself.
+    auto relaxedSolver = buildResetFrontierSolver(
+        data,
+        solverType,
+        normalizedCube,
+        targetFrame,
+        /*encodeCubeAsUnitClauses=*/true,
+        /*closeStartupEqualityDependencies=*/false);
+    const size_t relaxedTransitionTargets =
+        countTransitionTargets(relaxedSolver->coi.transitionTargetsByFrame);
+
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset frontier relaxed cached cube coi "
+          "post_bootstrap_steps=",
+          postBootstrapSteps,
+          " frames=",
+          targetFrame + 1,
+          " solver_symbols=",
+          relaxedSolver->coi.solverSymbols.size(),
+          " transition_targets=",
+          relaxedTransitionTargets,
+          " cube_literals=",
+          normalizedCube.size(),
+          " frame_invariant_symbols=",
+          data.frameInvariantSupport.size());
+    }
+
+    const bool relaxedCoiIsLocal =
+        relaxedSolver->coi.solverSymbols.size() <=
+            kMaxRelaxedResetFrontierPrecheckSymbols &&
+        relaxedTransitionTargets <=
+            kMaxRelaxedResetFrontierPrecheckTransitionTargets;
+    if (relaxedCoiIsLocal) {
+      bool relaxedUnsat = false;
+      if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+        const auto status =
+            relaxedSolver->solver->solveWithKissatResourceLimits(
+                kRelaxedResetFrontierPrecheckConflictLimit);
+        relaxedUnsat = status == SATSolverWrapper::SolveStatus::Unsat;
+        if (status == SATSolverWrapper::SolveStatus::Unknown &&
+            isKInductionCoiDiagEnabled()) {
+          emitSecDiag(
+              "SEC diag: reset frontier relaxed cached precheck "
+              "resource_limit post_bootstrap_steps=",
+              postBootstrapSteps,
+              " solver_symbols=",
+              relaxedSolver->coi.solverSymbols.size(),
+              " transition_targets=",
+              relaxedTransitionTargets);
+        }
+      } else {
+        relaxedUnsat = !relaxedSolver->solver->solve();
+      }
+      if (relaxedUnsat) {
+        rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+        return false;
+      }
+    } else if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset frontier relaxed cached precheck skipped "
+          "reason=coi_cap post_bootstrap_steps=",
+          postBootstrapSteps,
+          " solver_symbols=",
+          relaxedSolver->coi.solverSymbols.size(),
+          " transition_targets=",
+          relaxedTransitionTargets);
+    }
+  }
+  if (resetFrontierAssumptionSolvesDisabled()) {
+    auto unitSolver = buildResetFrontierSolver(
+        data,
+        solverType,
+        normalizedCube,
+        targetFrame,
+        /*encodeCubeAsUnitClauses=*/true);
+    const int64_t conflictLimit =
+        postBootstrapSteps == 0 && startupConflictLimit >= 0
+            ? startupConflictLimit
+            : static_cast<int64_t>(kResetFrontierCachedAssumptionConflictLimit);
+    const auto status = solveResetFrontierUnitClauseQuery(
+        *unitSolver->solver, solverType, conflictLimit);
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {
+      if (isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset frontier unit-clause proof resource_limit ",
+            "post_bootstrap_steps=",
+            postBootstrapSteps,
+            " solver_symbols=",
+            unitSolver->coi.solverSymbols.size(),
+            " transition_targets=",
+            countTransitionTargets(unitSolver->coi.transitionTargetsByFrame),
+            " cube_literals=",
+            normalizedCube.size());
+      }
+      return true;
+    }
+    const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;
+    if (!reachable) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+    }
+    return reachable;
+  }
+
   CachedResetFrontierSolver& cached =
       getCachedResetFrontierSolver(data, solverType, normalizedCube, targetFrame);
 
@@ -1505,18 +2854,53 @@ bool isStateCubeReachableAtResetFrontier(
         " transition_targets=",
         countTransitionTargets(cached.coi.transitionTargetsByFrame),
         " cube_literals=",
-        normalizedCube.size());
+        normalizedCube.size(),
+        " frame_invariant_symbols=",
+        data.frameInvariantSupport.size());
   }
 
-  const bool reachable =
-      cached.cubeEncodedAsUnitClauses
-          ? cached.solver->solve()
-          : cached.solver->solveWithAssumptions(
-                stateCubeAssumptionLits(
-                    *cached.variables, normalizedCube, targetFrame));
+  SATSolverWrapper::SolveStatus status = SATSolverWrapper::SolveStatus::Unknown;
+  if (cached.cubeEncodedAsUnitClauses) {
+    status = cached.solver->solveStatus();
+  } else {
+    const auto assumptions =
+        stateCubeAssumptionLits(*cached.variables, normalizedCube, targetFrame);
+    if (postBootstrapSteps == 0) {
+      status =
+          startupConflictLimit >= 0 || startupPropagationLimit >= 0
+              ? cached.solver->solveWithAssumptionsStatus(
+                    assumptions, startupConflictLimit, startupPropagationLimit)
+              : cached.solver->solveWithAssumptionsStatus(assumptions);
+    } else {
+      status = cached.solver->solveWithAssumptionsStatus(
+          assumptions, kResetFrontierCachedAssumptionConflictLimit);
+    }
+  }
+  if (status == SATSolverWrapper::SolveStatus::Unknown) {
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset frontier cached assumption proof resource_limit ",
+          "post_bootstrap_steps=",
+          postBootstrapSteps,
+          " solver_symbols=",
+          cached.coi.solverSymbols.size(),
+          " transition_targets=",
+          countTransitionTargets(cached.coi.transitionTargetsByFrame),
+          " cube_literals=",
+          normalizedCube.size());
+    }
+    return true;
+  }
+
+  const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;
   if (!reachable) {
     if (postBootstrapSteps == 0) {
-      if (const auto core = extractUnreachableCoreFromCachedResetFrontierSolver(
+      // The solve above already produced a failed-assumption core.  Reuse it
+      // directly instead of launching a second exact minimization loop: AES
+      // PDR samples showed wide F[0] reset cubes spending their runtime inside
+      // that duplicate Glucose search, while the failed core is already a
+      // sound reset-frontier blocker and still reusable for neighboring cubes.
+      if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
               cached, normalizedCube, targetFrame);
           core.has_value()) {
         rememberResetFrontierUnreachableCore(data, targetFrame, *core);
@@ -1541,7 +2925,8 @@ bool isStateCubeReachableAtResetFrontierOneShot(
     const ResetFrontierReachabilityContext& context,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
-    size_t postBootstrapSteps) {
+    size_t postBootstrapSteps,
+    bool usePostBootstrapPrechecks) {
   if (cube.empty()) {
     return true;
   }
@@ -1549,17 +2934,146 @@ bool isStateCubeReachableAtResetFrontierOneShot(
   const auto& data = *context.data;
   const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;
   const auto normalizedCube = normalizedAssignmentCube(cube);
+  if (const auto knownCore = knownResetFrontierConflictCore(
+          data, normalizedCube, postBootstrapSteps);
+      knownCore.has_value()) {
+    rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
+    return false;
+  }
   if (findCachedResetFrontierUnreachableCore(
           data, targetFrame, normalizedCube)
           .has_value()) {
     return false;
   }
+  if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
+    if (resetSummaryPrecheckProvesUnreachable(
+            data, solverType, normalizedCube, postBootstrapSteps)) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+      return false;
+    }
+
+    // First try a weakened COI that does not close the startup equality
+    // components.  This is safe only as an UNSAT precheck: removing equality
+    // constraints can create spurious SAT witnesses, but if the relaxed query
+    // is already UNSAT then the exact reset-frontier query is UNSAT too.  AES
+    // PDR sampling showed the exact post-reset one-shot query expanding a
+    // two-literal root cube through a 900+ symbol equality/transition closure;
+    // this precheck lets local transition/bootstrap contradictions prove out
+    // before opening that wider solver. Keep it bounded so a broad relaxed COI
+    // falls through instead of replacing the exact query with another wall.
+    auto relaxedSolver = buildResetFrontierSolver(
+        data,
+        solverType,
+        normalizedCube,
+        targetFrame,
+        /*encodeCubeAsUnitClauses=*/true,
+        /*closeStartupEqualityDependencies=*/false);
+    const size_t relaxedTransitionTargets =
+        countTransitionTargets(relaxedSolver->coi.transitionTargetsByFrame);
+
+    if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset frontier relaxed one-shot cube coi "
+          "post_bootstrap_steps=",
+          postBootstrapSteps,
+          " frames=",
+          targetFrame + 1,
+          " solver_symbols=",
+          relaxedSolver->coi.solverSymbols.size(),
+          " transition_targets=",
+          relaxedTransitionTargets,
+          " cube_literals=",
+          normalizedCube.size(),
+          " frame_invariant_symbols=",
+          data.frameInvariantSupport.size());
+    }
+
+    const bool relaxedCoiIsLocal =
+        relaxedSolver->coi.solverSymbols.size() <=
+            kMaxRelaxedResetFrontierPrecheckSymbols &&
+        relaxedTransitionTargets <=
+            kMaxRelaxedResetFrontierPrecheckTransitionTargets;
+    if (relaxedCoiIsLocal) {
+      bool relaxedUnsat = false;
+      if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+        const auto status =
+            relaxedSolver->solver->solveWithKissatResourceLimits(
+                kRelaxedResetFrontierPrecheckConflictLimit);
+        relaxedUnsat = status == SATSolverWrapper::SolveStatus::Unsat;
+        if (status == SATSolverWrapper::SolveStatus::Unknown &&
+            isKInductionCoiDiagEnabled()) {
+          emitSecDiag(
+              "SEC diag: reset frontier relaxed one-shot precheck "
+              "resource_limit post_bootstrap_steps=",
+              postBootstrapSteps,
+              " solver_symbols=",
+              relaxedSolver->coi.solverSymbols.size(),
+              " transition_targets=",
+              relaxedTransitionTargets);
+        }
+      } else {
+        relaxedUnsat = !relaxedSolver->solver->solve();
+      }
+      if (relaxedUnsat) {
+        rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+        return false;
+      }
+    } else if (isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: reset frontier relaxed one-shot precheck skipped "
+          "reason=coi_cap post_bootstrap_steps=",
+          postBootstrapSteps,
+          " solver_symbols=",
+          relaxedSolver->coi.solverSymbols.size(),
+          " transition_targets=",
+          relaxedTransitionTargets);
+    }
+  }
+  if (resetFrontierAssumptionSolvesDisabled()) {
+    auto solver = buildResetFrontierSolver(
+        data,
+        solverType,
+        normalizedCube,
+        targetFrame,
+        /*encodeCubeAsUnitClauses=*/true);
+    const int64_t conflictLimit =
+        postBootstrapSteps == 0
+            ? -1
+            : static_cast<int64_t>(kResetFrontierCachedAssumptionConflictLimit);
+    const auto status = solveResetFrontierUnitClauseQuery(
+        *solver->solver, solverType, conflictLimit);
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {
+      if (isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset frontier one-shot unit-clause resource_limit ",
+            "post_bootstrap_steps=",
+            postBootstrapSteps,
+            " solver_symbols=",
+            solver->coi.solverSymbols.size(),
+            " transition_targets=",
+            countTransitionTargets(solver->coi.transitionTargetsByFrame),
+            " cube_literals=",
+            normalizedCube.size());
+      }
+      return true;
+    }
+    const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;
+    if (!reachable) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+    }
+    return reachable;
+  }
+
+  const auto assumptionSolverType =
+      solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
+          ? KEPLER_FORMAL::Config::SolverType::GLUCOSE
+          : solverType;
   auto solver = buildResetFrontierSolver(
       data,
-      solverType,
+      assumptionSolverType,
       normalizedCube,
       targetFrame,
-      /*encodeCubeAsUnitClauses=*/true);
+      /*encodeCubeAsUnitClauses=*/false);
 
   if (isKInductionCoiDiagEnabled()) {
     emitSecDiag(
@@ -1572,14 +3086,365 @@ bool isStateCubeReachableAtResetFrontierOneShot(
         " transition_targets=",
         countTransitionTargets(solver->coi.transitionTargetsByFrame),
         " cube_literals=",
-        normalizedCube.size());
+        normalizedCube.size(),
+        " frame_invariant_symbols=",
+        data.frameInvariantSupport.size());
   }
 
-  const bool reachable = solver->solver->solve();
-  if (!reachable && postBootstrapSteps == 0) {
-    rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+  const auto assumptions =
+      stateCubeAssumptionLits(*solver->variables, normalizedCube, targetFrame);
+  const bool reachable = solver->solver->solveWithAssumptions(assumptions);
+  if (!reachable) {
+    // Keep the one-shot COI/build profile, but query the cube through
+    // assumptions so an UNSAT proof exposes a reusable core. BlackParrot
+    // samples showed full-cube caching missing many neighboring root cubes.
+    if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
+            *solver, normalizedCube, targetFrame);
+        core.has_value()) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, *core);
+    } else {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+    }
   }
   return reachable;
+}
+
+bool isStateCubeReachableWithinResetFrontier(
+    const ResetFrontierReachabilityContext& context,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::vector<std::pair<size_t, bool>>& cube,
+    size_t maxPostBootstrapSteps) {
+  if (cube.empty()) {
+    return true;
+  }
+
+  const auto& data = *context.data;
+  const auto normalizedCube = normalizedAssignmentCube(cube);
+  std::vector<size_t> uncheckedSteps;
+  uncheckedSteps.reserve(maxPostBootstrapSteps + 1);
+  for (size_t step = 0; step <= maxPostBootstrapSteps; ++step) {
+    const size_t targetFrame = data.bootstrapFrames + step;
+    if (const auto knownCore =
+            knownResetFrontierConflictCore(data, normalizedCube, step);
+        knownCore.has_value()) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
+      continue;
+    }
+    if (findCachedResetFrontierUnreachableCore(
+            data, targetFrame, normalizedCube)
+            .has_value()) {
+      continue;
+    }
+    uncheckedSteps.push_back(step);
+  }
+  if (uncheckedSteps.empty()) {
+    return false;
+  }
+
+  std::vector<size_t> remainingSteps;
+  remainingSteps.reserve(uncheckedSteps.size());
+  for (const auto step : uncheckedSteps) {
+    if (step != 0 &&
+        resetSummaryPrecheckProvesUnreachable(
+            data, solverType, normalizedCube, step)) {
+      rememberResetFrontierUnreachableCore(
+          data, data.bootstrapFrames + step, normalizedCube);
+      continue;
+    }
+    remainingSteps.push_back(step);
+  }
+  if (remainingSteps.empty()) {
+    return false;
+  }
+  if (resetFrontierAssumptionSolvesDisabled() ||
+      remainingSteps.size() <= kMaxSparseResetFrontierPerStepChecks) {
+    for (const auto step : remainingSteps) {
+      if (isStateCubeReachableAtResetFrontier(
+              context,
+              solverType,
+              normalizedCube,
+              step,
+              /*usePostBootstrapPrechecks=*/false)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const size_t maxTargetFrame =
+      data.bootstrapFrames + maxPostBootstrapSteps;
+  CachedResetFrontierSolver& solver = getCachedResetFrontierPrefixSolver(
+      data, solverType, normalizedCube, maxTargetFrame);
+
+  if (isKInductionCoiDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: reset frontier prefix cube coi max_post_bootstrap_steps=",
+        maxPostBootstrapSteps,
+        " frames=",
+        maxTargetFrame + 1,
+        " solver_symbols=",
+        solver.coi.solverSymbols.size(),
+        " transition_targets=",
+        countTransitionTargets(solver.coi.transitionTargetsByFrame),
+        " cube_literals=",
+        normalizedCube.size(),
+        " unchecked_steps=",
+        remainingSteps.size(),
+        " frame_invariant_symbols=",
+        data.frameInvariantSupport.size());
+  }
+
+  for (const auto step : remainingSteps) {
+    const size_t targetFrame = data.bootstrapFrames + step;
+    const auto assumptions =
+        stateCubeAssumptionLits(*solver.variables, normalizedCube, targetFrame);
+    const auto status =
+        step == 0
+            ? solver.solver->solveWithAssumptionsStatus(assumptions)
+            : solver.solver->solveWithAssumptionsStatus(
+                  assumptions, kResetFrontierCachedAssumptionConflictLimit);
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {
+      if (isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset frontier prefix assumption proof resource_limit ",
+            "post_bootstrap_steps=",
+            step,
+            " max_post_bootstrap_steps=",
+            maxPostBootstrapSteps,
+            " solver_symbols=",
+            solver.coi.solverSymbols.size(),
+            " transition_targets=",
+            countTransitionTargets(solver.coi.transitionTargetsByFrame),
+            " cube_literals=",
+            normalizedCube.size());
+      }
+      return true;
+    }
+    if (status == SATSolverWrapper::SolveStatus::Sat) {
+      return true;
+    }
+    if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
+            solver, normalizedCube, targetFrame);
+        core.has_value()) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, *core);
+    } else {
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+    }
+  }
+  return false;
+}
+
+std::vector<std::pair<size_t, bool>> supportCubeForAssignmentCubes(
+    const std::vector<std::vector<std::pair<size_t, bool>>>& cubes) {
+  std::unordered_map<size_t, bool> valueBySymbol;
+  for (const auto& cube : cubes) {
+    for (const auto& [symbol, value] : cube) {
+      valueBySymbol.emplace(symbol, value);
+    }
+  }
+
+  std::vector<std::pair<size_t, bool>> supportCube;
+  supportCube.reserve(valueBySymbol.size());
+  for (const auto& [symbol, value] : valueBySymbol) {
+    supportCube.emplace_back(symbol, value);
+  }
+  return normalizedAssignmentCube(std::move(supportCube));
+}
+
+bool anyStateCubeReachableWithinResetFrontier(
+    const ResetFrontierReachabilityContext& context,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::vector<std::vector<std::pair<size_t, bool>>>& cubes,
+    size_t maxPostBootstrapSteps) {
+  std::vector<std::vector<std::pair<size_t, bool>>> normalizedCubes;
+  normalizedCubes.reserve(cubes.size());
+  for (auto cube : cubes) {
+    cube = normalizedAssignmentCube(std::move(cube));
+    if (cube.empty()) {
+      return true;
+    }
+    normalizedCubes.push_back(std::move(cube));
+  }
+  if (normalizedCubes.empty()) {
+    return false;
+  }
+
+  const auto& data = *context.data;
+  const size_t maxTargetFrame = data.bootstrapFrames + maxPostBootstrapSteps;
+  const std::vector<std::pair<size_t, bool>> supportCube =
+      supportCubeForAssignmentCubes(normalizedCubes);
+  if (supportCube.empty()) {
+    return true;
+  }
+
+  CachedResetFrontierSolver& solver = getCachedResetFrontierPrefixSolver(
+      data, solverType, supportCube, maxTargetFrame);
+
+  if (isKInductionCoiDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: reset frontier batch cube coi max_post_bootstrap_steps=",
+        maxPostBootstrapSteps,
+        " frames=",
+        maxTargetFrame + 1,
+        " solver_symbols=",
+        solver.coi.solverSymbols.size(),
+        " transition_targets=",
+        countTransitionTargets(solver.coi.transitionTargetsByFrame),
+        " cubes=",
+        normalizedCubes.size(),
+        " support_literals=",
+        supportCube.size(),
+        " frame_invariant_symbols=",
+        data.frameInvariantSupport.size());
+  }
+
+  for (size_t step = 0; step <= maxPostBootstrapSteps; ++step) {
+    const size_t targetFrame = data.bootstrapFrames + step;
+    for (const auto& cube : normalizedCubes) {
+      if (const auto knownCore =
+              knownResetFrontierConflictCore(data, cube, step);
+          knownCore.has_value()) {
+        rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
+        continue;
+      }
+      if (findCachedResetFrontierUnreachableCore(data, targetFrame, cube)
+              .has_value()) {
+        continue;
+      }
+      const auto assumptions =
+          stateCubeAssumptionLits(*solver.variables, cube, targetFrame);
+      const auto status =
+          step == 0
+              ? solver.solver->solveWithAssumptionsStatus(assumptions)
+              : solver.solver->solveWithAssumptionsStatus(
+                    assumptions,
+                    kResetFrontierCachedAssumptionConflictLimit,
+                    kResetFrontierBatchProofPropagationLimit);
+      if (status == SATSolverWrapper::SolveStatus::Sat) {
+        return true;
+      }
+      if (status == SATSolverWrapper::SolveStatus::Unknown) {
+        if (isKInductionCoiDiagEnabled()) {
+          emitSecDiag(
+              "SEC diag: reset frontier batch assumption proof resource_limit ",
+              "post_bootstrap_steps=",
+              step,
+              " max_post_bootstrap_steps=",
+              maxPostBootstrapSteps,
+              " solver_symbols=",
+              solver.coi.solverSymbols.size(),
+              " transition_targets=",
+              countTransitionTargets(solver.coi.transitionTargetsByFrame),
+              " cubes=",
+              normalizedCubes.size());
+        }
+        return true;
+      }
+      if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
+              solver, cube, targetFrame);
+          core.has_value()) {
+        rememberResetFrontierUnreachableCore(data, targetFrame, *core);
+      } else {
+        rememberResetFrontierUnreachableCore(data, targetFrame, cube);
+      }
+    }
+  }
+  return false;
+}
+
+bool anyStateCubeReachableAtResetFrontier(
+    const ResetFrontierReachabilityContext& context,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::vector<std::vector<std::pair<size_t, bool>>>& cubes,
+    size_t postBootstrapSteps,
+    long long glucoseConflictLimit,
+    long long glucosePropagationLimit) {
+  std::vector<std::vector<std::pair<size_t, bool>>> normalizedCubes;
+  normalizedCubes.reserve(cubes.size());
+  for (auto cube : cubes) {
+    cube = normalizedAssignmentCube(std::move(cube));
+    if (cube.empty()) {
+      return true;
+    }
+    normalizedCubes.push_back(std::move(cube));
+  }
+  if (normalizedCubes.empty()) {
+    return false;
+  }
+
+  const auto& data = *context.data;
+  const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;
+  const std::vector<std::pair<size_t, bool>> supportCube =
+      supportCubeForAssignmentCubes(normalizedCubes);
+  if (supportCube.empty()) {
+    return true;
+  }
+
+  CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
+      data, solverType, supportCube, targetFrame);
+
+  if (isKInductionCoiDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: reset frontier target batch cube coi "
+        "post_bootstrap_steps=",
+        postBootstrapSteps,
+        " frames=",
+        targetFrame + 1,
+        " solver_symbols=",
+        solver.coi.solverSymbols.size(),
+        " transition_targets=",
+        countTransitionTargets(solver.coi.transitionTargetsByFrame),
+        " cubes=",
+        normalizedCubes.size(),
+        " support_literals=",
+        supportCube.size(),
+        " frame_invariant_symbols=",
+        data.frameInvariantSupport.size());
+  }
+
+  for (const auto& cube : normalizedCubes) {
+    if (const auto knownCore =
+            knownResetFrontierConflictCore(data, cube, postBootstrapSteps);
+        knownCore.has_value()) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
+      continue;
+    }
+    if (findCachedResetFrontierUnreachableCore(data, targetFrame, cube)
+            .has_value()) {
+      continue;
+    }
+    const auto assumptions =
+        stateCubeAssumptionLits(*solver.variables, cube, targetFrame);
+    const auto status =
+        solver.solver->solveWithAssumptionsStatus(
+            assumptions, glucoseConflictLimit, glucosePropagationLimit);
+    if (status == SATSolverWrapper::SolveStatus::Sat) {
+      return true;
+    }
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {
+      if (isKInductionCoiDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: reset frontier target batch assumption proof "
+            "resource_limit post_bootstrap_steps=",
+            postBootstrapSteps,
+            " solver_symbols=",
+            solver.coi.solverSymbols.size(),
+            " transition_targets=",
+            countTransitionTargets(solver.coi.transitionTargetsByFrame),
+            " cubes=",
+            normalizedCubes.size());
+      }
+      return true;
+    }
+    if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
+            solver, cube, targetFrame);
+        core.has_value()) {
+      rememberResetFrontierUnreachableCore(data, targetFrame, *core);
+    } else {
+      rememberResetFrontierUnreachableCore(data, targetFrame, cube);
+    }
+  }
+  return false;
 }
 
 std::optional<std::vector<std::pair<size_t, bool>>>
@@ -1595,10 +3460,19 @@ findResetFrontierUnreachableCubeCore(
   const auto& data = *context.data;
   const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;
   const auto normalizedCube = normalizedAssignmentCube(cube);
+  if (const auto knownCore = knownResetFrontierConflictCore(
+          data, normalizedCube, postBootstrapSteps);
+      knownCore.has_value()) {
+    rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
+    return knownCore;
+  }
   if (const auto cachedCore =
           findCachedResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
       cachedCore.has_value()) {
     return cachedCore;
+  }
+  if (resetFrontierAssumptionSolvesDisabled()) {
+    return std::nullopt;
   }
   CachedResetFrontierSolver& cached =
       getCachedResetFrontierSolver(data, solverType, normalizedCube, targetFrame);

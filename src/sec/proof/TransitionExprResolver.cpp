@@ -3,6 +3,7 @@
 
 #include "proof/TransitionExprResolver.h"
 
+#include <algorithm>
 #include <memory_resource>
 #include <stdexcept>
 #include <string>
@@ -15,13 +16,19 @@ namespace KEPLER_FORMAL::SEC {
 
 namespace {
 
+constexpr size_t kCachedUnionSupportTargetThreshold = 16;
+
 size_t countBoolExprNodes(BoolExpr* formula) {
   if (formula == nullptr) {
     return 0;  // LCOV_EXCL_LINE
   }
 
-  std::unordered_set<BoolExpr*> visited;
-  std::vector<BoolExpr*> stack{formula};
+  std::pmr::monotonic_buffer_resource visitedResource;
+  std::pmr::unordered_set<BoolExpr*> visited{&visitedResource};
+  visited.reserve(4096);
+  std::vector<BoolExpr*> stack;
+  stack.reserve(1024);
+  stack.push_back(formula);
   while (!stack.empty()) {
     BoolExpr* node = stack.back();
     stack.pop_back();
@@ -76,6 +83,22 @@ std::set<size_t> collectBoolExprSupport(BoolExpr* formula,
   }
   return support;
 }
+
+struct SupportVisitKey {
+  BoolExpr* node = nullptr;
+  const void* symbolMap = nullptr;
+
+  bool operator==(const SupportVisitKey& other) const {
+    return node == other.node && symbolMap == other.symbolMap;
+  }
+};
+
+struct SupportVisitKeyHash {
+  size_t operator()(const SupportVisitKey& key) const {
+    return std::hash<BoolExpr*>{}(key.node) ^
+           (std::hash<const void*>{}(key.symbolMap) << 1);
+  }
+};
 
 std::set<size_t> identitySupport(BoolExpr* formula) {
   return collectBoolExprSupport(
@@ -159,6 +182,33 @@ BoolExpr* TransitionExprResolver::at(size_t stateSymbol) const {
   return remapped;
 }
 
+TransitionExprView TransitionExprResolver::expressionView(size_t stateSymbol) const {
+  if (const auto eagerIt = eagerByStateSymbol_.find(stateSymbol);
+      eagerIt != eagerByStateSymbol_.end()) {
+    return TransitionExprView{eagerIt->second, nullptr};
+  }
+
+  if (problem_.lazyTransitions == nullptr) {
+    throw std::runtime_error(
+        "Missing transition expression for state symbol " +
+        std::to_string(stateSymbol));
+  }
+
+  const auto& store = *problem_.lazyTransitions;
+  const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);
+  if (sourceIt == store.sourceByStateSymbol.end()) {
+    throw std::runtime_error(
+        "Missing lazy transition expression for state symbol " +
+        std::to_string(stateSymbol));
+  }
+  const LazyTransitionSource& source = sourceIt->second;
+  if (source.designIndex >= store.localToCombinedByDesign.size()) {
+    throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+  }
+  return TransitionExprView{
+      source.localExpr, &store.localToCombinedByDesign[source.designIndex]};
+}
+
 const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) const {
   if (const auto cachedIt = supportByStateSymbol_.find(stateSymbol);
       cachedIt != supportByStateSymbol_.end()) {
@@ -204,6 +254,109 @@ const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) cons
           sourceIt->second.localExpr,
           store.localToCombinedByDesign[sourceIt->second.designIndex]));
   return insertedIt->second;
+}
+
+void TransitionExprResolver::collectSupportForTargets(
+    const std::vector<size_t>& stateSymbols,
+    const std::unordered_set<size_t>& knownStateSymbols,
+    std::unordered_set<size_t>& stateSupport,
+    std::unordered_set<size_t>& allSupport) const {
+  if (stateSymbols.empty()) {
+    return;
+  }
+
+  if (stateSymbols.size() >= kCachedUnionSupportTargetThreshold) {
+    // Large reset-frontier COI builders repeatedly ask for neighboring target
+    // sets. Reuse the resolver's per-transition support cache instead of
+    // rebuilding a large per-query visited table and throwing it away.
+    for (const auto stateSymbol : stateSymbols) {
+      for (const auto symbol : support(stateSymbol)) {
+        allSupport.insert(symbol);
+        if (knownStateSymbols.find(symbol) != knownStateSymbols.end()) {
+          stateSupport.insert(symbol);
+        }
+      }
+    }
+    return;
+  }
+
+  // COI builders often need the union support for many transition targets in
+  // the same frame. Walking each target separately repeats shared BoolExpr DAG
+  // regions on ASIC designs. Traverse all requested roots together and key the
+  // visited set by the source symbol map, so lazy design-local expressions are
+  // still remapped exactly without forcing full DAG remapping.
+  std::pmr::monotonic_buffer_resource visitedResource;
+  std::pmr::unordered_set<SupportVisitKey, SupportVisitKeyHash> visited{
+      &visitedResource};
+  visited.reserve(std::min(
+      static_cast<size_t>(1 << 20),
+      std::max(static_cast<size_t>(4096), stateSymbols.size() * 1024)));
+  std::vector<SupportVisitKey> stack;
+  stack.reserve(stateSymbols.size());
+
+  for (const auto stateSymbol : stateSymbols) {
+    if (const auto eagerIt = eagerByStateSymbol_.find(stateSymbol);
+        eagerIt != eagerByStateSymbol_.end()) {
+      stack.push_back({eagerIt->second, nullptr});
+      continue;
+    }
+
+    if (problem_.lazyTransitions == nullptr) {
+      throw std::runtime_error(
+          "Missing transition expression for state symbol " +
+          std::to_string(stateSymbol));
+    }
+    const auto& store = *problem_.lazyTransitions;
+    const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);
+    if (sourceIt == store.sourceByStateSymbol.end()) {
+      throw std::runtime_error(
+          "Missing lazy transition expression for state symbol " +
+          std::to_string(stateSymbol));
+    }
+    const LazyTransitionSource& source = sourceIt->second;
+    if (source.designIndex >= store.localToCombinedByDesign.size()) {
+      throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+    }
+    stack.push_back(
+        {source.localExpr, &store.localToCombinedByDesign[source.designIndex]});
+  }
+
+  while (!stack.empty()) {
+    const SupportVisitKey current = stack.back();
+    stack.pop_back();
+    BoolExpr* node = current.node;
+    if (node == nullptr || !visited.insert(current).second) {
+      continue;
+    }
+    if (node->getOp() == Op::VAR) {
+      size_t symbol = node->getId();
+      if (current.symbolMap != nullptr && symbol >= 2) {
+        const auto& map =
+            *static_cast<const std::unordered_map<size_t, size_t>*>(
+                current.symbolMap);
+        const auto mappedIt = map.find(symbol);
+        if (mappedIt == map.end()) {
+          throw std::runtime_error(
+              "Missing BoolExpr support remap for variable " +
+              std::to_string(symbol));
+        }
+        symbol = mappedIt->second;
+      }
+      if (symbol >= 2) {
+        allSupport.insert(symbol);
+        if (knownStateSymbols.find(symbol) != knownStateSymbols.end()) {
+          stateSupport.insert(symbol);
+        }
+      }
+      continue;
+    }
+    if (node->getRight() != nullptr) {
+      stack.push_back({node->getRight(), current.symbolMap});
+    }
+    if (node->getLeft() != nullptr) {
+      stack.push_back({node->getLeft(), current.symbolMap});
+    }
+  }
 }
 
 size_t TransitionExprResolver::nodeCount(size_t stateSymbol) const {
