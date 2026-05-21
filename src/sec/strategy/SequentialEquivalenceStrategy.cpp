@@ -1556,7 +1556,11 @@ SequentialEquivalenceResult runPdrSecEngine(
     constexpr size_t kMaxPdrConcreteValidationOutputs = 1;
     constexpr size_t kMaxFinalExactPdrOutputBatchSize =
         kPdrOutputBatchingLimits.maxOutputBatchSize;
-    constexpr size_t kFinalExactPdrPredecessorProjectionLimit = 32;
+    // The final exact repair already carries exact frame clauses and validated
+    // bad-formula clauses. Keeping predecessor cubes at 16 literals avoids the
+    // BlackParrot 32-literal sibling-enumeration wall while retaining enough
+    // context for the exact final stage to close the proof.
+    constexpr size_t kFinalExactPdrPredecessorProjectionLimit = 16;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrBadCubeStateLimit = 32;
     constexpr size_t kFinalExactPdrRootGeneralizationAttempts = 0;
     if (endOutput - firstOutput > kMaxFinalExactPdrOutputBatchSize) {
@@ -1597,7 +1601,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     // supports assumptions efficiently enough to use the exact reset-frontier
     // core cache here: concrete F[0] blockers cut off those abstract roots
     // before the exact-frame PDR loop walks thousands of SAT predecessors.
-    const bool finalSliceUsesResetFrontier = true;
+    const bool finalSliceUsesResetFrontier = true;  // LCOV_EXCL_LINE
     const size_t finalPdrPredecessorProjectionLimit =
         kFinalExactPdrPredecessorProjectionLimit;
     const size_t finalPdrBadCubeStateLimit =

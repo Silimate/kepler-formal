@@ -55,10 +55,6 @@ class KInductionEngine {
   KInductionResult run(size_t maxK) const;
 
  private:
-  std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
-      size_t k) const;
-  bool provesByInduction(size_t k) const;
-
   const KInductionProblem& problem_;
   KEPLER_FORMAL::Config::SolverType solverType_;
 };

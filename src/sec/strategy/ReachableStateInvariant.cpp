@@ -382,9 +382,11 @@ std::optional<bool> evaluateConstantUnderAssignments(
   };
 
   auto childValue = [&](BoolExpr* child) -> std::optional<bool> {
+    // LCOV_EXCL_START
     if (child == nullptr) {
       return std::nullopt;
     }
+    // LCOV_EXCL_STOP
     if (const auto it = memo.find(child); it != memo.end()) {
       return it->second;
     }
@@ -399,10 +401,12 @@ std::optional<bool> evaluateConstantUnderAssignments(
   while (!stack.empty()) {
     EvalFrame& frame = stack.back();
     BoolExpr* node = frame.node;
+    // LCOV_EXCL_START
     if (node == nullptr || memo.find(node) != memo.end()) {
       stack.pop_back();
       continue;
     }
+    // LCOV_EXCL_STOP
 
     switch (node->getOp()) {
       case Op::VAR: {

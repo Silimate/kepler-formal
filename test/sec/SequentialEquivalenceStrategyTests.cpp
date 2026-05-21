@@ -1488,6 +1488,14 @@ SignalKey makeSignalKey(const std::string& name) {
   return key;
 }
 
+BoolExpr* makeOrChain(const std::vector<size_t>& vars) {
+  BoolExpr* expr = BoolExpr::createFalse();
+  for (const auto var : vars) {
+    expr = BoolExpr::Or(expr, BoolExpr::Var(var));
+  }
+  return expr;
+}
+
 SequentialDesignModel makeCombinationalExtractedModel(BoolExpr* outputExpr) {
   SequentialDesignModel model;
   const SignalKey inputKey = makeSignalKey("in");
@@ -4198,6 +4206,203 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantEvaluatesXorBootstrapValuesInSourcePath) {
+  const SignalKey rst0 = makeSignalKey("xorRst0");
+  const SignalKey rst1 = makeSignalKey("xorRst1");
+  const SignalKey lhs0 = makeSignalKey("xorLhs0");
+  const SignalKey lhs1 = makeSignalKey("xorLhs1");
+  const SignalKey rhs0 = makeSignalKey("xorRhs0");
+  const SignalKey rhs1 = makeSignalKey("xorRhs1");
+  const SignalKey xor0 = makeSignalKey("xorState0");
+  const SignalKey xor1 = makeSignalKey("xorState1");
+  const SignalKey unknownXor0 = makeSignalKey("unknownXorState0");
+  const SignalKey unknownXor1 = makeSignalKey("unknownXorState1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst0};
+  model0.stateBits = {xor0, lhs0, rhs0, unknownXor0};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(lhs0, 4);
+  model0.inputVarByKey.emplace(rhs0, 6);
+  model0.inputVarByKey.emplace(xor0, 8);
+  model0.inputVarByKey.emplace(unknownXor0, 10);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model0.initialStateValueByKey.emplace(lhs0, true);
+  model0.initialStateValueByKey.emplace(rhs0, false);
+  model0.nextStateExprByStateKey.emplace(lhs0, BoolExpr::Var(4));
+  model0.nextStateExprByStateKey.emplace(rhs0, BoolExpr::Var(6));
+  model0.nextStateExprByStateKey.emplace(
+      xor0, BoolExpr::Xor(BoolExpr::Var(4), BoolExpr::Var(6)));
+  model0.nextStateExprByStateKey.emplace(
+      unknownXor0, BoolExpr::Xor(BoolExpr::Var(4), BoolExpr::Var(1000)));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst1};
+  model1.stateBits = {xor1, lhs1, rhs1, unknownXor1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(lhs1, 5);
+  model1.inputVarByKey.emplace(rhs1, 7);
+  model1.inputVarByKey.emplace(xor1, 9);
+  model1.inputVarByKey.emplace(unknownXor1, 11);
+  model1.displayNameByKey.emplace(rst1, "rst");
+  model1.initialStateValueByKey.emplace(lhs1, true);
+  model1.initialStateValueByKey.emplace(rhs1, false);
+  model1.nextStateExprByStateKey.emplace(lhs1, BoolExpr::Var(5));
+  model1.nextStateExprByStateKey.emplace(rhs1, BoolExpr::Var(7));
+  model1.nextStateExprByStateKey.emplace(
+      xor1, BoolExpr::Xor(BoolExpr::Var(5), BoolExpr::Var(7)));
+  model1.nextStateExprByStateKey.emplace(
+      unknownXor1, BoolExpr::Xor(BoolExpr::Var(5), BoolExpr::Var(1001)));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"xor_state"};
+  candidateStates.keys0 = {xor0};
+  candidateStates.keys1 = {xor1};
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.bootstrapValues0.size(), 3u);
+  EXPECT_TRUE(invariant.bootstrapValues0.at(xor0));
+  ASSERT_EQ(invariant.bootstrapValues1.size(), 3u);
+  EXPECT_TRUE(invariant.bootstrapValues1.at(xor1));
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
+  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "xor_state");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantEvaluatesAndOrBootstrapShortCircuitsInSourcePath) {
+  const SignalKey rst0 = makeSignalKey("andOrRst0");
+  const SignalKey rst1 = makeSignalKey("andOrRst1");
+
+  auto buildModel = [](const SignalKey& rst, size_t firstVar) {
+    SequentialDesignModel model;
+    const SignalKey falseState = makeSignalKey("andOrFalse" + std::to_string(firstVar));
+    const SignalKey trueState = makeSignalKey("andOrTrue" + std::to_string(firstVar));
+    const SignalKey falseHighState =
+        makeSignalKey("andOrFalseHigh" + std::to_string(firstVar));
+    const SignalKey trueHighState =
+        makeSignalKey("andOrTrueHigh" + std::to_string(firstVar));
+    const SignalKey andLhsFalse =
+        makeSignalKey("andOrAndLhsFalse" + std::to_string(firstVar));
+    const SignalKey andRhsFalse =
+        makeSignalKey("andOrAndRhsFalse" + std::to_string(firstVar));
+    const SignalKey andBothKnown =
+        makeSignalKey("andOrAndBothKnown" + std::to_string(firstVar));
+    const SignalKey orLhsTrue =
+        makeSignalKey("andOrOrLhsTrue" + std::to_string(firstVar));
+    const SignalKey orRhsTrue =
+        makeSignalKey("andOrOrRhsTrue" + std::to_string(firstVar));
+    const SignalKey orBothKnown =
+        makeSignalKey("andOrOrBothKnown" + std::to_string(firstVar));
+
+    const size_t falseVar = firstVar;
+    const size_t trueVar = firstVar + 2;
+    const size_t falseHighVar = firstVar + 4;
+    const size_t trueHighVar = firstVar + 6;
+    const size_t andLhsFalseVar = firstVar + 8;
+    const size_t andRhsFalseVar = firstVar + 10;
+    const size_t andBothKnownVar = firstVar + 12;
+    const size_t orLhsTrueVar = firstVar + 14;
+    const size_t orRhsTrueVar = firstVar + 16;
+    const size_t orBothKnownVar = firstVar + 18;
+    const size_t unknownVar = firstVar + 1000;
+
+    model.environmentInputs = {rst};
+    model.stateBits = {
+        falseState,
+        trueState,
+        falseHighState,
+        trueHighState,
+        andLhsFalse,
+        andRhsFalse,
+        andBothKnown,
+        orLhsTrue,
+        orRhsTrue,
+        orBothKnown};
+    model.inputVarByKey.emplace(rst, firstVar - 2);
+    model.inputVarByKey.emplace(falseState, falseVar);
+    model.inputVarByKey.emplace(trueState, trueVar);
+    model.inputVarByKey.emplace(falseHighState, falseHighVar);
+    model.inputVarByKey.emplace(trueHighState, trueHighVar);
+    model.inputVarByKey.emplace(andLhsFalse, andLhsFalseVar);
+    model.inputVarByKey.emplace(andRhsFalse, andRhsFalseVar);
+    model.inputVarByKey.emplace(andBothKnown, andBothKnownVar);
+    model.inputVarByKey.emplace(orLhsTrue, orLhsTrueVar);
+    model.inputVarByKey.emplace(orRhsTrue, orRhsTrueVar);
+    model.inputVarByKey.emplace(orBothKnown, orBothKnownVar);
+    model.displayNameByKey.emplace(rst, "rst");
+    model.initialStateValueByKey.emplace(falseState, false);
+    model.initialStateValueByKey.emplace(trueState, true);
+    model.initialStateValueByKey.emplace(falseHighState, false);
+    model.initialStateValueByKey.emplace(trueHighState, true);
+
+    model.nextStateExprByStateKey.emplace(falseState, BoolExpr::Var(falseVar));
+    model.nextStateExprByStateKey.emplace(trueState, BoolExpr::Var(trueVar));
+    model.nextStateExprByStateKey.emplace(falseHighState, BoolExpr::Var(falseHighVar));
+    model.nextStateExprByStateKey.emplace(trueHighState, BoolExpr::Var(trueHighVar));
+    model.nextStateExprByStateKey.emplace(
+        andLhsFalse,
+        BoolExpr::And(BoolExpr::Var(falseVar), BoolExpr::Var(unknownVar)));
+    model.nextStateExprByStateKey.emplace(
+        andRhsFalse,
+        BoolExpr::And(BoolExpr::Var(trueVar), BoolExpr::Var(falseHighVar)));
+    model.nextStateExprByStateKey.emplace(
+        andBothKnown,
+        BoolExpr::And(BoolExpr::Var(trueVar), BoolExpr::Var(trueHighVar)));
+    model.nextStateExprByStateKey.emplace(
+        orLhsTrue,
+        BoolExpr::Or(BoolExpr::Var(trueVar), BoolExpr::Var(unknownVar)));
+    model.nextStateExprByStateKey.emplace(
+        orRhsTrue,
+        BoolExpr::Or(BoolExpr::Var(falseVar), BoolExpr::Var(trueVar)));
+    model.nextStateExprByStateKey.emplace(
+        orBothKnown,
+        BoolExpr::Or(BoolExpr::Var(falseVar), BoolExpr::Var(falseHighVar)));
+
+    return std::make_pair(std::move(model), std::vector<SignalKey>{
+        andLhsFalse,
+        andRhsFalse,
+        andBothKnown,
+        orLhsTrue,
+        orRhsTrue,
+        orBothKnown});
+  };
+
+  auto [model0, states0] = buildModel(rst0, 4);
+  auto [model1, states1] = buildModel(rst1, 5);
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  const auto invariant =
+      buildReachableStateInvariant(model0, model1, alignedInputs, {});
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(states0.size(), states1.size());
+  for (size_t i = 0; i < states0.size(); ++i) {
+    ASSERT_NE(invariant.bootstrapValues0.find(states0[i]),
+              invariant.bootstrapValues0.end());
+    ASSERT_NE(invariant.bootstrapValues1.find(states1[i]),
+              invariant.bootstrapValues1.end());
+  }
+  EXPECT_FALSE(invariant.bootstrapValues0.at(states0[0]));
+  EXPECT_FALSE(invariant.bootstrapValues0.at(states0[1]));
+  EXPECT_TRUE(invariant.bootstrapValues0.at(states0[2]));
+  EXPECT_TRUE(invariant.bootstrapValues0.at(states0[3]));
+  EXPECT_TRUE(invariant.bootstrapValues0.at(states0[4]));
+  EXPECT_FALSE(invariant.bootstrapValues0.at(states0[5]));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantCoversSatRemapFailureForUnalignedBootstrapInput) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
@@ -4245,6 +4450,141 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
   EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state_q[0]");
   EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantReportsSkippedBootstrapSatRecoveryBudget) {
+  const SignalKey rst0 = makeSignalKey("satBudgetRst0");
+  const SignalKey rst1 = makeSignalKey("satBudgetRst1");
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model0.environmentInputs = {rst0};
+  model1.environmentInputs = {rst1};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model1.inputVarByKey.emplace(rst1, 3);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model1.displayNameByKey.emplace(rst1, "rst");
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  AlignedSignals candidateStates;
+  constexpr size_t kCandidateCount = 1025;
+  for (size_t i = 0; i < kCandidateCount; ++i) {
+    const SignalKey data0 = makeSignalKey("satBudgetData0_" + std::to_string(i));
+    const SignalKey data1 = makeSignalKey("satBudgetData1_" + std::to_string(i));
+    const SignalKey state0 = makeSignalKey("satBudgetState0_" + std::to_string(i));
+    const SignalKey state1 = makeSignalKey("satBudgetState1_" + std::to_string(i));
+    const size_t dataVar0 = 10 + i * 4;
+    const size_t dataVar1 = 11 + i * 4;
+    const size_t stateVar0 = 12 + i * 4;
+    const size_t stateVar1 = 13 + i * 4;
+
+    model0.environmentInputs.push_back(data0);
+    model1.environmentInputs.push_back(data1);
+    model0.stateBits.push_back(state0);
+    model1.stateBits.push_back(state1);
+    model0.inputVarByKey.emplace(data0, dataVar0);
+    model1.inputVarByKey.emplace(data1, dataVar1);
+    model0.inputVarByKey.emplace(state0, stateVar0);
+    model1.inputVarByKey.emplace(state1, stateVar1);
+    model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(dataVar0));
+    model1.nextStateExprByStateKey.emplace(
+        state1, BoolExpr::Not(BoolExpr::Var(dataVar1)));
+
+    alignedInputs.names.push_back("data_" + std::to_string(i));
+    alignedInputs.keys0.push_back(data0);
+    alignedInputs.keys1.push_back(data1);
+    candidateStates.names.push_back("state_" + std::to_string(i));
+    candidateStates.keys0.push_back(state0);
+    candidateStates.keys1.push_back(state1);
+  }
+
+  testing::internal::CaptureStderr();
+  const auto invariant = buildReachableStateInvariant(
+      model0,
+      model1,
+      alignedInputs,
+      candidateStates,
+      /*deriveResetBootstrapStrengthening=*/false,
+      /*secDiagEnabled=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=1025"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantSkipsHugeBootstrapSatRecoveryCone) {
+  const SignalKey rst0 = makeSignalKey("wideSatRst0");
+  const SignalKey rst1 = makeSignalKey("wideSatRst1");
+  const SignalKey state0 = makeSignalKey("wideSatState0");
+  const SignalKey state1 = makeSignalKey("wideSatState1");
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model0.environmentInputs = {rst0};
+  model1.environmentInputs = {rst1};
+  model0.stateBits = {state0};
+  model1.stateBits = {state1};
+  model0.inputVarByKey.emplace(rst0, 2);
+  model1.inputVarByKey.emplace(rst1, 3);
+  model0.inputVarByKey.emplace(state0, 4);
+  model1.inputVarByKey.emplace(state1, 5);
+  model0.displayNameByKey.emplace(rst0, "rst");
+  model1.displayNameByKey.emplace(rst1, "rst");
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"rst"};
+  alignedInputs.keys0 = {rst0};
+  alignedInputs.keys1 = {rst1};
+
+  std::vector<size_t> vars0;
+  std::vector<size_t> vars1;
+  constexpr size_t kWideSupportSize = 4097;
+  vars0.reserve(kWideSupportSize);
+  vars1.reserve(kWideSupportSize);
+  for (size_t i = 0; i < kWideSupportSize; ++i) {
+    const SignalKey data0 = makeSignalKey("wideSatData0_" + std::to_string(i));
+    const SignalKey data1 = makeSignalKey("wideSatData1_" + std::to_string(i));
+    const size_t dataVar0 = 100 + i * 2;
+    const size_t dataVar1 = 101 + i * 2;
+    model0.environmentInputs.push_back(data0);
+    model1.environmentInputs.push_back(data1);
+    model0.inputVarByKey.emplace(data0, dataVar0);
+    model1.inputVarByKey.emplace(data1, dataVar1);
+    alignedInputs.names.push_back("wide_data_" + std::to_string(i));
+    alignedInputs.keys0.push_back(data0);
+    alignedInputs.keys1.push_back(data1);
+    vars0.push_back(dataVar0);
+    vars1.push_back(dataVar1);
+  }
+  model0.nextStateExprByStateKey.emplace(state0, makeOrChain(vars0));
+  model1.nextStateExprByStateKey.emplace(
+      state1, BoolExpr::Not(makeOrChain(vars1)));
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"wide_state"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
+
+  testing::internal::CaptureStderr();
+  const auto invariant = buildReachableStateInvariant(
+      model0,
+      model1,
+      alignedInputs,
+      candidateStates,
+      /*deriveResetBootstrapStrengthening=*/false,
+      /*secDiagEnabled=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=1"), std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -11965,6 +12305,53 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionBatchedOutputsCombineInconclusiveSlices) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initialStateAssignments = {{2, false}};
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  for (size_t i = 0; i < 33; ++i) {
+    problem.observedOutputs.push_back(makeSignalKey("batched_inconclusive_" + std::to_string(i)));
+    problem.observedOutputNames.push_back("out_" + std::to_string(i));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(2));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(2));
+  }
+  problem.property = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+
+  EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionBatchedOutputsReturnDifferentSlice) {
+  KInductionProblem problem;
+  for (size_t i = 0; i < 33; ++i) {
+    problem.observedOutputs.push_back(makeSignalKey("batched_different_" + std::to_string(i)));
+    problem.observedOutputNames.push_back("out_" + std::to_string(i));
+    problem.observedOutputExprs0.push_back(i == 0 ? BoolExpr::createFalse()
+                                                  : BoolExpr::createTrue());
+    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+  }
+  problem.property = BoolExpr::createFalse();
+  problem.bad = BoolExpr::createTrue();
+
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+
+  EXPECT_EQ(result.status, KInductionStatus::Different);
+  ASSERT_TRUE(result.witness.has_value());
+  EXPECT_EQ(result.witness->badFrame, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelDetailHelpersCoverNextStateAndInitErrors) {
   const std::unordered_map<naja::DNL::DNLID, BoolExpr*> outputExprByTerm = {
       {11, BoolExpr::Var(7)},
@@ -12007,6 +12394,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(detail::detectInitialStateValueForTest({}), std::nullopt);
   EXPECT_THROW(
       detail::detectInitialStateValueForTest({{"R", 11}, {"S", 12}}),
+      std::runtime_error);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BoolExprVariableRemapRejectsUnsupportedOperator) {
+  BoolExpr invalidExpr;
+
+  EXPECT_THROW(
+      static_cast<void>(remapBoolExprVariables(&invalidExpr, {})),
       std::runtime_error);
 }
 

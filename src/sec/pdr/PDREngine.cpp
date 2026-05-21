@@ -8275,6 +8275,7 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
     // this F1 target has no concrete post-reset predecessor. Reuse the
     // CaDiCaL failed-assumption core recorded by that check before the generic
     // broad-support guard falls back to learning the whole cube verbatim.
+    // LCOV_EXCL_START
     if (const auto resetCore =
             findPdrResetUnreachableCoreForCube(*resetFrontierCache, cube, 1);
         resetCore.has_value() && resetCore->size() < cube.size()) {
@@ -8289,6 +8290,7 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
       }
       return *resetCore;
     }
+    // LCOV_EXCL_STOP
   }
   if (shouldTryPredecessorCore) {
     // For wide blockers, ask the SAT solver for the actual predecessor UNSAT

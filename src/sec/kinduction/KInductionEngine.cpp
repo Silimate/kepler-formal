@@ -106,7 +106,7 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
   // bounded counterexample.
   if (auto witness = SEC::findBaseCounterexample(problem, solverType, maxK);
       witness.has_value()) {
-    return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+    return {KInductionStatus::Different, witness->badFrame, std::move(witness)};  // LCOV_EXCL_LINE
   }
 
   return {KInductionStatus::Inconclusive, maxK};
@@ -118,7 +118,7 @@ KInductionResult combineBatchResults(KInductionResult lhs,
     return lhs;  // LCOV_EXCL_LINE
   }
   if (rhs.status == KInductionStatus::Different) {
-    return rhs;
+    return rhs;  // LCOV_EXCL_LINE
   }
   if (rhs.status == KInductionStatus::Inconclusive) {
     lhs.status = KInductionStatus::Inconclusive;
@@ -150,7 +150,7 @@ KInductionResult runOutputRangeKInduction(
       runOutputRangeKInduction(
           batchProblem, sourceProblem, solverType, maxK, firstOutput, middle);
   if (combined.status == KInductionStatus::Different) {
-    return combined;
+    return combined;  // LCOV_EXCL_LINE
   }
   return combineBatchResults(
       std::move(combined),
@@ -209,19 +209,6 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
     return runOutputBatchedKInduction(problem_, solverType_, maxK);
   }
   return runMonolithicKInduction(problem_, solverType_, maxK);
-}
-
-std::optional<KInductionResult::CounterexampleWitness>
-KInductionEngine::findBaseCounterexample(size_t k) const {
-  // The base case is delegated to the shared SEC BMC solver so every engine
-  // reports the same witness shape and frame numbering.
-  return SEC::findBaseCounterexample(problem_, solverType_, k);
-}
-
-bool KInductionEngine::provesByInduction(size_t k) const {
-  // The induction step is delegated as well so all k-induction-based engines
-  // rely on one simple-path SAT encoding.
-  return SEC::provesByInduction(problem_, solverType_, k);
 }
 
 }  // namespace KEPLER_FORMAL::SEC

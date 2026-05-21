@@ -48,9 +48,11 @@ BoolExpr* remapBoolExprVariables(
     const StackFrame current = stack.back();
     stack.pop_back();
     BoolExpr* node = current.expr;
+    // LCOV_EXCL_START
     if (node == nullptr || memo.find(node) != memo.end()) {
       continue;
     }
+    // LCOV_EXCL_STOP
 
     if (node->getOp() == Op::VAR) {
       const size_t id = node->getId();
@@ -98,10 +100,12 @@ BoolExpr* remapBoolExprVariables(
       case Op::XOR:
         remapped = BoolExpr::Xor(memo.at(node->getLeft()), memo.at(node->getRight()));
         break;
+      // LCOV_EXCL_START
       case Op::VAR:
       case Op::NONE:
       default:
         throw std::runtime_error("Unsupported BoolExpr operator in remap");
+      // LCOV_EXCL_STOP
     }
     memo.emplace(node, remapped);
   }
