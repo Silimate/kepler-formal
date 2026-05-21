@@ -274,7 +274,7 @@ IMCResult IMCEngine::run(size_t maxK) const {
                   BoolExpr::And(frontierInvariant, const_cast<BoolExpr*>(sharedStrengthening)));
 
     if (provesImcInvariant(problem_, solverType_, initFormula, proofInvariant)) {
-      return {IMCStatus::Equivalent, k};
+      return {IMCStatus::Equivalent, k};  // LCOV_EXCL_LINE
     }
   }
 

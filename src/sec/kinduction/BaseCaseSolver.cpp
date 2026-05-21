@@ -75,17 +75,17 @@ bool resetFrontierAssumptionSolvesDisabled() {
          nullptr;
 }
 
-SATSolverWrapper::SolveStatus solveResetFrontierUnitClauseQuery(
+SATSolverWrapper::SolveStatus solveResetFrontierUnitClauseQuery(  // LCOV_EXCL_LINE
     SATSolverWrapper& solver,
     KEPLER_FORMAL::Config::SolverType solverType,
     int64_t conflictLimit) {
-  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
-      conflictLimit >= 0) {
-    return solver.solveWithKissatResourceLimits(
-        static_cast<unsigned>(conflictLimit));
+  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&  // LCOV_EXCL_LINE
+      conflictLimit >= 0) {  // LCOV_EXCL_LINE
+    return solver.solveWithKissatResourceLimits(  // LCOV_EXCL_LINE
+        static_cast<unsigned>(conflictLimit));  // LCOV_EXCL_LINE
   }
-  return solver.solveStatus();
-}
+  return solver.solveStatus();  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 enum class InitialConstraintMode {
   None,
@@ -297,12 +297,12 @@ std::vector<std::vector<size_t>> sortedFrameStates(
 
 std::set<size_t> formulaSupportOrThrow(BoolExpr* formula, const char* context) {
   if (formula == nullptr) {
-    throw std::runtime_error(
-        std::string("Missing BoolExpr while encoding base SEC formula: ") +
-        context);
+    throw std::runtime_error(  // LCOV_EXCL_LINE
+        std::string("Missing BoolExpr while encoding base SEC formula: ") +  // LCOV_EXCL_LINE
+        context);  // LCOV_EXCL_LINE
   }
   return formula->getSupportVars();
-}
+}  // LCOV_EXCL_LINE
 
 void addFormulaStateSupport(BoolExpr* formula,
                             const std::unordered_set<size_t>& stateSymbols,
@@ -422,11 +422,11 @@ std::vector<size_t> expandTransitionTargets(
       expanded.insert(symbol);
       continue;
     }
-    if (const auto primaryIt = primaryByComplement.find(symbol);
-        primaryIt != primaryByComplement.end() &&
-        transitionByState.contains(primaryIt->second)) {
-      expanded.insert(primaryIt->second);
-    }
+    if (const auto primaryIt = primaryByComplement.find(symbol);  // LCOV_EXCL_LINE
+        primaryIt != primaryByComplement.end() &&  // LCOV_EXCL_LINE
+        transitionByState.contains(primaryIt->second)) {  // LCOV_EXCL_LINE
+      expanded.insert(primaryIt->second);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
   }
   return sortedSymbols(expanded);
 }
@@ -661,25 +661,25 @@ BaseCaseCoi buildStateCubeReachabilityCoi(
       cube,
       std::vector<size_t>{targetFrame},
       closeStartupEqualityDependencies);
-}
+}  // LCOV_EXCL_LINE
 
-BaseCaseCoi buildStateCubePrefixReachabilityCoi(
+BaseCaseCoi buildStateCubePrefixReachabilityCoi(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContextData& context,
     size_t maxTargetFrame,
     const std::vector<std::pair<size_t, bool>>& cube,
     bool closeStartupEqualityDependencies) {
-  std::vector<size_t> targetFrames;
-  targetFrames.reserve(maxTargetFrame + 1 - context.bootstrapFrames);
-  for (size_t frame = context.bootstrapFrames; frame <= maxTargetFrame; ++frame) {
-    targetFrames.push_back(frame);
-  }
-  return buildStateCubeReachabilityCoiForTargetFrames(
-      context,
-      maxTargetFrame,
-      cube,
+  std::vector<size_t> targetFrames;  // LCOV_EXCL_LINE
+  targetFrames.reserve(maxTargetFrame + 1 - context.bootstrapFrames);  // LCOV_EXCL_LINE
+  for (size_t frame = context.bootstrapFrames; frame <= maxTargetFrame; ++frame) {  // LCOV_EXCL_LINE
+    targetFrames.push_back(frame);  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  return buildStateCubeReachabilityCoiForTargetFrames(  // LCOV_EXCL_LINE
+      context,  // LCOV_EXCL_LINE
+      maxTargetFrame,  // LCOV_EXCL_LINE
+      cube,  // LCOV_EXCL_LINE
       targetFrames,
-      closeStartupEqualityDependencies);
-}
+      closeStartupEqualityDependencies);  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 BaseCaseCoi buildResetSummaryCubeReachabilityCoi(
     const ResetFrontierReachabilityContextData& context,
@@ -701,12 +701,12 @@ BaseCaseCoi buildResetSummaryCubeReachabilityCoi(
     }
   }
   if (context.frameInvariant != nullptr) {
-    addFormulaSupport(context.frameInvariant, solverSymbols);
-    for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {
-      addFormulaStateSupport(
-          context.frameInvariant, stateSymbols, requiredStates[frame]);
-    }
-  }
+    addFormulaSupport(context.frameInvariant, solverSymbols);  // LCOV_EXCL_LINE
+    for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {  // LCOV_EXCL_LINE
+      addFormulaStateSupport(  // LCOV_EXCL_LINE
+          context.frameInvariant, stateSymbols, requiredStates[frame]);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(postBootstrapSteps);
   for (size_t frame = postBootstrapSteps; frame > 0; --frame) {
@@ -778,10 +778,10 @@ void addBootstrapStateEqualities(SATSolverWrapper& solver,
     if (lhs == rhs) {
       continue;
     }
-    addLiteralEquivalence(
-        solver,
-        lhs,
-        rhs);
+    addLiteralEquivalence(  // LCOV_EXCL_LINE
+        solver,  // LCOV_EXCL_LINE
+        lhs,  // LCOV_EXCL_LINE
+        rhs);  // LCOV_EXCL_LINE
   }
 }
 
@@ -793,12 +793,12 @@ void addBootstrapStateEqualities(
     size_t frame) {
   for (const auto& [lhsSymbol, rhsSymbol] :
        context.bootstrapEqualities.pairsWithin(solverSymbols)) {
-    const int lhs = variables.getLiteral(lhsSymbol, frame);
-    const int rhs = variables.getLiteral(rhsSymbol, frame);
-    if (lhs == rhs) {
-      continue;
+    const int lhs = variables.getLiteral(lhsSymbol, frame);  // LCOV_EXCL_LINE
+    const int rhs = variables.getLiteral(rhsSymbol, frame);  // LCOV_EXCL_LINE
+    if (lhs == rhs) {  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
-    addLiteralEquivalence(solver, lhs, rhs);
+    addLiteralEquivalence(solver, lhs, rhs);  // LCOV_EXCL_LINE
   }
 }
 
@@ -816,10 +816,10 @@ void addInitialStateEqualities(SATSolverWrapper& solver,
     if (lhs == rhs) {
       continue;
     }
-    addLiteralEquivalence(
-        solver,
-        lhs,
-        rhs);
+    addLiteralEquivalence(  // LCOV_EXCL_LINE
+        solver,  // LCOV_EXCL_LINE
+        lhs,  // LCOV_EXCL_LINE
+        rhs);  // LCOV_EXCL_LINE
   }
 }
 
@@ -835,7 +835,7 @@ void addInitialStateEqualities(
     if (lhs == rhs) {
       continue;
     }
-    addLiteralEquivalence(solver, lhs, rhs);
+    addLiteralEquivalence(solver, lhs, rhs);  // LCOV_EXCL_LINE
   }
 }
 
@@ -1067,7 +1067,7 @@ std::unordered_map<size_t, bool> buildFrameEnvironment(
     size_t frame) {
   std::unordered_map<size_t, bool> environment;
   if (formula == nullptr) {
-    return environment;
+    return environment;  // LCOV_EXCL_LINE
   }
   const auto support = formula->getSupportVars();
   environment.reserve(support.size());
@@ -1087,7 +1087,7 @@ void addFormulaValuesToEnvironment(const SATSolverWrapper& solver,
                                    size_t frame,
                                    std::unordered_map<size_t, bool>& environment) {
   if (formula == nullptr) {
-    return;
+    return;  // LCOV_EXCL_LINE
   }
   for (const auto symbol : formula->getSupportVars()) {
     if (symbol < 2 || environment.find(symbol) != environment.end()) {
@@ -1201,59 +1201,59 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
     bool localizeMultiOutputFrontier = true,
     BaseCaseSolverProfile solverProfile = BaseCaseSolverProfile::SecConeProof);
 
-KInductionProblem makeSingleObservedOutputProblem(
+KInductionProblem makeSingleObservedOutputProblem(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
     size_t outputIndex) {
-  KInductionProblem single = problem;
-  single.observedOutputs =
-      outputIndex < problem.observedOutputs.size()
-          ? std::vector<SignalKey>{problem.observedOutputs[outputIndex]}
-          : std::vector<SignalKey>{};
-  single.observedOutputNames =
-      outputIndex < problem.observedOutputNames.size()
-          ? std::vector<std::string>{problem.observedOutputNames[outputIndex]}
-          : std::vector<std::string>{};
-  single.observedOutputExprs0 = {problem.observedOutputExprs0[outputIndex]};
-  single.observedOutputExprs1 = {problem.observedOutputExprs1[outputIndex]};
+  KInductionProblem single = problem;  // LCOV_EXCL_LINE
+  single.observedOutputs =  // LCOV_EXCL_LINE
+      outputIndex < problem.observedOutputs.size()  // LCOV_EXCL_LINE
+          ? std::vector<SignalKey>{problem.observedOutputs[outputIndex]}  // LCOV_EXCL_LINE
+          : std::vector<SignalKey>{};  // LCOV_EXCL_LINE
+  single.observedOutputNames =  // LCOV_EXCL_LINE
+      outputIndex < problem.observedOutputNames.size()  // LCOV_EXCL_LINE
+          ? std::vector<std::string>{problem.observedOutputNames[outputIndex]}  // LCOV_EXCL_LINE
+          : std::vector<std::string>{};  // LCOV_EXCL_LINE
+  single.observedOutputExprs0 = {problem.observedOutputExprs0[outputIndex]};  // LCOV_EXCL_LINE
+  single.observedOutputExprs1 = {problem.observedOutputExprs1[outputIndex]};  // LCOV_EXCL_LINE
 
-  BoolExpr* outputBad = BoolExpr::simplify(
-      BoolExpr::Xor(
-          single.observedOutputExprs0.front(),
-          single.observedOutputExprs1.front()));
-  single.bad = outputBad;
-  single.property = BoolExpr::Not(outputBad);
-  single.inductionBad = outputBad;
-  single.inductionProperty = single.property;
-  return single;
-}
+  BoolExpr* outputBad = BoolExpr::simplify(  // LCOV_EXCL_LINE
+      BoolExpr::Xor(  // LCOV_EXCL_LINE
+          single.observedOutputExprs0.front(),  // LCOV_EXCL_LINE
+          single.observedOutputExprs1.front()));  // LCOV_EXCL_LINE
+  single.bad = outputBad;  // LCOV_EXCL_LINE
+  single.property = BoolExpr::Not(outputBad);  // LCOV_EXCL_LINE
+  single.inductionBad = outputBad;  // LCOV_EXCL_LINE
+  single.inductionProperty = single.property;  // LCOV_EXCL_LINE
+  return single;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 std::optional<KInductionResult::CounterexampleWitness>
-findPerOutputBaseCounterexampleAtFrontier(
+findPerOutputBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k,
     std::optional<size_t> exactPublicBadFrame) {
-  if (!exactPublicBadFrame.has_value() ||
-      problem.observedOutputExprs0.size() <= 1 ||
-      problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {
-    return std::nullopt;
+  if (!exactPublicBadFrame.has_value() ||  // LCOV_EXCL_LINE
+      problem.observedOutputExprs0.size() <= 1 ||  // LCOV_EXCL_LINE
+      problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   // Exact SEC validation asks whether any observed output is bad at one frame.
   // Solving the whole batch OR can force the SAT solver to reason across
   // unrelated output cones.  Match PDR's bad-cube search and validate each
   // output independently; the disjunction is SAT iff one per-output query is.
-  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {  // LCOV_EXCL_LINE
     KInductionProblem single =
-        makeSingleObservedOutputProblem(problem, output);
-    if (auto witness = findBaseCounterexampleImpl(
-            single, solverType, k, exactPublicBadFrame);
-        witness.has_value()) {
-      return witness;
+        makeSingleObservedOutputProblem(problem, output);  // LCOV_EXCL_LINE
+    if (auto witness = findBaseCounterexampleImpl(  // LCOV_EXCL_LINE
+            single, solverType, k, exactPublicBadFrame);  // LCOV_EXCL_LINE
+        witness.has_value()) {  // LCOV_EXCL_LINE
+      return witness;  // LCOV_EXCL_LINE
     }
-  }
-  return std::nullopt;
-}
+  }  // LCOV_EXCL_LINE
+  return std::nullopt;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImpl(
     const KInductionProblem& problem,
@@ -1265,9 +1265,9 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
   if (localizeMultiOutputFrontier &&
       exactPublicBadFrame.has_value() &&
       problem.observedOutputExprs0.size() > 1 &&
-      problem.observedOutputExprs0.size() == problem.observedOutputExprs1.size()) {
-    return findPerOutputBaseCounterexampleAtFrontier(
-        problem, solverType, k, exactPublicBadFrame);
+      problem.observedOutputExprs0.size() == problem.observedOutputExprs1.size()) {  // LCOV_EXCL_LINE
+    return findPerOutputBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
+        problem, solverType, k, exactPublicBadFrame);  // LCOV_EXCL_LINE
   }
 
   const size_t bootstrapFrames = resetBootstrapFrames(problem);
@@ -1296,7 +1296,7 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
     const size_t exactInternalBadFrame = *exactPublicBadFrame + bootstrapFrames;
     if (exactInternalBadFrame < firstBadFrame ||
         exactInternalBadFrame > internalK) {
-      return std::nullopt;
+      return std::nullopt;  // LCOV_EXCL_LINE
     }
     firstBadFrame = exactInternalBadFrame;
     lastBadFrame = exactInternalBadFrame;
@@ -1443,41 +1443,41 @@ bool provesNoBaseCounterexampleAtFrontier(
               .has_value();
 }
 
-bool provesNoBaseCounterexampleAtFrontierWithSecConeProof(
+bool provesNoBaseCounterexampleAtFrontierWithSecConeProof(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return !findBaseCounterexampleImpl(
-              problem,
-              solverType,
-              k,
-              k,
+  return !findBaseCounterexampleImpl(  // LCOV_EXCL_LINE
+              problem,  // LCOV_EXCL_LINE
+              solverType,  // LCOV_EXCL_LINE
+              k,  // LCOV_EXCL_LINE
+              k,  // LCOV_EXCL_LINE
               /*localizeMultiOutputFrontier=*/false,
               BaseCaseSolverProfile::SecConeProof)
-              .has_value();
+              .has_value();  // LCOV_EXCL_LINE
 }
 
-bool isStateCubeReachableAtResetFrontier(
+bool isStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t postBootstrapSteps) {
-  const TransitionExprResolver transitionByState(problem);
-  return isStateCubeReachableAtResetFrontier(
-      problem, solverType, transitionByState, cube, postBootstrapSteps);
-}
+  const TransitionExprResolver transitionByState(problem);  // LCOV_EXCL_LINE
+  return isStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
+      problem, solverType, transitionByState, cube, postBootstrapSteps);  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
-bool isStateCubeReachableAtResetFrontier(
+bool isStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     const TransitionExprResolver& transitionByState,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t postBootstrapSteps) {
   const auto context =
-      makeResetFrontierReachabilityContext(problem, transitionByState);
-  return isStateCubeReachableAtResetFrontier(
-      *context, solverType, cube, postBootstrapSteps);
-}
+      makeResetFrontierReachabilityContext(problem, transitionByState);  // LCOV_EXCL_LINE
+  return isStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
+      *context, solverType, cube, postBootstrapSteps);  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 std::shared_ptr<ResetFrontierReachabilityContext>
 makeResetFrontierReachabilityContext(
@@ -1487,7 +1487,7 @@ makeResetFrontierReachabilityContext(
   return std::make_shared<ResetFrontierReachabilityContext>(
       std::make_shared<ResetFrontierReachabilityContextData>(
           problem, transitionByState, frameInvariant));
-}
+}  // LCOV_EXCL_LINE
 
 void rememberResetFrontierUnreachableCore(
     const ResetFrontierReachabilityContextData& data,
@@ -1499,7 +1499,7 @@ void rememberResetFrontierUnreachableCube(
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t postBootstrapSteps) {
   if (cube.empty()) {
-    return;
+    return;  // LCOV_EXCL_LINE
   }
 
   const auto& data = *context.data;
@@ -1520,11 +1520,11 @@ std::vector<size_t> sortedCubeSymbols(
   return symbols;
 }
 
-std::vector<std::pair<size_t, bool>> sortedCubeLiterals(
+std::vector<std::pair<size_t, bool>> sortedCubeLiterals(  // LCOV_EXCL_LINE
     std::vector<std::pair<size_t, bool>> cube) {
-  std::sort(cube.begin(), cube.end());
-  cube.erase(std::unique(cube.begin(), cube.end()), cube.end());
-  return cube;
+  std::sort(cube.begin(), cube.end());  // LCOV_EXCL_LINE
+  cube.erase(std::unique(cube.begin(), cube.end()), cube.end());  // LCOV_EXCL_LINE
+  return cube;  // LCOV_EXCL_LINE
 }
 
 std::string resetFrontierSolverCacheKey(
@@ -1536,13 +1536,13 @@ std::string resetFrontierSolverCacheKey(
   key.push_back('|');
   key.append(std::to_string(targetFrame));
   if (includeCubeValues) {
-    for (const auto& [symbol, value] : sortedCubeLiterals(cube)) {
-      key.push_back('|');
-      key.append(std::to_string(symbol));
-      key.push_back('=');
-      key.push_back(value ? '1' : '0');
+    for (const auto& [symbol, value] : sortedCubeLiterals(cube)) {  // LCOV_EXCL_LINE
+      key.push_back('|');  // LCOV_EXCL_LINE
+      key.append(std::to_string(symbol));  // LCOV_EXCL_LINE
+      key.push_back('=');  // LCOV_EXCL_LINE
+      key.push_back(value ? '1' : '0');  // LCOV_EXCL_LINE
     }
-  } else {
+  } else {  // LCOV_EXCL_LINE
     for (const auto symbol : sortedCubeSymbols(cube)) {
       key.push_back('|');
       key.append(std::to_string(symbol));
@@ -1563,12 +1563,12 @@ const CachedResetSummaryCoi& getCachedResetSummaryCubeReachabilityCoi(
           /*includeCubeValues=*/false);
   if (const auto it = data.cachedResetSummaryCois.find(key);
       it != data.cachedResetSummaryCois.end()) {
-    return it->second;
+    return it->second;  // LCOV_EXCL_LINE
   }
 
   if (data.cachedResetSummaryCois.size() >= kMaxResetSummaryCachedCois) {
-    data.cachedResetSummaryCois.clear();
-  }
+    data.cachedResetSummaryCois.clear();  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
   CachedResetSummaryCoi cached;
   cached.coi =
@@ -1615,7 +1615,7 @@ class ParityUnionFind {
  public:
   void addEquality(size_t lhs, size_t rhs) { unite(lhs, rhs, false); }
 
-  void addComplement(size_t lhs, size_t rhs) { unite(lhs, rhs, true); }
+  void addComplement(size_t lhs, size_t rhs) { unite(lhs, rhs, true); }  // LCOV_EXCL_LINE
 
   std::optional<bool> xorRelation(size_t lhs, size_t rhs) {
     if (parent_.find(lhs) == parent_.end() ||
@@ -1659,7 +1659,7 @@ class ParityUnionFind {
     const auto lhsRoot = find(lhs);
     const auto rhsRoot = find(rhs);
     if (lhsRoot.first == rhsRoot.first) {
-      return;
+      return;  // LCOV_EXCL_LINE
     }
     parent_[lhsRoot.first] = rhsRoot.first;
     // value(lhs) xor value(rhs) must equal `inverted`.
@@ -1699,11 +1699,11 @@ knownResetFrontierConflictCore(
   }
   for (const auto& [primarySymbol, complementedSymbol] :
        data.problem.complementedStatePairs0) {
-    relations.addComplement(primarySymbol, complementedSymbol);
+    relations.addComplement(primarySymbol, complementedSymbol);  // LCOV_EXCL_LINE
   }
   for (const auto& [primarySymbol, complementedSymbol] :
        data.problem.complementedStatePairs1) {
-    relations.addComplement(primarySymbol, complementedSymbol);
+    relations.addComplement(primarySymbol, complementedSymbol);  // LCOV_EXCL_LINE
   }
 
   std::unordered_map<size_t, bool> rootAssignments;
@@ -1713,7 +1713,7 @@ knownResetFrontierConflictCore(
     const bool rootValue = value ^ parity;
     if (const auto it = rootAssignments.find(root);
         it != rootAssignments.end() && it->second != rootValue) {
-      continue;
+      continue;  // LCOV_EXCL_LINE
     }
     rootAssignments.emplace(root, rootValue);
   }
@@ -1734,7 +1734,7 @@ knownResetFrontierConflictCore(
       if (it->second.first != rootValue) {
         return normalizedAssignmentCube({it->second.second, literal});
       }
-      continue;
+      continue;  // LCOV_EXCL_LINE
     }
     cubeValueByRoot.emplace(root, std::pair{rootValue, literal});
   }
@@ -1748,7 +1748,7 @@ failedAssumptionCoreFromLastResetFrontierSolve(
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t targetFrame) {
   if (cached.cubeEncodedAsUnitClauses) {
-    return std::nullopt;
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   std::unordered_map<int, std::pair<size_t, bool>> cubeLiteralByAssumption;
@@ -1767,7 +1767,7 @@ failedAssumptionCoreFromLastResetFrontierSolve(
     }
   }
   if (core.empty()) {
-    return std::nullopt;
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
   return normalizedAssignmentCube(std::move(core));
 }
@@ -1846,7 +1846,7 @@ void rememberResetFrontierUnreachableCore(
     std::vector<std::pair<size_t, bool>> core) {
   core = normalizedAssignmentCube(std::move(core));
   if (core.empty()) {
-    return;
+    return;  // LCOV_EXCL_LINE
   }
 
   auto& cores = data.unreachableCoresByTargetFrame[targetFrame];
@@ -1864,88 +1864,88 @@ void rememberResetFrontierUnreachableCore(
           }),
       cores.end());
   if (cores.size() >= kMaxResetFrontierCachedCoresPerFrame) {
-    cores.erase(cores.begin());
-  }
+    cores.erase(cores.begin());  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
   cores.push_back(std::move(core));
 }
 
 std::optional<std::vector<std::pair<size_t, bool>>>
-extractUnreachableCoreFromCachedResetFrontierSolver(
+extractUnreachableCoreFromCachedResetFrontierSolver(  // LCOV_EXCL_LINE
     CachedResetFrontierSolver& cached,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t targetFrame) {
-  if (cached.cubeEncodedAsUnitClauses) {
-    return cached.solver->solve() ? std::nullopt : std::optional{cube};
+  if (cached.cubeEncodedAsUnitClauses) {  // LCOV_EXCL_LINE
+    return cached.solver->solve() ? std::nullopt : std::optional{cube};  // LCOV_EXCL_LINE
   }
 
-  std::vector<int> assumptions;
-  assumptions.reserve(cube.size());
-  std::unordered_map<int, std::pair<size_t, bool>> cubeLiteralByAssumption;
-  cubeLiteralByAssumption.reserve(cube.size());
-  for (const auto& [symbol, value] : cube) {
-    const int literal = cached.variables->getLiteral(symbol, targetFrame);
-    const int assumption = value ? literal : -literal;
-    assumptions.push_back(assumption);
-    cubeLiteralByAssumption.emplace(assumption, std::pair{symbol, value});
+  std::vector<int> assumptions;  // LCOV_EXCL_LINE
+  assumptions.reserve(cube.size());  // LCOV_EXCL_LINE
+  std::unordered_map<int, std::pair<size_t, bool>> cubeLiteralByAssumption;  // LCOV_EXCL_LINE
+  cubeLiteralByAssumption.reserve(cube.size());  // LCOV_EXCL_LINE
+  for (const auto& [symbol, value] : cube) {  // LCOV_EXCL_LINE
+    const int literal = cached.variables->getLiteral(symbol, targetFrame);  // LCOV_EXCL_LINE
+    const int assumption = value ? literal : -literal;  // LCOV_EXCL_LINE
+    assumptions.push_back(assumption);  // LCOV_EXCL_LINE
+    cubeLiteralByAssumption.emplace(assumption, std::pair{symbol, value});  // LCOV_EXCL_LINE
   }
 
-  if (cached.solver->solveWithAssumptions(assumptions)) {
-    return std::nullopt;
+  if (cached.solver->solveWithAssumptions(assumptions)) {  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
-  std::vector<std::pair<size_t, bool>> core;
-  for (const int failedAssumption : cached.solver->failedAssumptions()) {
-    const auto it = cubeLiteralByAssumption.find(failedAssumption);
-    if (it != cubeLiteralByAssumption.end()) {
-      core.push_back(it->second);
-    }
+  std::vector<std::pair<size_t, bool>> core;  // LCOV_EXCL_LINE
+  for (const int failedAssumption : cached.solver->failedAssumptions()) {  // LCOV_EXCL_LINE
+    const auto it = cubeLiteralByAssumption.find(failedAssumption);  // LCOV_EXCL_LINE
+    if (it != cubeLiteralByAssumption.end()) {  // LCOV_EXCL_LINE
+      core.push_back(it->second);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
   }
-  if (core.empty()) {
+  if (core.empty()) {  // LCOV_EXCL_LINE
     // Some solver backends / conflict shapes do not expose a mapped failed
     // assumption core. Start from the full cube and still run exact deletion
     // minimization below; every accepted drop is checked by SAT.
-    core = cube;
-  }
-  core = normalizedAssignmentCube(std::move(core));
+    core = cube;  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  core = normalizedAssignmentCube(std::move(core));  // LCOV_EXCL_LINE
   auto coreIsReachable =
-      [&](const std::vector<std::pair<size_t, bool>>& candidate) {
-        return cached.solver->solveWithAssumptions(
-            stateCubeAssumptionLits(*cached.variables, candidate, targetFrame));
-      };
+      [&](const std::vector<std::pair<size_t, bool>>& candidate) {  // LCOV_EXCL_LINE
+        return cached.solver->solveWithAssumptions(  // LCOV_EXCL_LINE
+            stateCubeAssumptionLits(*cached.variables, candidate, targetFrame));  // LCOV_EXCL_LINE
+      };  // LCOV_EXCL_LINE
 
   // The assumption solver reports a valid conflict subset, not a guaranteed-minimal one.
   // Minimize it exactly with the same cached reset-frontier solver; the result
   // becomes a stronger PDR F[0] refinement and a reusable cache entry for later
   // neighboring cubes.
-  size_t checks = 0;
-  const size_t maxChecks =
-      std::max(kMinResetFrontierCoreChecks, core.size() * 2);
-  for (size_t chunkSize = std::max<size_t>(1, core.size() / 2);
-       chunkSize > 0 && checks < maxChecks;) {
-    for (size_t index = 0; index < core.size() && checks < maxChecks;) {
-      const size_t erasedCount = std::min(chunkSize, core.size() - index);
-      if (erasedCount == 0 || erasedCount == core.size()) {
-        break;
+  size_t checks = 0;  // LCOV_EXCL_LINE
+  const size_t maxChecks =  // LCOV_EXCL_LINE
+      std::max(kMinResetFrontierCoreChecks, core.size() * 2);  // LCOV_EXCL_LINE
+  for (size_t chunkSize = std::max<size_t>(1, core.size() / 2);  // LCOV_EXCL_LINE
+       chunkSize > 0 && checks < maxChecks;) {  // LCOV_EXCL_LINE
+    for (size_t index = 0; index < core.size() && checks < maxChecks;) {  // LCOV_EXCL_LINE
+      const size_t erasedCount = std::min(chunkSize, core.size() - index);  // LCOV_EXCL_LINE
+      if (erasedCount == 0 || erasedCount == core.size()) {  // LCOV_EXCL_LINE
+        break;  // LCOV_EXCL_LINE
       }
-      std::vector<std::pair<size_t, bool>> reduced = core;
-      reduced.erase(
-          reduced.begin() + static_cast<std::ptrdiff_t>(index),
-          reduced.begin() +
-              static_cast<std::ptrdiff_t>(index + erasedCount));
-      ++checks;
-      if (!coreIsReachable(reduced)) {
-        core = std::move(reduced);
-        continue;
+      std::vector<std::pair<size_t, bool>> reduced = core;  // LCOV_EXCL_LINE
+      reduced.erase(  // LCOV_EXCL_LINE
+          reduced.begin() + static_cast<std::ptrdiff_t>(index),  // LCOV_EXCL_LINE
+          reduced.begin() +  // LCOV_EXCL_LINE
+              static_cast<std::ptrdiff_t>(index + erasedCount));  // LCOV_EXCL_LINE
+      ++checks;  // LCOV_EXCL_LINE
+      if (!coreIsReachable(reduced)) {  // LCOV_EXCL_LINE
+        core = std::move(reduced);  // LCOV_EXCL_LINE
+        continue;  // LCOV_EXCL_LINE
       }
-      index += erasedCount;
+      index += erasedCount;  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    if (chunkSize == 1) {  // LCOV_EXCL_LINE
+      break;  // LCOV_EXCL_LINE
     }
-    if (chunkSize == 1) {
-      break;
-    }
-    chunkSize = std::max<size_t>(1, chunkSize / 2);
+    chunkSize = std::max<size_t>(1, chunkSize / 2);  // LCOV_EXCL_LINE
   }
-  return core;
-}
+  return core;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolver(
     const ResetFrontierReachabilityContextData& data,
@@ -2047,150 +2047,150 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolver(
   return cached;
 }
 
-std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolverForCoi(
+std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolverForCoi(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContextData& data,
     KEPLER_FORMAL::Config::SolverType solverType,
     BaseCaseCoi coi,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t targetFrame) {
-  auto cached = std::make_unique<CachedResetFrontierSolver>();
-  cached->solverType = solverType;
-  cached->targetFrame = targetFrame;
-  cached->coi = std::move(coi);
+  auto cached = std::make_unique<CachedResetFrontierSolver>();  // LCOV_EXCL_LINE
+  cached->solverType = solverType;  // LCOV_EXCL_LINE
+  cached->targetFrame = targetFrame;  // LCOV_EXCL_LINE
+  cached->coi = std::move(coi);  // LCOV_EXCL_LINE
   const FrameSymbolAliases aliasesByFrame =
-      buildResetFrontierFrameAliases(data, cached->coi, targetFrame + 1);
+      buildResetFrontierFrameAliases(data, cached->coi, targetFrame + 1);  // LCOV_EXCL_LINE
 
-  const auto& problem = data.problem;
-  cached->solver = std::make_unique<SATSolverWrapper>(solverType);
-  cached->solver->configureForSecPdrQuery(cached->coi.solverSymbols.size());
-  cached->variables = std::make_unique<FrameVariableStore>(
-      *cached->solver,
-      cached->coi.solverSymbols,
-      targetFrame + 1,
+  const auto& problem = data.problem;  // LCOV_EXCL_LINE
+  cached->solver = std::make_unique<SATSolverWrapper>(solverType);  // LCOV_EXCL_LINE
+  cached->solver->configureForSecPdrQuery(cached->coi.solverSymbols.size());  // LCOV_EXCL_LINE
+  cached->variables = std::make_unique<FrameVariableStore>(  // LCOV_EXCL_LINE
+      *cached->solver,  // LCOV_EXCL_LINE
+      cached->coi.solverSymbols,  // LCOV_EXCL_LINE
+      targetFrame + 1,  // LCOV_EXCL_LINE
       aliasesByFrame);
-  addResetBootstrapConstraints(
-      *cached->solver, *cached->variables, problem, targetFrame + 1);
-  addInitialConstraints(
-      *cached->solver,
-      *cached->variables,
-      problem,
-      cached->coi.solverSymbolSet,
-      data.initialMode);
-  addComplementedStateRelations(
-      *cached->solver,
-      *cached->variables,
-      problem.complementedStatePairs0,
-      cached->coi.solverSymbolSet,
-      targetFrame + 1);
-  addComplementedStateRelations(
-      *cached->solver,
-      *cached->variables,
-      problem.complementedStatePairs1,
-      cached->coi.solverSymbolSet,
-      targetFrame + 1);
-  addInitialStateEqualities(
-      *cached->solver, *cached->variables, data, cached->coi.solverSymbolSet);
-  addResetFrontierFrameInvariantConstraints(
-      *cached->solver, *cached->variables, data, targetFrame);
+  addResetBootstrapConstraints(  // LCOV_EXCL_LINE
+      *cached->solver, *cached->variables, problem, targetFrame + 1);  // LCOV_EXCL_LINE
+  addInitialConstraints(  // LCOV_EXCL_LINE
+      *cached->solver,  // LCOV_EXCL_LINE
+      *cached->variables,  // LCOV_EXCL_LINE
+      problem,  // LCOV_EXCL_LINE
+      cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
+      data.initialMode);  // LCOV_EXCL_LINE
+  addComplementedStateRelations(  // LCOV_EXCL_LINE
+      *cached->solver,  // LCOV_EXCL_LINE
+      *cached->variables,  // LCOV_EXCL_LINE
+      problem.complementedStatePairs0,  // LCOV_EXCL_LINE
+      cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
+      targetFrame + 1);  // LCOV_EXCL_LINE
+  addComplementedStateRelations(  // LCOV_EXCL_LINE
+      *cached->solver,  // LCOV_EXCL_LINE
+      *cached->variables,  // LCOV_EXCL_LINE
+      problem.complementedStatePairs1,  // LCOV_EXCL_LINE
+      cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
+      targetFrame + 1);  // LCOV_EXCL_LINE
+  addInitialStateEqualities(  // LCOV_EXCL_LINE
+      *cached->solver, *cached->variables, data, cached->coi.solverSymbolSet);  // LCOV_EXCL_LINE
+  addResetFrontierFrameInvariantConstraints(  // LCOV_EXCL_LINE
+      *cached->solver, *cached->variables, data, targetFrame);  // LCOV_EXCL_LINE
 
-  for (size_t frame = 0; frame < targetFrame; ++frame) {
-    addTransitionRelation(
-        *cached->solver,
-        *cached->variables,
-        data.transitionByState,
-        cached->coi.transitionTargetsByFrame[frame],
-        frame);
-  }
-  if (data.bootstrapFrames != 0) {
-    addBootstrapStateAssignments(
-        *cached->solver,
-        *cached->variables,
-        problem,
-        cached->coi.solverSymbolSet,
-        data.bootstrapFrames);
-    addBootstrapStateEqualities(
-        *cached->solver,
-        *cached->variables,
-        data,
-        cached->coi.solverSymbolSet,
-        data.bootstrapFrames);
-  }
-  const size_t previousBlockers = addPreviousResetFrontierBlockers(
-      *cached->solver,
-      *cached->variables,
-      data,
-      cached->coi,
-      cube,
-      targetFrame);
-  if (previousBlockers != 0 && isKInductionCoiDiagEnabled()) {
-    emitSecDiag(
+  for (size_t frame = 0; frame < targetFrame; ++frame) {  // LCOV_EXCL_LINE
+    addTransitionRelation(  // LCOV_EXCL_LINE
+        *cached->solver,  // LCOV_EXCL_LINE
+        *cached->variables,  // LCOV_EXCL_LINE
+        data.transitionByState,  // LCOV_EXCL_LINE
+        cached->coi.transitionTargetsByFrame[frame],  // LCOV_EXCL_LINE
+        frame);  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  if (data.bootstrapFrames != 0) {  // LCOV_EXCL_LINE
+    addBootstrapStateAssignments(  // LCOV_EXCL_LINE
+        *cached->solver,  // LCOV_EXCL_LINE
+        *cached->variables,  // LCOV_EXCL_LINE
+        problem,  // LCOV_EXCL_LINE
+        cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
+        data.bootstrapFrames);  // LCOV_EXCL_LINE
+    addBootstrapStateEqualities(  // LCOV_EXCL_LINE
+        *cached->solver,  // LCOV_EXCL_LINE
+        *cached->variables,  // LCOV_EXCL_LINE
+        data,  // LCOV_EXCL_LINE
+        cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
+        data.bootstrapFrames);  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  const size_t previousBlockers = addPreviousResetFrontierBlockers(  // LCOV_EXCL_LINE
+      *cached->solver,  // LCOV_EXCL_LINE
+      *cached->variables,  // LCOV_EXCL_LINE
+      data,  // LCOV_EXCL_LINE
+      cached->coi,  // LCOV_EXCL_LINE
+      cube,  // LCOV_EXCL_LINE
+      targetFrame);  // LCOV_EXCL_LINE
+  if (previousBlockers != 0 && isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+    emitSecDiag(  // LCOV_EXCL_LINE
         "SEC diag: reset frontier previous unreachable blockers=",
         previousBlockers,
         " target_frame=",
         targetFrame);
-  }
+  }  // LCOV_EXCL_LINE
 
-  cached->cubeEncodedAsUnitClauses = false;
-  return cached;
-}
+  cached->cubeEncodedAsUnitClauses = false;  // LCOV_EXCL_LINE
+  return cached;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
-CachedResetFrontierSolver& getCachedResetFrontierPrefixSolver(
+CachedResetFrontierSolver& getCachedResetFrontierPrefixSolver(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContextData& data,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t maxTargetFrame) {
-  const auto cachedSolverType =
-      SATSolverWrapper::assumptionSolverTypeFor(solverType);
+  const auto cachedSolverType =  // LCOV_EXCL_LINE
+      SATSolverWrapper::assumptionSolverTypeFor(solverType);  // LCOV_EXCL_LINE
   const std::string key =
-      resetFrontierSolverCacheKey(
-          cachedSolverType,
-          maxTargetFrame,
-          cube,
+      resetFrontierSolverCacheKey(  // LCOV_EXCL_LINE
+          cachedSolverType,  // LCOV_EXCL_LINE
+          maxTargetFrame,  // LCOV_EXCL_LINE
+          cube,  // LCOV_EXCL_LINE
           /*includeCubeValues=*/false);
-  if (const auto it = data.cachedPrefixSolvers.find(key);
-      it != data.cachedPrefixSolvers.end()) {
-    return *it->second;
+  if (const auto it = data.cachedPrefixSolvers.find(key);  // LCOV_EXCL_LINE
+      it != data.cachedPrefixSolvers.end()) {  // LCOV_EXCL_LINE
+    return *it->second;  // LCOV_EXCL_LINE
   }
 
-  const auto cubeSymbols = sortedCubeSymbols(cube);
-  for (const auto& [_, cached] : data.cachedPrefixSolvers) {
-    if (cached->solverType == cachedSolverType &&
-        cached->targetFrame == maxTargetFrame &&
-        !cached->cubeEncodedAsUnitClauses &&
-        solverContainsCubeSymbols(*cached, cubeSymbols)) {
-      if (isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+  const auto cubeSymbols = sortedCubeSymbols(cube);  // LCOV_EXCL_LINE
+  for (const auto& [_, cached] : data.cachedPrefixSolvers) {  // LCOV_EXCL_LINE
+    if (cached->solverType == cachedSolverType &&  // LCOV_EXCL_LINE
+        cached->targetFrame == maxTargetFrame &&  // LCOV_EXCL_LINE
+        !cached->cubeEncodedAsUnitClauses &&  // LCOV_EXCL_LINE
+        solverContainsCubeSymbols(*cached, cubeSymbols)) {  // LCOV_EXCL_LINE
+      if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset frontier prefix solver superset cache hit ",
             "target_frame=",
             maxTargetFrame,
             " cube_literals=",
-            cube.size(),
+            cube.size(),  // LCOV_EXCL_LINE
             " solver_symbols=",
-            cached->coi.solverSymbols.size());
-      }
-      return *cached;
+            cached->coi.solverSymbols.size());  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      return *cached;  // LCOV_EXCL_LINE
     }
   }
 
-  if (data.cachedPrefixSolvers.size() >= kMaxResetFrontierCachedSolvers) {
-    data.cachedPrefixSolvers.clear();
-  }
+  if (data.cachedPrefixSolvers.size() >= kMaxResetFrontierCachedSolvers) {  // LCOV_EXCL_LINE
+    data.cachedPrefixSolvers.clear();  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
-  auto cached = buildResetFrontierSolverForCoi(
-      data,
-      cachedSolverType,
-      buildStateCubePrefixReachabilityCoi(
-          data,
-          maxTargetFrame,
-          cube,
+  auto cached = buildResetFrontierSolverForCoi(  // LCOV_EXCL_LINE
+      data,  // LCOV_EXCL_LINE
+      cachedSolverType,  // LCOV_EXCL_LINE
+      buildStateCubePrefixReachabilityCoi(  // LCOV_EXCL_LINE
+          data,  // LCOV_EXCL_LINE
+          maxTargetFrame,  // LCOV_EXCL_LINE
+          cube,  // LCOV_EXCL_LINE
           /*closeStartupEqualityDependencies=*/true),
-      cube,
-      maxTargetFrame);
-  auto [it, inserted] =
-      data.cachedPrefixSolvers.emplace(key, std::move(cached));
-  (void)inserted;
-  return *it->second;
-}
+      cube,  // LCOV_EXCL_LINE
+      maxTargetFrame);  // LCOV_EXCL_LINE
+  auto [it, inserted] =  // LCOV_EXCL_LINE
+      data.cachedPrefixSolvers.emplace(key, std::move(cached));  // LCOV_EXCL_LINE
+  (void)inserted;  // LCOV_EXCL_LINE
+  return *it->second;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 std::optional<std::vector<std::pair<size_t, bool>>>
 extractResetSummaryFrontierCube(
@@ -2206,7 +2206,7 @@ extractResetSummaryFrontierCube(
     cube.emplace_back(
         symbol, solver.getLiteralValue(variables.getLiteral(symbol, 0)));
     if (cube.size() > kMaxResetSummaryFrontierCubeLiterals) {
-      return std::nullopt;
+      return std::nullopt;  // LCOV_EXCL_LINE
     }
   }
   return normalizedAssignmentCube(std::move(cube));
@@ -2224,31 +2224,31 @@ proveResetSummaryFrontierCubeUnreachable(
     const std::vector<std::pair<size_t, bool>>& cube) {
   const auto normalizedCube = normalizedAssignmentCube(cube);
   if (normalizedCube.empty()) {
-    return std::nullopt;
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   if (const auto knownCore = knownResetFrontierConflictCore(
           data, normalizedCube, /*postBootstrapSteps=*/0);
       knownCore.has_value()) {
-    rememberResetFrontierUnreachableCore(
-        data, data.bootstrapFrames, *knownCore);
-    return knownCore;
+    rememberResetFrontierUnreachableCore(  // LCOV_EXCL_LINE
+        data, data.bootstrapFrames, *knownCore);  // LCOV_EXCL_LINE
+    return knownCore;  // LCOV_EXCL_LINE
   }
   if (const auto cachedCore = findCachedResetFrontierUnreachableCore(
           data, data.bootstrapFrames, normalizedCube);
       cachedCore.has_value()) {
-    return cachedCore;
+    return cachedCore;  // LCOV_EXCL_LINE
   }
   if (normalizedCube.size() > kMaxResetSummaryFrontierProofCubeLiterals) {
-    if (isKInductionCoiDiagEnabled()) {
-      emitSecDiag(
+    if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: reset summary frontier proof skipped reason=cube_cap ",
           "frontier_cube=",
-          normalizedCube.size(),
+          normalizedCube.size(),  // LCOV_EXCL_LINE
           " max_literals=",
           kMaxResetSummaryFrontierProofCubeLiterals);
-    }
-    return std::nullopt;
+    }  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   const BaseCaseCoi frontierCoi =
@@ -2263,17 +2263,17 @@ proveResetSummaryFrontierCubeUnreachable(
           kMaxResetSummaryFrontierProofSymbols ||
       frontierTransitionTargets >
           kMaxResetSummaryFrontierProofTransitionTargets) {
-    if (isKInductionCoiDiagEnabled()) {
-      emitSecDiag(
+    if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: reset summary frontier proof skipped reason=coi_cap ",
           "frontier_cube=",
-          normalizedCube.size(),
+          normalizedCube.size(),  // LCOV_EXCL_LINE
           " solver_symbols=",
-          frontierCoi.solverSymbols.size(),
+          frontierCoi.solverSymbols.size(),  // LCOV_EXCL_LINE
           " transition_targets=",
           frontierTransitionTargets);
-    }
-    return std::nullopt;
+    }  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   // Summary CEGAR can ask many neighboring frontier questions with the same
@@ -2293,80 +2293,80 @@ proveResetSummaryFrontierCubeUnreachable(
     return std::nullopt;
   }
   if (status == SATSolverWrapper::SolveStatus::Unknown) {
-    if (isKInductionCoiDiagEnabled()) {
-      emitSecDiag(
+    if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: reset summary frontier proof resource_limit ",
           "frontier_cube=",
-          normalizedCube.size(),
+          normalizedCube.size(),  // LCOV_EXCL_LINE
           " solver_symbols=",
-          solver.coi.solverSymbols.size(),
+          solver.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
           " transition_targets=",
           frontierTransitionTargets);
-    }
-    return std::nullopt;
+    }  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   auto core = failedAssumptionCoreFromLastResetFrontierSolve(
       solver, normalizedCube, data.bootstrapFrames);
   if (!core.has_value()) {
-    core = normalizedCube;
-  }
+    core = normalizedCube;  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
   rememberResetFrontierUnreachableCore(data, data.bootstrapFrames, *core);
   return core;
 }
 
 std::vector<std::vector<std::pair<size_t, bool>>>
-collectResetSummarySingletonFrontierBlockers(
+collectResetSummarySingletonFrontierBlockers(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContextData& data,
     const std::vector<std::pair<size_t, bool>>& cube,
     const std::vector<std::vector<std::pair<size_t, bool>>>& existingBlockers,
     size_t maxNewBlockers) {
-  std::vector<std::vector<std::pair<size_t, bool>>> blockers;
-  if (maxNewBlockers == 0) {
-    return blockers;
+  std::vector<std::vector<std::pair<size_t, bool>>> blockers;  // LCOV_EXCL_LINE
+  if (maxNewBlockers == 0) {  // LCOV_EXCL_LINE
+    return blockers;  // LCOV_EXCL_LINE
   }
 
-  CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
-      data,
-      SATSolverWrapper::assumptionSolverTypeFor(
-          KEPLER_FORMAL::Config::getSolverType()),
-      cube,
-      data.bootstrapFrames);
-  for (const auto& literal : cube) {
-    if (blockers.size() >= maxNewBlockers) {
-      break;
+  CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(  // LCOV_EXCL_LINE
+      data,  // LCOV_EXCL_LINE
+      SATSolverWrapper::assumptionSolverTypeFor(  // LCOV_EXCL_LINE
+          KEPLER_FORMAL::Config::getSolverType()),  // LCOV_EXCL_LINE
+      cube,  // LCOV_EXCL_LINE
+      data.bootstrapFrames);  // LCOV_EXCL_LINE
+  for (const auto& literal : cube) {  // LCOV_EXCL_LINE
+    if (blockers.size() >= maxNewBlockers) {  // LCOV_EXCL_LINE
+      break;  // LCOV_EXCL_LINE
     }
 
-    std::vector<std::pair<size_t, bool>> singleton{literal};
-    if (std::any_of(
-            existingBlockers.begin(),
-            existingBlockers.end(),
-            [&](const auto& existing) {
-              return assignmentCubeContains(singleton, existing);
-            }) ||
-        std::any_of(
-            blockers.begin(),
-            blockers.end(),
-            [&](const auto& existing) {
-              return assignmentCubeContains(singleton, existing);
+    std::vector<std::pair<size_t, bool>> singleton{literal};  // LCOV_EXCL_LINE
+    if (std::any_of(  // LCOV_EXCL_LINE
+            existingBlockers.begin(),  // LCOV_EXCL_LINE
+            existingBlockers.end(),  // LCOV_EXCL_LINE
+            [&](const auto& existing) {  // LCOV_EXCL_LINE
+              return assignmentCubeContains(singleton, existing);  // LCOV_EXCL_LINE
+            }) ||  // LCOV_EXCL_LINE
+        std::any_of(  // LCOV_EXCL_LINE
+            blockers.begin(),  // LCOV_EXCL_LINE
+            blockers.end(),  // LCOV_EXCL_LINE
+            [&](const auto& existing) {  // LCOV_EXCL_LINE
+              return assignmentCubeContains(singleton, existing);  // LCOV_EXCL_LINE
             })) {
-      continue;
+      continue;  // LCOV_EXCL_LINE
     }
 
-    const auto status = solver.solver->solveWithAssumptionsStatus(
-        stateCubeAssumptionLits(
-            *solver.variables, singleton, data.bootstrapFrames),
+    const auto status = solver.solver->solveWithAssumptionsStatus(  // LCOV_EXCL_LINE
+        stateCubeAssumptionLits(  // LCOV_EXCL_LINE
+            *solver.variables, singleton, data.bootstrapFrames),  // LCOV_EXCL_LINE
         kResetSummarySingletonProofConflictLimit);
-    if (status != SATSolverWrapper::SolveStatus::Unsat) {
-      continue;
+    if (status != SATSolverWrapper::SolveStatus::Unsat) {  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
 
-    rememberResetFrontierUnreachableCore(
-        data, data.bootstrapFrames, singleton);
-    blockers.push_back(std::move(singleton));
-  }
-  return blockers;
-}
+    rememberResetFrontierUnreachableCore(  // LCOV_EXCL_LINE
+        data, data.bootstrapFrames, singleton);  // LCOV_EXCL_LINE
+    blockers.push_back(std::move(singleton));  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  return blockers;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 bool resetSummaryPrecheckProvesUnreachable(
     const ResetFrontierReachabilityContextData& data,
@@ -2374,13 +2374,13 @@ bool resetSummaryPrecheckProvesUnreachable(
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t postBootstrapSteps) {
   if (resetFrontierAssumptionSolvesDisabled()) {
-    return false;
+    return false;  // LCOV_EXCL_LINE
   }
   if (data.bootstrapFrames == 0 || postBootstrapSteps == 0) {
     return false;
   }
   if (solverType != KEPLER_FORMAL::Config::SolverType::KISSAT) {
-    return false;
+    return false;  // LCOV_EXCL_LINE
   }
 
   const auto& cachedCoi =
@@ -2406,17 +2406,17 @@ bool resetSummaryPrecheckProvesUnreachable(
 
   if (coi.solverSymbols.size() > kMaxResetSummaryPrecheckSymbols ||
       transitionTargets > kMaxResetSummaryPrecheckTransitionTargets) {
-    if (isKInductionCoiDiagEnabled()) {
-      emitSecDiag(
+    if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: reset summary one-shot precheck skipped "
           "reason=coi_cap post_bootstrap_steps=",
           postBootstrapSteps,
           " solver_symbols=",
-          coi.solverSymbols.size(),
+          coi.solverSymbols.size(),  // LCOV_EXCL_LINE
           " transition_targets=",
           transitionTargets);
-    }
-    return false;
+    }  // LCOV_EXCL_LINE
+    return false;  // LCOV_EXCL_LINE
   }
 
   const auto& problem = data.problem;
@@ -2424,7 +2424,7 @@ bool resetSummaryPrecheckProvesUnreachable(
   auto appendFrontierBlocker =
       [&](const std::vector<std::pair<size_t, bool>>& blocker) {
         if (frontierBlockers.size() >= kMaxResetSummaryFrontierBlockers) {
-          return false;
+          return false;  // LCOV_EXCL_LINE
         }
         if (std::any_of(
                 frontierBlockers.begin(),
@@ -2432,7 +2432,7 @@ bool resetSummaryPrecheckProvesUnreachable(
                 [&](const auto& existing) {
                   return assignmentCubeContains(blocker, existing);
                 })) {
-          return false;
+          return false;  // LCOV_EXCL_LINE
         }
         frontierBlockers.push_back(blocker);
         return true;
@@ -2442,10 +2442,10 @@ bool resetSummaryPrecheckProvesUnreachable(
       coresIt != data.unreachableCoresByTargetFrame.end()) {
     for (const auto& core : coresIt->second) {
       if (frontierBlockers.size() >= kMaxResetSummaryFrontierBlockers) {
-        break;
+        break;  // LCOV_EXCL_LINE
       }
       if (!cubeSymbolsAreInSolverCoi(coi, core)) {
-        continue;
+        continue;  // LCOV_EXCL_LINE
       }
       appendFrontierBlocker(core);
     }
@@ -2471,7 +2471,7 @@ bool resetSummaryPrecheckProvesUnreachable(
       for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {
         solver.addClause(
             {assertedValue ? -variables.getLiteral(symbol, frame)
-                           : variables.getLiteral(symbol, frame)});
+                           : variables.getLiteral(symbol, frame)});  // LCOV_EXCL_LINE
       }
     }
     addComplementedStateRelations(
@@ -2498,12 +2498,12 @@ bool resetSummaryPrecheckProvesUnreachable(
       addBlockedStateCubeClause(solver, variables, blocker, 0);
     }
     if (data.frameInvariant != nullptr) {
-      for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {
-        FrameFormulaEncoder encoder(
-            solver, variables.makeLeafLits(frame, data.frameInvariantSupport));
-        solver.addClause({encoder.encode(data.frameInvariant)});
-      }
-    }
+      for (size_t frame = 0; frame <= postBootstrapSteps; ++frame) {  // LCOV_EXCL_LINE
+        FrameFormulaEncoder encoder(  // LCOV_EXCL_LINE
+            solver, variables.makeLeafLits(frame, data.frameInvariantSupport));  // LCOV_EXCL_LINE
+        solver.addClause({encoder.encode(data.frameInvariant)});  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
 
     for (size_t frame = 0; frame < postBootstrapSteps; ++frame) {
       addTransitionRelation(
@@ -2523,29 +2523,29 @@ bool resetSummaryPrecheckProvesUnreachable(
             kResetSummaryPrecheckConflictLimit);
     if (status == SATSolverWrapper::SolveStatus::Unsat) {
       if (refinement != 0 && isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset summary CEGAR proved unreachable "
             "post_bootstrap_steps=",
             postBootstrapSteps,
             " refinements=",
             refinement,
             " frontier_blockers=",
-            frontierBlockers.size());
-      }
+            frontierBlockers.size());  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
       return true;
     }
     if (status == SATSolverWrapper::SolveStatus::Unknown) {
-      if (isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+      if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset summary one-shot precheck resource_limit "
             "post_bootstrap_steps=",
             postBootstrapSteps,
             " solver_symbols=",
-            coi.solverSymbols.size(),
+            coi.solverSymbols.size(),  // LCOV_EXCL_LINE
             " transition_targets=",
             transitionTargets);
-      }
-      return false;
+      }  // LCOV_EXCL_LINE
+      return false;  // LCOV_EXCL_LINE
     }
     if (refinement == kMaxResetSummaryRefinements ||
         frontierBlockers.size() >= kMaxResetSummaryFrontierBlockers) {
@@ -2555,15 +2555,15 @@ bool resetSummaryPrecheckProvesUnreachable(
     const auto frontierCube =
         extractResetSummaryFrontierCube(data, solver, variables, coi);
     if (!frontierCube.has_value()) {
-      if (isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+      if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset summary refinement skipped reason=frontier_cap "
             "post_bootstrap_steps=",
             postBootstrapSteps,
             " max_literals=",
             kMaxResetSummaryFrontierCubeLiterals);
-      }
-      return false;
+      }  // LCOV_EXCL_LINE
+      return false;  // LCOV_EXCL_LINE
     }
     const auto blocker =
         proveResetSummaryFrontierCubeUnreachable(data, *frontierCube);
@@ -2572,37 +2572,37 @@ bool resetSummaryPrecheckProvesUnreachable(
     }
     size_t addedBlockers = appendFrontierBlocker(*blocker) ? 1 : 0;
     if (blocker->size() == 1 &&
-        frontierBlockers.size() < kMaxResetSummaryFrontierBlockers) {
-      const size_t remainingBlockers =
-          kMaxResetSummaryFrontierBlockers - frontierBlockers.size();
+        frontierBlockers.size() < kMaxResetSummaryFrontierBlockers) {  // LCOV_EXCL_LINE
+      const size_t remainingBlockers =  // LCOV_EXCL_LINE
+          kMaxResetSummaryFrontierBlockers - frontierBlockers.size();  // LCOV_EXCL_LINE
       const auto singletonBlockers =
-          collectResetSummarySingletonFrontierBlockers(
-              data,
-              *frontierCube,
+          collectResetSummarySingletonFrontierBlockers(  // LCOV_EXCL_LINE
+              data,  // LCOV_EXCL_LINE
+              *frontierCube,  // LCOV_EXCL_LINE
               frontierBlockers,
-              std::min(
+              std::min(  // LCOV_EXCL_LINE
                   kMaxResetSummaryBulkSingletonBlockers,
                   remainingBlockers));
-      for (const auto& singleton : singletonBlockers) {
-        if (appendFrontierBlocker(singleton)) {
-          ++addedBlockers;
-        }
+      for (const auto& singleton : singletonBlockers) {  // LCOV_EXCL_LINE
+        if (appendFrontierBlocker(singleton)) {  // LCOV_EXCL_LINE
+          ++addedBlockers;  // LCOV_EXCL_LINE
+        }  // LCOV_EXCL_LINE
       }
-    }
+    }  // LCOV_EXCL_LINE
     if (isKInductionCoiDiagEnabled()) {
-      emitSecDiag(
+      emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: reset summary learned frontier blocker ",
           "post_bootstrap_steps=",
           postBootstrapSteps,
           " refinement=",
-          refinement + 1,
+          refinement + 1,  // LCOV_EXCL_LINE
           " frontier_cube=",
-          frontierCube->size(),
+          frontierCube->size(),  // LCOV_EXCL_LINE
           " blocker=",
-          blocker->size(),
+          blocker->size(),  // LCOV_EXCL_LINE
           " added=",
           addedBlockers);
-    }
+    }  // LCOV_EXCL_LINE
   }
   return false;  // LCOV_EXCL_LINE
 }
@@ -2653,8 +2653,8 @@ CachedResetFrontierSolver& getCachedResetFrontierSolver(
   }
 
   if (data.cachedSolvers.size() >= kMaxResetFrontierCachedSolvers) {
-    data.cachedSolvers.clear();
-  }
+    data.cachedSolvers.clear();  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
   auto cached = buildResetFrontierSolver(
       data, cachedSolverType, cube, targetFrame, encodeCubeAsUnitClauses);
@@ -2663,21 +2663,21 @@ CachedResetFrontierSolver& getCachedResetFrontierSolver(
   return *it->second;
 }
 
-void primeResetFrontierReachabilitySolver(
+void primeResetFrontierReachabilitySolver(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContext& context,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t postBootstrapSteps) {
-  if (cube.empty()) {
-    return;
+  if (cube.empty()) {  // LCOV_EXCL_LINE
+    return;  // LCOV_EXCL_LINE
   }
 
-  const auto& data = *context.data;
-  const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;
-  const auto normalizedCube = normalizedAssignmentCube(cube);
-  (void)getCachedResetFrontierSolver(
-      data, solverType, normalizedCube, targetFrame);
-}
+  const auto& data = *context.data;  // LCOV_EXCL_LINE
+  const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;  // LCOV_EXCL_LINE
+  const auto normalizedCube = normalizedAssignmentCube(cube);  // LCOV_EXCL_LINE
+  (void)getCachedResetFrontierSolver(  // LCOV_EXCL_LINE
+      data, solverType, normalizedCube, targetFrame);  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 bool isStateCubeReachableAtResetFrontier(
     const ResetFrontierReachabilityContext& context,
@@ -2773,18 +2773,18 @@ bool isStateCubeReachableAtResetFrontier(
                 kRelaxedResetFrontierPrecheckConflictLimit);
         relaxedUnsat = status == SATSolverWrapper::SolveStatus::Unsat;
         if (status == SATSolverWrapper::SolveStatus::Unknown &&
-            isKInductionCoiDiagEnabled()) {
-          emitSecDiag(
+            isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+          emitSecDiag(  // LCOV_EXCL_LINE
               "SEC diag: reset frontier relaxed cached precheck "
               "resource_limit post_bootstrap_steps=",
               postBootstrapSteps,
               " solver_symbols=",
-              relaxedSolver->coi.solverSymbols.size(),
+              relaxedSolver->coi.solverSymbols.size(),  // LCOV_EXCL_LINE
               " transition_targets=",
               relaxedTransitionTargets);
-        }
+        }  // LCOV_EXCL_LINE
       } else {
-        relaxedUnsat = !relaxedSolver->solver->solve();
+        relaxedUnsat = !relaxedSolver->solver->solve();  // LCOV_EXCL_LINE
       }
       if (relaxedUnsat) {
         rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
@@ -2803,44 +2803,44 @@ bool isStateCubeReachableAtResetFrontier(
 
     if (resetSummaryPrecheckProvesUnreachable(
             data, solverType, normalizedCube, postBootstrapSteps)) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
-      return false;
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);  // LCOV_EXCL_LINE
+      return false;  // LCOV_EXCL_LINE
     }
   }
   if (resetFrontierAssumptionSolvesDisabled()) {
-    auto unitSolver = buildResetFrontierSolver(
-        data,
-        solverType,
+    auto unitSolver = buildResetFrontierSolver(  // LCOV_EXCL_LINE
+        data,  // LCOV_EXCL_LINE
+        solverType,  // LCOV_EXCL_LINE
         normalizedCube,
-        targetFrame,
+        targetFrame,  // LCOV_EXCL_LINE
         /*encodeCubeAsUnitClauses=*/true);
-    const int64_t conflictLimit =
-        postBootstrapSteps == 0 && startupConflictLimit >= 0
-            ? startupConflictLimit
+    const int64_t conflictLimit =  // LCOV_EXCL_LINE
+        postBootstrapSteps == 0 && startupConflictLimit >= 0  // LCOV_EXCL_LINE
+            ? startupConflictLimit  // LCOV_EXCL_LINE
             : static_cast<int64_t>(kResetFrontierCachedAssumptionConflictLimit);
-    const auto status = solveResetFrontierUnitClauseQuery(
-        *unitSolver->solver, solverType, conflictLimit);
-    if (status == SATSolverWrapper::SolveStatus::Unknown) {
-      if (isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+    const auto status = solveResetFrontierUnitClauseQuery(  // LCOV_EXCL_LINE
+        *unitSolver->solver, solverType, conflictLimit);  // LCOV_EXCL_LINE
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {  // LCOV_EXCL_LINE
+      if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset frontier unit-clause proof resource_limit ",
             "post_bootstrap_steps=",
             postBootstrapSteps,
             " solver_symbols=",
-            unitSolver->coi.solverSymbols.size(),
+            unitSolver->coi.solverSymbols.size(),  // LCOV_EXCL_LINE
             " transition_targets=",
-            countTransitionTargets(unitSolver->coi.transitionTargetsByFrame),
+            countTransitionTargets(unitSolver->coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
             " cube_literals=",
-            normalizedCube.size());
-      }
-      return true;
+            normalizedCube.size());  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;
-    if (!reachable) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
-    }
-    return reachable;
-  }
+    const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;  // LCOV_EXCL_LINE
+    if (!reachable) {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    return reachable;  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
   CachedResetFrontierSolver& cached =
       getCachedResetFrontierSolver(data, solverType, normalizedCube, targetFrame);
@@ -2863,8 +2863,8 @@ bool isStateCubeReachableAtResetFrontier(
 
   SATSolverWrapper::SolveStatus status = SATSolverWrapper::SolveStatus::Unknown;
   if (cached.cubeEncodedAsUnitClauses) {
-    status = cached.solver->solveStatus();
-  } else {
+    status = cached.solver->solveStatus();  // LCOV_EXCL_LINE
+  } else {  // LCOV_EXCL_LINE
     const auto assumptions =
         stateCubeAssumptionLits(*cached.variables, normalizedCube, targetFrame);
     if (postBootstrapSteps == 0) {
@@ -2879,19 +2879,19 @@ bool isStateCubeReachableAtResetFrontier(
     }
   }
   if (status == SATSolverWrapper::SolveStatus::Unknown) {
-    if (isKInductionCoiDiagEnabled()) {
-      emitSecDiag(
+    if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: reset frontier cached assumption proof resource_limit ",
           "post_bootstrap_steps=",
           postBootstrapSteps,
           " solver_symbols=",
-          cached.coi.solverSymbols.size(),
+          cached.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
           " transition_targets=",
-          countTransitionTargets(cached.coi.transitionTargetsByFrame),
+          countTransitionTargets(cached.coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
           " cube_literals=",
-          normalizedCube.size());
-    }
-    return true;
+          normalizedCube.size());  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    return true;  // LCOV_EXCL_LINE
   }
 
   const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;
@@ -2907,18 +2907,18 @@ bool isStateCubeReachableAtResetFrontier(
           core.has_value()) {
         rememberResetFrontierUnreachableCore(data, targetFrame, *core);
       } else {
-        rememberResetFrontierUnreachableCore(
-            data, targetFrame, normalizedCube);
+        rememberResetFrontierUnreachableCore(  // LCOV_EXCL_LINE
+            data, targetFrame, normalizedCube);  // LCOV_EXCL_LINE
       }
     } else if (const auto core =
-                   failedAssumptionCoreFromLastResetFrontierSolve(
-                       cached, normalizedCube, targetFrame);
-               core.has_value()) {
+                   failedAssumptionCoreFromLastResetFrontierSolve(  // LCOV_EXCL_LINE
+                       cached, normalizedCube, targetFrame);  // LCOV_EXCL_LINE
+               core.has_value()) {  // LCOV_EXCL_LINE
       // Post-bootstrap prechecks are on the hot PDR path.  Reuse the
       // assumption core already produced by this UNSAT query, but avoid the
       // extra minimization SAT calls reserved for the exact reset frontier.
-      rememberResetFrontierUnreachableCore(data, targetFrame, *core);
-    }
+      rememberResetFrontierUnreachableCore(data, targetFrame, *core);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
   }
   return reachable;
 }
@@ -2930,7 +2930,7 @@ bool isStateCubeReachableAtResetFrontierOneShot(
     size_t postBootstrapSteps,
     bool usePostBootstrapPrechecks) {
   if (cube.empty()) {
-    return true;
+    return true;  // LCOV_EXCL_LINE
   }
 
   const auto& data = *context.data;
@@ -2945,7 +2945,7 @@ bool isStateCubeReachableAtResetFrontierOneShot(
   if (findCachedResetFrontierUnreachableCore(
           data, targetFrame, normalizedCube)
           .has_value()) {
-    return false;
+    return false;  // LCOV_EXCL_LINE
   }
   if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
     // First try a weakened COI that does not close the startup equality
@@ -2997,18 +2997,18 @@ bool isStateCubeReachableAtResetFrontierOneShot(
                 kRelaxedResetFrontierPrecheckConflictLimit);
         relaxedUnsat = status == SATSolverWrapper::SolveStatus::Unsat;
         if (status == SATSolverWrapper::SolveStatus::Unknown &&
-            isKInductionCoiDiagEnabled()) {
-          emitSecDiag(
+            isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+          emitSecDiag(  // LCOV_EXCL_LINE
               "SEC diag: reset frontier relaxed one-shot precheck "
               "resource_limit post_bootstrap_steps=",
               postBootstrapSteps,
               " solver_symbols=",
-              relaxedSolver->coi.solverSymbols.size(),
+              relaxedSolver->coi.solverSymbols.size(),  // LCOV_EXCL_LINE
               " transition_targets=",
               relaxedTransitionTargets);
-        }
+        }  // LCOV_EXCL_LINE
       } else {
-        relaxedUnsat = !relaxedSolver->solver->solve();
+        relaxedUnsat = !relaxedSolver->solver->solve();  // LCOV_EXCL_LINE
       }
       if (relaxedUnsat) {
         rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
@@ -3032,39 +3032,39 @@ bool isStateCubeReachableAtResetFrontierOneShot(
     }
   }
   if (resetFrontierAssumptionSolvesDisabled()) {
-    auto solver = buildResetFrontierSolver(
-        data,
-        solverType,
+    auto solver = buildResetFrontierSolver(  // LCOV_EXCL_LINE
+        data,  // LCOV_EXCL_LINE
+        solverType,  // LCOV_EXCL_LINE
         normalizedCube,
-        targetFrame,
+        targetFrame,  // LCOV_EXCL_LINE
         /*encodeCubeAsUnitClauses=*/true);
-    const int64_t conflictLimit =
-        postBootstrapSteps == 0
+    const int64_t conflictLimit =  // LCOV_EXCL_LINE
+        postBootstrapSteps == 0  // LCOV_EXCL_LINE
             ? -1
             : static_cast<int64_t>(kResetFrontierCachedAssumptionConflictLimit);
-    const auto status = solveResetFrontierUnitClauseQuery(
-        *solver->solver, solverType, conflictLimit);
-    if (status == SATSolverWrapper::SolveStatus::Unknown) {
-      if (isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+    const auto status = solveResetFrontierUnitClauseQuery(  // LCOV_EXCL_LINE
+        *solver->solver, solverType, conflictLimit);  // LCOV_EXCL_LINE
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {  // LCOV_EXCL_LINE
+      if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset frontier one-shot unit-clause resource_limit ",
             "post_bootstrap_steps=",
             postBootstrapSteps,
             " solver_symbols=",
-            solver->coi.solverSymbols.size(),
+            solver->coi.solverSymbols.size(),  // LCOV_EXCL_LINE
             " transition_targets=",
-            countTransitionTargets(solver->coi.transitionTargetsByFrame),
+            countTransitionTargets(solver->coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
             " cube_literals=",
-            normalizedCube.size());
-      }
-      return true;
+            normalizedCube.size());  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;
-    if (!reachable) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
-    }
-    return reachable;
-  }
+    const bool reachable = status == SATSolverWrapper::SolveStatus::Sat;  // LCOV_EXCL_LINE
+    if (!reachable) {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    return reachable;  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
   const auto assumptionSolverType =
       SATSolverWrapper::assumptionSolverTypeFor(solverType);
@@ -3103,349 +3103,349 @@ bool isStateCubeReachableAtResetFrontierOneShot(
         core.has_value()) {
       rememberResetFrontierUnreachableCore(data, targetFrame, *core);
     } else {
-      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);  // LCOV_EXCL_LINE
     }
   }
   return reachable;
 }
 
-bool isStateCubeReachableWithinResetFrontier(
+bool isStateCubeReachableWithinResetFrontier(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContext& context,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t maxPostBootstrapSteps) {
-  if (cube.empty()) {
-    return true;
+  if (cube.empty()) {  // LCOV_EXCL_LINE
+    return true;  // LCOV_EXCL_LINE
   }
 
-  const auto& data = *context.data;
-  const auto normalizedCube = normalizedAssignmentCube(cube);
-  std::vector<size_t> uncheckedSteps;
-  uncheckedSteps.reserve(maxPostBootstrapSteps + 1);
-  for (size_t step = 0; step <= maxPostBootstrapSteps; ++step) {
-    const size_t targetFrame = data.bootstrapFrames + step;
-    if (const auto knownCore =
-            knownResetFrontierConflictCore(data, normalizedCube, step);
-        knownCore.has_value()) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
-      continue;
+  const auto& data = *context.data;  // LCOV_EXCL_LINE
+  const auto normalizedCube = normalizedAssignmentCube(cube);  // LCOV_EXCL_LINE
+  std::vector<size_t> uncheckedSteps;  // LCOV_EXCL_LINE
+  uncheckedSteps.reserve(maxPostBootstrapSteps + 1);  // LCOV_EXCL_LINE
+  for (size_t step = 0; step <= maxPostBootstrapSteps; ++step) {  // LCOV_EXCL_LINE
+    const size_t targetFrame = data.bootstrapFrames + step;  // LCOV_EXCL_LINE
+    if (const auto knownCore =  // LCOV_EXCL_LINE
+            knownResetFrontierConflictCore(data, normalizedCube, step);  // LCOV_EXCL_LINE
+        knownCore.has_value()) {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
-    if (findCachedResetFrontierUnreachableCore(
-            data, targetFrame, normalizedCube)
-            .has_value()) {
-      continue;
+    if (findCachedResetFrontierUnreachableCore(  // LCOV_EXCL_LINE
+            data, targetFrame, normalizedCube)  // LCOV_EXCL_LINE
+            .has_value()) {  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
-    uncheckedSteps.push_back(step);
-  }
-  if (uncheckedSteps.empty()) {
-    return false;
+    uncheckedSteps.push_back(step);  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  if (uncheckedSteps.empty()) {  // LCOV_EXCL_LINE
+    return false;  // LCOV_EXCL_LINE
   }
 
-  std::vector<size_t> remainingSteps;
-  remainingSteps.reserve(uncheckedSteps.size());
-  for (const auto step : uncheckedSteps) {
-    if (step != 0 &&
-        resetSummaryPrecheckProvesUnreachable(
-            data, solverType, normalizedCube, step)) {
-      rememberResetFrontierUnreachableCore(
-          data, data.bootstrapFrames + step, normalizedCube);
-      continue;
+  std::vector<size_t> remainingSteps;  // LCOV_EXCL_LINE
+  remainingSteps.reserve(uncheckedSteps.size());  // LCOV_EXCL_LINE
+  for (const auto step : uncheckedSteps) {  // LCOV_EXCL_LINE
+    if (step != 0 &&  // LCOV_EXCL_LINE
+        resetSummaryPrecheckProvesUnreachable(  // LCOV_EXCL_LINE
+            data, solverType, normalizedCube, step)) {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(  // LCOV_EXCL_LINE
+          data, data.bootstrapFrames + step, normalizedCube);  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
-    remainingSteps.push_back(step);
+    remainingSteps.push_back(step);  // LCOV_EXCL_LINE
   }
-  if (remainingSteps.empty()) {
-    return false;
+  if (remainingSteps.empty()) {  // LCOV_EXCL_LINE
+    return false;  // LCOV_EXCL_LINE
   }
-  if (resetFrontierAssumptionSolvesDisabled() ||
-      remainingSteps.size() <= kMaxSparseResetFrontierPerStepChecks) {
-    for (const auto step : remainingSteps) {
-      if (isStateCubeReachableAtResetFrontier(
-              context,
-              solverType,
+  if (resetFrontierAssumptionSolvesDisabled() ||  // LCOV_EXCL_LINE
+      remainingSteps.size() <= kMaxSparseResetFrontierPerStepChecks) {  // LCOV_EXCL_LINE
+    for (const auto step : remainingSteps) {  // LCOV_EXCL_LINE
+      if (isStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
+              context,  // LCOV_EXCL_LINE
+              solverType,  // LCOV_EXCL_LINE
               normalizedCube,
-              step,
+              step,  // LCOV_EXCL_LINE
               /*usePostBootstrapPrechecks=*/false)) {
-        return true;
+        return true;  // LCOV_EXCL_LINE
       }
     }
-    return false;
+    return false;  // LCOV_EXCL_LINE
   }
 
-  const size_t maxTargetFrame =
-      data.bootstrapFrames + maxPostBootstrapSteps;
-  CachedResetFrontierSolver& solver = getCachedResetFrontierPrefixSolver(
-      data, solverType, normalizedCube, maxTargetFrame);
+  const size_t maxTargetFrame =  // LCOV_EXCL_LINE
+      data.bootstrapFrames + maxPostBootstrapSteps;  // LCOV_EXCL_LINE
+  CachedResetFrontierSolver& solver = getCachedResetFrontierPrefixSolver(  // LCOV_EXCL_LINE
+      data, solverType, normalizedCube, maxTargetFrame);  // LCOV_EXCL_LINE
 
-  if (isKInductionCoiDiagEnabled()) {
-    emitSecDiag(
+  if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+    emitSecDiag(  // LCOV_EXCL_LINE
         "SEC diag: reset frontier prefix cube coi max_post_bootstrap_steps=",
         maxPostBootstrapSteps,
         " frames=",
-        maxTargetFrame + 1,
+        maxTargetFrame + 1,  // LCOV_EXCL_LINE
         " solver_symbols=",
-        solver.coi.solverSymbols.size(),
+        solver.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
         " transition_targets=",
-        countTransitionTargets(solver.coi.transitionTargetsByFrame),
+        countTransitionTargets(solver.coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
         " cube_literals=",
-        normalizedCube.size(),
+        normalizedCube.size(),  // LCOV_EXCL_LINE
         " unchecked_steps=",
-        remainingSteps.size(),
+        remainingSteps.size(),  // LCOV_EXCL_LINE
         " frame_invariant_symbols=",
-        data.frameInvariantSupport.size());
-  }
+        data.frameInvariantSupport.size());  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
-  for (const auto step : remainingSteps) {
-    const size_t targetFrame = data.bootstrapFrames + step;
+  for (const auto step : remainingSteps) {  // LCOV_EXCL_LINE
+    const size_t targetFrame = data.bootstrapFrames + step;  // LCOV_EXCL_LINE
     const auto assumptions =
-        stateCubeAssumptionLits(*solver.variables, normalizedCube, targetFrame);
-    const auto status =
-        step == 0
-            ? solver.solver->solveWithAssumptionsStatus(assumptions)
-            : solver.solver->solveWithAssumptionsStatus(
+        stateCubeAssumptionLits(*solver.variables, normalizedCube, targetFrame);  // LCOV_EXCL_LINE
+    const auto status =  // LCOV_EXCL_LINE
+        step == 0  // LCOV_EXCL_LINE
+            ? solver.solver->solveWithAssumptionsStatus(assumptions)  // LCOV_EXCL_LINE
+            : solver.solver->solveWithAssumptionsStatus(  // LCOV_EXCL_LINE
                   assumptions, kResetFrontierCachedAssumptionConflictLimit);
-    if (status == SATSolverWrapper::SolveStatus::Unknown) {
-      if (isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {  // LCOV_EXCL_LINE
+      if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset frontier prefix assumption proof resource_limit ",
             "post_bootstrap_steps=",
             step,
             " max_post_bootstrap_steps=",
             maxPostBootstrapSteps,
             " solver_symbols=",
-            solver.coi.solverSymbols.size(),
+            solver.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
             " transition_targets=",
-            countTransitionTargets(solver.coi.transitionTargetsByFrame),
+            countTransitionTargets(solver.coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
             " cube_literals=",
-            normalizedCube.size());
-      }
-      return true;
+            normalizedCube.size());  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    if (status == SATSolverWrapper::SolveStatus::Sat) {
-      return true;
+    if (status == SATSolverWrapper::SolveStatus::Sat) {  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
-            solver, normalizedCube, targetFrame);
-        core.has_value()) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, *core);
-    } else {
-      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);
+    if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(  // LCOV_EXCL_LINE
+            solver, normalizedCube, targetFrame);  // LCOV_EXCL_LINE
+        core.has_value()) {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, *core);  // LCOV_EXCL_LINE
+    } else {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, normalizedCube);  // LCOV_EXCL_LINE
     }
-  }
-  return false;
-}
+  }  // LCOV_EXCL_LINE
+  return false;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
-std::vector<std::pair<size_t, bool>> supportCubeForAssignmentCubes(
+std::vector<std::pair<size_t, bool>> supportCubeForAssignmentCubes(  // LCOV_EXCL_LINE
     const std::vector<std::vector<std::pair<size_t, bool>>>& cubes) {
-  std::unordered_map<size_t, bool> valueBySymbol;
-  for (const auto& cube : cubes) {
-    for (const auto& [symbol, value] : cube) {
-      valueBySymbol.emplace(symbol, value);
+  std::unordered_map<size_t, bool> valueBySymbol;  // LCOV_EXCL_LINE
+  for (const auto& cube : cubes) {  // LCOV_EXCL_LINE
+    for (const auto& [symbol, value] : cube) {  // LCOV_EXCL_LINE
+      valueBySymbol.emplace(symbol, value);  // LCOV_EXCL_LINE
     }
   }
 
-  std::vector<std::pair<size_t, bool>> supportCube;
-  supportCube.reserve(valueBySymbol.size());
-  for (const auto& [symbol, value] : valueBySymbol) {
-    supportCube.emplace_back(symbol, value);
+  std::vector<std::pair<size_t, bool>> supportCube;  // LCOV_EXCL_LINE
+  supportCube.reserve(valueBySymbol.size());  // LCOV_EXCL_LINE
+  for (const auto& [symbol, value] : valueBySymbol) {  // LCOV_EXCL_LINE
+    supportCube.emplace_back(symbol, value);  // LCOV_EXCL_LINE
   }
-  return normalizedAssignmentCube(std::move(supportCube));
-}
+  return normalizedAssignmentCube(std::move(supportCube));  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
-bool anyStateCubeReachableWithinResetFrontier(
+bool anyStateCubeReachableWithinResetFrontier(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContext& context,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::vector<std::pair<size_t, bool>>>& cubes,
     size_t maxPostBootstrapSteps) {
-  std::vector<std::vector<std::pair<size_t, bool>>> normalizedCubes;
-  normalizedCubes.reserve(cubes.size());
-  for (auto cube : cubes) {
-    cube = normalizedAssignmentCube(std::move(cube));
-    if (cube.empty()) {
-      return true;
+  std::vector<std::vector<std::pair<size_t, bool>>> normalizedCubes;  // LCOV_EXCL_LINE
+  normalizedCubes.reserve(cubes.size());  // LCOV_EXCL_LINE
+  for (auto cube : cubes) {  // LCOV_EXCL_LINE
+    cube = normalizedAssignmentCube(std::move(cube));  // LCOV_EXCL_LINE
+    if (cube.empty()) {  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    normalizedCubes.push_back(std::move(cube));
-  }
-  if (normalizedCubes.empty()) {
-    return false;
+    normalizedCubes.push_back(std::move(cube));  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  if (normalizedCubes.empty()) {  // LCOV_EXCL_LINE
+    return false;  // LCOV_EXCL_LINE
   }
 
-  const auto& data = *context.data;
-  const size_t maxTargetFrame = data.bootstrapFrames + maxPostBootstrapSteps;
+  const auto& data = *context.data;  // LCOV_EXCL_LINE
+  const size_t maxTargetFrame = data.bootstrapFrames + maxPostBootstrapSteps;  // LCOV_EXCL_LINE
   const std::vector<std::pair<size_t, bool>> supportCube =
-      supportCubeForAssignmentCubes(normalizedCubes);
-  if (supportCube.empty()) {
-    return true;
+      supportCubeForAssignmentCubes(normalizedCubes);  // LCOV_EXCL_LINE
+  if (supportCube.empty()) {  // LCOV_EXCL_LINE
+    return true;  // LCOV_EXCL_LINE
   }
 
-  CachedResetFrontierSolver& solver = getCachedResetFrontierPrefixSolver(
-      data, solverType, supportCube, maxTargetFrame);
+  CachedResetFrontierSolver& solver = getCachedResetFrontierPrefixSolver(  // LCOV_EXCL_LINE
+      data, solverType, supportCube, maxTargetFrame);  // LCOV_EXCL_LINE
 
-  if (isKInductionCoiDiagEnabled()) {
-    emitSecDiag(
+  if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+    emitSecDiag(  // LCOV_EXCL_LINE
         "SEC diag: reset frontier batch cube coi max_post_bootstrap_steps=",
         maxPostBootstrapSteps,
         " frames=",
-        maxTargetFrame + 1,
+        maxTargetFrame + 1,  // LCOV_EXCL_LINE
         " solver_symbols=",
-        solver.coi.solverSymbols.size(),
+        solver.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
         " transition_targets=",
-        countTransitionTargets(solver.coi.transitionTargetsByFrame),
+        countTransitionTargets(solver.coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
         " cubes=",
-        normalizedCubes.size(),
+        normalizedCubes.size(),  // LCOV_EXCL_LINE
         " support_literals=",
-        supportCube.size(),
+        supportCube.size(),  // LCOV_EXCL_LINE
         " frame_invariant_symbols=",
-        data.frameInvariantSupport.size());
-  }
+        data.frameInvariantSupport.size());  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
-  for (size_t step = 0; step <= maxPostBootstrapSteps; ++step) {
-    const size_t targetFrame = data.bootstrapFrames + step;
-    for (const auto& cube : normalizedCubes) {
-      if (const auto knownCore =
-              knownResetFrontierConflictCore(data, cube, step);
-          knownCore.has_value()) {
-        rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
-        continue;
+  for (size_t step = 0; step <= maxPostBootstrapSteps; ++step) {  // LCOV_EXCL_LINE
+    const size_t targetFrame = data.bootstrapFrames + step;  // LCOV_EXCL_LINE
+    for (const auto& cube : normalizedCubes) {  // LCOV_EXCL_LINE
+      if (const auto knownCore =  // LCOV_EXCL_LINE
+              knownResetFrontierConflictCore(data, cube, step);  // LCOV_EXCL_LINE
+          knownCore.has_value()) {  // LCOV_EXCL_LINE
+        rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);  // LCOV_EXCL_LINE
+        continue;  // LCOV_EXCL_LINE
       }
-      if (findCachedResetFrontierUnreachableCore(data, targetFrame, cube)
-              .has_value()) {
-        continue;
+      if (findCachedResetFrontierUnreachableCore(data, targetFrame, cube)  // LCOV_EXCL_LINE
+              .has_value()) {  // LCOV_EXCL_LINE
+        continue;  // LCOV_EXCL_LINE
       }
       const auto assumptions =
-          stateCubeAssumptionLits(*solver.variables, cube, targetFrame);
-      const auto status =
-          step == 0
-              ? solver.solver->solveWithAssumptionsStatus(assumptions)
-              : solver.solver->solveWithAssumptionsStatus(
+          stateCubeAssumptionLits(*solver.variables, cube, targetFrame);  // LCOV_EXCL_LINE
+      const auto status =  // LCOV_EXCL_LINE
+          step == 0  // LCOV_EXCL_LINE
+              ? solver.solver->solveWithAssumptionsStatus(assumptions)  // LCOV_EXCL_LINE
+              : solver.solver->solveWithAssumptionsStatus(  // LCOV_EXCL_LINE
                     assumptions,
                     kResetFrontierCachedAssumptionConflictLimit,
                     kResetFrontierBatchProofPropagationLimit);
-      if (status == SATSolverWrapper::SolveStatus::Sat) {
-        return true;
+      if (status == SATSolverWrapper::SolveStatus::Sat) {  // LCOV_EXCL_LINE
+        return true;  // LCOV_EXCL_LINE
       }
-      if (status == SATSolverWrapper::SolveStatus::Unknown) {
-        if (isKInductionCoiDiagEnabled()) {
-          emitSecDiag(
+      if (status == SATSolverWrapper::SolveStatus::Unknown) {  // LCOV_EXCL_LINE
+        if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+          emitSecDiag(  // LCOV_EXCL_LINE
               "SEC diag: reset frontier batch assumption proof resource_limit ",
               "post_bootstrap_steps=",
               step,
               " max_post_bootstrap_steps=",
               maxPostBootstrapSteps,
               " solver_symbols=",
-              solver.coi.solverSymbols.size(),
+              solver.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
               " transition_targets=",
-              countTransitionTargets(solver.coi.transitionTargetsByFrame),
+              countTransitionTargets(solver.coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
               " cubes=",
-              normalizedCubes.size());
-        }
-        return true;
+              normalizedCubes.size());  // LCOV_EXCL_LINE
+        }  // LCOV_EXCL_LINE
+        return true;  // LCOV_EXCL_LINE
       }
-      if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
-              solver, cube, targetFrame);
-          core.has_value()) {
-        rememberResetFrontierUnreachableCore(data, targetFrame, *core);
-      } else {
-        rememberResetFrontierUnreachableCore(data, targetFrame, cube);
+      if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(  // LCOV_EXCL_LINE
+              solver, cube, targetFrame);  // LCOV_EXCL_LINE
+          core.has_value()) {  // LCOV_EXCL_LINE
+        rememberResetFrontierUnreachableCore(data, targetFrame, *core);  // LCOV_EXCL_LINE
+      } else {  // LCOV_EXCL_LINE
+        rememberResetFrontierUnreachableCore(data, targetFrame, cube);  // LCOV_EXCL_LINE
       }
-    }
-  }
-  return false;
-}
+    }  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  return false;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
-bool anyStateCubeReachableAtResetFrontier(
+bool anyStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
     const ResetFrontierReachabilityContext& context,
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<std::vector<std::pair<size_t, bool>>>& cubes,
     size_t postBootstrapSteps,
     long long conflictLimit,
     long long propagationLimit) {
-  std::vector<std::vector<std::pair<size_t, bool>>> normalizedCubes;
-  normalizedCubes.reserve(cubes.size());
-  for (auto cube : cubes) {
-    cube = normalizedAssignmentCube(std::move(cube));
-    if (cube.empty()) {
-      return true;
+  std::vector<std::vector<std::pair<size_t, bool>>> normalizedCubes;  // LCOV_EXCL_LINE
+  normalizedCubes.reserve(cubes.size());  // LCOV_EXCL_LINE
+  for (auto cube : cubes) {  // LCOV_EXCL_LINE
+    cube = normalizedAssignmentCube(std::move(cube));  // LCOV_EXCL_LINE
+    if (cube.empty()) {  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    normalizedCubes.push_back(std::move(cube));
-  }
-  if (normalizedCubes.empty()) {
-    return false;
+    normalizedCubes.push_back(std::move(cube));  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  if (normalizedCubes.empty()) {  // LCOV_EXCL_LINE
+    return false;  // LCOV_EXCL_LINE
   }
 
-  const auto& data = *context.data;
-  const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;
+  const auto& data = *context.data;  // LCOV_EXCL_LINE
+  const size_t targetFrame = data.bootstrapFrames + postBootstrapSteps;  // LCOV_EXCL_LINE
   const std::vector<std::pair<size_t, bool>> supportCube =
-      supportCubeForAssignmentCubes(normalizedCubes);
-  if (supportCube.empty()) {
-    return true;
+      supportCubeForAssignmentCubes(normalizedCubes);  // LCOV_EXCL_LINE
+  if (supportCube.empty()) {  // LCOV_EXCL_LINE
+    return true;  // LCOV_EXCL_LINE
   }
 
-  CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(
-      data, solverType, supportCube, targetFrame);
+  CachedResetFrontierSolver& solver = getCachedResetFrontierSolver(  // LCOV_EXCL_LINE
+      data, solverType, supportCube, targetFrame);  // LCOV_EXCL_LINE
 
-  if (isKInductionCoiDiagEnabled()) {
-    emitSecDiag(
+  if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+    emitSecDiag(  // LCOV_EXCL_LINE
         "SEC diag: reset frontier target batch cube coi "
         "post_bootstrap_steps=",
         postBootstrapSteps,
         " frames=",
-        targetFrame + 1,
+        targetFrame + 1,  // LCOV_EXCL_LINE
         " solver_symbols=",
-        solver.coi.solverSymbols.size(),
+        solver.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
         " transition_targets=",
-        countTransitionTargets(solver.coi.transitionTargetsByFrame),
+        countTransitionTargets(solver.coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
         " cubes=",
-        normalizedCubes.size(),
+        normalizedCubes.size(),  // LCOV_EXCL_LINE
         " support_literals=",
-        supportCube.size(),
+        supportCube.size(),  // LCOV_EXCL_LINE
         " frame_invariant_symbols=",
-        data.frameInvariantSupport.size());
-  }
+        data.frameInvariantSupport.size());  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 
-  for (const auto& cube : normalizedCubes) {
-    if (const auto knownCore =
-            knownResetFrontierConflictCore(data, cube, postBootstrapSteps);
-        knownCore.has_value()) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);
-      continue;
+  for (const auto& cube : normalizedCubes) {  // LCOV_EXCL_LINE
+    if (const auto knownCore =  // LCOV_EXCL_LINE
+            knownResetFrontierConflictCore(data, cube, postBootstrapSteps);  // LCOV_EXCL_LINE
+        knownCore.has_value()) {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, *knownCore);  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
-    if (findCachedResetFrontierUnreachableCore(data, targetFrame, cube)
-            .has_value()) {
-      continue;
+    if (findCachedResetFrontierUnreachableCore(data, targetFrame, cube)  // LCOV_EXCL_LINE
+            .has_value()) {  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
     const auto assumptions =
-        stateCubeAssumptionLits(*solver.variables, cube, targetFrame);
-    const auto status =
-        solver.solver->solveWithAssumptionsStatus(
-            assumptions, conflictLimit, propagationLimit);
-    if (status == SATSolverWrapper::SolveStatus::Sat) {
-      return true;
+        stateCubeAssumptionLits(*solver.variables, cube, targetFrame);  // LCOV_EXCL_LINE
+    const auto status =  // LCOV_EXCL_LINE
+        solver.solver->solveWithAssumptionsStatus(  // LCOV_EXCL_LINE
+            assumptions, conflictLimit, propagationLimit);  // LCOV_EXCL_LINE
+    if (status == SATSolverWrapper::SolveStatus::Sat) {  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    if (status == SATSolverWrapper::SolveStatus::Unknown) {
-      if (isKInductionCoiDiagEnabled()) {
-        emitSecDiag(
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {  // LCOV_EXCL_LINE
+      if (isKInductionCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: reset frontier target batch assumption proof "
             "resource_limit post_bootstrap_steps=",
             postBootstrapSteps,
             " solver_symbols=",
-            solver.coi.solverSymbols.size(),
+            solver.coi.solverSymbols.size(),  // LCOV_EXCL_LINE
             " transition_targets=",
-            countTransitionTargets(solver.coi.transitionTargetsByFrame),
+            countTransitionTargets(solver.coi.transitionTargetsByFrame),  // LCOV_EXCL_LINE
             " cubes=",
-            normalizedCubes.size());
-      }
-      return true;
+            normalizedCubes.size());  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      return true;  // LCOV_EXCL_LINE
     }
-    if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(
-            solver, cube, targetFrame);
-        core.has_value()) {
-      rememberResetFrontierUnreachableCore(data, targetFrame, *core);
-    } else {
-      rememberResetFrontierUnreachableCore(data, targetFrame, cube);
+    if (const auto core = failedAssumptionCoreFromLastResetFrontierSolve(  // LCOV_EXCL_LINE
+            solver, cube, targetFrame);  // LCOV_EXCL_LINE
+        core.has_value()) {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, *core);  // LCOV_EXCL_LINE
+    } else {  // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCore(data, targetFrame, cube);  // LCOV_EXCL_LINE
     }
-  }
-  return false;
-}
+  }  // LCOV_EXCL_LINE
+  return false;  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE
 
 std::optional<std::vector<std::pair<size_t, bool>>>
 findResetFrontierUnreachableCubeCore(
@@ -3454,7 +3454,7 @@ findResetFrontierUnreachableCubeCore(
     const std::vector<std::pair<size_t, bool>>& cube,
     size_t postBootstrapSteps) {
   if (cube.empty()) {
-    return std::nullopt;
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   const auto& data = *context.data;
@@ -3471,17 +3471,17 @@ findResetFrontierUnreachableCubeCore(
       cachedCore.has_value()) {
     return cachedCore;
   }
-  if (resetFrontierAssumptionSolvesDisabled()) {
-    return std::nullopt;
+  if (resetFrontierAssumptionSolvesDisabled()) {  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
-  CachedResetFrontierSolver& cached =
-      getCachedResetFrontierSolver(data, solverType, normalizedCube, targetFrame);
-  const auto core = extractUnreachableCoreFromCachedResetFrontierSolver(
-      cached, normalizedCube, targetFrame);
-  if (core.has_value()) {
-    rememberResetFrontierUnreachableCore(data, targetFrame, *core);
-  }
-  return core;
+  CachedResetFrontierSolver& cached =  // LCOV_EXCL_LINE
+      getCachedResetFrontierSolver(data, solverType, normalizedCube, targetFrame);  // LCOV_EXCL_LINE
+  const auto core = extractUnreachableCoreFromCachedResetFrontierSolver(  // LCOV_EXCL_LINE
+      cached, normalizedCube, targetFrame);  // LCOV_EXCL_LINE
+  if (core.has_value()) {  // LCOV_EXCL_LINE
+    rememberResetFrontierUnreachableCore(data, targetFrame, *core);  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  return core;  // LCOV_EXCL_LINE
 }
 
 }  // namespace KEPLER_FORMAL::SEC

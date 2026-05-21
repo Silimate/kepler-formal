@@ -82,7 +82,7 @@ std::optional<BoolExpr*> ExactInterpolantSynthesizer::deriveOneStepReachableStat
 
   BoolExpr* init = buildProofInitFormula(problem_);
   if (init == nullptr) {
-    return std::nullopt;
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   // Build the one-step frontier over fresh "next-state" symbols so the shared

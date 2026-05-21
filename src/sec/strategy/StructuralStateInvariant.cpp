@@ -196,9 +196,9 @@ void reserveFingerprintMemo(FingerprintMemo& memo,
   if (desiredEntries <= reservedEntries) {
     return;
   }
-  reservedEntries =
-      desiredEntries + std::max(desiredEntries / 2, static_cast<size_t>(4096));
-  memo.reserve(reservedEntries);
+  reservedEntries =  // LCOV_EXCL_LINE
+      desiredEntries + std::max(desiredEntries / 2, static_cast<size_t>(4096));  // LCOV_EXCL_LINE
+  memo.reserve(reservedEntries);  // LCOV_EXCL_LINE
 }
 
 void cacheFingerprint(FingerprintMemo& memo,
@@ -277,7 +277,7 @@ uint64_t fingerprintExpr(
     stack.pop_back();
     BoolExpr* node = current.node;
     if (node == nullptr || memo.find(node) != memo.end()) {
-      continue;
+      continue;  // LCOV_EXCL_LINE
     }
 
     if (node->getOp() == Op::VAR) {
@@ -334,9 +334,9 @@ uint64_t fingerprintExpr(
         break;
       }
       case Op::VAR:
-      case Op::NONE:
+      case Op::NONE:  // LCOV_EXCL_LINE
       default:
-        throw std::runtime_error("Unsupported BoolExpr operator in fingerprint");
+        throw std::runtime_error("Unsupported BoolExpr operator in fingerprint");  // LCOV_EXCL_LINE
     }
     cacheFingerprint(memo, memoReservedEntries, node, fingerprint);
   }

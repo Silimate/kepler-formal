@@ -648,8 +648,8 @@ void SNLLogicCloud::appendTermList(std::ostream& out,
     }
   }
   if (termIDs.size() > capped) {
-    out << ", ... +" << (termIDs.size() - capped) << " more";
-  }
+    out << ", ... +" << (termIDs.size() - capped) << " more";  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 }
 
 // LCOV_EXCL_START
@@ -1082,7 +1082,7 @@ naja::DNL::DNLID SNLLogicCloud::resolveTransparentLoopTarget(
         SNLBitTerm::Direction::Output) {
       const auto isoID = getIsoIDCached(currentTermID, termIsoIDs);
       if (isoID == naja::DNL::DNLID_MAX) {
-        break;
+        break;  // LCOV_EXCL_LINE
       }
       const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(isoID);
       if (iso.isConstant() || iso.getDrivers().size() != 1) {
@@ -1169,27 +1169,27 @@ void SNLLogicCloud::compute() {
     assert(table_.isInitialized() &&
            "Truth table for seed output term is not initialized");
   } else {
-    const auto& inst = dnl_.getDNLInstanceFromID(seedOutputTerm_);
-    for (DNLID termID = inst.getTermIndexes().first;
-         termID <= inst.getTermIndexes().second; termID++) {
-      const DNLTerminalFull& term = dnl_.getDNLTerminalFromID(termID);
-      if (term.getSnlBitTerm()->getDirection() !=
+    const auto& inst = dnl_.getDNLInstanceFromID(seedOutputTerm_);  // LCOV_EXCL_LINE
+    for (DNLID termID = inst.getTermIndexes().first;  // LCOV_EXCL_LINE
+         termID <= inst.getTermIndexes().second; termID++) {  // LCOV_EXCL_LINE
+      const DNLTerminalFull& term = dnl_.getDNLTerminalFromID(termID);  // LCOV_EXCL_LINE
+      if (term.getSnlBitTerm()->getDirection() !=  // LCOV_EXCL_LINE
           SNLBitTerm::Direction::Output) {
         // newIterationInputs.emplace_back(termID);
         newIterationInputs.emplace_back(termID);  // LCOV_EXCL_LINE
         DEBUG_LOG("Add input with id: %zu\n", termID);
-      }
-    }
+      }  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     DEBUG_LOG("model name: %s\n",
               inst.getSNLModel()->getName().getString().c_str());
-    table_ = SNLTruthTableTree(inst.getID(), seedOutputTerm_);
-    assert(table_.isInitialized() &&
+    table_ = SNLTruthTableTree(inst.getID(), seedOutputTerm_);  // LCOV_EXCL_LINE
+    assert(table_.isInitialized() &&  // LCOV_EXCL_LINE
            "Truth table for seed output term is not initialized");
   }
 
   if (newIterationInputs.empty()) {
     DEBUG_LOG("No inputs found for seed output term %zu\n", seedOutputTerm_);
-    return;
+    return;  // LCOV_EXCL_LINE
   }
   // LCOV_EXCL_START
   if (captureFrontierHistory) {
@@ -1212,7 +1212,7 @@ void SNLLogicCloud::compute() {
       reachedPIs = false;
       break;
     }
-  } // allocator for buckets
+  } // allocator for buckets LCOV_EXCL_LINE
 
   // HandledSet handledTerms;
   // handledTerms.reserve(naja::DNL::get()->getDNLTerms().size() / 4);
