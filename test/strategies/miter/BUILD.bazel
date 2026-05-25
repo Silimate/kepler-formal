@@ -18,6 +18,7 @@ cc_test(
         "//src/formal:formal_structures",
         "//src/strategies:formal_strategies",
         "@naja",
+        "@naja//:naja_extra_headers",
         "@googletest//:gtest_main",
     ],
 )

@@ -15,6 +15,7 @@ cc_test(
         "//src/sec:kepler_sec",
         "//src/strategies:formal_strategies",
         "@naja",
+        "@naja//:naja_extra_headers",
         "@googletest//:gtest_main",
     ],
 )

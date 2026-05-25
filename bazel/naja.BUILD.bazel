@@ -18,6 +18,16 @@ NAJA_MACOS_CMAKE_CACHE_ENTRIES = dict(
     FLEX_EXECUTABLE = "/opt/homebrew/opt/flex/bin/flex",
 )
 
+NAJA_SHARED_LIB_NAMES = [
+    "naja_nl",
+    "naja_dnl",
+    "naja_bne",
+    "naja_opt",
+    "naja_metrics",
+    "naja_python",
+    "naja_snl_pyloader",
+]
+
 filegroup(
     name = "all_srcs",
     srcs = glob(["src/**"]),
@@ -29,15 +39,16 @@ cmake(
     lib_source = ":all_srcs",
     # Naja builds these 5 as explicitly SHARED — cannot be made static.
     # The release tarball bundles them alongside the binary with RPATH.
-    out_shared_libs = [
-        "libnaja_nl.so",
-        "libnaja_dnl.so",
-        "libnaja_bne.so",
-        "libnaja_opt.so",
-        "libnaja_metrics.so",
-        "libnaja_python.so",
-        "libnaja_snl_pyloader.so",
-    ],
+    out_shared_libs = select({
+        "@platforms//os:macos": [
+            "lib{}.dylib".format(name)
+            for name in NAJA_SHARED_LIB_NAMES
+        ],
+        "//conditions:default": [
+            "lib{}.so".format(name)
+            for name in NAJA_SHARED_LIB_NAMES
+        ],
+    }),
     # Output static libraries
     out_static_libs = [
         "libnaja_core.a",

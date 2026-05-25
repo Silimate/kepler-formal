@@ -47,8 +47,10 @@ public:
       kissatSolver_ = kissat_init();
       // Embedded SEC runs can create thousands of short-lived Kissat queries.
       // Keep those solver instances quiet so regressions are not dominated by
-      // progress-report I/O.
-      setKissatOptionOrThrow(static_cast<kissat*>(kissatSolver_), "quiet", 1);
+      // progress-report I/O.  Some embedded Kissat builds do not expose
+      // application-only options such as "quiet", so this must remain
+      // best-effort instead of aborting the proof setup.
+      setKissatOptionIfSupported(static_cast<kissat*>(kissatSolver_), "quiet", 1);
       kissatNumVars_ = 0;
       kissatReservedVars_ = 0;
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
@@ -630,9 +632,13 @@ public:
   }
 
 private:
-  static void setKissatOptionOrThrow(kissat* solver, const char* name, int value) {
+  static bool setKissatOptionIfSupported(kissat* solver, const char* name, int value) {
     kissat_set_option(solver, name, value);
-    if (kissat_get_option(solver, name) != value) {
+    return kissat_get_option(solver, name) == value;
+  }
+
+  static void setKissatOptionOrThrow(kissat* solver, const char* name, int value) {
+    if (!setKissatOptionIfSupported(solver, name, value)) {
       throw std::runtime_error(  // LCOV_EXCL_LINE
           std::string("Failed to configure Kissat option `") + name + "`");  // LCOV_EXCL_LINE
     }
