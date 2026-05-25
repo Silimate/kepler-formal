@@ -36,6 +36,7 @@
 #include "proof/TransitionExprResolver.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/StructuralStateInvariant.h"
+#include "../../sat/SATSolverWrapper.h"
 
 namespace KEPLER_FORMAL::SEC {
 
@@ -921,12 +922,14 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
   }
 
   logSecDiagLine(secDiagEnabled, "SEC diag: inferring inductive state equalities");
+  const auto localValidationSolverType =
+      SATSolverWrapper::assumptionSolverTypeFor(solverType);
   aligned.inductiveStateEqualities = inferStructurallyEquivalentStatePairs(
-      model0, model1, aligned.inputs, aligned.outputs, solverType);
+      model0, model1, aligned.inputs, aligned.outputs, localValidationSolverType);
   logSecDiagLine(secDiagEnabled, "SEC diag: inferred inductive state equalities");
   aligned.resetBootstrapCandidateStateEqualities =
       inferStructurallyEquivalentOutputConeStatePairs(
-          model0, model1, aligned.inputs, aligned.outputs, solverType);
+          model0, model1, aligned.inputs, aligned.outputs, localValidationSolverType);
   return aligned;
 }
 
@@ -1144,7 +1147,7 @@ ReachableStateInvariant integrateReachableStateInvariant(
       inductiveStateEqualities,
       deriveResetBootstrapStrengthening,
       secDiagEnabled,
-      solverType,
+      SATSolverWrapper::assumptionSolverTypeFor(solverType),
       deriveResetBootstrapEqualities,
       resetBootstrapCandidateStateEqualities);
   for (size_t i = 0; i < reachableInvariant.initialStateCorrespondence.names.size(); ++i) {

@@ -4514,7 +4514,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
   EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=1"), std::string::npos)
+  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=" +
+                              std::to_string(kCandidateCount)),
+            std::string::npos)
       << stderrOutput;
 }
 

@@ -479,7 +479,7 @@ public:
     setKissatOptionOrThrow(solver, "stable", 2);
 
     // The threshold is intentionally based on the engine's COI size, not on a
-    // design name. Medium SEC cones still benefit from Kissat's normal
+    // design name. Small and medium SEC cones still benefit from Kissat's normal
     // congruence/probing passes because those passes recognize duplicated
     // gate-level structure. Reserve the stripped-down profile for truly huge
     // cones where the prepasses themselves dominate memory and runtime.

@@ -143,6 +143,17 @@ size_t resetBootstrapFrames(const KInductionProblem& problem) {
              : 0u;
 }
 
+KEPLER_FORMAL::Config::SolverType selectBaseCaseSolverType(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  (void)problem;
+  // Base-case checks are short-lived validation oracles shared by KI, IMC and
+  // PDR. Keep Glucose when explicitly requested, but otherwise use the default
+  // assumption-capable backend so these validator queries follow the same solver
+  // semantics as the reset/frontier core checks.
+  return SATSolverWrapper::assumptionSolverTypeFor(solverType);
+}
+
 InitialConstraintMode determineInitialConstraintMode(const KInductionProblem& problem) {
   if (!problem.hasSequentialState()) {
     return InitialConstraintMode::None;
@@ -1521,7 +1532,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return findBaseCounterexampleImpl(problem, solverType, k, std::nullopt);
+  return findBaseCounterexampleImpl(
+      problem, selectBaseCaseSolverType(problem, solverType), k, std::nullopt);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -1529,7 +1541,8 @@ findBaseCounterexampleAtFrontier(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return findBaseCounterexampleImpl(problem, solverType, k, k);
+  return findBaseCounterexampleImpl(
+      problem, selectBaseCaseSolverType(problem, solverType), k, k);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -1537,11 +1550,13 @@ findFastBaseCounterexampleAtFrontier(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  // This fresh frontier SAT query does not need assumptions; keep the user's
-  // configured solver and only borrow the SAT-oriented validation profile.
+  // This fresh frontier SAT query normally keeps the user's configured solver
+  // and only borrows the SAT-oriented validation profile. Reset-bootstrap
+  // checks are assumption-shaped, so route them through the same default
+  // assumption-capable solver used by the exact frontier validators.
   return findBaseCounterexampleImpl(
       problem,
-      solverType,
+      selectBaseCaseSolverType(problem, solverType),
       k,
       k,
       /*localizeMultiOutputFrontier=*/true,
@@ -1554,7 +1569,7 @@ bool provesNoBaseCounterexampleAtFrontier(
     size_t k) {
   return !findBaseCounterexampleImpl(
               problem,
-              solverType,
+              selectBaseCaseSolverType(problem, solverType),
               k,
               k,
               /*localizeMultiOutputFrontier=*/false,
