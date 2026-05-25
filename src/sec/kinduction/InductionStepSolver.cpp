@@ -313,6 +313,8 @@ bool provesByInduction(const KInductionProblem& problem,
       inductionBad,
       addExtraInductiveEqualities,
       k);
+  const auto inductionPropertySupport = inductionProperty->getSupportVars();
+  const auto inductionBadSupport = inductionBad->getSupportVars();
   const TransitionExprResolver transitionByState(problem);
   const FrameSymbolAliases aliasesByFrame = buildInductionFrameAliases(
       problem, coi, k + 1, aliasInductiveStateEqualities);
@@ -332,7 +334,7 @@ bool provesByInduction(const KInductionProblem& problem,
 
   for (size_t frame = 0; frame < k; ++frame) {
     FrameFormulaEncoder encoder(
-        solver, variables.makeLeafLits(frame, inductionProperty->getSupportVars()));
+        solver, variables.makeLeafLits(frame, inductionPropertySupport));
     solver.addClause({encoder.encode(inductionProperty)});
   }
   if (addExtraInductiveEqualities && k > 0) {
@@ -349,7 +351,7 @@ bool provesByInduction(const KInductionProblem& problem,
   }
 
   FrameFormulaEncoder lastFrameEncoder(
-      solver, variables.makeLeafLits(k, inductionBad->getSupportVars()));
+      solver, variables.makeLeafLits(k, inductionBadSupport));
   solver.addClause({lastFrameEncoder.encode(inductionBad)});
   return !solver.solve();
 }

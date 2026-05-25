@@ -35,6 +35,18 @@ findBaseCounterexampleAtFrontier(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k);
 
+// Counterexample-search variant of the newest-frontier base query.  It keeps
+// the same exact bounded-prefix semantics and witness reconstruction, but uses
+// the fast SAT-validation solver profile instead of the UNSAT/proof-oriented
+// profile.  Regressions enable this for cases that are expected to be different
+// so KI does not spend minutes trying to prove a frontier that should produce a
+// concrete witness.
+std::optional<KInductionResult::CounterexampleWitness>
+findFastBaseCounterexampleAtFrontier(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k);
+
 // Exact one-sided PDR refinement helper: returns true only when an
 // over-approximate, startup-pruned base query proves the frontier bad predicate
 // unreachable. A false result is inconclusive, not a counterexample, because

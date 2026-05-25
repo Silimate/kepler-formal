@@ -1557,6 +1557,7 @@ SequentialEquivalenceResult runPdrSecEngine(
   // still proves a real conjunction slice. If projected PDR finds a
   // counterexample on a multi-output slice, escalate PDR precision first and
   // avoid broad concrete-BMC validation until the final exact retry.
+  constexpr size_t kMinOutputsForBatchedPdrProof = 129;
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
   constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
@@ -1566,9 +1567,17 @@ SequentialEquivalenceResult runPdrSecEngine(
     bool startAtFinalExact = false;
   };
   std::vector<PdrOutputBatch> outputBatches;
-  for (const auto& [firstOutput, endOutput] :
-       buildSupportBoundedOutputBatches(problem, kPdrOutputBatchingLimits)) {
-    outputBatches.push_back({firstOutput, endOutput, false});
+  if (problem.observedOutputExprs0.size() < kMinOutputsForBatchedPdrProof) {
+    // Batching protects very wide SEC/PDR properties from broad bad-state
+    // queries.  On medium designs, each tiny batch repeats the same
+    // reset/bootstrap invariant validation, so prove one conjunction slice and
+    // reserve batching for BlackParrot/AES-scale output counts.
+    outputBatches.push_back({0, problem.observedOutputExprs0.size(), false});
+  } else {
+    for (const auto& [firstOutput, endOutput] :
+         buildSupportBoundedOutputBatches(problem, kPdrOutputBatchingLimits)) {
+      outputBatches.push_back({firstOutput, endOutput, false});
+    }
   }
   KInductionProblem batchProblem = problem;
   size_t provedBound = 0;

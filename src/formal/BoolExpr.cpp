@@ -4,6 +4,7 @@
 #include "BoolExpr.h"
 #include <cassert>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace KEPLER_FORMAL {
 
@@ -398,7 +399,7 @@ BoolExpr* BoolExpr::simplify(BoolExpr* e) {
 
 std::set<size_t> BoolExpr::getSupportVars() const {
     std::set<size_t> support;
-    std::unordered_map<const BoolExpr*, bool> visited;
+    std::unordered_set<const BoolExpr*> visited;
     std::vector<const BoolExpr*> stack;
     stack.push_back(this);
 
@@ -406,10 +407,9 @@ std::set<size_t> BoolExpr::getSupportVars() const {
         const BoolExpr* node = stack.back();
         stack.pop_back();
 
-        if (visited[node]) {
+        if (!visited.insert(node).second) {
             continue;
         }
-        visited[node] = true;
 
         if (node->getOp() == Op::VAR) {
             support.insert(node->getId());

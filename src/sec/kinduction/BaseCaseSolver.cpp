@@ -64,6 +64,11 @@ constexpr size_t kMaxResetSummaryCachedCois = 64;
 // that targets every frame widens the COI unnecessarily; use exact per-step
 // solvers while only a couple of frames remain.
 constexpr size_t kMaxSparseResetFrontierPerStepChecks = 2;
+// Expected-different k-induction regressions use a frontier-first SAT search
+// only to find a concrete witness.  Bound each localized output query so one
+// hard UNSAT cone cannot consume the whole workflow budget before easier
+// mismatching outputs are tried.
+constexpr int64_t kFastCounterexampleSearchConflictLimit = 5000;
 // Transition node counts are only reserve hints for FrameFormulaEncoder.
 // BlackParrot reset-frontier sampling showed exact counting across ~86k
 // transition targets dominating the whole query before any CNF was emitted.
@@ -1237,6 +1242,7 @@ enum class BaseCaseSolverProfile {
   SecConeProof,
   PdrValidation,
   PdrValidationProofOnly,
+  FastCounterexampleSearch,
 };
 
 std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImpl(
@@ -1278,7 +1284,8 @@ findPerOutputBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k,
-    std::optional<size_t> exactPublicBadFrame) {
+    std::optional<size_t> exactPublicBadFrame,
+    BaseCaseSolverProfile solverProfile) {
   if (!exactPublicBadFrame.has_value() ||  // LCOV_EXCL_LINE
       problem.observedOutputExprs0.size() <= 1 ||  // LCOV_EXCL_LINE
       problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {  // LCOV_EXCL_LINE
@@ -1289,11 +1296,44 @@ findPerOutputBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
   // Solving the whole batch OR can force the SAT solver to reason across
   // unrelated output cones.  Match PDR's bad-cube search and validate each
   // output independently; the disjunction is SAT iff one per-output query is.
+  struct OutputCandidate {  // LCOV_EXCL_LINE
+    size_t index;  // LCOV_EXCL_LINE
+    size_t support;  // LCOV_EXCL_LINE
+  };  // LCOV_EXCL_LINE
+  std::vector<OutputCandidate> outputs;  // LCOV_EXCL_LINE
+  outputs.reserve(problem.observedOutputExprs0.size());  // LCOV_EXCL_LINE
   for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {  // LCOV_EXCL_LINE
+    size_t support = output;  // LCOV_EXCL_LINE
+    if (solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch) {  // LCOV_EXCL_LINE
+      support = 0;  // LCOV_EXCL_LINE
+      if (problem.observedOutputExprs0[output] != nullptr) {  // LCOV_EXCL_LINE
+        support += problem.observedOutputExprs0[output]->getSupportVars().size();  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      if (problem.observedOutputExprs1[output] != nullptr) {  // LCOV_EXCL_LINE
+        support += problem.observedOutputExprs1[output]->getSupportVars().size();  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    outputs.push_back({output, support});  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  if (solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch) {  // LCOV_EXCL_LINE
+    std::stable_sort(  // LCOV_EXCL_LINE
+        outputs.begin(), outputs.end(),
+        [](const OutputCandidate& lhs, const OutputCandidate& rhs) {  // LCOV_EXCL_LINE
+          return lhs.support < rhs.support;  // LCOV_EXCL_LINE
+        });  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+
+  for (const OutputCandidate& candidate : outputs) {  // LCOV_EXCL_LINE
+    const size_t output = candidate.index;  // LCOV_EXCL_LINE
     KInductionProblem single =
         makeSingleObservedOutputProblem(problem, output);  // LCOV_EXCL_LINE
     if (auto witness = findBaseCounterexampleImpl(  // LCOV_EXCL_LINE
-            single, solverType, k, exactPublicBadFrame);  // LCOV_EXCL_LINE
+            single,
+            solverType,
+            k,
+            exactPublicBadFrame,
+            /*localizeMultiOutputFrontier=*/false,
+            solverProfile);  // LCOV_EXCL_LINE
         witness.has_value()) {  // LCOV_EXCL_LINE
       return witness;  // LCOV_EXCL_LINE
     }
@@ -1313,7 +1353,7 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
       problem.observedOutputExprs0.size() > 1 &&
       problem.observedOutputExprs0.size() == problem.observedOutputExprs1.size()) {  // LCOV_EXCL_LINE
     return findPerOutputBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
-        problem, solverType, k, exactPublicBadFrame);  // LCOV_EXCL_LINE
+        problem, solverType, k, exactPublicBadFrame, solverProfile);  // LCOV_EXCL_LINE
   }
 
   const size_t bootstrapFrames = resetBootstrapFrames(problem);
@@ -1321,7 +1361,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
   const bool constrainPreviouslySafeFrames =
       exactPublicBadFrame.has_value() &&
       solverProfile != BaseCaseSolverProfile::PdrValidation &&
-      solverProfile != BaseCaseSolverProfile::PdrValidationProofOnly;
+      solverProfile != BaseCaseSolverProfile::PdrValidationProofOnly &&
+      solverProfile != BaseCaseSolverProfile::FastCounterexampleSearch;
   const InitialConstraintMode initialMode =
       bootstrapFrames == 0 ? determineInitialConstraintMode(problem)
                            : InitialConstraintMode::None;
@@ -1369,7 +1410,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
 
   SATSolverWrapper solver(solverType);
   if (solverProfile == BaseCaseSolverProfile::PdrValidation ||
-      solverProfile == BaseCaseSolverProfile::PdrValidationProofOnly) {
+      solverProfile == BaseCaseSolverProfile::PdrValidationProofOnly ||
+      solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch) {
     // PDR calls this helper as a short-lived exact CEGAR validation. It asks
     // only whether bad is reachable at this frontier: older public bad frames
     // were checked or learned by earlier PDR refinements, and re-encoding them
@@ -1429,7 +1471,28 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
   }
   solver.addClause(badClause);
 
-  if (!solver.solve()) {
+  SATSolverWrapper::SolveStatus status = SATSolverWrapper::SolveStatus::Unknown;
+  if (solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch) {
+    if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      status = solver.solveWithKissatResourceLimits(
+          static_cast<unsigned>(kFastCounterexampleSearchConflictLimit));
+    } else {
+      status = solver.solveWithAssumptionsStatus(
+          {},
+          kFastCounterexampleSearchConflictLimit,
+          /*propagationLimit=*/-1);
+    }
+  } else {
+    status = solver.solveStatus();
+  }
+  if (status != SATSolverWrapper::SolveStatus::Sat) {
+    if (status == SATSolverWrapper::SolveStatus::Unknown &&
+        isKInductionCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: k-induction fast base k=", k,
+          " unknown within conflict budget ",
+          kFastCounterexampleSearchConflictLimit);
+    }
     return std::nullopt;
   }
   if (solverProfile == BaseCaseSolverProfile::PdrValidationProofOnly) {
@@ -1467,6 +1530,22 @@ findBaseCounterexampleAtFrontier(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
   return findBaseCounterexampleImpl(problem, solverType, k, k);
+}
+
+std::optional<KInductionResult::CounterexampleWitness>
+findFastBaseCounterexampleAtFrontier(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  // This fresh frontier SAT query does not need assumptions; keep the user's
+  // configured solver and only borrow the SAT-oriented validation profile.
+  return findBaseCounterexampleImpl(
+      problem,
+      solverType,
+      k,
+      k,
+      /*localizeMultiOutputFrontier=*/true,
+      BaseCaseSolverProfile::FastCounterexampleSearch);
 }
 
 bool provesNoBaseCounterexampleAtFrontier(

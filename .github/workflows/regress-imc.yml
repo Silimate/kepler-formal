@@ -109,7 +109,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/sky130hs_ibex" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-different \
+          expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }}
 

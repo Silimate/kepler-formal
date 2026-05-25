@@ -1329,7 +1329,7 @@ ReachableStateInvariant buildReachableStateInvariant(
               model0,
               model1,
               resetBootstrapCandidateEqualities,
-              structuralStartupCorrespondence,
+              invariant.initialStateCorrespondence,
               invariant.bootstrapCycles,
               secDiagEnabled,
               &invariant.bootstrapValues0,
@@ -1353,11 +1353,14 @@ ReachableStateInvariant buildReachableStateInvariant(
     } else if (invariant.bootstrapCycles == 0) {
       invariant.anchoredStateEqualities = structuralStartupCorrespondence;
     } else {
+      const auto bootstrapCandidateStates = mergeStartupCorrespondence(
+          inductiveStateEqualities,
+          resetBootstrapCandidateEqualities);
       invariant.anchoredStateEqualities = deriveResetBootstrapStateEqualities(
           model0,
           model1,
           alignedInputs,
-          inductiveStateEqualities,
+          bootstrapCandidateStates,
           invariant.initialStateCorrespondence,
           invariant.bootstrapCycles,
           solverType,

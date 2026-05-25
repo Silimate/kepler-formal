@@ -108,7 +108,12 @@ run_engine() {
     # completion.  Large SEC/PDR cases can run for minutes between solver
     # decisions, so emit a lightweight heartbeat to keep GitHub logs obviously
     # alive and to make a true hang easier to distinguish from solver work.
-    "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
+    if [[ "${expectation}" == "expect-different" ]]; then
+      KEPLER_SEC_KI_FRONTIER_FIRST=1 \
+        "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
+    else
+      "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
+    fi
     local kepler_pid=$!
     tail -n +1 -f "${stdout_log}" &
     local tail_pid=$!

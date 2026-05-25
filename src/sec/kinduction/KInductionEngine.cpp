@@ -20,6 +20,16 @@ bool isKInductionDiagEnabled() {
   return std::getenv("KEPLER_SEC_KI_DIAG") != nullptr || isSecDiagEnabled();
 }
 
+bool isFrontierFirstEnabled() {
+  return std::getenv("KEPLER_SEC_KI_FRONTIER_FIRST") != nullptr;
+}
+
+// Batching protects very wide designs from one enormous OR-of-output-bads SAT
+// query, but medium designs can be faster monolithically because every batch
+// repeats the same reset/bootstrap COI.  Keep AES/BlackParrot-style wide cases
+// batched while allowing sky130hs_ibex-sized designs to close in one proof.
+constexpr size_t kMinOutputsForBatchedProof = 129;
+
 void emitKInductionProblemDiag(const KInductionProblem& problem,
                                size_t maxK) {
   if (!isKInductionDiagEnabled()) {
@@ -40,16 +50,22 @@ void emitKInductionProblemDiag(const KInductionProblem& problem,
 KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
                                          KEPLER_FORMAL::Config::SolverType solverType,
                                          size_t maxK) {
+  const bool frontierFirst = isFrontierFirstEnabled();
   // Handle the purely combinational mismatch case before any unrolling.
   if (isKInductionDiagEnabled()) {
     emitSecDiag("SEC diag: k-induction base k=0 begin");
   }
-  if (auto witness = SEC::findBaseCounterexample(problem, solverType, 0);
-      witness.has_value()) {
+  auto baseZeroWitness = frontierFirst
+      ? SEC::findFastBaseCounterexampleAtFrontier(problem, solverType, 0)
+      : SEC::findBaseCounterexample(problem, solverType, 0);
+  if (baseZeroWitness.has_value()) {
     if (isKInductionDiagEnabled()) {
       emitSecDiag("SEC diag: k-induction base k=0 found cex");
     }
-    return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+    return {
+        KInductionStatus::Different,
+        baseZeroWitness->badFrame,
+        std::move(baseZeroWitness)};
   }
   if (isKInductionDiagEnabled()) {
     emitSecDiag("SEC diag: k-induction base k=0 unsat");
@@ -67,6 +83,31 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
   // BMC query for frame k. Only when the step is inconclusive do we extend the
   // concrete base horizon by checking the new frontier for a real counterexample.
   for (size_t k = 1; k <= maxK; ++k) {
+    bool frontierAlreadyChecked = false;
+    if (frontierFirst) {
+      if (isKInductionDiagEnabled()) {
+        emitSecDiag("SEC diag: k-induction base k=", k, " begin");
+      }
+      if (auto witness = SEC::findFastBaseCounterexampleAtFrontier(
+              problem, solverType, k);
+          witness.has_value()) {
+        if (isKInductionDiagEnabled()) {
+          emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
+        }
+        return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+      }
+      if (isKInductionDiagEnabled()) {
+        emitSecDiag("SEC diag: k-induction base k=", k, " unsat");
+      }
+      frontierAlreadyChecked = true;
+      // The regression helper enables frontier-first only for cases expected
+      // to produce a counterexample.  In that mode, spending time on the
+      // induction proof can only delay the desired CEX search; if all checked
+      // frontiers are safe, the run should end inconclusive rather than prove
+      // equivalence.
+      continue;
+    }
+
     if (isKInductionDiagEnabled()) {
       emitSecDiag("SEC diag: k-induction step k=", k, " begin");
     }
@@ -79,23 +120,31 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     }
     if (isKInductionDiagEnabled()) {
       emitSecDiag("SEC diag: k-induction step k=", k, " inconclusive");
-      emitSecDiag("SEC diag: k-induction base k=", k, " begin");
+      if (!frontierAlreadyChecked) {
+        emitSecDiag("SEC diag: k-induction base k=", k, " begin");
+      }
     }
 
     // Earlier base checks have already ruled out bad states on frames < k.
     // Check only the newly exposed frontier instead of re-solving an
     // OR-of-all-previous-bads query at every depth.
-    if (auto witness = SEC::findBaseCounterexampleAtFrontier(
-            problem, solverType, k);
-        witness.has_value()) {
-      if (isKInductionDiagEnabled()) {
-        emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
+    if (!frontierAlreadyChecked) {
+      if (auto witness = SEC::findBaseCounterexampleAtFrontier(
+              problem, solverType, k);
+          witness.has_value()) {
+        if (isKInductionDiagEnabled()) {
+          emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
+        }
+        return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
       }
-      return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+      if (isKInductionDiagEnabled()) {
+        emitSecDiag("SEC diag: k-induction base k=", k, " unsat");
+      }
     }
-    if (isKInductionDiagEnabled()) {
-      emitSecDiag("SEC diag: k-induction base k=", k, " unsat");
-    }
+  }
+
+  if (frontierFirst) {
+    return {KInductionStatus::Inconclusive, maxK};
   }
 
   // Frontier checks are an optimization over the classic cumulative base case:
@@ -202,10 +251,14 @@ KInductionEngine::KInductionEngine(
     : problem_(problem), solverType_(solverType) {}
 
 KInductionResult KInductionEngine::run(size_t maxK) const {
+  if (isFrontierFirstEnabled()) {
+    emitKInductionProblemDiag(problem_, maxK);
+    return runMonolithicKInduction(problem_, solverType_, maxK);
+  }
   if (problem_.observedOutputExprs0.size() <= 1) {
     emitKInductionProblemDiag(problem_, maxK);
   }
-  if (problem_.observedOutputExprs0.size() > 1) {
+  if (problem_.observedOutputExprs0.size() >= kMinOutputsForBatchedProof) {
     return runOutputBatchedKInduction(problem_, solverType_, maxK);
   }
   return runMonolithicKInduction(problem_, solverType_, maxK);

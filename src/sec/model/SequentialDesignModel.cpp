@@ -55,6 +55,7 @@ struct PendingTransition {
   SignalKey stateKey;
   naja::DNL::DNLID stateTermID = naja::DNL::DNLID_MAX;
   std::string statePinName;
+  bool stateOutputIsComplemented = false;
   naja::NL::NLID::Bit stateBit = 0;
   size_t independentStateOutputCount = 0;
   size_t boundaryInfoIndex = std::numeric_limits<size_t>::max();
@@ -716,10 +717,19 @@ bool hasSuffix(const std::string& value, const std::string& suffix) {
 }
 
 std::string stripComplementSuffix(const std::string& pinName) {
+  if (hasSuffix(pinName, "_N") || hasSuffix(pinName, "_B")) {
+    return pinName.substr(0, pinName.size() - 2);
+  }
   if (hasSuffix(pinName, "N") || hasSuffix(pinName, "B")) {
     return pinName.substr(0, pinName.size() - 1);
   }
   return pinName;
+}
+
+bool isIntrinsicComplementedStateOutput(const std::string& pinName) {
+  const std::string normalized = normalizePinName(pinName);
+  return normalized == "QN" || normalized == "QB" ||
+         normalized == "Q_N" || normalized == "Q_B";
 }
 
 bool isComplementedStateOutput(const std::string& primaryPinName,
@@ -921,6 +931,9 @@ BoolExpr* buildNextStateExpr(
   if (data == nullptr) {
     throw std::runtime_error("Unsupported sequential primitive without D input");  // LCOV_EXCL_LINE
   }
+  if (pending.stateOutputIsComplemented) {
+    data = BoolExpr::Not(data);
+  }
 
   BoolExpr* current = BoolExpr::Var(stateVarID);
   BoolExpr* next = data;
@@ -932,14 +945,10 @@ BoolExpr* buildNextStateExpr(
         BoolExpr::And(BoolExpr::Not(enable), current));
   }
 
-  const BoolExpr* resetHigh =
-      getRequiredOutputExpr(pending, "R", outputExprByTerm);
-  const BoolExpr* resetLow =
-      getRequiredOutputExpr(pending, "RN", outputExprByTerm);
-  const BoolExpr* setHigh =
-      getRequiredOutputExpr(pending, "S", outputExprByTerm);
-  const BoolExpr* setLow =
-      getRequiredOutputExpr(pending, "SN", outputExprByTerm);
+  BoolExpr* resetHigh = getRequiredOutputExpr(pending, "R", outputExprByTerm);
+  BoolExpr* resetLow = getRequiredOutputExpr(pending, "RN", outputExprByTerm);
+  BoolExpr* setHigh = getRequiredOutputExpr(pending, "S", outputExprByTerm);
+  BoolExpr* setLow = getRequiredOutputExpr(pending, "SN", outputExprByTerm);
 
   int controlKinds = 0;
   controlKinds += resetHigh != nullptr ? 1 : 0;
@@ -951,20 +960,26 @@ BoolExpr* buildNextStateExpr(
         "Unsupported sequential primitive with multiple control styles");
   }
 
+  auto applyForcedValue = [&](BoolExpr* asserted, bool value) {
+    return BoolExpr::Or(
+        BoolExpr::And(asserted,
+                      value ? BoolExpr::createTrue() : BoolExpr::createFalse()),
+        BoolExpr::And(BoolExpr::Not(asserted), next));
+  };
+
+  const bool resetValue = pending.stateOutputIsComplemented;
+  const bool setValue = !pending.stateOutputIsComplemented;
+
   // Support one control style at a time and fail loudly on more complex cells
   // so we do not silently prove the wrong transition system.
   if (resetHigh) {
-    next = BoolExpr::And(BoolExpr::Not(const_cast<BoolExpr*>(resetHigh)), next);
+    next = applyForcedValue(resetHigh, resetValue);
   } else if (resetLow) {
-    next = BoolExpr::And(const_cast<BoolExpr*>(resetLow), next);
+    next = applyForcedValue(BoolExpr::Not(resetLow), resetValue);
   } else if (setHigh) {
-    next = BoolExpr::Or(
-        const_cast<BoolExpr*>(setHigh),
-        BoolExpr::And(BoolExpr::Not(const_cast<BoolExpr*>(setHigh)), next));
+    next = applyForcedValue(setHigh, setValue);
   } else if (setLow) {
-    next = BoolExpr::Or(
-        BoolExpr::Not(const_cast<BoolExpr*>(setLow)),
-        BoolExpr::And(const_cast<BoolExpr*>(setLow), next));
+    next = applyForcedValue(BoolExpr::Not(setLow), setValue);
   }
 
   return next;
@@ -987,10 +1002,10 @@ std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
   }
 
   if (hasResetHigh || hasResetLow) {
-    return false;
+    return pending.stateOutputIsComplemented;
   }
   if (hasSetHigh || hasSetLow) {
-    return true;
+    return !pending.stateOutputIsComplemented;
   }
   return std::nullopt;
 }
@@ -1902,6 +1917,8 @@ void appendPendingTransitionsForInstance(
     pending.stateTermID = stateOutput.termID;
     pending.stateKey = ctx.inputKeyByTerm.at(pending.stateTermID);
     pending.statePinName = stateOutput.pinName;
+    pending.stateOutputIsComplemented =
+        isIntrinsicComplementedStateOutput(stateOutput.pinName);
     pending.stateBit = stateOutput.bit;
     pending.independentStateOutputCount = independentStateOutputCount;
     pending.boundaryInfoIndex = boundaryInfoIndex;

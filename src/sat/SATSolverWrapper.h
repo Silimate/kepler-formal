@@ -500,6 +500,7 @@ public:
     setKissatOptionOrThrow(solver, "congruence", 0);  // LCOV_EXCL_LINE
     setKissatOptionOrThrow(solver, "probe", 0);  // LCOV_EXCL_LINE
     setKissatOptionOrThrow(solver, "probeinit", 0);  // LCOV_EXCL_LINE
+    setKissatOptionOrThrow(solver, "eliminate", 0);  // LCOV_EXCL_LINE
     setKissatOptionOrThrow(solver, "eliminateinit", 0);  // LCOV_EXCL_LINE
     setKissatOptionOrThrow(solver, "lucky", 0);  // LCOV_EXCL_LINE
     setKissatOptionOrThrow(solver, "luckyearly", 0);  // LCOV_EXCL_LINE
@@ -511,6 +512,30 @@ public:
   }
 
   void configureForSecPdrQuery(size_t coneSymbols = 0) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
+      auto* solver = cadicalSolver_.get();
+      // CaDiCaL is the default local solver for assumption-capable validation
+      // queries.  These SEC/PDR validators are rebuilt from scratch and only
+      // need a quick SAT/UNSAT answer, so avoid expensive inprocessing and
+      // recursive clause polishing that samples showed dominating deeper
+      // sky130hs_ibex frontier checks.
+      setCadicalOptionIfSupported(solver, "inprocessing", 0);
+      setCadicalOptionIfSupported(solver, "compact", 0);
+      setCadicalOptionIfSupported(solver, "arenacompact", 0);
+      setCadicalOptionIfSupported(solver, "elim", 0);
+      setCadicalOptionIfSupported(solver, "probe", 0);
+      setCadicalOptionIfSupported(solver, "congruence", 0);
+      setCadicalOptionIfSupported(solver, "lucky", 0);
+      setCadicalOptionIfSupported(solver, "luckyearly", 0);
+      setCadicalOptionIfSupported(solver, "luckylate", 0);
+      setCadicalOptionIfSupported(solver, "minimize", 0);
+      setCadicalOptionIfSupported(solver, "shrink", 0);
+      setCadicalOptionIfSupported(solver, "rephase", 0);
+      setCadicalOptionIfSupported(solver, "walk", 0);
+      (void)coneSymbols;
+      return;
+    }
+
     if (solverType_ != KEPLER_FORMAL::Config::SolverType::KISSAT) {
       return;
     }
@@ -551,6 +576,7 @@ public:
     setKissatOptionOrThrow(solver, "congruence", 0);
     setKissatOptionOrThrow(solver, "probe", 0);
     setKissatOptionOrThrow(solver, "probeinit", 0);
+    setKissatOptionOrThrow(solver, "eliminate", 0);
     setKissatOptionOrThrow(solver, "eliminateinit", 0);
   }
 
@@ -585,6 +611,7 @@ public:
     setKissatOptionOrThrow(solver, "congruence", 0);
     setKissatOptionOrThrow(solver, "probe", 0);
     setKissatOptionOrThrow(solver, "probeinit", 0);
+    setKissatOptionOrThrow(solver, "eliminate", 0);
     setKissatOptionOrThrow(solver, "eliminateinit", 0);
     (void)coneSymbols;
   }
@@ -628,6 +655,7 @@ public:
     setKissatOptionOrThrow(solver, "congruence", 0);
     setKissatOptionOrThrow(solver, "probe", 0);
     setKissatOptionOrThrow(solver, "probeinit", 0);
+    setKissatOptionOrThrow(solver, "eliminate", 0);
     setKissatOptionOrThrow(solver, "eliminateinit", 0);
   }
 
@@ -638,10 +666,16 @@ private:
   }
 
   static void setKissatOptionOrThrow(kissat* solver, const char* name, int value) {
-    if (!setKissatOptionIfSupported(solver, name, value)) {
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          std::string("Failed to configure Kissat option `") + name + "`");  // LCOV_EXCL_LINE
-    }
+    // Kissat option availability varies across the embedded builds used by
+    // CMake, Bazel, and CI. These profiles are performance hints only; falling
+    // back to the solver default is better than aborting an otherwise valid SEC
+    // proof when an option such as `quiet` is not present in that build.
+    (void)setKissatOptionIfSupported(solver, name, value);
+  }
+
+  static bool setCadicalOptionIfSupported(
+      CaDiCaL::Solver* solver, const char* name, int value) {
+    return CaDiCaL::Solver::is_valid_option(name) && solver->set(name, value);
   }
 
   KEPLER_FORMAL::Config::SolverType solverType_;
