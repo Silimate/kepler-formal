@@ -482,21 +482,10 @@ void closeFrameEqualityDependencies(
     const std::vector<std::pair<size_t, size_t>>& equalityPairs,
     std::unordered_set<size_t>& frameStates) {
   // Equality constraints can make a state bit relevant even if the bad cone
-  // touches only its paired bit. Iterate to cover short equality chains while
-  // still keeping unrelated resetless state out of the SAT problem.
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
-      const bool lhsRelevant = frameStates.find(lhsSymbol) != frameStates.end();
-      const bool rhsRelevant = frameStates.find(rhsSymbol) != frameStates.end();
-      if (!lhsRelevant && !rhsRelevant) {
-        continue;
-      }
-      changed |= frameStates.insert(lhsSymbol).second;
-      changed |= frameStates.insert(rhsSymbol).second;
-    }
-  }
+  // touches only its paired bit. Use the adjacency index so ASIC-sized startup
+  // relations do not repeatedly rescan hundreds of thousands of unrelated
+  // candidates while closing a small output COI.
+  EqualityIndex(equalityPairs).close(frameStates);
 }
 
 void addRelevantComplementPartners(

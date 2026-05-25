@@ -1148,6 +1148,7 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     std::vector<PendingSatRecovery> pendingSatRecovery;
     pendingSatRecovery.reserve(
         std::min(candidateStates.names.size(), kBootstrapSatRecoveryCandidateBudget));
+    size_t satSkippedEqualities = 0;
     for (size_t i = 0; i < candidateStates.names.size(); ++i) {
       const auto& key0 = candidateStates.keys0[i];
       const auto& key1 = candidateStates.keys1[i];
@@ -1180,12 +1181,13 @@ AlignedSignals deriveResetBootstrapStateEqualities(
             pendingSatRecovery.push_back(
                 {i, specializedNext0.at(key0), specializedNext1.at(key1),
                  *supportSize});
+          } else {
+            ++satSkippedEqualities;
           }
         }
       }
     }
 
-    size_t satSkippedEqualities = 0;
     if (pendingSatRecovery.size() > kBootstrapSatRecoveryCandidateBudget) {
       std::sort(
           pendingSatRecovery.begin(),
@@ -1293,6 +1295,47 @@ ReachableStateInvariant buildReachableStateInvariant(
   invariant.initialStateCorrespondence = structuralStartupCorrespondence;
 
   if (hasResetBootstrap) {
+    const bool hasResetBootstrapCandidates =
+        !resetBootstrapCandidateEqualities.names.empty() &&
+        invariant.bootstrapCycles != 0;
+    if (!resetBootstrapCandidateEqualities.names.empty()) {
+      // Reset bootstrap starts from an arbitrary pre-reset state.  Additional
+      // startup correspondence may only come from structurally checked COI
+      // candidates rooted at aligned top outputs, never from internal names.
+      // Base-case COI indexes this relation before encoding it, so large ASIC
+      // cases still pull in only the startup pairs needed by the checked top
+      // output cone.
+      invariant.initialStateCorrespondence = mergeStartupCorrespondence(
+          invariant.initialStateCorrespondence,
+          resetBootstrapCandidateEqualities);
+    }
+    auto deriveCandidateBootstrapFacts = [&]() {
+      if (!hasResetBootstrapCandidates) {
+        return;
+      }
+      if (resetBootstrapCandidateEqualities.names.size() <=
+          kSelectiveBootstrapValueCandidateBudget) {
+        invariant.bootstrapValues0 = deriveResetBootstrapStateValuesForKeys(
+            model0,
+            resetBootstrapCandidateEqualities.keys0,
+            invariant.bootstrapCycles);
+        invariant.bootstrapValues1 = deriveResetBootstrapStateValuesForKeys(
+            model1,
+            resetBootstrapCandidateEqualities.keys1,
+            invariant.bootstrapCycles);
+      }
+      invariant.bootstrapOnlyStateEqualities =
+          deriveResetBootstrapStateEqualitiesByDependency(
+              model0,
+              model1,
+              resetBootstrapCandidateEqualities,
+              structuralStartupCorrespondence,
+              invariant.bootstrapCycles,
+              secDiagEnabled,
+              &invariant.bootstrapValues0,
+              &invariant.bootstrapValues1);
+    };
+
     // Walk the reset window to find which candidate equalities are true at the
     // first checked frame. The seed includes startup equalities, but a pair is
     // promoted only if reset-specialized transition logic proves it survives.
@@ -1306,33 +1349,7 @@ ReachableStateInvariant buildReachableStateInvariant(
       // The reset unroll can include state that is intentionally not reset.
       // For PDR we may relate that pre-reset state only through a checked
       // structural COI relation rooted at top outputs, never by internal names.
-      invariant.initialStateCorrespondence = mergeStartupCorrespondence(
-          invariant.initialStateCorrespondence,
-          resetBootstrapCandidateEqualities);
-      if (!resetBootstrapCandidateEqualities.names.empty() &&
-          invariant.bootstrapCycles != 0) {
-        if (resetBootstrapCandidateEqualities.names.size() <=
-            kSelectiveBootstrapValueCandidateBudget) {
-          invariant.bootstrapValues0 = deriveResetBootstrapStateValuesForKeys(
-              model0,
-              resetBootstrapCandidateEqualities.keys0,
-              invariant.bootstrapCycles);
-          invariant.bootstrapValues1 = deriveResetBootstrapStateValuesForKeys(
-              model1,
-              resetBootstrapCandidateEqualities.keys1,
-              invariant.bootstrapCycles);
-        }
-        invariant.bootstrapOnlyStateEqualities =
-            deriveResetBootstrapStateEqualitiesByDependency(
-                model0,
-                model1,
-                resetBootstrapCandidateEqualities,
-                structuralStartupCorrespondence,
-                invariant.bootstrapCycles,
-                secDiagEnabled,
-                &invariant.bootstrapValues0,
-                &invariant.bootstrapValues1);
-      }
+      deriveCandidateBootstrapFacts();
     } else if (invariant.bootstrapCycles == 0) {
       invariant.anchoredStateEqualities = structuralStartupCorrespondence;
     } else {
@@ -1345,6 +1362,7 @@ ReachableStateInvariant buildReachableStateInvariant(
           invariant.bootstrapCycles,
           solverType,
           secDiagEnabled);
+      deriveCandidateBootstrapFacts();
     }
 
     if (deriveResetBootstrapStrengthening) {

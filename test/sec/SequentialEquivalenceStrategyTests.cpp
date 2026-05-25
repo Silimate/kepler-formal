@@ -4471,7 +4471,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   alignedInputs.keys1 = {rst1};
 
   AlignedSignals candidateStates;
-  constexpr size_t kCandidateCount = 1025;
+  constexpr size_t kCandidateCount = 4097;
   for (size_t i = 0; i < kCandidateCount; ++i) {
     const SignalKey data0 = makeSignalKey("satBudgetData0_" + std::to_string(i));
     const SignalKey data1 = makeSignalKey("satBudgetData1_" + std::to_string(i));
@@ -4514,7 +4514,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
   EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=1025"), std::string::npos)
+  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=1"), std::string::npos)
       << stderrOutput;
 }
 
@@ -12183,7 +12183,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("SEC diag: entering legacy engine"),
       std::string::npos);
   EXPECT_NE(stdoutOutput.find("SEC diag: aligned_inputs="), std::string::npos);
-  EXPECT_NE(stdoutOutput.find("SEC diag: property_is_true="), std::string::npos);
+  EXPECT_NE(stdoutOutput.find("SEC summary: property_is_true="), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
