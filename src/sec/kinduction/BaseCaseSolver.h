@@ -35,18 +35,6 @@ findBaseCounterexampleAtFrontier(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k);
 
-// Same exact frontier query, but only returns SAT/UNSAT. This keeps
-// multi-output SEC validation as one batch formula instead of localizing the
-// witness per output, which is much cheaper for PDR CEGAR refinements that only
-// need to know whether the candidate bad formula is concretely reachable. It
-// also avoids re-encoding previously checked safe frames and uses the PDR
-// solver profile because this is a short-lived PDR obligation, not a standalone
-// k-induction proof.
-bool hasBaseCounterexampleAtFrontier(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t k);
-
 // Exact one-sided PDR refinement helper: returns true only when an
 // over-approximate, startup-pruned base query proves the frontier bad predicate
 // unreachable. A false result is inconclusive, not a counterexample, because

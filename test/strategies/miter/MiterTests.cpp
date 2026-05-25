@@ -1054,6 +1054,59 @@ TEST_F(
             BuildPrimaryOutputClauses::SkippedOutputReason::LogicalLoop);
 }
 
+TEST_F(
+    MiterTests,
+    BuildPrimaryOutputClausesSkipsTopOutputMuxSelfFeedback) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto* muxModel = NLDB0::getMux2();
+  ASSERT_NE(muxModel, nullptr);
+
+  auto* top = SNLDesign::create(
+      libraryDesigns, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto* topA = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto* topS = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("s"));
+  auto* topY =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+  auto* muxInst = SNLInstance::create(top, muxModel, NLName("mux_loop"));
+
+  auto* netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto* netS = SNLScalarNet::create(top, NLName("net_s"));
+  auto* netY = SNLScalarNet::create(top, NLName("net_y"));
+
+  topA->setNet(netA);
+  topS->setNet(netS);
+  topY->setNet(netY);
+  muxInst->getInstTerm(NLDB0::getMux2InputA()->getBit(0))->setNet(netA);
+  muxInst->getInstTerm(NLDB0::getMux2InputB()->getBit(0))->setNet(netY);
+  muxInst->getInstTerm(NLDB0::getMux2Select())->setNet(netS);
+  muxInst->getInstTerm(NLDB0::getMux2Output()->getBit(0))->setNet(netY);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  ASSERT_EQ(builder.getOutputs().size(), 1u);
+  const auto topOutputID = builder.getOutputs()[0];
+  const auto inputCountBeforeBuild = builder.getInputs().size();
+  builder.setOutputs({topOutputID});
+  builder.build();
+
+  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  EXPECT_FALSE(builder.getPOs()[0]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  ASSERT_NE(builder.getSkippedOutputs().find(topOutputID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getSkippedOutputs().at(topOutputID).reason,
+            BuildPrimaryOutputClauses::SkippedOutputReason::LogicalLoop);
+}
+
 TEST_F(MiterTests, CachedIsoShortcutDoesNotCreateNewMiterInput) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);

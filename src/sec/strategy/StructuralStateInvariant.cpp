@@ -4,6 +4,8 @@
 #include "strategy/StructuralStateInvariant.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -11,10 +13,12 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "BoolExpr.h"
+#include "common/BoolExprUtils.h"
 
 namespace KEPLER_FORMAL::SEC {
 
@@ -27,6 +31,13 @@ namespace KEPLER_FORMAL::SEC {
 // 6. Use an ordered fast path only when every state already matches in order.
 
 namespace {
+
+constexpr size_t kMaxSatValidatedOrderedStatePairs = 5000;
+constexpr size_t kMaxSatValidatedOrderedCoiStatePairs = 700000;
+constexpr size_t kDefaultResetBootstrapOutputCoiStatePairs =
+    kMaxSatValidatedOrderedCoiStatePairs;
+constexpr size_t kMaxSatValidatedOrderedPairSupport = 8192;
+constexpr size_t kMaxOrderedCoiExpansionPasses = 64;
 
 using KEPLER_FORMAL::BoolExpr;
 using FingerprintMemo = std::pmr::unordered_map<BoolExpr*, uint64_t>;
@@ -97,6 +108,66 @@ AlignedSignals buildOrderedStatePairs(const SequentialDesignModel& model0,
   return aligned;
 }
 
+std::unordered_map<size_t, size_t> buildStateIndexByVar(
+    const SequentialDesignModel& model) {
+  std::unordered_map<size_t, size_t> indexByVar;
+  indexByVar.reserve(model.stateBits.size());
+  for (size_t i = 0; i < model.stateBits.size(); ++i) {
+    indexByVar.emplace(model.inputVarByKey.at(model.stateBits[i]), i);
+  }
+  return indexByVar;
+}
+
+AlignedSignals buildOrderedStatePairsForSelection(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const std::vector<unsigned char>& selected) {
+  AlignedSignals aligned;
+  const size_t selectedCount =
+      static_cast<size_t>(std::count(selected.begin(), selected.end(), 1));
+  aligned.names.reserve(selectedCount);
+  aligned.keys0.reserve(selectedCount);
+  aligned.keys1.reserve(selectedCount);
+  for (size_t i = 0; i < selected.size(); ++i) {
+    if (!selected[i]) {
+      continue;
+    }
+    aligned.names.push_back("ordered_coi_state_" + std::to_string(i));
+    aligned.keys0.push_back(model0.stateBits[i]);
+    aligned.keys1.push_back(model1.stateBits[i]);
+  }
+  return aligned;
+}
+
+std::pair<LocalToAbstractVarMap, LocalToAbstractVarMap> buildSelectedAbstractMaps(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& selectedStates) {
+  LocalToAbstractVarMap abstractMap0;
+  LocalToAbstractVarMap abstractMap1;
+  abstractMap0.reserve(alignedInputs.names.size() + selectedStates.names.size());
+  abstractMap1.reserve(alignedInputs.names.size() + selectedStates.names.size());
+  size_t nextAbstractSymbol = 2;
+
+  for (size_t i = 0; i < alignedInputs.names.size(); ++i) {
+    const size_t symbol = nextAbstractSymbol++;
+    abstractMap0.emplace(model0.inputVarByKey.at(alignedInputs.keys0[i]), symbol);
+    abstractMap1.emplace(model1.inputVarByKey.at(alignedInputs.keys1[i]), symbol);
+  }
+  for (size_t i = 0; i < selectedStates.names.size(); ++i) {
+    const size_t symbol = nextAbstractSymbol++;
+    abstractMap0.emplace(model0.inputVarByKey.at(selectedStates.keys0[i]), symbol);
+    abstractMap1.emplace(model1.inputVarByKey.at(selectedStates.keys1[i]), symbol);
+  }
+
+  return {std::move(abstractMap0), std::move(abstractMap1)};
+}
+
+std::unordered_map<size_t, size_t> buildInputClassMap(
+    const SequentialDesignModel& model,
+    const std::vector<SignalKey>& alignedInputKeys);
+
 bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
                                    const SequentialDesignModel& model1,
                                    const AlignedSignals& alignedInputs,
@@ -124,14 +195,780 @@ bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
   return true;
 }
 
-std::unordered_map<SignalKey, size_t, SignalKeyHash> buildStateIndexMap(
-    const std::vector<SignalKey>& stateBits) {
-  std::unordered_map<SignalKey, size_t, SignalKeyHash> indices;
-  indices.reserve(stateBits.size());
-  for (size_t i = 0; i < stateBits.size(); ++i) {
-    indices.emplace(stateBits[i], i);
+bool areSatEquivalentUnderAbstractMaps(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const LocalToAbstractVarMap& abstractMap0,
+    const LocalToAbstractVarMap& abstractMap1,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  try {
+    std::unordered_map<BoolExpr*, BoolExpr*> memo0;
+    std::unordered_map<BoolExpr*, BoolExpr*> memo1;
+    BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
+    BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
+    return boolFormulaImplies(
+        BoolExpr::createTrue(),
+        makeEqualityExpr(remapped0, remapped1),
+        solverType);
+  } catch (const std::runtime_error&) {
+    return false;
   }
-  return indices;
+}
+
+bool isWithinSatValidatedOrderedSupportBudget(BoolExpr* expr0, BoolExpr* expr1) {
+  std::set<size_t> support = expr0->getSupportVars();
+  const auto support1 = expr1->getSupportVars();
+  support.insert(support1.begin(), support1.end());
+  return support.size() <= kMaxSatValidatedOrderedPairSupport;
+}
+
+size_t nextAbstractSymbolAfter(const LocalToAbstractVarMap& abstractMap0,
+                               const LocalToAbstractVarMap& abstractMap1) {
+  size_t nextSymbol = 2;
+  for (const auto& [_, symbol] : abstractMap0) {
+    nextSymbol = std::max(nextSymbol, symbol + 1);
+  }
+  for (const auto& [_, symbol] : abstractMap1) {
+    nextSymbol = std::max(nextSymbol, symbol + 1);
+  }
+  return nextSymbol;
+}
+
+bool structuralCoiDiagEnabled() {
+  static const bool enabled = std::getenv("KEPLER_SEC_DIAG") != nullptr ||
+                              std::getenv("KEPLER_SEC_STRUCTURAL_DIAG") != nullptr;
+  return enabled;
+}
+
+size_t resetBootstrapOutputCoiStatePairBudget() {
+  static const size_t budget = []() {
+    const char* env = std::getenv("KEPLER_SEC_BOOTSTRAP_COI_PAIR_BUDGET");
+    if (env == nullptr || env[0] == '\0') {
+      return kDefaultResetBootstrapOutputCoiStatePairs;
+    }
+    char* end = nullptr;
+    const auto parsed = std::strtoull(env, &end, 10);
+    if (end == env || parsed == 0) {
+      return kDefaultResetBootstrapOutputCoiStatePairs;
+    }
+    return static_cast<size_t>(parsed);
+  }();
+  return budget;
+}
+
+bool resetBootstrapOutputCoiTransitionClosureEnabled() {
+  static const bool enabled = []() {
+    const char* env = std::getenv("KEPLER_SEC_BOOTSTRAP_OUTPUT_ROOTS_ONLY");
+    return !(env != nullptr && env[0] != '\0' && std::string(env) != "0");
+  }();
+  return enabled;
+}
+
+void assignPrivateSupportSymbols(BoolExpr* expr,
+                                 LocalToAbstractVarMap& abstractMap,
+                                 size_t& nextAbstractSymbol) {
+  if (expr == nullptr) {
+    return;  // LCOV_EXCL_LINE
+  }
+  for (const auto var : expr->getSupportVars()) {
+    if (var < 2 || abstractMap.find(var) != abstractMap.end()) {
+      continue;
+    }
+    abstractMap.emplace(var, nextAbstractSymbol++);
+  }
+}
+
+bool areSatEquivalentUnderPartialAbstractMaps(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const LocalToAbstractVarMap& partialMap0,
+    const LocalToAbstractVarMap& partialMap1,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  LocalToAbstractVarMap abstractMap0 = partialMap0;
+  LocalToAbstractVarMap abstractMap1 = partialMap1;
+  size_t nextAbstractSymbol = nextAbstractSymbolAfter(abstractMap0, abstractMap1);
+  assignPrivateSupportSymbols(expr0, abstractMap0, nextAbstractSymbol);
+  assignPrivateSupportSymbols(expr1, abstractMap1, nextAbstractSymbol);
+  return areSatEquivalentUnderAbstractMaps(
+      expr0, expr1, abstractMap0, abstractMap1, solverType);
+}
+
+bool areAllOrderedStatesSatEquivalent(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& orderedStates,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (orderedStates.names.empty()) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  if (orderedStates.names.size() > kMaxSatValidatedOrderedStatePairs) {
+    return false;
+  }
+
+  const auto [abstractMap0, abstractMap1] =
+      buildAbstractTransitionMapsImpl(model0, model1, alignedInputs, orderedStates);
+  std::pmr::monotonic_buffer_resource memoResource;
+  AbstractExprPairMemo structuralMemo{&memoResource};
+  for (size_t i = 0; i < orderedStates.names.size(); ++i) {
+    const auto& key0 = orderedStates.keys0[i];
+    const auto& key1 = orderedStates.keys1[i];
+    BoolExpr* next0 = model0.nextStateExprByStateKey.at(key0);
+    BoolExpr* next1 = model1.nextStateExprByStateKey.at(key1);
+    if (next0 == nullptr || next1 == nullptr) {
+      return false;
+    }
+    if (areEquivalentUnderAbstractMaps(
+            next0,
+            next1,
+            abstractMap0,
+            abstractMap1,
+            structuralMemo)) {
+      continue;
+    }
+    if (!isWithinSatValidatedOrderedSupportBudget(next0, next1)) {
+      return false;
+    }
+    if (!areSatEquivalentUnderAbstractMaps(
+            next0, next1, abstractMap0, abstractMap1, solverType)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool addSupportStateIndices(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, size_t>& stateIndexByVar,
+    std::vector<unsigned char>& selected) {
+  if (expr == nullptr) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  bool changed = false;
+  for (const auto var : expr->getSupportVars()) {
+    const auto stateIt = stateIndexByVar.find(var);
+    if (stateIt == stateIndexByVar.end() || stateIt->second >= selected.size()) {
+      continue;
+    }
+    if (!selected[stateIt->second]) {
+      selected[stateIt->second] = 1;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+bool ensureExprPairEquivalentOrExpand(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const std::unordered_map<size_t, size_t>& stateIndexByVar0,
+    const std::unordered_map<size_t, size_t>& stateIndexByVar1,
+    const LocalToAbstractVarMap& abstractMap0,
+    const LocalToAbstractVarMap& abstractMap1,
+    AbstractExprPairMemo& structuralMemo,
+    std::vector<unsigned char>& selected,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    bool& invalidRelation) {
+  if (areEquivalentUnderAbstractMaps(
+          expr0, expr1, abstractMap0, abstractMap1, structuralMemo)) {
+    return false;
+  }
+
+  const bool added0 = addSupportStateIndices(expr0, stateIndexByVar0, selected);
+  const bool added1 = addSupportStateIndices(expr1, stateIndexByVar1, selected);
+  if (added0 || added1) {
+    return true;
+  }
+
+  if (expr0 == nullptr || expr1 == nullptr ||
+      !isWithinSatValidatedOrderedSupportBudget(expr0, expr1) ||
+      !areSatEquivalentUnderPartialAbstractMaps(
+          expr0, expr1, abstractMap0, abstractMap1, solverType)) {
+    invalidRelation = true;
+  }
+  return false;
+}
+
+bool expandOrderedCoiFromOutputs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedOutputs,
+    const std::unordered_map<size_t, size_t>& stateIndexByVar0,
+    const std::unordered_map<size_t, size_t>& stateIndexByVar1,
+    std::vector<unsigned char>& selected) {
+  bool changed = false;
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+    const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    if (exprIt0 != model0.observedOutputExprByKey.end()) {
+      changed |= addSupportStateIndices(exprIt0->second, stateIndexByVar0, selected);
+    }
+    if (exprIt1 != model1.observedOutputExprByKey.end()) {
+      changed |= addSupportStateIndices(exprIt1->second, stateIndexByVar1, selected);
+    }
+  }
+  return changed;
+}
+
+struct StructuralCoiMapping {
+  static constexpr size_t kUnmapped = std::numeric_limits<size_t>::max();
+
+  std::vector<size_t> state0ToState1;
+  std::vector<size_t> state1ToState0;
+  std::vector<std::pair<size_t, size_t>> pairs;
+};
+
+using StructuralExprPairSet =
+    std::pmr::unordered_set<std::pair<BoolExpr*, BoolExpr*>, AbstractExprPairHash>;
+
+struct StructuralCoiUnificationContext {
+  const std::unordered_map<size_t, size_t>& inputClasses0;
+  const std::unordered_map<size_t, size_t>& inputClasses1;
+  const std::unordered_map<size_t, size_t>& stateIndexByVar0;
+  const std::unordered_map<size_t, size_t>& stateIndexByVar1;
+  StructuralCoiMapping& mapping;
+  StructuralExprPairSet& seenPairs;
+};
+
+StructuralCoiMapping makeStructuralCoiMapping(size_t stateCount0,
+                                              size_t stateCount1) {
+  return {
+      std::vector<size_t>(stateCount0, StructuralCoiMapping::kUnmapped),
+      std::vector<size_t>(stateCount1, StructuralCoiMapping::kUnmapped),
+      {}};
+}
+
+bool addStructuralCoiStatePair(StructuralCoiMapping& mapping,
+                               size_t index0,
+                               size_t index1) {
+  if (index0 >= mapping.state0ToState1.size() ||
+      index1 >= mapping.state1ToState0.size()) {
+    return false;  // LCOV_EXCL_LINE
+  }
+
+  const size_t existing1 = mapping.state0ToState1[index0];
+  const size_t existing0 = mapping.state1ToState0[index1];
+  if (existing1 != StructuralCoiMapping::kUnmapped ||
+      existing0 != StructuralCoiMapping::kUnmapped) {
+    return existing1 == index1 && existing0 == index0;
+  }
+
+  mapping.state0ToState1[index0] = index1;
+  mapping.state1ToState0[index1] = index0;
+  mapping.pairs.push_back({index0, index1});
+  return true;
+}
+
+bool structurallyUnifyExprPairForCoi(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    StructuralCoiUnificationContext& context) {
+  struct StackItem {
+    BoolExpr* lhs = nullptr;
+    BoolExpr* rhs = nullptr;
+  };
+
+  std::vector<StackItem> stack;
+  stack.reserve(64);
+  stack.push_back({expr0, expr1});
+  while (!stack.empty()) {
+    const auto [lhs, rhs] = stack.back();
+    stack.pop_back();
+    if (!context.seenPairs.emplace(lhs, rhs).second) {
+      continue;
+    }
+
+    if (lhs == nullptr || rhs == nullptr) {
+      if (lhs != rhs) {
+        return false;
+      }
+      continue;  // LCOV_EXCL_LINE
+    }
+
+    const Op lhsOp = lhs->getOp();
+    const Op rhsOp = rhs->getOp();
+    if (lhsOp == Op::VAR && rhsOp == Op::VAR) {
+      const size_t lhsId = lhs->getId();
+      const size_t rhsId = rhs->getId();
+      if (lhsId < 2 || rhsId < 2) {
+        if (lhsId != rhsId) {
+          return false;
+        }
+        continue;
+      }
+
+      const auto lhsInputIt = context.inputClasses0.find(lhsId);
+      const auto rhsInputIt = context.inputClasses1.find(rhsId);
+      if (lhsInputIt != context.inputClasses0.end() ||
+          rhsInputIt != context.inputClasses1.end()) {
+        if (lhsInputIt == context.inputClasses0.end() ||
+            rhsInputIt == context.inputClasses1.end() ||
+            lhsInputIt->second != rhsInputIt->second) {
+          return false;
+        }
+        continue;
+      }
+
+      const auto lhsStateIt = context.stateIndexByVar0.find(lhsId);
+      const auto rhsStateIt = context.stateIndexByVar1.find(rhsId);
+      if (lhsStateIt != context.stateIndexByVar0.end() ||
+          rhsStateIt != context.stateIndexByVar1.end()) {
+        if (lhsStateIt == context.stateIndexByVar0.end() ||
+            rhsStateIt == context.stateIndexByVar1.end() ||
+            !addStructuralCoiStatePair(
+                context.mapping, lhsStateIt->second, rhsStateIt->second)) {
+          return false;
+        }
+        continue;
+      }
+
+      return false;
+    }
+
+    if (lhsOp != rhsOp || lhsOp == Op::NONE || rhsOp == Op::NONE) {
+      return false;
+    }
+
+    stack.push_back({lhs->getLeft(), rhs->getLeft()});
+    if (lhsOp != Op::NOT) {
+      stack.push_back({lhs->getRight(), rhs->getRight()});
+    }
+  }
+
+  return true;
+}
+
+AlignedSignals buildStructuralCoiStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const StructuralCoiMapping& mapping) {
+  AlignedSignals aligned;
+  aligned.names.reserve(mapping.pairs.size());
+  aligned.keys0.reserve(mapping.pairs.size());
+  aligned.keys1.reserve(mapping.pairs.size());
+  for (size_t i = 0; i < mapping.pairs.size(); ++i) {
+    const auto [index0, index1] = mapping.pairs[i];
+    aligned.names.push_back("structural_coi_state_" + std::to_string(i));
+    aligned.keys0.push_back(model0.stateBits[index0]);
+    aligned.keys1.push_back(model1.stateBits[index1]);
+  }
+  return aligned;
+}
+
+bool validateStructuralCoiRelation(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    const AlignedSignals& alignedStates,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  const auto [abstractMap0, abstractMap1] =
+      buildSelectedAbstractMaps(model0, model1, alignedInputs, alignedStates);
+  std::pmr::monotonic_buffer_resource memoResource;
+  AbstractExprPairMemo structuralMemo{&memoResource};
+
+  auto equivalentOrSat = [&](BoolExpr* expr0, BoolExpr* expr1) {
+    if (areEquivalentUnderAbstractMaps(
+            expr0, expr1, abstractMap0, abstractMap1, structuralMemo)) {
+      return true;
+    }
+    return expr0 != nullptr && expr1 != nullptr &&
+           isWithinSatValidatedOrderedSupportBudget(expr0, expr1) &&
+           areSatEquivalentUnderPartialAbstractMaps(
+               expr0, expr1, abstractMap0, abstractMap1, solverType);
+  };
+
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+    const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    if (exprIt0 == model0.observedOutputExprByKey.end() ||
+        exprIt1 == model1.observedOutputExprByKey.end() ||
+        !equivalentOrSat(exprIt0->second, exprIt1->second)) {
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < alignedStates.names.size(); ++i) {
+    BoolExpr* next0 = model0.nextStateExprByStateKey.at(alignedStates.keys0[i]);
+    BoolExpr* next1 = model1.nextStateExprByStateKey.at(alignedStates.keys1[i]);
+    if (!equivalentOrSat(next0, next1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validateStructuralOutputCoiRelation(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    const AlignedSignals& alignedStates,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  const auto [abstractMap0, abstractMap1] =
+      buildSelectedAbstractMaps(model0, model1, alignedInputs, alignedStates);
+  std::pmr::monotonic_buffer_resource memoResource;
+  AbstractExprPairMemo structuralMemo{&memoResource};
+
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+    const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    if (exprIt0 == model0.observedOutputExprByKey.end() ||
+        exprIt1 == model1.observedOutputExprByKey.end()) {
+      return false;  // LCOV_EXCL_LINE
+    }
+    if (areEquivalentUnderAbstractMaps(
+            exprIt0->second, exprIt1->second, abstractMap0, abstractMap1,
+            structuralMemo)) {
+      continue;
+    }
+    if (!isWithinSatValidatedOrderedSupportBudget(exprIt0->second, exprIt1->second) ||
+        !areSatEquivalentUnderPartialAbstractMaps(
+            exprIt0->second,
+            exprIt1->second,
+            abstractMap0,
+            abstractMap1,
+            solverType)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+AlignedSignals inferStructuralOutputCoiStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (alignedOutputs.names.empty()) {
+    return {};
+  }
+
+  const auto inputClasses0 = buildInputClassMap(model0, alignedInputs.keys0);
+  const auto inputClasses1 = buildInputClassMap(model1, alignedInputs.keys1);
+  const auto stateIndexByVar0 = buildStateIndexByVar(model0);
+  const auto stateIndexByVar1 = buildStateIndexByVar(model1);
+  StructuralCoiMapping mapping =
+      makeStructuralCoiMapping(model0.stateBits.size(), model1.stateBits.size());
+  std::pmr::monotonic_buffer_resource seenPairResource;
+  StructuralExprPairSet seenPairs{&seenPairResource};
+  seenPairs.reserve(std::max<size_t>(4096, alignedOutputs.names.size() * 128));
+  StructuralCoiUnificationContext unificationContext{
+      inputClasses0,
+      inputClasses1,
+      stateIndexByVar0,
+      stateIndexByVar1,
+      mapping,
+      seenPairs};
+  const size_t bootstrapCoiBudget =
+      std::min(kMaxSatValidatedOrderedCoiStatePairs,
+               resetBootstrapOutputCoiStatePairBudget());
+
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+    const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    if (exprIt0 == model0.observedOutputExprByKey.end() ||
+        exprIt1 == model1.observedOutputExprByKey.end() ||
+        !structurallyUnifyExprPairForCoi(
+            exprIt0->second,
+            exprIt1->second,
+            unificationContext)) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: structural output coi rejected output=%zu pairs=%zu\n",
+            i,
+            mapping.pairs.size());
+      }
+      return {};
+    }
+    if (mapping.pairs.size() > bootstrapCoiBudget) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: structural output coi rejected budget pairs=%zu budget=%zu\n",
+            mapping.pairs.size(),
+            bootstrapCoiBudget);
+      }
+      return {};
+    }
+  }
+
+  if (resetBootstrapOutputCoiTransitionClosureEnabled()) {
+    size_t checkedTransitionPairs = 0;
+    for (size_t cursor = 0; cursor < mapping.pairs.size(); ++cursor) {
+      if (mapping.pairs.size() >= bootstrapCoiBudget) {
+        if (structuralCoiDiagEnabled()) {
+          std::fprintf(
+              stderr,
+              "SEC diag: structural output-transition coi stopped budget pairs=%zu "
+              "budget=%zu\n",
+              mapping.pairs.size(),
+              bootstrapCoiBudget);
+        }
+        break;
+      }
+      const auto [index0, index1] = mapping.pairs[cursor];
+      BoolExpr* next0 = model0.nextStateExprByStateKey.at(model0.stateBits[index0]);
+      BoolExpr* next1 = model1.nextStateExprByStateKey.at(model1.stateBits[index1]);
+      if (!structurallyUnifyExprPairForCoi(
+              next0,
+              next1,
+              unificationContext)) {
+        if (structuralCoiDiagEnabled()) {
+          std::fprintf(
+              stderr,
+              "SEC diag: structural output-transition coi stopped cursor=%zu pairs=%zu\n",
+              cursor,
+              mapping.pairs.size());
+        }
+        break;
+      }
+      checkedTransitionPairs = cursor + 1;
+      if (mapping.pairs.size() > bootstrapCoiBudget) {
+        if (structuralCoiDiagEnabled()) {
+          std::fprintf(
+              stderr,
+              "SEC diag: structural output-transition coi stopped budget pairs=%zu "
+              "budget=%zu\n",
+              mapping.pairs.size(),
+              bootstrapCoiBudget);
+        }
+        break;
+      }
+    }
+    if (checkedTransitionPairs < mapping.pairs.size()) {
+      mapping.pairs.resize(checkedTransitionPairs);
+    }
+  } else if (structuralCoiDiagEnabled()) {
+    std::fprintf(
+        stderr,
+        "SEC diag: structural output-transition coi skipped root_pairs=%zu\n",
+        mapping.pairs.size());
+  }
+
+  const AlignedSignals alignedStates =
+      buildStructuralCoiStatePairs(model0, model1, mapping);
+  if (alignedStates.names.empty() ||
+      !validateStructuralOutputCoiRelation(
+          model0, model1, alignedInputs, alignedOutputs, alignedStates, solverType)) {
+    if (structuralCoiDiagEnabled()) {
+      std::fprintf(
+          stderr,
+          "SEC diag: structural output coi rejected validation pairs=%zu\n",
+          alignedStates.names.size());
+    }
+    return {};
+  }
+  if (structuralCoiDiagEnabled()) {
+    std::fprintf(
+        stderr,
+        "SEC diag: structural output coi accepted pairs=%zu\n",
+        alignedStates.names.size());
+  }
+  return alignedStates;
+}
+
+AlignedSignals inferStructuralCoiStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (alignedOutputs.names.empty()) {
+    if (structuralCoiDiagEnabled()) {
+      std::fprintf(stderr, "SEC diag: structural coi skipped no outputs\n");
+    }
+    return {};
+  }
+
+  const auto inputClasses0 = buildInputClassMap(model0, alignedInputs.keys0);
+  const auto inputClasses1 = buildInputClassMap(model1, alignedInputs.keys1);
+  const auto stateIndexByVar0 = buildStateIndexByVar(model0);
+  const auto stateIndexByVar1 = buildStateIndexByVar(model1);
+  StructuralCoiMapping mapping =
+      makeStructuralCoiMapping(model0.stateBits.size(), model1.stateBits.size());
+  std::pmr::monotonic_buffer_resource seenPairResource;
+  StructuralExprPairSet seenPairs{&seenPairResource};
+  seenPairs.reserve(std::max<size_t>(4096, alignedOutputs.names.size() * 128));
+  StructuralCoiUnificationContext unificationContext{
+      inputClasses0,
+      inputClasses1,
+      stateIndexByVar0,
+      stateIndexByVar1,
+      mapping,
+      seenPairs};
+
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+    const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    if (exprIt0 == model0.observedOutputExprByKey.end() ||
+        exprIt1 == model1.observedOutputExprByKey.end() ||
+        !structurallyUnifyExprPairForCoi(
+            exprIt0->second,
+            exprIt1->second,
+            unificationContext)) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: structural coi rejected output=%zu pairs=%zu\n",
+            i,
+            mapping.pairs.size());
+      }
+      return {};
+    }
+    if (mapping.pairs.size() > kMaxSatValidatedOrderedCoiStatePairs) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: structural coi rejected output budget pairs=%zu\n",
+            mapping.pairs.size());
+      }
+      return {};
+    }
+  }
+
+  for (size_t cursor = 0; cursor < mapping.pairs.size(); ++cursor) {
+    const auto [index0, index1] = mapping.pairs[cursor];
+    BoolExpr* next0 = model0.nextStateExprByStateKey.at(model0.stateBits[index0]);
+    BoolExpr* next1 = model1.nextStateExprByStateKey.at(model1.stateBits[index1]);
+    if (!structurallyUnifyExprPairForCoi(
+            next0,
+            next1,
+            unificationContext)) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: structural coi rejected transition cursor=%zu pairs=%zu\n",
+            cursor,
+            mapping.pairs.size());
+      }
+      return {};
+    }
+    if (mapping.pairs.size() > kMaxSatValidatedOrderedCoiStatePairs) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: structural coi rejected transition budget pairs=%zu\n",
+            mapping.pairs.size());
+      }
+      return {};
+    }
+  }
+
+  const AlignedSignals alignedStates =
+      buildStructuralCoiStatePairs(model0, model1, mapping);
+  if (alignedStates.names.empty() ||
+      !validateStructuralCoiRelation(
+          model0, model1, alignedInputs, alignedOutputs, alignedStates, solverType)) {
+    if (structuralCoiDiagEnabled()) {
+      std::fprintf(
+          stderr,
+          "SEC diag: structural coi rejected validation pairs=%zu\n",
+          alignedStates.names.size());
+    }
+    return {};
+  }
+  if (structuralCoiDiagEnabled()) {
+    std::fprintf(
+        stderr,
+        "SEC diag: structural coi accepted pairs=%zu\n",
+        alignedStates.names.size());
+  }
+  return alignedStates;
+}
+
+AlignedSignals inferSatValidatedOrderedCoiStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (alignedOutputs.names.empty() ||
+      model0.stateBits.size() != model1.stateBits.size()) {
+    return {};
+  }
+
+  const auto stateIndexByVar0 = buildStateIndexByVar(model0);
+  const auto stateIndexByVar1 = buildStateIndexByVar(model1);
+  std::vector<unsigned char> selected(model0.stateBits.size(), 0);
+  expandOrderedCoiFromOutputs(
+      model0, model1, alignedOutputs, stateIndexByVar0, stateIndexByVar1, selected);
+  if (std::count(selected.begin(), selected.end(), 1) == 0) {
+    return {};
+  }
+
+  for (size_t pass = 0; pass < kMaxOrderedCoiExpansionPasses; ++pass) {
+    if (static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)) >
+        kMaxSatValidatedOrderedCoiStatePairs) {
+      return {};
+    }
+
+    const AlignedSignals selectedStates =
+        buildOrderedStatePairsForSelection(model0, model1, selected);
+    const std::vector<unsigned char> passSelected = selected;
+    const auto [abstractMap0, abstractMap1] =
+        buildSelectedAbstractMaps(model0, model1, alignedInputs, selectedStates);
+    std::pmr::monotonic_buffer_resource memoResource;
+    AbstractExprPairMemo structuralMemo{&memoResource};
+    bool changed = false;
+    bool invalidRelation = false;
+
+    for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+      const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+      const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+      if (exprIt0 == model0.observedOutputExprByKey.end() ||
+          exprIt1 == model1.observedOutputExprByKey.end()) {
+        return {};  // LCOV_EXCL_LINE
+      }
+      changed |= ensureExprPairEquivalentOrExpand(
+          exprIt0->second,
+          exprIt1->second,
+          stateIndexByVar0,
+          stateIndexByVar1,
+          abstractMap0,
+          abstractMap1,
+          structuralMemo,
+          selected,
+          solverType,
+          invalidRelation);
+      if (invalidRelation) {
+        return {};
+      }
+    }
+
+    for (size_t i = 0; i < passSelected.size(); ++i) {
+      if (!passSelected[i]) {
+        continue;
+      }
+      BoolExpr* next0 = model0.nextStateExprByStateKey.at(model0.stateBits[i]);
+      BoolExpr* next1 = model1.nextStateExprByStateKey.at(model1.stateBits[i]);
+      changed |= ensureExprPairEquivalentOrExpand(
+          next0,
+          next1,
+          stateIndexByVar0,
+          stateIndexByVar1,
+          abstractMap0,
+          abstractMap1,
+          structuralMemo,
+          selected,
+          solverType,
+          invalidRelation);
+      if (invalidRelation) {
+        return {};
+      }
+    }
+
+    if (!changed) {
+      // Only the top-output alignment came from names.  Ordered internal state
+      // bits were merely candidates, and every reached output/transition formula
+      // has now been proven equivalent under the selected relation.
+      return selectedStates;
+    }
+  }
+
+  return {};
 }
 
 std::unordered_map<size_t, size_t> buildInputClassMap(
@@ -422,6 +1259,13 @@ std::vector<size_t> seedClasses(const SequentialDesignModel& model) {
 struct StateClassFingerprint {
   uint64_t seedSignature = 0;
   uint64_t transitionFingerprint = 0;
+
+  bool operator<(const StateClassFingerprint& other) const {
+    if (seedSignature != other.seedSignature) {
+      return seedSignature < other.seedSignature;
+    }
+    return transitionFingerprint < other.transitionFingerprint;
+  }
 };
 
 std::vector<StateClassFingerprint> computeFinalFingerprints(
@@ -454,11 +1298,6 @@ std::vector<StateClassFingerprint> computeFinalFingerprints(
   }
   return fingerprints;
 }
-
-std::string stateFingerprintKey(const StateClassFingerprint& fingerprint) {
-  return std::to_string(fingerprint.seedSignature) + ":" +
-      std::to_string(fingerprint.transitionFingerprint);
-}  // LCOV_EXCL_LINE
 
 }  // namespace
 
@@ -557,7 +1396,9 @@ bool areEquivalentUnderAbstractMaps(
 AlignedSignals inferStructurallyEquivalentStatePairs(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
-    const AlignedSignals& alignedInputs) {
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
   if (model0.stateBits.empty() || model1.stateBits.empty()) {
     return {};
   }
@@ -567,6 +1408,27 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
       areAllOrderedStatesEquivalent(model0, model1, alignedInputs, orderedStates)) {
     // This fast path is purely structural: same order, same transition shape.
     return orderedStates;
+  }
+  if (!orderedStates.names.empty() &&
+      areAllOrderedStatesSatEquivalent(
+          model0, model1, alignedInputs, orderedStates, solverType)) {
+    // This fallback still does not trust internal names or raw extraction
+    // order.  The order only proposes a relation; every next-state equation is
+    // SAT-proved equivalent under that relation before it is exposed to SEC.
+    return orderedStates;
+  }
+  const AlignedSignals structuralCoiStates = inferStructuralCoiStatePairs(
+      model0, model1, alignedInputs, alignedOutputs, solverType);
+  if (!structuralCoiStates.names.empty()) {
+    // Top output names anchor the SEC property.  Internal state candidates here
+    // come only from structurally unifying the reached output/transition cones,
+    // then validating the resulting relation.
+    return structuralCoiStates;
+  }
+  const AlignedSignals orderedCoiStates = inferSatValidatedOrderedCoiStatePairs(
+      model0, model1, alignedInputs, alignedOutputs, solverType);
+  if (!orderedCoiStates.names.empty()) {
+    return orderedCoiStates;
   }
 
   const auto inputClasses0 = buildInputClassMap(model0, alignedInputs.keys0);
@@ -590,13 +1452,13 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
   const auto fingerprints0 = computeFinalFingerprints(model0, inputClasses0, classes0);
   const auto fingerprints1 = computeFinalFingerprints(model1, inputClasses1, classes1);
 
-  std::map<std::string, std::vector<size_t>> indicesByFingerprint0;
-  std::map<std::string, std::vector<size_t>> indicesByFingerprint1;
+  std::map<StateClassFingerprint, std::vector<size_t>> indicesByFingerprint0;
+  std::map<StateClassFingerprint, std::vector<size_t>> indicesByFingerprint1;
   for (size_t i = 0; i < fingerprints0.size(); ++i) {
-    indicesByFingerprint0[stateFingerprintKey(fingerprints0[i])].push_back(i);
+    indicesByFingerprint0[fingerprints0[i]].push_back(i);
   }
   for (size_t i = 0; i < fingerprints1.size(); ++i) {
-    indicesByFingerprint1[stateFingerprintKey(fingerprints1[i])].push_back(i);
+    indicesByFingerprint1[fingerprints1[i]].push_back(i);
   }
 
   AlignedSignals aligned;
@@ -614,6 +1476,25 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
     }
   }
   return aligned;
+}
+
+AlignedSignals inferStructurallyEquivalentOutputConeStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  return inferStructuralOutputCoiStatePairs(
+      model0, model1, alignedInputs, alignedOutputs, solverType);
+}
+
+AlignedSignals inferStructurallyEquivalentStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  return inferStructurallyEquivalentStatePairs(
+      model0, model1, alignedInputs, AlignedSignals{}, solverType);
 }
 
 }  // namespace KEPLER_FORMAL::SEC

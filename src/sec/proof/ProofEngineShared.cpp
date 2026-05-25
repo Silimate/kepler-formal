@@ -140,23 +140,6 @@ std::unordered_set<size_t> buildCombinedStateSymbolSet(
   return stateSymbols;
 }
 
-std::vector<size_t> collectStateSupportSymbols(
-    const KInductionProblem& problem,
-    BoolExpr* formula) {
-  if (formula == nullptr) {
-    return {};  // LCOV_EXCL_LINE
-  }
-  return collectStateSupportSymbols(problem, buildFormulaSupportVector(formula));
-}
-
-void addFormulaSupportSymbols(BoolExpr* formula,
-                              std::unordered_set<size_t>& symbols) {
-  if (formula == nullptr) {
-    return;  // LCOV_EXCL_LINE
-  }
-  addSupportSymbols(buildFormulaSupportVector(formula), symbols);
-}
-
 void addRelevantComplementedStatePartners(
     const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
     std::unordered_set<size_t>& symbols) {

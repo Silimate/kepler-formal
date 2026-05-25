@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "BoolExpr.h"
+#include "../../config/Config.h"
 #include "common/AlignedSignals.h"
 #include "model/SequentialDesignModel.h"
 
@@ -61,6 +62,28 @@ bool areEquivalentUnderAbstractMaps(
 AlignedSignals inferStructurallyEquivalentStatePairs(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
-    const AlignedSignals& alignedInputs);
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType =
+        KEPLER_FORMAL::Config::getSolverType());
+
+// Uses only the aligned top-observed output cones to propose state pairs for
+// later reset-bootstrap validation. These pairs are not inductive facts by
+// themselves; callers must prove them at the reset frontier before assuming
+// them in a proof problem.
+AlignedSignals inferStructurallyEquivalentOutputConeStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType =
+        KEPLER_FORMAL::Config::getSolverType());
+
+AlignedSignals inferStructurallyEquivalentStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    KEPLER_FORMAL::Config::SolverType solverType =
+        KEPLER_FORMAL::Config::getSolverType());
 
 }  // namespace KEPLER_FORMAL::SEC

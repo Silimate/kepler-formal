@@ -118,6 +118,9 @@ std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   // bootstrap constraints are converted to shared SAT symbols.
   const std::string normalized = normalizeSignalBaseName(displayName);
   std::vector<std::string> candidates = {normalized};
+  if (hasSuffix(normalized, "_IN")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 3));  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
   if (hasSuffix(normalized, "_I")) {
     candidates.push_back(normalized.substr(0, normalized.size() - 2));  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
@@ -235,6 +238,7 @@ struct AlignedSecInterface {
   AlignedSignals inputs;
   AlignedSignals outputs;
   AlignedSignals inductiveStateEqualities;
+  AlignedSignals resetBootstrapCandidateStateEqualities;
   OutputCoverageSelection outputCoverage;
 };
 
@@ -751,6 +755,11 @@ bool pdrStrategyStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
 }
 
+bool secSummaryStatsEnabled() {
+  return std::getenv("KEPLER_SEC_SUMMARY_STATS") != nullptr ||
+         pdrStrategyStatsEnabled();
+}
+
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
 
 void emitPdrStrategyStageStats(
@@ -864,6 +873,7 @@ SequentialDesignModel extractSecDesign(naja::NL::SNLDesign* top,
 
 AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
                                       const SequentialDesignModel& model1,
+                                      KEPLER_FORMAL::Config::SolverType solverType,
                                       bool secDiagEnabled) {
   AlignedSecInterface aligned;
   logSecDiagLine(secDiagEnabled, "SEC diag: aligning inputs/outputs");
@@ -911,8 +921,11 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
 
   logSecDiagLine(secDiagEnabled, "SEC diag: inferring inductive state equalities");
   aligned.inductiveStateEqualities = inferStructurallyEquivalentStatePairs(
-      model0, model1, aligned.inputs);
+      model0, model1, aligned.inputs, aligned.outputs, solverType);
   logSecDiagLine(secDiagEnabled, "SEC diag: inferred inductive state equalities");
+  aligned.resetBootstrapCandidateStateEqualities =
+      inferStructurallyEquivalentOutputConeStatePairs(
+          model0, model1, aligned.inputs, aligned.outputs, solverType);
   return aligned;
 }
 
@@ -1104,6 +1117,7 @@ ReachableStateInvariant integrateReachableStateInvariant(
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& inductiveStateEqualities,
+    const AlignedSignals& resetBootstrapCandidateStateEqualities,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
     KInductionProblem& problem,
@@ -1130,7 +1144,8 @@ ReachableStateInvariant integrateReachableStateInvariant(
       deriveResetBootstrapStrengthening,
       secDiagEnabled,
       solverType,
-      deriveResetBootstrapEqualities);
+      deriveResetBootstrapEqualities,
+      resetBootstrapCandidateStateEqualities);
   for (size_t i = 0; i < reachableInvariant.initialStateCorrespondence.names.size(); ++i) {
     problem.initialStateEqualityPairs.emplace_back(
         state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]),
@@ -1169,6 +1184,15 @@ ReachableStateInvariant integrateReachableStateInvariant(
       problem.bootstrapStateEqualityPairs.emplace_back(
           state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
           state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
+    }
+  }
+  for (size_t i = 0;
+       i < reachableInvariant.bootstrapOnlyStateEqualities.names.size();
+       ++i) {
+    if (!problem.resetBootstrapInputs.empty()) {
+      problem.bootstrapStateEqualityPairs.emplace_back(
+          state0Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys0[i]),
+          state1Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys1[i]));
     }
   }
   return reachableInvariant;
@@ -1253,12 +1277,13 @@ void buildSecPropertiesAndTransitions(
   problem.description = "SEC property with aligned observed outputs";
   logSecDiagLine(secDiagEnabled, "SEC diag: built SEC and induction properties");
 
-  if (secDiagEnabled) {
+  if (secDiagEnabled || secSummaryStatsEnabled()) {
     printf(
-        "SEC diag: property_is_true=%d induction_property_is_true=%d "
+        "SEC summary: property_is_true=%d induction_property_is_true=%d "
         "bad_is_false=%d induction_bad_is_false=%d reset_bootstrap_inputs=%zu "
-        "bootstrap_cycles=%zu initial_equalities=%zu bootstrap_equalities=%zu "
-        "inductive_equalities=%zu abstract_equiv_outputs=%zu "
+        "bootstrap_cycles=%zu bootstrap_assignments=%zu initial_equalities=%zu "
+        "bootstrap_equalities=%zu inductive_equalities=%zu "
+        "abstract_equiv_outputs=%zu "
         "sat_implied_outputs=%zu\n",
         problem.property == BoolExpr::createTrue(),
         problem.inductionProperty == BoolExpr::createTrue(),
@@ -1266,6 +1291,7 @@ void buildSecPropertiesAndTransitions(
         problem.inductionBad == BoolExpr::createFalse(),
         problem.resetBootstrapInputs.size(),
         problem.resetBootstrapCycles,
+        problem.bootstrapStateAssignments.size(),
         problem.initialStateEqualityPairs.size(),
         problem.bootstrapStateEqualityPairs.size(),
         problem.inductiveStateEqualityPairs.size(),
@@ -1528,7 +1554,7 @@ SequentialEquivalenceResult runPdrSecEngine(
   // still proves a real conjunction slice. If projected PDR finds a
   // counterexample on a multi-output slice, escalate PDR precision first and
   // avoid broad concrete-BMC validation until the final exact retry.
-  constexpr OutputBatchingLimits kPdrOutputBatchingLimits{16, 512};
+  constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
   constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
   struct PdrOutputBatch {
@@ -1554,12 +1580,15 @@ SequentialEquivalenceResult runPdrSecEngine(
           size_t firstOutput,
           size_t endOutput) -> FinalPdrStageOutcome {
     constexpr size_t kMaxPdrConcreteValidationOutputs = 1;  // LCOV_EXCL_LINE
-    constexpr size_t kMaxFinalExactPdrOutputBatchSize =  // LCOV_EXCL_LINE
-        kPdrOutputBatchingLimits.maxOutputBatchSize;
+    // The final exact stage enables validated bad-formula repair. Keep its
+    // batch size aligned with the per-output repair path instead of the broader
+    // initial PDR batching limit; otherwise a 32-output BlackParrot slice can
+    // choose a monolithic whole-batch BMC validation before it ever splits into
+    // local output repairs.
+    constexpr size_t kMaxFinalExactPdrOutputBatchSize = 16;  // LCOV_EXCL_LINE
     // The final exact repair already carries exact frame clauses and validated
-    // bad-formula clauses. Keeping predecessor cubes at 16 literals avoids the
-    // BlackParrot 32-literal sibling-enumeration wall while retaining enough
-    // context for the exact final stage to close the proof.
+    // bad-formula clauses. Keeping both predecessor and bad cubes bounded avoids
+    // large single-output loops from enumerating thousands of sibling cubes.
     constexpr size_t kFinalExactPdrPredecessorProjectionLimit = 16;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrBadCubeStateLimit = 32;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrRootGeneralizationAttempts = 0;  // LCOV_EXCL_LINE
@@ -2266,7 +2295,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // whose cones were already classified as skipped by extraction.
   AlignedSecInterface aligned;
   try {
-    aligned = alignSecInterface(model0, model1, secDiagEnabled);
+    aligned = alignSecInterface(model0, model1, solverType_, secDiagEnabled);
   } catch (const std::exception& e) {
     return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,
@@ -2290,10 +2319,11 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   if (secDiagEnabled) {
     printf(
         "SEC diag: aligned_inputs=%zu aligned_outputs=%zu inductive_state_equalities=%zu "
-        "state_bits0=%zu state_bits1=%zu\n",
+        "reset_bootstrap_candidate_equalities=%zu state_bits0=%zu state_bits1=%zu\n",
         aligned.inputs.names.size(),
         aligned.outputs.names.size(),
         aligned.inductiveStateEqualities.names.size(),
+        aligned.resetBootstrapCandidateStateEqualities.names.size(),
         model0.stateBits.size(),
         model1.stateBits.size());
     fflush(stdout);
@@ -2359,6 +2389,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       model1,
       aligned.inputs,
       aligned.inductiveStateEqualities,
+      aligned.resetBootstrapCandidateStateEqualities,
       symbolSpace.state0Symbols,
       symbolSpace.state1Symbols,
       symbolSpace.problem,

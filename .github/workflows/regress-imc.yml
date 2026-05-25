@@ -49,6 +49,10 @@ jobs:
       working-directory: ${{github.workspace}}
       run: git clone https://github.com/keplertech/kepler-formal-regress
 
+    - name: Clone kepler-formal-examples
+      working-directory: ${{github.workspace}}
+      run: git clone https://github.com/keplertech/kepler-formal-examples
+
     - name: Run external SEC regressions
       working-directory: ${{github.workspace}}
       run: |
@@ -81,6 +85,22 @@ jobs:
           "${{github.workspace}}/kepler-formal-regress/ihp-sg13g2_i2c-gpio-expander" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          nangate45_dynamic_node \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_dynamic_node" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          asap7_jpeg_lvt \
+          "${{github.workspace}}/kepler-formal-examples/asap7_jpeg_lvt" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
           expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }}

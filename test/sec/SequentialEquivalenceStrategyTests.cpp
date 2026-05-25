@@ -3988,7 +3988,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantSkipsSameNamedStartupPairWithConflictingInit) {
+       ReachableStateInvariantDoesNotInferStartupPairsFromInternalNames) {
   const SignalKey state0 = makeSignalKey("state0");
   const SignalKey state1 = makeSignalKey("state1");
 
@@ -4739,7 +4739,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantDerivesBootstrapEqualityFromSameNamedResetlessState) {
+       ReachableStateInvariantDoesNotUseInternalNamesForResetlessBootstrapState) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey structural0 = makeSignalKey("structural0");
@@ -4776,10 +4776,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   alignedInputs.keys0 = {rst0};
   alignedInputs.keys1 = {rst1};
 
-  // This mirrors post-resize AES: only a small structural guard was inferred as
-  // inductive, while same-named resetless flops still represent the same
-  // startup state. If reset propagation proves the equality survives the
-  // bootstrap window, SEC can safely use it at the first checked frame too.
+  // Internal state names are diagnostic only.  Even when a resetless flop has
+  // the same display name on both sides, SEC may not add that pair unless the
+  // structural/semantic matcher already supplied it.
   AlignedSignals inductiveStates;
   inductiveStates.names = {"u_guard.q[0]"};
   inductiveStates.keys0 = {structural0};
@@ -4789,21 +4788,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
       buildReachableStateInvariant(model0, model1, alignedInputs, inductiveStates);
 
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 2u);
+  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
   EXPECT_NE(
       std::find(
           invariant.initialStateCorrespondence.names.begin(),
           invariant.initialStateCorrespondence.names.end(),
-          "text_out[0]$_DFF_P_.QN[0]"),
+          "u_guard.q[0]"),
       invariant.initialStateCorrespondence.names.end());
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 2u);
+  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
   EXPECT_NE(
       std::find(
           invariant.anchoredStateEqualities.names.begin(),
           invariant.anchoredStateEqualities.names.end(),
           "u_guard.q[0]"),
       invariant.anchoredStateEqualities.names.end());
-  EXPECT_NE(
+  EXPECT_EQ(
       std::find(
           invariant.anchoredStateEqualities.names.begin(),
           invariant.anchoredStateEqualities.names.end(),
@@ -4860,9 +4859,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   alignedInputs.keys1 = {rst1, in1};
 
   AlignedSignals inductiveStates;
-  inductiveStates.names = {"u_guard.q[0]"};
-  inductiveStates.keys0 = {structural0};
-  inductiveStates.keys1 = {structural1};
+  inductiveStates.names = {"u_guard.q[0]", "state_q[0]"};
+  inductiveStates.keys0 = {structural0, resetless0};
+  inductiveStates.keys1 = {structural1, resetless1};
 
   const auto invariant =
       buildReachableStateInvariant(model0, model1, alignedInputs, inductiveStates);
@@ -5273,26 +5272,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ResetExpressionProofProfileDisablesSpeculativePreprocessingForModerateProofs) {
-  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
-  solver.configureForSecResetExpressionProof(/*coneSymbols=*/1000);
-
-  // Sampling on AES PDR showed moderate reset-expression UNSAT checks spending
-  // their wall time in Kissat's probe/sweep/kitten preprocessing. These checks
-  // are short-lived local proofs, so the PDR profile should avoid speculative
-  // simplification even below the generic large-cone threshold.
-  auto* kissatSolver = static_cast<kissat*>(solver.getSolver());
-  EXPECT_EQ(kissat_get_option(kissatSolver, "preprocess"), 0);
-  EXPECT_EQ(kissat_get_option(kissatSolver, "simplify"), 0);
-  EXPECT_EQ(kissat_get_option(kissatSolver, "preprocesscongruence"), 0);
-  EXPECT_EQ(kissat_get_option(kissatSolver, "preprocessprobe"), 0);
-  EXPECT_EQ(kissat_get_option(kissatSolver, "congruence"), 0);
-  EXPECT_EQ(kissat_get_option(kissatSolver, "probe"), 0);
-  EXPECT_EQ(kissat_get_option(kissatSolver, "probeinit"), 0);
-  EXPECT_EQ(kissat_get_option(kissatSolver, "eliminateinit"), 0);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        KissatResourceLimitedSolveReportsUnknownInsteadOfUnsat) {
   SATSolverWrapper limitedSolver(KEPLER_FORMAL::Config::SolverType::KISSAT);
   limitedSolver.configureForSecResetExpressionProof();
@@ -5340,37 +5319,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(witness->inputTrace[0].frame, 0u);
   ASSERT_EQ(witness->outputMismatches.size(), 1u);
   EXPECT_EQ(witness->outputMismatches[0].signal, "out");
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       BaseCaseSolverExistenceFrontierKeepsMultiOutputBatchTogether) {
-  KInductionProblem problem;
-  problem.observedOutputNames = {"out0", "out1"};
-  problem.inputSymbols = {2, 3};
-  problem.allSymbols = {2, 3};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(3)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(2), BoolExpr::Var(3)};
-  problem.property = BoolExpr::And(
-      makeEqualityExpr(problem.observedOutputExprs0[0],
-                       problem.observedOutputExprs1[0]),
-      makeEqualityExpr(problem.observedOutputExprs0[1],
-                       problem.observedOutputExprs1[1]));
-  problem.bad = BoolExpr::Not(problem.property);
-
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  EXPECT_FALSE(hasBaseCounterexampleAtFrontier(
-      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  size_t diagCount = 0;
-  size_t pos = 0;
-  while ((pos = stderrOutput.find("SEC diag: k-induction base coi", pos)) !=
-         std::string::npos) {
-    ++diagCount;
-    ++pos;
-  }
-  EXPECT_EQ(diagCount, 1u) << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

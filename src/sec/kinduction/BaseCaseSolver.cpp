@@ -11,6 +11,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "common/SecDiag.h"
 #include "kinduction/SatEncoding.h"
@@ -69,6 +70,43 @@ constexpr size_t kMaxSparseResetFrontierPerStepChecks = 2;
 // Keep exact hints for local cones and skip the prepass for ASIC-sized groups;
 // the encoder still grows its cache geometrically while emitting the same CNF.
 constexpr size_t kMaxExactTransitionNodeCountHintTargets = 512;
+
+void mixHashValue(size_t& seed, size_t value) {
+  seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+}
+
+struct ResetFrontierSolverCacheKey {
+  KEPLER_FORMAL::Config::SolverType solverType =
+      KEPLER_FORMAL::Config::SolverType::KISSAT;
+  size_t targetFrame = 0;
+  bool includeCubeValues = false;
+  std::vector<size_t> cubeSymbols;
+  std::vector<std::pair<size_t, bool>> cubeLiterals;
+
+  bool operator==(const ResetFrontierSolverCacheKey& other) const {
+    return solverType == other.solverType &&
+           targetFrame == other.targetFrame &&
+           includeCubeValues == other.includeCubeValues &&
+           cubeSymbols == other.cubeSymbols &&
+           cubeLiterals == other.cubeLiterals;
+  }
+};
+
+struct ResetFrontierSolverCacheKeyHash {
+  size_t operator()(const ResetFrontierSolverCacheKey& key) const {
+    size_t seed = std::hash<int>()(static_cast<int>(key.solverType));
+    mixHashValue(seed, std::hash<size_t>()(key.targetFrame));
+    mixHashValue(seed, std::hash<bool>()(key.includeCubeValues));
+    for (const size_t symbol : key.cubeSymbols) {
+      mixHashValue(seed, std::hash<size_t>()(symbol));
+    }
+    for (const auto& [symbol, value] : key.cubeLiterals) {
+      mixHashValue(seed, std::hash<size_t>()(symbol));
+      mixHashValue(seed, std::hash<bool>()(value));
+    }
+    return seed;
+  }
+};
 
 bool resetFrontierAssumptionSolvesDisabled() {
   return std::getenv("KEPLER_SEC_PDR_DISABLE_RESET_FRONTIER_ASSUMPTIONS") !=
@@ -230,13 +268,19 @@ struct ResetFrontierReachabilityContextData {
   // state symbols while refining projected counterexamples. Cache the unrolled
   // reset/bootstrap solver by frame and cube support, and vary only the cube
   // values through SAT assumptions.
-  mutable std::unordered_map<std::string, std::unique_ptr<CachedResetFrontierSolver>>
+  mutable std::unordered_map<
+      ResetFrontierSolverCacheKey,
+      std::unique_ptr<CachedResetFrontierSolver>,
+      ResetFrontierSolverCacheKeyHash>
       cachedSolvers;
   // Shared-prefix reset-frontier queries check one cube against every concrete
   // post-bootstrap frame up to a depth. The COI depends only on the cube
   // symbols and max frame, so cache that exact solver separately from the
   // single-frontier cache and vary literal values through assumptions.
-  mutable std::unordered_map<std::string, std::unique_ptr<CachedResetFrontierSolver>>
+  mutable std::unordered_map<
+      ResetFrontierSolverCacheKey,
+      std::unique_ptr<CachedResetFrontierSolver>,
+      ResetFrontierSolverCacheKeyHash>
       cachedPrefixSolvers;
   // Exact reset-frontier UNSAT cores are reusable across neighboring cubes:
   // once core C is proven unreachable, every later cube containing C is also
@@ -250,7 +294,10 @@ struct ResetFrontierReachabilityContextData {
   // The reset-summary precheck is often asked about neighboring cubes that
   // share the same support at the same post-bootstrap depth. Its COI is
   // support-only, so cache it separately from SAT solvers and vary values later.
-  mutable std::unordered_map<std::string, CachedResetSummaryCoi>
+  mutable std::unordered_map<
+      ResetFrontierSolverCacheKey,
+      CachedResetSummaryCoi,
+      ResetFrontierSolverCacheKeyHash>
       cachedResetSummaryCois;
 };
 
@@ -984,16 +1031,6 @@ void addComplementedStateRelations(
   }
 }
 
-void addStateCubeAssumptions(SATSolverWrapper& solver,
-                             const FrameVariableStore& variables,
-                             const std::vector<std::pair<size_t, bool>>& cube,
-                             size_t frame) {
-  for (const auto& [symbol, value] : cube) {
-    solver.addClause({value ? variables.getLiteral(symbol, frame)
-                            : -variables.getLiteral(symbol, frame)});
-  }
-}
-
 void addBlockedStateCubeClause(SATSolverWrapper& solver,
                                const FrameVariableStore& variables,
                                const std::vector<std::pair<size_t, bool>>& cube,
@@ -1415,20 +1452,6 @@ findBaseCounterexampleAtFrontier(
   return findBaseCounterexampleImpl(problem, solverType, k, k);
 }
 
-bool hasBaseCounterexampleAtFrontier(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t k) {
-  return findBaseCounterexampleImpl(
-      problem,
-      solverType,
-      k,
-      k,
-      /*localizeMultiOutputFrontier=*/false,
-      BaseCaseSolverProfile::PdrValidation)
-      .has_value();
-}
-
 bool provesNoBaseCounterexampleAtFrontier(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -1527,26 +1550,19 @@ std::vector<std::pair<size_t, bool>> sortedCubeLiterals(  // LCOV_EXCL_LINE
   return cube;  // LCOV_EXCL_LINE
 }
 
-std::string resetFrontierSolverCacheKey(
+ResetFrontierSolverCacheKey resetFrontierSolverCacheKey(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t targetFrame,
     const std::vector<std::pair<size_t, bool>>& cube,
     bool includeCubeValues) {
-  std::string key = std::to_string(static_cast<int>(solverType));
-  key.push_back('|');
-  key.append(std::to_string(targetFrame));
+  ResetFrontierSolverCacheKey key;
+  key.solverType = solverType;
+  key.targetFrame = targetFrame;
+  key.includeCubeValues = includeCubeValues;
   if (includeCubeValues) {
-    for (const auto& [symbol, value] : sortedCubeLiterals(cube)) {  // LCOV_EXCL_LINE
-      key.push_back('|');  // LCOV_EXCL_LINE
-      key.append(std::to_string(symbol));  // LCOV_EXCL_LINE
-      key.push_back('=');  // LCOV_EXCL_LINE
-      key.push_back(value ? '1' : '0');  // LCOV_EXCL_LINE
-    }
+    key.cubeLiterals = sortedCubeLiterals(cube);  // LCOV_EXCL_LINE
   } else {  // LCOV_EXCL_LINE
-    for (const auto symbol : sortedCubeSymbols(cube)) {
-      key.push_back('|');
-      key.append(std::to_string(symbol));
-    }
+    key.cubeSymbols = sortedCubeSymbols(cube);
   }
   return key;
 }
@@ -1555,7 +1571,7 @@ const CachedResetSummaryCoi& getCachedResetSummaryCubeReachabilityCoi(
     const ResetFrontierReachabilityContextData& data,
     size_t postBootstrapSteps,
     const std::vector<std::pair<size_t, bool>>& cube) {
-  const std::string key =
+  const ResetFrontierSolverCacheKey key =
       resetFrontierSolverCacheKey(
           KEPLER_FORMAL::Config::SolverType::KISSAT,
           postBootstrapSteps,
@@ -2141,7 +2157,7 @@ CachedResetFrontierSolver& getCachedResetFrontierPrefixSolver(  // LCOV_EXCL_LIN
     size_t maxTargetFrame) {
   const auto cachedSolverType =  // LCOV_EXCL_LINE
       SATSolverWrapper::assumptionSolverTypeFor(solverType);  // LCOV_EXCL_LINE
-  const std::string key =
+  const ResetFrontierSolverCacheKey key =
       resetFrontierSolverCacheKey(  // LCOV_EXCL_LINE
           cachedSolverType,  // LCOV_EXCL_LINE
           maxTargetFrame,  // LCOV_EXCL_LINE
@@ -2620,7 +2636,7 @@ CachedResetFrontierSolver& getCachedResetFrontierSolver(
   const bool encodeCubeAsUnitClauses = false;
   const auto cachedSolverType =
       SATSolverWrapper::assumptionSolverTypeFor(solverType);
-  const std::string key =
+  const ResetFrontierSolverCacheKey key =
       resetFrontierSolverCacheKey(
           cachedSolverType, targetFrame, cube, encodeCubeAsUnitClauses);
   if (const auto it = data.cachedSolvers.find(key);

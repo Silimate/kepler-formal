@@ -351,44 +351,6 @@ BuiltObservedExpr buildObservedExprForTerm(  // LCOV_EXCL_LINE
   return buildRecursively(buildRecursively, termID);  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
-std::unordered_set<naja::DNL::DNLID> collectRequiredSequentialOutputTerms(
-    const std::vector<PendingTransition>& pendingTransitions) {
-  std::unordered_set<naja::DNL::DNLID> requiredTerms;
-  for (const auto& pending : pendingTransitions) {
-    for (const auto& [_, candidates] : pending.pinTermIDs) {
-      for (const auto& candidate : candidates) {
-        requiredTerms.insert(candidate.termID);
-      }
-    }
-  }
-  return requiredTerms;
-}
-
-std::vector<naja::DNL::DNLID> selectRequiredBuilderOutputs(
-    const std::vector<naja::DNL::DNLID>& collectedOutputs,
-    const std::unordered_set<naja::DNL::DNLID>& topOutputTerms,
-    const std::unordered_set<naja::DNL::DNLID>& sequentialDependencyTerms,
-    const std::unordered_set<naja::DNL::DNLID>& prunedBuilderOutputTerms) {
-  std::vector<naja::DNL::DNLID> filteredOutputs;
-  filteredOutputs.reserve(collectedOutputs.size());
-
-  // Only materialize formulas that SEC will consume: user-visible outputs and
-  // the update/control terms required to reconstruct supported sequentials.
-  for (const auto outputTermID : collectedOutputs) {
-    if (prunedBuilderOutputTerms.find(outputTermID) !=
-        prunedBuilderOutputTerms.end()) {
-      continue;
-    }
-    if (topOutputTerms.find(outputTermID) != topOutputTerms.end() ||
-        sequentialDependencyTerms.find(outputTermID) !=
-            sequentialDependencyTerms.end()) {
-      filteredOutputs.push_back(outputTermID);
-    }
-  }
-
-  return filteredOutputs;
-}
-
 struct MaterializedBuilderOutputs {
   std::vector<naja::DNL::DNLID> inputs;
   std::vector<naja::DNL::DNLID> outputs;
@@ -1010,11 +972,6 @@ BoolExpr* buildAddressEqualsExpr(
   return makeAndChain(equalities);
 }
 
-bool isConstBoolExpr(BoolExpr* expr, bool value) {
-  return expr != nullptr && expr->getOp() == Op::VAR &&
-         expr->getId() == static_cast<size_t>(value ? 1 : 0);
-}
-
 std::optional<bool> evaluateConstantUnderAssignments(
     BoolExpr* expr,
     const std::unordered_map<size_t, bool>& assignments,
@@ -1110,6 +1067,9 @@ std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   // `reset_i[0]` and `rst_ni[0]` are classified consistently end-to-end.
   const std::string normalized = normalizeSignalBaseName(displayName);
   std::vector<std::string> candidates = {normalized};
+  if (hasSuffix(normalized, "_IN")) {
+    candidates.push_back(normalized.substr(0, normalized.size() - 3));
+  }
   if (hasSuffix(normalized, "_I")) {
     candidates.push_back(normalized.substr(0, normalized.size() - 2));
   }
@@ -2466,7 +2426,6 @@ void buildStructuredMemoryTransitions(
       }
       BoolExpr* next = BoolExpr::Var(varIt->second);
       for (size_t portIndex = 0; portIndex < pendingMemory.writePorts.size(); ++portIndex) {
-        const auto& writePort = pendingMemory.writePorts[portIndex];
         const auto& exprs = writePortExprs[portIndex];
         if (exprs.disabled) {
           continue;  // LCOV_EXCL_LINE

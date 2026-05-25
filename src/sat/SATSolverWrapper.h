@@ -459,19 +459,6 @@ public:
     return lit > 0 ? positiveValue : !positiveValue;
   }
 
-  void* getSolver() {
-    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
-      return glucoseSolver_.get();  // LCOV_EXCL_LINE
-    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
-      return kissatSolver_;
-    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {  // LCOV_EXCL_LINE
-      return cadicalSolver_.get();  // LCOV_EXCL_LINE
-    }
-    return nullptr;  // LCOV_EXCL_LINE
-  }
-
-  KEPLER_FORMAL::Config::SolverType getSolverType() const { return solverType_; }
-
   void configureForSecConeProof(size_t coneSymbols = 0) {
     if (solverType_ != KEPLER_FORMAL::Config::SolverType::KISSAT) {
       return;  // LCOV_EXCL_LINE

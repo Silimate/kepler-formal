@@ -20,6 +20,7 @@ struct ReachableStateInvariant {
   size_t bootstrapCycles = 0;
   AlignedSignals initialStateCorrespondence;
   AlignedSignals anchoredStateEqualities;
+  AlignedSignals bootstrapOnlyStateEqualities;
   std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues0;
   std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues1;
 };
@@ -33,6 +34,7 @@ ReachableStateInvariant buildReachableStateInvariant(
     bool secDiagEnabled = false,
     KEPLER_FORMAL::Config::SolverType solverType =
         KEPLER_FORMAL::Config::getSolverType(),
-    bool deriveResetBootstrapEqualities = true);
+    bool deriveResetBootstrapEqualities = true,
+    const AlignedSignals& resetBootstrapCandidateEqualities = {});
 
 }  // namespace KEPLER_FORMAL::SEC
