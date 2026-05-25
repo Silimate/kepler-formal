@@ -815,18 +815,61 @@ bool isSequentialNextStateInput(const naja::DNL::DNLTerminalFull& term) {
 }
 
 bool isOptionalSequentialControlPin(const std::string& pinName) {
-  return pinName == "E" || pinName == "R" || pinName == "RN" || pinName == "S";
+  return pinName == "E" || pinName == "DE" || pinName == "R" ||
+         pinName == "RN" || pinName == "RESET_B" ||
+         pinName == "RESET_N" || pinName == "RESETN" ||
+         pinName == "RST_B" || pinName == "RST_N" ||
+         pinName == "RSTN" || pinName == "S" ||
+         pinName == "SET_B" || pinName == "SET_N" ||
+         pinName == "SETN";
 }
 
 bool isSupportedSequentialUpdatePin(const std::string& pinName) {
   return pinName == "D" || isOptionalSequentialControlPin(pinName);
 }
 
+std::optional<naja::DNL::DNLID> resolvePendingPinRoleTermID(
+    const PendingTransition& pending,
+    const char* roleName) {
+  auto resolvedTermID = resolvePendingPinTermID(pending, roleName);
+  if (resolvedTermID.has_value()) {
+    return resolvedTermID;
+  }
+
+  const std::string role(roleName);
+  if (role == "E") {
+    // sky130 spells an enabled flop's data enable as DE while the generic SEC
+    // transition builder uses E for hold semantics.
+    return resolvePendingPinTermID(pending, "DE");
+  }
+  if (role == "RN") {
+    // Active-low reset pins appear under several Liberty naming conventions.
+    // Treat them as the same control role, without introducing any equality
+    // assumptions between internal state bits.
+    for (const char* alias : {"RESET_B", "RESET_N", "RESETN", "RST_B",
+                              "RST_N", "RSTN"}) {
+      resolvedTermID = resolvePendingPinTermID(pending, alias);
+      if (resolvedTermID.has_value()) {
+        return resolvedTermID;
+      }
+    }
+  }
+  if (role == "SN") {
+    for (const char* alias : {"SET_B", "SET_N", "SETN"}) {
+      resolvedTermID = resolvePendingPinTermID(pending, alias);
+      if (resolvedTermID.has_value()) {
+        return resolvedTermID;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 BoolExpr* getRequiredOutputExpr(
     const PendingTransition& pending,
     const char* pinName,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
-  const auto resolvedTermID = resolvePendingPinTermID(pending, pinName);
+  auto resolvedTermID = resolvePendingPinRoleTermID(pending, pinName);
   if (!resolvedTermID.has_value()) {
     return nullptr;
   }
@@ -851,9 +894,10 @@ void validatePendingTransitionShape(const PendingTransition& pending) {
   }
 
   int controlKinds = 0;
-  controlKinds += resolvePendingPinTermID(pending, "R").has_value() ? 1 : 0;
-  controlKinds += resolvePendingPinTermID(pending, "RN").has_value() ? 1 : 0;
-  controlKinds += resolvePendingPinTermID(pending, "S").has_value() ? 1 : 0;
+  controlKinds += resolvePendingPinRoleTermID(pending, "R").has_value() ? 1 : 0;
+  controlKinds += resolvePendingPinRoleTermID(pending, "RN").has_value() ? 1 : 0;
+  controlKinds += resolvePendingPinRoleTermID(pending, "S").has_value() ? 1 : 0;
+  controlKinds += resolvePendingPinRoleTermID(pending, "SN").has_value() ? 1 : 0;
   if (controlKinds > 1) {
     throw std::runtime_error(
         "Unsupported sequential primitive with multiple control styles");
@@ -894,11 +938,14 @@ BoolExpr* buildNextStateExpr(
       getRequiredOutputExpr(pending, "RN", outputExprByTerm);
   const BoolExpr* setHigh =
       getRequiredOutputExpr(pending, "S", outputExprByTerm);
+  const BoolExpr* setLow =
+      getRequiredOutputExpr(pending, "SN", outputExprByTerm);
 
   int controlKinds = 0;
   controlKinds += resetHigh != nullptr ? 1 : 0;
   controlKinds += resetLow != nullptr ? 1 : 0;
   controlKinds += setHigh != nullptr ? 1 : 0;
+  controlKinds += setLow != nullptr ? 1 : 0;
   if (controlKinds > 1) {
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Unsupported sequential primitive with multiple control styles");
@@ -914,20 +961,26 @@ BoolExpr* buildNextStateExpr(
     next = BoolExpr::Or(
         const_cast<BoolExpr*>(setHigh),
         BoolExpr::And(BoolExpr::Not(const_cast<BoolExpr*>(setHigh)), next));
+  } else if (setLow) {
+    next = BoolExpr::Or(
+        BoolExpr::Not(const_cast<BoolExpr*>(setLow)),
+        BoolExpr::And(const_cast<BoolExpr*>(setLow), next));
   }
 
   return next;
 }  // LCOV_EXCL_LINE
 
 std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
-  const bool hasResetHigh = resolvePendingPinTermID(pending, "R").has_value();
-  const bool hasResetLow = resolvePendingPinTermID(pending, "RN").has_value();
-  const bool hasSetHigh = resolvePendingPinTermID(pending, "S").has_value();
+  const bool hasResetHigh = resolvePendingPinRoleTermID(pending, "R").has_value();
+  const bool hasResetLow = resolvePendingPinRoleTermID(pending, "RN").has_value();
+  const bool hasSetHigh = resolvePendingPinRoleTermID(pending, "S").has_value();
+  const bool hasSetLow = resolvePendingPinRoleTermID(pending, "SN").has_value();
 
   int controlKinds = 0;
   controlKinds += hasResetHigh ? 1 : 0;
   controlKinds += hasResetLow ? 1 : 0;
   controlKinds += hasSetHigh ? 1 : 0;
+  controlKinds += hasSetLow ? 1 : 0;
   if (controlKinds > 1) {
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Unsupported sequential primitive with multiple control styles");
@@ -936,7 +989,7 @@ std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
   if (hasResetHigh || hasResetLow) {
     return false;
   }
-  if (hasSetHigh) {
+  if (hasSetHigh || hasSetLow) {
     return true;
   }
   return std::nullopt;
@@ -1474,19 +1527,26 @@ std::optional<SequentialInstanceScan> scanSequentialInstance(
        termID <= instance.getTermIndexes().second;
        ++termID) {
     const auto& term = naja::DNL::get()->getDNLTerminalFromID(termID);
+    const std::string normalizedPinName =
+        normalizePinName(term.getSnlBitTerm()->getName().getString());
     if (isSequentialStateOutput(term) &&
         term.getSnlBitTerm()->getDirection() !=
             naja::NL::SNLBitTerm::Direction::Input) {
       scan.stateOutputs.push_back(
           {termID,
-           normalizePinName(term.getSnlBitTerm()->getName().getString()),
+           normalizedPinName,
            term.getSnlBitTerm()->getBit()});
     }
-    if (isSequentialNextStateInput(term) &&
+    // Some Liberty readers expose async set/reset pins as control timing arcs
+    // rather than data-to-clock arcs.  If the cell is sequential and the pin
+    // name is a supported control role, include it explicitly so reset
+    // semantics are modeled instead of leaving the flop unconstrained.
+    if ((isSequentialNextStateInput(term) ||
+         isOptionalSequentialControlPin(normalizedPinName)) &&
         term.getSnlBitTerm()->getDirection() !=
             naja::NL::SNLBitTerm::Direction::Output) {
-      scan.pinTermIDs[normalizePinName(term.getSnlBitTerm()->getName().getString())]
-          .push_back({termID, term.getSnlBitTerm()->getBit()});
+      scan.pinTermIDs[normalizedPinName].push_back(
+          {termID, term.getSnlBitTerm()->getBit()});
     }
   }
 

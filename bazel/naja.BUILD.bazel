@@ -1,6 +1,23 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
 
+NAJA_CMAKE_CACHE_ENTRIES = {
+    "CMAKE_CXX_STANDARD": "20",
+    "BUILD_NAJA_PYTHON": "OFF",
+    "BUILD_ONLY_DOC": "OFF",
+    "BUILD_BENCHMARKS": "OFF",
+    "CODE_COVERAGE": "OFF",
+    "ENABLE_SANITIZERS": "OFF",
+    # rules_foreign_cc sandbox doesn't propagate implicit libs for executables.
+    "CMAKE_EXE_LINKER_FLAGS": "-lstdc++ -lm",
+}
+
+NAJA_MACOS_CMAKE_CACHE_ENTRIES = dict(
+    NAJA_CMAKE_CACHE_ENTRIES,
+    BISON_EXECUTABLE = "/opt/homebrew/opt/bison/bin/bison",
+    FLEX_EXECUTABLE = "/opt/homebrew/opt/flex/bin/flex",
+)
+
 filegroup(
     name = "all_srcs",
     srcs = glob(["src/**"]),
@@ -35,16 +52,10 @@ cmake(
         "libyosys_liberty.a",
     ],
     build_args = ["-j2"],
-    cache_entries = {
-        "CMAKE_CXX_STANDARD": "20",
-        "BUILD_NAJA_PYTHON": "OFF",
-        "BUILD_ONLY_DOC": "OFF",
-        "BUILD_BENCHMARKS": "OFF",
-        "CODE_COVERAGE": "OFF",
-        "ENABLE_SANITIZERS": "OFF",
-        # rules_foreign_cc sandbox doesn't propagate implicit libs for executables
-        "CMAKE_EXE_LINKER_FLAGS": "-lstdc++ -lm",
-    },
+    cache_entries = select({
+        "@platforms//os:macos": NAJA_MACOS_CMAKE_CACHE_ENTRIES,
+        "//conditions:default": NAJA_CMAKE_CACHE_ENTRIES,
+    }),
     # Copy static libs that cmake builds but doesn't install
     # (naja_nl_dump has no install() command; naja_verilog's is guarded by PROJECT_IS_TOP_LEVEL)
     postfix_script = " && ".join([

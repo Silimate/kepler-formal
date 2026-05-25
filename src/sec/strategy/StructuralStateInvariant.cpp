@@ -38,6 +38,7 @@ constexpr size_t kDefaultResetBootstrapOutputCoiStatePairs =
     kMaxSatValidatedOrderedCoiStatePairs;
 constexpr size_t kMaxSatValidatedOrderedPairSupport = 8192;
 constexpr size_t kMaxOrderedCoiExpansionPasses = 64;
+constexpr unsigned kSatValidatedStructuralConflictLimit = 256;
 
 using KEPLER_FORMAL::BoolExpr;
 using FingerprintMemo = std::pmr::unordered_map<BoolExpr*, uint64_t>;
@@ -206,10 +207,12 @@ bool areSatEquivalentUnderAbstractMaps(
     std::unordered_map<BoolExpr*, BoolExpr*> memo1;
     BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
     BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
-    return boolFormulaImplies(
+    const auto implied = boolFormulaImpliesWithConflictLimit(
         BoolExpr::createTrue(),
         makeEqualityExpr(remapped0, remapped1),
-        solverType);
+        solverType,
+        kSatValidatedStructuralConflictLimit);
+    return implied.value_or(false);
   } catch (const std::runtime_error&) {
     return false;
   }

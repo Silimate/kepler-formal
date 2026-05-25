@@ -4535,9 +4535,19 @@ void addTransitionRelationForTargets(
     std::unordered_map<size_t, int>* encodedLeafLits = nullptr) {
   for (const auto& group :
        groupTransitionTargetsBySymbolMap(transitionByState, encodedTargets)) {
+    std::unordered_map<size_t, int> leafLits;
+    try {
+      leafLits = variables.makeLeafLits(frame, supportSymbols);
+    } catch (const std::runtime_error& error) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR transition leaf-map build failed at frame " +  // LCOV_EXCL_LINE
+          std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
+          std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
+          " support symbols: " + error.what());  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     FrameFormulaEncoder encoder(
         solver,
-        variables.makeLeafLits(frame, supportSymbols),
+        std::move(leafLits),
         group.symbolMap,
         createMissingTransitionLeaves,
         estimateTransitionEncodingNodes(transitionByState, group.stateSymbols));
@@ -4579,9 +4589,20 @@ void addTransitionConstraintsForTargetCube(
   (void)encodedTargets;
   for (const auto& group :
        groupTransitionCubeLiteralsBySymbolMap(transitionByState, targetCube)) {
+    std::unordered_map<size_t, int> leafLits;
+    try {
+      leafLits = variables.makeLeafLits(frame, supportSymbols);
+    } catch (const std::runtime_error& error) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR predecessor transition leaf-map build failed at frame " +  // LCOV_EXCL_LINE
+          std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
+          std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
+          " support symbols for target cube " +  // LCOV_EXCL_LINE
+          std::to_string(targetCube.size()) + ": " + error.what());  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     FrameFormulaEncoder encoder(
         solver,
-        variables.makeLeafLits(frame, supportSymbols),
+        std::move(leafLits),
         group.symbolMap,
         false,
         estimateTransitionEncodingNodes(transitionByState, group.stateSymbols));
@@ -4624,9 +4645,20 @@ std::vector<std::pair<int, CubeLiteral>> addTransitionAssumptionsForTargetCube(
   assumptions.reserve(targetCube.size());
   for (const auto& group :
        groupTransitionCubeLiteralsBySymbolMap(transitionByState, targetCube)) {
+    std::unordered_map<size_t, int> leafLits;
+    try {
+      leafLits = variables.makeLeafLits(frame, supportSymbols);
+    } catch (const std::runtime_error& error) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR predecessor core leaf-map build failed at frame " +  // LCOV_EXCL_LINE
+          std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
+          std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
+          " support symbols for target cube " +  // LCOV_EXCL_LINE
+          std::to_string(targetCube.size()) + ": " + error.what());  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     FrameFormulaEncoder encoder(
         solver,
-        variables.makeLeafLits(frame, supportSymbols),
+        std::move(leafLits),
         group.symbolMap,
         false,
         estimateTransitionEncodingNodes(transitionByState, group.stateSymbols));
@@ -6570,6 +6602,13 @@ void addStateClause(SATSolverWrapper& solver,
   std::vector<int> satClause;
   satClause.reserve(clause.size());
   for (const auto& literal : clause) {
+    if (!variables.hasSymbol(literal.symbol)) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR frame-clause encoding missing symbol " +  // LCOV_EXCL_LINE
+          std::to_string(literal.symbol) + " at frame " +  // LCOV_EXCL_LINE
+          std::to_string(frame) + " in clause of size " +  // LCOV_EXCL_LINE
+          std::to_string(clause.size()));  // LCOV_EXCL_LINE
+    }
     const int satLiteral = variables.getLiteral(literal.symbol, frame);
     satClause.push_back(literal.positive ? satLiteral : -satLiteral);
   }
@@ -6681,6 +6720,13 @@ void addCubeAssumptions(SATSolverWrapper& solver,
                         const StateCube& cube,
                         size_t frame) {
   for (const auto& literal : cube) {
+    if (!variables.hasSymbol(literal.symbol)) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR cube-assumption encoding missing symbol " +  // LCOV_EXCL_LINE
+          std::to_string(literal.symbol) + " at frame " +  // LCOV_EXCL_LINE
+          std::to_string(frame) + " in cube of size " +  // LCOV_EXCL_LINE
+          std::to_string(cube.size()));  // LCOV_EXCL_LINE
+    }
     solver.addClause(
         {literal.value ? variables.getLiteral(literal.symbol, frame)
                        : -variables.getLiteral(literal.symbol, frame)});
@@ -6694,6 +6740,13 @@ void addNegatedCubeClause(SATSolverWrapper& solver,
   std::vector<int> satClause;
   satClause.reserve(cube.size());
   for (const auto& literal : cube) {
+    if (!variables.hasSymbol(literal.symbol)) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR negated-cube encoding missing symbol " +  // LCOV_EXCL_LINE
+          std::to_string(literal.symbol) + " at frame " +  // LCOV_EXCL_LINE
+          std::to_string(frame) + " in cube of size " +  // LCOV_EXCL_LINE
+          std::to_string(cube.size()));  // LCOV_EXCL_LINE
+    }
     const int satLiteral = variables.getLiteral(literal.symbol, frame);
     satClause.push_back(literal.value ? -satLiteral : satLiteral);
   }

@@ -45,6 +45,10 @@ public:
       glucoseSolver_->verbosity = -1;
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       kissatSolver_ = kissat_init();
+      // Embedded SEC runs can create thousands of short-lived Kissat queries.
+      // Keep those solver instances quiet so regressions are not dominated by
+      // progress-report I/O.
+      setKissatOptionOrThrow(static_cast<kissat*>(kissatSolver_), "quiet", 1);
       kissatNumVars_ = 0;
       kissatReservedVars_ = 0;
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
@@ -546,6 +550,41 @@ public:
     setKissatOptionOrThrow(solver, "probe", 0);
     setKissatOptionOrThrow(solver, "probeinit", 0);
     setKissatOptionOrThrow(solver, "eliminateinit", 0);
+  }
+
+  void configureForSecLocalBooleanCheck(size_t coneSymbols = 0) {
+    if (solverType_ != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      return;
+    }
+
+    auto* solver = static_cast<kissat*>(kissatSolver_);
+    // Local Boolean checks are short-lived validators used while building SEC
+    // invariants and output slices. They are not the main proof engine, and
+    // sampled sky130hs_ibex runs spent minutes in Kissat's speculative
+    // preprocessing before PDR even started. Keep these checks on a direct CDCL
+    // path; if the validator cannot decide quickly, the caller falls back to a
+    // weaker but still sound SEC obligation.
+    setKissatOptionOrThrow(solver, "stable", 0);
+    setKissatOptionOrThrow(solver, "target", 2);
+    setKissatOptionOrThrow(solver, "restartint", 10);
+    setKissatOptionOrThrow(solver, "restartreusetrail", 0);
+    setKissatOptionOrThrow(solver, "rephase", 0);
+    setKissatOptionOrThrow(solver, "walkeffort", 0);
+    setKissatOptionOrThrow(solver, "lucky", 0);
+    setKissatOptionOrThrow(solver, "luckyearly", 0);
+    setKissatOptionOrThrow(solver, "luckylate", 0);
+    setKissatOptionOrThrow(solver, "minimize", 0);
+    setKissatOptionOrThrow(solver, "shrink", 0);
+    setKissatOptionOrThrow(solver, "otfs", 0);
+    setKissatOptionOrThrow(solver, "preprocess", 0);
+    setKissatOptionOrThrow(solver, "simplify", 0);
+    setKissatOptionOrThrow(solver, "preprocesscongruence", 0);
+    setKissatOptionOrThrow(solver, "preprocessprobe", 0);
+    setKissatOptionOrThrow(solver, "congruence", 0);
+    setKissatOptionOrThrow(solver, "probe", 0);
+    setKissatOptionOrThrow(solver, "probeinit", 0);
+    setKissatOptionOrThrow(solver, "eliminateinit", 0);
+    (void)coneSymbols;
   }
 
   void configureForSecResetExpressionProof(size_t coneSymbols = 0) {

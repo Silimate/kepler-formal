@@ -761,6 +761,7 @@ bool secSummaryStatsEnabled() {
 }
 
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
+constexpr unsigned kLocalImplicationConflictLimit = 256;
 
 void emitPdrStrategyStageStats(
     bool enabled,
@@ -1260,7 +1261,9 @@ void buildSecPropertiesAndTransitions(
     // induction core already excludes every assignment that would violate it.
     // This catches Boolean-equivalent post-layout cones that are not
     // structurally identical under the fast abstract-map comparison.
-    if (boolFormulaImplies(inductionCore, outputEquality, solverType)) {
+    const auto impliedByInductionCore = boolFormulaImpliesWithConflictLimit(
+        inductionCore, outputEquality, solverType, kLocalImplicationConflictLimit);
+    if (impliedByInductionCore.value_or(false)) {
       ++satImpliedOutputCount;
       continue;
     }

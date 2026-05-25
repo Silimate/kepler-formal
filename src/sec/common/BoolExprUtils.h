@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include <unordered_map>
 
 #include "BoolExpr.h"
@@ -36,6 +37,12 @@ bool boolFormulaImplies(
     BoolExpr* assumptions,
     BoolExpr* conclusion,
     KEPLER_FORMAL::Config::SolverType solverType);
+
+std::optional<bool> boolFormulaImpliesWithConflictLimit(
+    BoolExpr* assumptions,
+    BoolExpr* conclusion,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    unsigned conflictLimit);
 
 inline BoolExpr* makeEqualityExpr(BoolExpr* lhs, BoolExpr* rhs) {
   return BoolExpr::Not(BoolExpr::Xor(lhs, rhs));

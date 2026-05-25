@@ -3,6 +3,7 @@
 
 #include "common/BoolExprUtils.h"
 
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -15,6 +16,39 @@ namespace {
 bool isBoolConst(BoolExpr* expr, bool value) {
   return expr != nullptr && expr->getOp() == Op::VAR &&
          expr->getId() == static_cast<size_t>(value ? 1 : 0);
+}
+
+SATSolverWrapper::SolveStatus solveBoolFormulaStatus(
+    BoolExpr* formula,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    std::optional<unsigned> conflictLimit) {
+  if (formula == nullptr || isBoolConst(formula, false)) {
+    return SATSolverWrapper::SolveStatus::Unsat;
+  }
+  if (isBoolConst(formula, true)) {
+    return SATSolverWrapper::SolveStatus::Sat;
+  }
+
+  SATSolverWrapper solver(solverType);
+  const auto support = formula->getSupportVars();
+  solver.configureForSecLocalBooleanCheck(support.size());
+  std::unordered_map<size_t, int> leafLits;
+  leafLits.reserve(support.size());
+  for (const auto symbol : support) {
+    if (symbol < 2) {
+      continue;
+    }
+    leafLits.emplace(symbol, solver.newVar() + 2);
+  }
+
+  FrameFormulaEncoder encoder(solver, std::move(leafLits));
+  solver.addClause({encoder.encode(formula)});
+  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+      conflictLimit.has_value()) {
+    return solver.solveWithKissatResourceLimits(
+        *conflictLimit, *conflictLimit);
+  }
+  return solver.solveStatus();
 }
 
 }  // namespace
@@ -185,27 +219,8 @@ BoolExpr* substituteBoolExprVariables(
 bool isBoolFormulaSatisfiable(
     BoolExpr* formula,
     KEPLER_FORMAL::Config::SolverType solverType) {
-  if (formula == nullptr || isBoolConst(formula, false)) {
-    return false;
-  }
-  if (isBoolConst(formula, true)) {
-    return true;
-  }
-
-  SATSolverWrapper solver(solverType);
-  const auto support = formula->getSupportVars();
-  std::unordered_map<size_t, int> leafLits;
-  leafLits.reserve(support.size());
-  for (const auto symbol : support) {
-    if (symbol < 2) {
-      continue;
-    }
-    leafLits.emplace(symbol, solver.newVar() + 2);
-  }
-
-  FrameFormulaEncoder encoder(solver, std::move(leafLits));
-  solver.addClause({encoder.encode(formula)});
-  return solver.solve();
+  return solveBoolFormulaStatus(formula, solverType, std::nullopt) ==
+         SATSolverWrapper::SolveStatus::Sat;
 }
 
 bool boolFormulaImplies(
@@ -223,6 +238,28 @@ bool boolFormulaImplies(
   // conclusion. If no such assignment exists, the implication is a theorem.
   return !isBoolFormulaSatisfiable(
       BoolExpr::And(assumptions, BoolExpr::Not(conclusion)), solverType);
+}
+
+std::optional<bool> boolFormulaImpliesWithConflictLimit(
+    BoolExpr* assumptions,
+    BoolExpr* conclusion,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    unsigned conflictLimit) {
+  if (conclusion == nullptr) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  if (isBoolConst(conclusion, true) || isBoolConst(assumptions, false)) {
+    return true;
+  }
+
+  const auto status = solveBoolFormulaStatus(
+      BoolExpr::And(assumptions, BoolExpr::Not(conclusion)),
+      solverType,
+      conflictLimit);
+  if (status == SATSolverWrapper::SolveStatus::Unknown) {
+    return std::nullopt;
+  }
+  return status == SATSolverWrapper::SolveStatus::Unsat;
 }
 
 }  // namespace KEPLER_FORMAL::SEC

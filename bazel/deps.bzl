@@ -10,6 +10,38 @@ replace the corresponding http_archive with a bazel_dep in MODULE.bazel.
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
+def _homebrew_tbb_repo_impl(repo_ctx):
+    """Expose Homebrew TBB headers to Bazel on macOS.
+
+    Linux builds keep using the compiler's system include/link paths.  On macOS,
+    Homebrew installs TBB outside Clang's default include search path, so a small
+    local repository is enough to make the headers visible without vendoring TBB.
+    """
+    for prefix in ["/opt/homebrew", "/usr/local"]:
+        if repo_ctx.path(prefix + "/include/tbb").exists:
+            repo_ctx.symlink(prefix + "/include", "include")
+            repo_ctx.file("BUILD.bazel", repo_ctx.read(repo_ctx.attr.build_file))
+            return
+
+    repo_ctx.file(
+        "BUILD.bazel",
+        """
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "tbb",
+    visibility = ["//visibility:public"],
+)
+""",
+    )
+
+homebrew_tbb_repo = repository_rule(
+    implementation = _homebrew_tbb_repo_impl,
+    attrs = {
+        "build_file": attr.label(mandatory = True),
+    },
+)
+
 def _naja_repo_impl(repo_ctx):
     """Repository rule that assembles naja from multiple archives.
 
@@ -116,6 +148,11 @@ _SLANG_COMMIT = "aedd7bc0394e5621340be94ed58def33d74ac677"
 _GOOGLETEST_COMMIT = "52eb8108c5bdec04579160ae17225d66034bd723"
 
 def _deps_impl(_module_ctx):
+    homebrew_tbb_repo(
+        name = "homebrew_tbb",
+        build_file = Label("//bazel:homebrew_tbb.BUILD.bazel"),
+    )
+
     http_archive(
         name = "cadical",
         url = "https://github.com/arminbiere/cadical/archive/{}.tar.gz".format(_CADICAL_COMMIT),

@@ -1119,9 +1119,25 @@ void addFormulaValuesToEnvironment(const SATSolverWrapper& solver,
     if (symbol < 2 || environment.find(symbol) != environment.end()) {
       continue;
     }
+    if (!variables.hasSymbol(symbol)) {
+      continue;
+    }
     environment.emplace(
         symbol, solver.getLiteralValue(variables.getLiteral(symbol, frame)));
   }
+}
+
+bool formulaSupportCoveredByVariables(const FrameVariableStore& variables,
+                                      BoolExpr* formula) {
+  if (formula == nullptr) {
+    return true;  // LCOV_EXCL_LINE
+  }
+  for (const auto symbol : formula->getSupportVars()) {
+    if (symbol >= 2 && !variables.hasSymbol(symbol)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 size_t findFirstBadFrame(const SATSolverWrapper& solver,
@@ -1176,6 +1192,10 @@ std::vector<KInductionResult::SignalMismatch> collectObservedOutputMismatches(
     size_t frame) {
   std::vector<KInductionResult::SignalMismatch> mismatches;
   for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
+    if (!formulaSupportCoveredByVariables(variables, problem.observedOutputExprs0[i]) ||
+        !formulaSupportCoveredByVariables(variables, problem.observedOutputExprs1[i])) {
+      continue;
+    }
     std::unordered_map<size_t, bool> environment;
     addFormulaValuesToEnvironment(
         solver, variables, problem.observedOutputExprs0[i], frame, environment);
@@ -1411,6 +1431,14 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
 
   if (!solver.solve()) {
     return std::nullopt;
+  }
+  if (solverProfile == BaseCaseSolverProfile::PdrValidationProofOnly) {
+    // PDR validation calls this mode only as a SAT/UNSAT oracle.  The COI can
+    // intentionally omit symbols needed for user-facing mismatch traces, so do
+    // not build a full witness when the caller only checks has_value().
+    KInductionResult::CounterexampleWitness witness;
+    witness.badFrame = firstBadFrame - bootstrapFrames;
+    return witness;
   }
   return buildCounterexampleWitness(
       solver, variables, problem, firstBadFrame, lastBadFrame, bootstrapFrames);

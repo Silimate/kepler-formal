@@ -104,6 +104,14 @@ jobs:
           expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          sky130hs_ibex \
+          "${{github.workspace}}/kepler-formal-examples/sky130hs_ibex" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-different \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}
