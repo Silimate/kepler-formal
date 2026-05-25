@@ -77,6 +77,18 @@ int runWithArgs(std::vector<std::string> args) {
 
 std::filesystem::path findBuiltNajaModuleDir() {
   const auto root = repoRoot();
+  const auto najaModuleSuffix =
+      std::filesystem::path("thirdparty/naja/src/nl/python/naja_wrapping");
+  for (auto cursor = std::filesystem::current_path(); !cursor.empty();
+       cursor = cursor.parent_path()) {
+    const auto candidate = cursor / najaModuleSuffix;
+    if (std::filesystem::exists(candidate / "naja.so")) {
+      return candidate;
+    }
+    if (cursor == cursor.root_path()) {
+      break;
+    }
+  }
   const std::vector<std::filesystem::path> candidates = {
       root / "build/thirdparty/naja/src/nl/python/naja_wrapping",
       root / "buildD/thirdparty/naja/src/nl/python/naja_wrapping",

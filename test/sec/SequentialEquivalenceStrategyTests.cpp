@@ -6166,9 +6166,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       KInductionEngineBatchesSmallOutputProofs) {
+       KInductionEngineBatchesWideOutputProofs) {
   KInductionProblem problem;
-  for (size_t i = 0; i < 40; ++i) {
+  for (size_t i = 0; i < 129; ++i) {
     const size_t symbol = 2 + i;
     problem.allSymbols.push_back(symbol);
     problem.observedOutputNames.push_back("out" + std::to_string(i));
@@ -6191,8 +6191,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   }
 
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
-  EXPECT_EQ(baseChecks, 2u);
-  EXPECT_NE(stderrOutput.find("SEC diag: k-induction problem outputs=40"),
+  EXPECT_EQ(baseChecks, 5u);
+  EXPECT_NE(stderrOutput.find("SEC diag: k-induction problem outputs=129"),
             std::string::npos);
 }
 

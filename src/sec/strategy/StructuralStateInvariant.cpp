@@ -340,140 +340,6 @@ bool areAllOrderedStatesSatEquivalent(
   return true;
 }
 
-struct PathNameIDGroup {
-  size_t firstIndex = std::numeric_limits<size_t>::max();
-  size_t count = 0;
-};
-
-using PathNameIDGroups =
-    std::map<KEPLER_FORMAL::BuildPrimaryOutputClauses::PathNameIDs,
-             PathNameIDGroup>;
-
-PathNameIDGroups groupStatesByPathNameIDs(const SequentialDesignModel& model) {
-  PathNameIDGroups groups;
-  for (size_t i = 0; i < model.stateBits.size(); ++i) {
-    const auto& pathNameIDs = model.stateBits[i].first;
-    if (pathNameIDs.empty()) {
-      continue;
-    }
-    auto [groupIt, inserted] = groups.try_emplace(pathNameIDs);
-    if (inserted) {
-      groupIt->second.firstIndex = i;
-    }
-    ++groupIt->second.count;
-  }
-  return groups;
-}
-
-AlignedSignals buildPathNameIDStatePairCandidates(
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1) {
-  if (model0.stateBits.empty() || model1.stateBits.empty()) {
-    return {};
-  }
-
-  const auto groups0 = groupStatesByPathNameIDs(model0);
-  const auto groups1 = groupStatesByPathNameIDs(model1);
-  AlignedSignals candidates;
-  const size_t maxPairs = std::min(model0.stateBits.size(), model1.stateBits.size());
-  candidates.names.reserve(maxPairs);
-  candidates.keys0.reserve(maxPairs);
-  candidates.keys1.reserve(maxPairs);
-  size_t pairIndex = 0;
-  for (const auto& [pathNameIDs, group0] : groups0) {
-    if (group0.count != 1 || group0.firstIndex >= model0.stateBits.size()) {
-      continue;
-    }
-    const auto group1It = groups1.find(pathNameIDs);
-    if (group1It == groups1.end() || group1It->second.count != 1 ||
-        group1It->second.firstIndex >= model1.stateBits.size()) {
-      continue;
-    }
-    candidates.names.push_back(
-        "sat_validated_path_state_" + std::to_string(pairIndex++));
-    candidates.keys0.push_back(model0.stateBits[group0.firstIndex]);
-    candidates.keys1.push_back(model1.stateBits[group1It->second.firstIndex]);
-  }
-
-  return candidates;
-}
-
-AlignedSignals buildSatValidatedPathNameIDStatePairs(
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    const AlignedSignals& alignedInputs,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  AlignedSignals candidates = buildPathNameIDStatePairCandidates(model0, model1);
-  if (candidates.names.size() > kMaxSatValidatedOrderedStatePairs ||
-      !areAllOrderedStatesSatEquivalent(
-          model0, model1, alignedInputs, candidates, solverType)) {
-    if (structuralCoiDiagEnabled()) {
-      std::fprintf(
-          stderr,
-          "SEC diag: path-name-id candidates rejected pairs=%zu\n",
-          candidates.names.size());
-    }
-    return {};
-  }
-  if (structuralCoiDiagEnabled()) {
-    std::fprintf(
-        stderr,
-        "SEC diag: path-name-id candidates accepted pairs=%zu\n",
-        candidates.names.size());
-  }
-  return candidates;
-}
-
-void appendStatePairIfUnused(
-    AlignedSignals& states,
-    const std::string& name,
-    const SignalKey& key0,
-    const SignalKey& key1,
-    std::unordered_set<SignalKey, SignalKeyHash>& usedKeys0,
-    std::unordered_set<SignalKey, SignalKeyHash>& usedKeys1) {
-  if (usedKeys0.find(key0) != usedKeys0.end() ||
-      usedKeys1.find(key1) != usedKeys1.end()) {
-    return;
-  }
-
-  states.names.push_back(name);
-  states.keys0.push_back(key0);
-  states.keys1.push_back(key1);
-  usedKeys0.insert(key0);
-  usedKeys1.insert(key1);
-}
-
-AlignedSignals mergeStatePairRelations(const AlignedSignals& primary,
-                                       const AlignedSignals& secondary) {
-  AlignedSignals merged;
-  std::unordered_set<SignalKey, SignalKeyHash> usedKeys0;
-  std::unordered_set<SignalKey, SignalKeyHash> usedKeys1;
-  usedKeys0.reserve(primary.keys0.size() + secondary.keys0.size());
-  usedKeys1.reserve(primary.keys1.size() + secondary.keys1.size());
-  merged.names.reserve(primary.names.size() + secondary.names.size());
-  merged.keys0.reserve(primary.keys0.size() + secondary.keys0.size());
-  merged.keys1.reserve(primary.keys1.size() + secondary.keys1.size());
-  for (size_t i = 0; i < primary.names.size(); ++i) {
-    appendStatePairIfUnused(
-        merged,
-        primary.names[i],
-        primary.keys0[i],
-        primary.keys1[i],
-        usedKeys0,
-        usedKeys1);
-  }
-  for (size_t i = 0; i < secondary.names.size(); ++i) {
-    appendStatePairIfUnused(
-        merged,
-        secondary.names[i],
-        secondary.keys0[i],
-        secondary.keys1[i],
-        usedKeys0,
-        usedKeys1);
-  }
-  return merged;
-}
-
 bool addSupportStateIndices(
     BoolExpr* expr,
     const std::unordered_map<size_t, size_t>& stateIndexByVar,
@@ -1554,21 +1420,19 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
     // SAT-proved equivalent under that relation before it is exposed to SEC.
     return orderedStates;
   }
-  const AlignedSignals pathNameIDStates =
-      buildSatValidatedPathNameIDStatePairs(
-          model0, model1, alignedInputs, solverType);
-  if (!pathNameIDStates.names.empty()) {
-    // Path NameIDs are only a candidate generator.  The relation is returned
-    // only after every paired next-state equation is proved equivalent under
-    // the candidate relation, so internal names alone are never proof facts.
-    return pathNameIDStates;
-  }
   const AlignedSignals structuralCoiStates = inferStructuralCoiStatePairs(
       model0, model1, alignedInputs, alignedOutputs, solverType);
+  if (!structuralCoiStates.names.empty()) {
+    // Top output names anchor the SEC property.  Internal state candidates here
+    // come only from structurally unifying the reached output/transition cones,
+    // then validating the resulting relation.
+    return structuralCoiStates;
+  }
   const AlignedSignals orderedCoiStates = inferSatValidatedOrderedCoiStatePairs(
       model0, model1, alignedInputs, alignedOutputs, solverType);
-  const AlignedSignals outputCoiStates =
-      mergeStatePairRelations(structuralCoiStates, orderedCoiStates);
+  if (!orderedCoiStates.names.empty()) {
+    return orderedCoiStates;
+  }
 
   const auto inputClasses0 = buildInputClassMap(model0, alignedInputs.keys0);
   const auto inputClasses1 = buildInputClassMap(model1, alignedInputs.keys1);
@@ -1614,17 +1478,7 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
       aligned.keys1.push_back(model1.stateBits[it1->second[i]]);
     }
   }
-  if (aligned.names.empty()) {
-    return outputCoiStates;
-  }
-  if (outputCoiStates.names.empty()) {
-    return aligned;
-  }
-  // Output-rooted pairs are preferred when they cover the same state key; the
-  // broader fixed-point relation then supplies reset-bootstrap candidates for
-  // state that is structurally equivalent but not directly visible at a top
-  // output in the first frame.  This avoids relying on internal instance names.
-  return mergeStatePairRelations(outputCoiStates, aligned);
+  return aligned;
 }
 
 AlignedSignals inferStructurallyEquivalentOutputConeStatePairs(
@@ -1633,26 +1487,8 @@ AlignedSignals inferStructurallyEquivalentOutputConeStatePairs(
     const AlignedSignals& alignedInputs,
     const AlignedSignals& alignedOutputs,
     KEPLER_FORMAL::Config::SolverType solverType) {
-  AlignedSignals outputCoiStates = inferStructuralOutputCoiStatePairs(
+  return inferStructuralOutputCoiStatePairs(
       model0, model1, alignedInputs, alignedOutputs, solverType);
-  AlignedSignals pathNameIDCandidates =
-      buildPathNameIDStatePairCandidates(model0, model1);
-  if (pathNameIDCandidates.names.size() > kMaxSatValidatedOrderedStatePairs) {
-    pathNameIDCandidates = {};
-  }
-  if (pathNameIDCandidates.names.empty()) {
-    return outputCoiStates;
-  }
-  if (structuralCoiDiagEnabled()) {
-    std::fprintf(
-        stderr,
-        "SEC diag: path-name-id bootstrap candidates pairs=%zu\n",
-        pathNameIDCandidates.names.size());
-  }
-  // These NameID-path pairs are not used as an inductive invariant here.  They
-  // only seed the reset-bootstrap sweep, which keeps a pair only after the
-  // reset-specialized transition relation proves it at the checked frontier.
-  return mergeStatePairRelations(outputCoiStates, pathNameIDCandidates);
 }
 
 AlignedSignals inferStructurallyEquivalentStatePairs(
