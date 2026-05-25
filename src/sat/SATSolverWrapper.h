@@ -523,8 +523,16 @@ public:
       setCadicalOptionIfSupported(solver, "compact", 0);
       setCadicalOptionIfSupported(solver, "arenacompact", 0);
       setCadicalOptionIfSupported(solver, "elim", 0);
+      setCadicalOptionIfSupported(solver, "fastelim", 0);
+      setCadicalOptionIfSupported(solver, "preprocesslight", 0);
       setCadicalOptionIfSupported(solver, "probe", 0);
+      setCadicalOptionIfSupported(solver, "inprobing", 0);
       setCadicalOptionIfSupported(solver, "congruence", 0);
+      setCadicalOptionIfSupported(solver, "decompose", 0);
+      setCadicalOptionIfSupported(solver, "deduplicate", 0);
+      setCadicalOptionIfSupported(solver, "factor", 0);
+      setCadicalOptionIfSupported(solver, "subsume", 0);
+      setCadicalOptionIfSupported(solver, "sweep", 0);
       setCadicalOptionIfSupported(solver, "lucky", 0);
       setCadicalOptionIfSupported(solver, "luckyearly", 0);
       setCadicalOptionIfSupported(solver, "luckylate", 0);

@@ -1561,6 +1561,41 @@ SequentialEquivalenceResult runPdrSecEngine(
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
   constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
+  constexpr size_t kMaxSmallDesignCertificateStateBits = 4096;
+  if (problem.observedOutputExprs0.size() < kMinOutputsForBatchedPdrProof &&
+      problem.totalStateCount <= kMaxSmallDesignCertificateStateBits) {
+    // On small regressions, a direct KI certificate is often the fastest sound
+    // SEC proof while exact PDR can spend minutes blocking equivalent bad
+    // cubes. Use it only as a precheck: inconclusive cases still fall through
+    // to the PDR strategy below.
+    KInductionEngine certificateEngine(problem, solverType);
+    const auto certificateResult = certificateEngine.run(maxK);
+    switch (certificateResult.status) {
+      case KInductionStatus::Equivalent:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Equivalent,
+            certificateResult.bound,
+            "",
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+      case KInductionStatus::Different:
+        return makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            certificateResult.bound,
+            certificateResult.witness.has_value()
+                ? formatCounterexampleWitness(
+                      certificateResult, model0, model1, top0, top1)
+                : "K-induction precheck found a counterexample at k = " +
+                      std::to_string(certificateResult.bound),
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+      case KInductionStatus::Inconclusive:
+      default:
+        break;
+    }
+  }
   struct PdrOutputBatch {
     size_t firstOutput = 0;
     size_t endOutput = 0;

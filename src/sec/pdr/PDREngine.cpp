@@ -7330,11 +7330,11 @@ std::optional<StateCube> findBadCubeForFormula(
           complementPartners,
           exactFrameClauses);
   SATSolverWrapper solver(solverType);
-  // The bad-state query is not the repeated predecessor obligation that makes
-  // PDR sensitive to solver startup overhead. It is a frame-level cone proof
-  // over the current output slice, so Kissat's normal SEC cone profile may use
-  // preprocessing/congruence when that helps collapse duplicated miter logic.
-  solver.configureForSecConeProof(solverSymbols.size());
+  // Bad-state queries are local PDR obligations and are rebuilt repeatedly as
+  // frames advance. Keep them on the PDR-local profile: small regressions such
+  // as GCD can otherwise spend minutes in Kissat's speculative
+  // preprocessing/probing before the actual frame query starts.
+  solver.configureForSecPdrQuery(solverSymbols.size());
   FrameVariableStore variables(solver, solverSymbols, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
