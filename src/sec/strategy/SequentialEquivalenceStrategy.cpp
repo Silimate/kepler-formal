@@ -2393,26 +2393,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       deriveResetBootstrapStrengthening,
       deriveResetBootstrapEqualities,
       secDiagEnabled);
-  if (!aligned.resetBootstrapCandidateStateEqualities.names.empty() &&
-      !symbolSpace.problem.resetBootstrapInputs.empty()) {
-    // The reset-bootstrap candidate relation is not name-based. It is built by
-    // structurally unifying all aligned top-output cones, closing the reached
-    // state relation through next-state logic, and validating that relation
-    // before it reaches this point. Once reset/startup assumes that checked
-    // relation at frame 0, the relation itself is an SEC certificate; do not
-    // ask KI/IMC/PDR to rediscover the same transition-closed proof with a
-    // large SAT query.
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: output-rooted structural startup relation proves SEC");
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        0,
-        "",
-        aligned.outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
   if (useLazyTransitionRemapping) {
     attachLazyTransitions(
         model0,
