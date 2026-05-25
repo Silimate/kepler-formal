@@ -45,15 +45,6 @@ bool provesNoBaseCounterexampleAtFrontier(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k);
 
-// Same frontier proof as the original SEC base-case flow: keep the multi-output
-// bad predicate as one formula, constrain earlier safe frames, and use the
-// cone-proof solver profile. Exact-frame PDR uses this for large whole-batch
-// bad-formula learning where the PDR proof-only profile can be slower.
-bool provesNoBaseCounterexampleAtFrontierWithSecConeProof(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t k);
-
 // Checks whether a concrete reset/bootstrap prefix can reach a state cube at
 // the requested post-bootstrap depth. PDR uses this as an exact CEGAR check for
 // abstract startup-frontier obligations; it shares the base-case COI machinery

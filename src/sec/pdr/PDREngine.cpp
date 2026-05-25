@@ -204,13 +204,6 @@ constexpr size_t kMaxWholeBadFormulaBaseValidationFrame = 1;
 // at the startup frontier: BlackParrot sampling showed the frame-3 version
 // turning into an unbounded SAT wall instead of an incremental PDR repair.
 constexpr size_t kMaxWholeBadFormulaBaseValidationAfterCachedRootFrame = 1;
-// Whole-batch bad-formula validation proves an OR over every output mismatch in
-// the current slice. That is a useful shortcut for tiny final slices, but on
-// BlackParrot a 32-output final batch became a broad BMC query and spent the
-// proof wall inside Kissat preprocessing. Larger slices should use the
-// per-output validator below, or split first, so each exact proof stays local to
-// one output cone.
-constexpr size_t kMaxWholeBatchValidatedBadFormulaRepairOutputs = 4;
 // Single-output final leaves validate the whole output-bad predicate with one
 // bounded-frontier query before learning any clause. BlackParrot sampling
 // showed 32-clause, tiny-support predicates otherwise degenerating into tens of
@@ -847,6 +840,20 @@ void consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
 
 bool pdrStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
+}
+
+KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  // The main PDR loop is tuned for Kissat's many short predecessor queries.
+  // Whole-bad-formula validation is different: it is an optional exact BMC
+  // repair over a wider frontier formula. BlackParrot samples showed a single
+  // Kissat validation query dominating the run, while failure to validate just
+  // means "fall back to normal PDR." Use CaDiCaL for this optional proof when
+  // the selected solver is Kissat; UNSAT remains a real proof, SAT/UNKNOWN only
+  // disables the shortcut.
+  return solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
+             ? KEPLER_FORMAL::Config::SolverType::CADICAL
+             : solverType;
 }
 
 bool pdrResetShortcutDiagEnabled() {
@@ -6155,7 +6162,9 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
                 " cached_roots=", cachedResetValidatedAssignments);
           }  // LCOV_EXCL_LINE
           if (SEC::provesNoBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
-                  validationProblem, solverType, targetFrame)) {  // LCOV_EXCL_LINE
+                  validationProblem,
+                  badFormulaValidationSolverType(solverType),
+                  targetFrame)) {  // LCOV_EXCL_LINE
             validatedGroup = true;  // LCOV_EXCL_LINE
           } else {  // LCOV_EXCL_LINE
             resetFrontierCache.wholeBadFormulaValidationMisses.insert(  // LCOV_EXCL_LINE
@@ -6169,7 +6178,9 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
     }
     if (!validatedGroup &&
         !SEC::provesNoBaseCounterexampleAtFrontier(
-            validationProblem, solverType, targetFrame)) {
+            validationProblem,
+            badFormulaValidationSolverType(solverType),
+            targetFrame)) {
       return std::nullopt;  // LCOV_EXCL_LINE
     }
 
@@ -6509,11 +6520,10 @@ std::optional<bool> learnValidatedBadFormulaClauses(
           " cached_roots=", cachedResetValidatedAssignments);
     }  // LCOV_EXCL_LINE
     const bool badFormulaUnreachable =
-        useWholeBatchValidation
-            ? SEC::provesNoBaseCounterexampleAtFrontierWithSecConeProof(  // LCOV_EXCL_LINE
-                  problem, solverType, targetFrame)  // LCOV_EXCL_LINE
-            : SEC::provesNoBaseCounterexampleAtFrontier(
-                  problem, solverType, targetFrame);
+        SEC::provesNoBaseCounterexampleAtFrontier(
+            problem,
+            badFormulaValidationSolverType(solverType),
+            targetFrame);
     if (!badFormulaUnreachable) {
       if (allowDeepWholeBadFormulaAfterCachedRoot) {  // LCOV_EXCL_LINE
         resetFrontierCache.wholeBadFormulaValidationMisses.insert(validationKey);  // LCOV_EXCL_LINE
@@ -9503,9 +9513,7 @@ bool blockProofObligations(const KInductionProblem& problem,
   const bool useWholeBatchValidatedBadFormulaRepair =
       learnValidatedBadFormulaClausesOnReject &&
       exactFrameClauses &&
-      problem.observedOutputExprs0.size() > 1 &&
-      problem.observedOutputExprs0.size() <=
-          kMaxWholeBatchValidatedBadFormulaRepairOutputs;  // LCOV_EXCL_LINE
+      problem.observedOutputExprs0.size() > 1;  // LCOV_EXCL_LINE
   const bool usePerOutputValidatedBadFormulaRepair =
       learnValidatedBadFormulaClausesOnReject &&
       !useWholeBatchValidatedBadFormulaRepair &&

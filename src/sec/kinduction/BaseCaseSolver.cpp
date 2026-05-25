@@ -1466,20 +1466,6 @@ bool provesNoBaseCounterexampleAtFrontier(
               .has_value();
 }
 
-bool provesNoBaseCounterexampleAtFrontierWithSecConeProof(  // LCOV_EXCL_LINE
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t k) {
-  return !findBaseCounterexampleImpl(  // LCOV_EXCL_LINE
-              problem,  // LCOV_EXCL_LINE
-              solverType,  // LCOV_EXCL_LINE
-              k,  // LCOV_EXCL_LINE
-              k,  // LCOV_EXCL_LINE
-              /*localizeMultiOutputFrontier=*/false,
-              BaseCaseSolverProfile::SecConeProof)
-              .has_value();  // LCOV_EXCL_LINE
-}
-
 bool isStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,

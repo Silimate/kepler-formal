@@ -1580,12 +1580,8 @@ SequentialEquivalenceResult runPdrSecEngine(
           size_t firstOutput,
           size_t endOutput) -> FinalPdrStageOutcome {
     constexpr size_t kMaxPdrConcreteValidationOutputs = 1;  // LCOV_EXCL_LINE
-    // The final exact stage enables validated bad-formula repair. Keep its
-    // batch size aligned with the per-output repair path instead of the broader
-    // initial PDR batching limit; otherwise a 32-output BlackParrot slice can
-    // choose a monolithic whole-batch BMC validation before it ever splits into
-    // local output repairs.
-    constexpr size_t kMaxFinalExactPdrOutputBatchSize = 16;  // LCOV_EXCL_LINE
+    constexpr size_t kMaxFinalExactPdrOutputBatchSize =  // LCOV_EXCL_LINE
+        kPdrOutputBatchingLimits.maxOutputBatchSize;
     // The final exact repair already carries exact frame clauses and validated
     // bad-formula clauses. Keeping both predecessor and bad cubes bounded avoids
     // large single-output loops from enumerating thousands of sibling cubes.
