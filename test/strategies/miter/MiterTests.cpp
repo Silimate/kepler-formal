@@ -1394,7 +1394,7 @@ TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSe
 TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWritesCnf) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 
@@ -1449,7 +1449,7 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWrit
 TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWriteFailure) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 
@@ -1490,7 +1490,7 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWrit
 TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreationFailure) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 
@@ -1528,7 +1528,7 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreat
 TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsWithNoCommonOutputsIsVacuouslyEquivalent) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 

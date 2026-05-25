@@ -1,9 +1,11 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//bazel:naja_includes.bzl", "NAJA_HEADER_COPTS")
 
 cc_library(
     name = "scope_extraction",
     srcs = ["ScopeExtraction.cpp"],
     hdrs = ["ScopeExtraction.h"],
+    copts = NAJA_HEADER_COPTS,
     includes = ["."],
     visibility = ["//visibility:public"],
     deps = [

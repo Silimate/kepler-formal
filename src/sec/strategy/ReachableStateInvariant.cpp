@@ -40,6 +40,8 @@ constexpr size_t kBootstrapSatRecoverySupportBudget = 4096;
 // to the engine-level COI proof instead of launching unbounded per-bit SAT.
 constexpr size_t kBootstrapSatRecoveryCandidateBudget =
     kBootstrapSatRecoverySupportBudget;
+constexpr size_t kBootstrapSatRecoveryGlobalCandidateBudget =
+    kBootstrapSatRecoveryCandidateBudget;
 constexpr size_t kSelectiveBootstrapValueCandidateBudget = 10000;
 constexpr size_t kUnpairedStateDependency = std::numeric_limits<size_t>::max();
 
@@ -1148,6 +1150,8 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     std::vector<PendingSatRecovery> pendingSatRecovery;
     pendingSatRecovery.reserve(
         std::min(candidateStates.names.size(), kBootstrapSatRecoveryCandidateBudget));
+    const bool allowSatRecovery =
+        candidateStates.names.size() <= kBootstrapSatRecoveryGlobalCandidateBudget;
     size_t satSkippedEqualities = 0;
     for (size_t i = 0; i < candidateStates.names.size(); ++i) {
       const auto& key0 = candidateStates.keys0[i];
@@ -1175,7 +1179,9 @@ AlignedSignals deriveResetBootstrapStateEqualities(
             abstractMap1,
             abstractEquivalenceMemo);
         if (!equalAfterStep[i]) {
-          if (const auto supportSize = bootstrapSatRecoverySupportSize(
+          if (!allowSatRecovery) {
+            ++satSkippedEqualities;
+          } else if (const auto supportSize = bootstrapSatRecoverySupportSize(
                   specializedNext0.at(key0), specializedNext1.at(key1));
               supportSize.has_value()) {
             pendingSatRecovery.push_back(

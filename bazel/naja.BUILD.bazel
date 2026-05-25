@@ -85,6 +85,30 @@ cmake(
 # Naja's cmake only installs "public API" headers; many internal headers
 # (used transitively) are missing. Expose all source headers directly.
 cc_library(
+    name = "cpptrace",
+    srcs = glob([
+        "src/thirdparty/cpptrace/src/**/*.cpp",
+    ]),
+    hdrs = glob([
+        "src/thirdparty/cpptrace/include/**/*.h",
+        "src/thirdparty/cpptrace/include/**/*.hpp",
+        "src/thirdparty/cpptrace/src/**/*.hpp",
+    ]),
+    copts = [
+        "-DCPPTRACE_STATIC_DEFINE",
+        "-DCPPTRACE_GET_SYMBOLS_WITH_NOTHING",
+        "-DCPPTRACE_UNWIND_WITH_NOTHING",
+        "-DCPPTRACE_DEMANGLE_WITH_CXXABI",
+        "-DCPPTRACE_NO_STD_FORMAT",
+    ],
+    includes = [
+        "src/thirdparty/cpptrace/include",
+        "src/thirdparty/cpptrace/src",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "naja_extra_headers",
     hdrs = glob([
         "src/src/**/*.h",
@@ -117,5 +141,8 @@ cc_library(
         "src/thirdparty/lefdef/src/def/def",
     ],
     visibility = ["//visibility:public"],
-    deps = [":naja"],
+    deps = [
+        ":cpptrace",
+        ":naja",
+    ],
 )
