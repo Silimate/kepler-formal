@@ -1644,10 +1644,7 @@ SNLDesign* createAnd2Model(NLLibrary* library) {
   SNLDesignModeling::addCombinatorialArcs({input0, input1}, {output});
   SNLDesignModeling::setTruthTable(
       model,
-      SNLTruthTable(
-          2,
-          SNLTruthTable::GenericType::AND,
-          SNLTruthTable::fullDependencies(2)));
+      SNLTruthTable(2, 0b1000, SNLTruthTable::fullDependencies(2)));
   return model;
 }
 
@@ -3485,6 +3482,100 @@ SNLDesign* createDffreTop(
   ff->getInstTerm(NLDB0::getDFFREReset())->setNet(netReset);
   ff->getInstTerm(NLDB0::getDFFREClock())->setNet(netClock);
   ff->getInstTerm(NLDB0::getDFFREOutput())->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createOpaqueClockGateLatchModel(NLLibrary* library) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("DLATCH_N"));
+  SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
+  SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("GATE"));
+  SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
+  return model;
+}
+
+SNLDesign* createConstantLowModel(NLLibrary* library) {
+  auto* model =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("CONB"));
+  SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("LO"));
+  SNLDesignModeling::setTruthTable(
+      model, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+  return model;
+}
+
+SNLDesign* createClockGateLatchDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* andModel,
+    SNLDesign* latchModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topEnable =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("en"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* latch = SNLInstance::create(top, latchModel, NLName("clock_gate_i.en_latch"));
+  auto* gateAnd = SNLInstance::create(top, andModel, NLName("clock_gate_i.and_clk"));
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netEnable = SNLScalarNet::create(top, NLName("net_en"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netLatchQ = SNLScalarNet::create(top, NLName("net_latch_q"));
+  auto* netGatedClock = SNLScalarNet::create(top, NLName("net_gated_clk"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topEnable->setNet(netEnable);
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  latch->getInstTerm(latchModel->getScalarTerm(NLName("D")))->setNet(netEnable);
+  latch->getInstTerm(latchModel->getScalarTerm(NLName("GATE")))->setNet(netClock);
+  latch->getInstTerm(latchModel->getScalarTerm(NLName("Q")))->setNet(netLatchQ);
+
+  gateAnd->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netClock);
+  gateAnd->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(netLatchQ);
+  gateAnd->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netGatedClock);
+
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netIn);
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netGatedClock);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createConstantDrivenDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* constantModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* constant = SNLInstance::create(top, constantModel, NLName("tie0"));
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netConstant = SNLScalarNet::create(top, NLName("net_const"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  constant->getInstTerm(constantModel->getScalarTerm(NLName("LO")))->setNet(netConstant);
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netConstant);
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netOut);
 
   return top;
 }
@@ -11485,6 +11576,67 @@ TEST_F(SequentialEquivalenceStrategyTests,
        {extracted.inputVarByKey.at(enKey), false},
        {extracted.inputVarByKey.at(rstKey), false},
        {stateVar, true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractFoldsOpaqueClockGateLatchEnable) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* andModel = createAnd2Model(primitives);
+  auto* latchModel = createOpaqueClockGateLatchModel(primitives);
+  auto* top = createClockGateLatchDffTop(
+      library, "top", andModel, latchModel);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+  const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  const auto inKey = findKeyByDisplayName(extracted, "in[0]");
+  const auto enableKey = findKeyByDisplayName(extracted, "en[0]");
+  const auto latchKey =
+      findKeyByDisplayName(extracted, "clock_gate_i.en_latch.Q[0]");
+  const size_t stateVar = extracted.inputVarByKey.at(stateKey);
+  const size_t latchVar = extracted.inputVarByKey.at(latchKey);
+  auto* expr = extracted.nextStateExprByStateKey.at(stateKey);
+  const auto support = expr->getSupportVars();
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_EQ(support.find(latchVar), support.end());
+  EXPECT_TRUE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), false},
+       {extracted.inputVarByKey.at(enableKey), false},
+       {stateVar, true}}));
+  EXPECT_TRUE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), true},
+       {extracted.inputVarByKey.at(enableKey), true},
+       {stateVar, false}}));
+  EXPECT_FALSE(expr->evaluate(
+      {{extracted.inputVarByKey.at(inKey), false},
+       {extracted.inputVarByKey.at(enableKey), true},
+       {stateVar, true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractDoesNotPublishConstantInternalBoundaryInputs) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* constantModel = createConstantLowModel(primitives);
+  auto* top = createConstantDrivenDffTop(library, "top", constantModel);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  for (const auto& key : extracted.environmentInputs) {
+    const auto nameIt = extracted.displayNameByKey.find(key);
+    ASSERT_NE(nameIt, extracted.displayNameByKey.end());
+    EXPECT_NE(nameIt->second, "tie0.LO[0]");
+  }
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

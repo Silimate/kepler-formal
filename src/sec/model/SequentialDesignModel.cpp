@@ -153,6 +153,101 @@ std::optional<naja::DNL::DNLID> getClockTreeBufferSourceDriverTerm(
     naja::DNL::DNLFull* dnl,
     const naja::DNL::DNLTerminalFull& outputTerm);
 
+bool hasBuildableCombinationalRoot(
+    naja::DNL::DNLFull* dnl,
+    naja::DNL::DNLID requestedTermID) {
+  if (dnl == nullptr || requestedTermID == naja::DNL::DNLID_MAX) {
+    return false;  // LCOV_EXCL_LINE
+  }
+
+  std::unordered_set<naja::DNL::DNLID> visitedTerms;
+  naja::DNL::DNLID currentTermID = requestedTermID;
+  while (currentTermID != naja::DNL::DNLID_MAX &&
+         visitedTerms.insert(currentTermID).second) {
+    const auto& currentTerm = dnl->getDNLTerminalFromID(currentTermID);
+    if (currentTerm.isNull()) {
+      return false;  // LCOV_EXCL_LINE
+    }
+    if (currentTerm.isTopPort() &&
+        currentTerm.getSnlBitTerm()->getDirection() !=
+            naja::NL::SNLBitTerm::Direction::Output) {
+      return true;
+    }
+
+    if (currentTerm.getSnlBitTerm()->getDirection() !=
+        naja::NL::SNLBitTerm::Direction::Output) {
+      const auto isoID = currentTerm.getIsoID();
+      if (isoID == naja::DNL::DNLID_MAX) {
+        return false;
+      }
+      const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(isoID);
+      if (iso.isConstant()) {
+        return true;
+      }
+      if (iso.getDrivers().size() != 1) {
+        return false;
+      }
+      currentTermID = iso.getDrivers().front();
+      continue;
+    }
+
+    if (currentTerm.isTopPort()) {
+      return false;
+    }
+    if (isClockTreeBufferCell(currentTerm)) {
+      if (const auto sourceDriver =
+              getClockTreeBufferSourceDriverTerm(dnl, currentTerm)) {
+        currentTermID = *sourceDriver;
+        continue;
+      }
+      return false;
+    }
+
+    const auto& instance = currentTerm.getDNLInstance();
+    auto* model = instance.getSNLModel();
+    if (model == nullptr) {
+      return false;
+    }
+    if (NLDB0::isAssign(model)) {
+      std::optional<naja::DNL::DNLID> passthroughDriver;
+      for (auto* inputBitTerm : naja::NL::SNLDesignModeling::getCombinatorialInputs(
+               const_cast<naja::NL::SNLBitTerm*>(currentTerm.getSnlBitTerm()))) {
+        if (inputBitTerm == nullptr ||
+            inputBitTerm->getDirection() ==
+                naja::NL::SNLBitTerm::Direction::Output) {
+          continue;  // LCOV_EXCL_LINE
+        }
+        const auto& inputTerm = instance.getTerminalFromBitTerm(inputBitTerm);
+        if (inputTerm.isNull() || inputTerm.getIsoID() == naja::DNL::DNLID_MAX) {
+          passthroughDriver.reset();  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
+        }
+        const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(inputTerm.getIsoID());
+        if (iso.isConstant() || iso.getDrivers().size() != 1) {
+          passthroughDriver.reset();
+          break;
+        }
+        if (passthroughDriver.has_value()) {
+          passthroughDriver.reset();  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
+        }
+        passthroughDriver = iso.getDrivers().front();
+      }
+      if (passthroughDriver.has_value()) {
+        currentTermID = *passthroughDriver;
+        continue;
+      }
+      return false;
+    }
+
+    const auto& truthTable = naja::NL::SNLDesignModeling::getTruthTable(
+        model, currentTerm.getSnlBitTerm()->getOrderID());
+    return truthTable.isInitialized();
+  }
+
+  return false;
+}
+
 std::string describeConnectivitySkipOrigin(ConnectivitySkipOrigin origin) {
   switch (origin) {
     case ConnectivitySkipOrigin::NoDriver:
@@ -407,11 +502,11 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
 
   KEPLER_FORMAL::BuildPrimaryOutputClauses builder;
   builder.setRetainDnl(true);
-  builder.setInputs(collectedInputs);
   std::vector<naja::DNL::DNLID> normalizedRoots;
   normalizedRoots.reserve(requestedOutputs.size());
   std::unordered_map<naja::DNL::DNLID, std::vector<naja::DNL::DNLID>> requestedByRoot;
   std::unordered_set<naja::DNL::DNLID> seenRoots;
+  std::unordered_set<naja::DNL::DNLID> nonTopRootsToBuild;
   auto* dnl = naja::DNL::get();
   size_t clockBufferRootPassthroughs = 0;
   const auto describeTerminal = [](const naja::DNL::DNLTerminalFull& terminal) {
@@ -504,6 +599,12 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
     if (!rootTermID.has_value()) {
       continue;
     }
+    const auto& rootTerm = dnl->getDNLTerminalFromID(*rootTermID);
+    if (!(rootTerm.isTopPort() &&
+          rootTerm.getSnlBitTerm()->getDirection() !=
+              naja::NL::SNLBitTerm::Direction::Output)) {
+      nonTopRootsToBuild.insert(*rootTermID);
+    }
     requestedByRoot[*rootTermID].push_back(requestedTermID);
     const auto skippedIt = collectedSkippedOutputs.find(*rootTermID);
     if (skippedIt != collectedSkippedOutputs.end()) {
@@ -514,6 +615,20 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
       normalizedRoots.push_back(*rootTermID);
     }
   }
+
+  // A dependency root can also appear in the carried boundary-input set from an
+  // earlier extraction pass.  If we leave that non-top root marked as a PI, the
+  // cloud stops at the root instead of rebuilding its cone; clock-gated flops
+  // then see their gated clock as a stale frontier rather than clk & enable.
+  std::vector<naja::DNL::DNLID> materializationInputs;
+  materializationInputs.reserve(collectedInputs.size());
+  for (const auto inputTermID : collectedInputs) {
+    if (nonTopRootsToBuild.find(inputTermID) != nonTopRootsToBuild.end()) {
+      continue;
+    }
+    materializationInputs.push_back(inputTermID);
+  }
+  builder.setInputs(materializationInputs);
 
   // Structured memory dependencies are often internal roots that SEC needs
   // even when the generic boundary collector would not classify them as
@@ -551,7 +666,59 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
         normalizedRoots.size());
     fflush(stderr);
   }
-  builder.build();
+  try {
+    builder.build();
+  } catch (const std::exception& e) {
+    const std::string detail =
+        "failed to materialize dependency cone: " + std::string(e.what());
+    if (requestedOutputs.size() > 1) {
+      MaterializedBuilderOutputs merged;
+      for (const auto requestedTermID : requestedOutputs) {
+        const auto single = materializeBuilderOutputs(
+            {requestedTermID},
+            collectedInputs,
+            collectedSkippedOutputs,
+            secDiagEnabled,
+            topName,
+            phaseLabel);
+        appendUniqueTermIDs(merged.inputs, single.inputs);
+        appendUniqueTermIDs(merged.outputs, single.outputs);
+        mergeBuilderTermVarIDs(merged.termDNLID2varID, single.termDNLID2varID);
+        for (const auto& [termID, expr] : single.outputExprByTerm) {
+          merged.outputExprByTerm.insert_or_assign(termID, expr);
+        }
+        for (const auto& [termID, info] : single.skippedOutputsByTerm) {
+          merged.skippedOutputsByTerm.emplace(termID, info);
+        }
+      }
+      return merged;
+    }
+    if (secDiagEnabled) {
+      std::fprintf(
+          stderr,
+          "SEC diag: extract(%s) %s skipped all outputs: %s\n",
+          topName,
+          phaseLabel,
+          detail.c_str());
+      std::fflush(stderr);
+    }
+    for (const auto rootTermID : normalizedRoots) {
+      result.skippedOutputsByTerm.emplace(
+          rootTermID,
+          BuilderSkippedOutputInfo{BuilderSkippedOutputReason::NoDriver, detail});
+      const auto requestedIt = requestedByRoot.find(rootTermID);
+      if (requestedIt == requestedByRoot.end()) {
+        continue;
+      }
+      for (const auto requestedTermID : requestedIt->second) {
+        result.skippedOutputsByTerm.emplace(
+            requestedTermID,
+            BuilderSkippedOutputInfo{
+                BuilderSkippedOutputReason::NoDriver, detail});
+      }
+    }
+    return result;
+  }
   // BuildPrimaryOutputClauses owns a temporary DNL expansion and destroys the
   // singleton when build() completes. Rebuilding the full DNL here is very
   // expensive on CVA6, so only reacquire it when the detailed dependency-root
@@ -856,6 +1023,32 @@ bool isSequentialNextStateInput(const naja::DNL::DNLTerminalFull& term) {
               .empty();
 }
 
+bool isConstantInternalOutputTerm(const naja::DNL::DNLTerminalFull& term) {
+  if (term.isNull() || term.isTopPort() ||
+      term.getSnlBitTerm()->getDirection() !=
+          naja::NL::SNLBitTerm::Direction::Output) {
+    return false;
+  }
+
+  const auto& instance = term.getDNLInstance();
+  const auto* model = instance.getSNLModel();
+  if (model == nullptr) {
+    return false;  // LCOV_EXCL_LINE
+  }
+
+  const auto truthTable = naja::NL::SNLDesignModeling::getTruthTable(
+      model, term.getSnlBitTerm()->getOrderID());
+  if (truthTable.isInitialized() && (truthTable.all0() || truthTable.all1())) {
+    return true;
+  }
+
+  const std::string pinName = normalizePinName(term.getSnlBitTerm()->getName().getString());
+  const std::string modelName = normalizePinName(model->getName().getString());
+  return (pinName == "LO" || pinName == "HI") &&
+         (modelName.find("CONB") != std::string::npos ||
+          modelName.find("TIE") != std::string::npos);
+}
+
 bool isOptionalSequentialControlPin(const std::string& pinName) {
   return pinName == "E" || pinName == "DE" || pinName == "R" ||
          pinName == "RN" || pinName == "RESET_B" ||
@@ -1027,21 +1220,9 @@ BoolExpr* substituteClockGateLatchVars(
 BoolExpr* getLocalClockEnableExpr(
     const PendingTransition& pending,
     const std::unordered_set<size_t>& topClockCarrierVarIDs,
-    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs,
     const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
   if (pending.clockTermIDs.empty() || topClockCarrierVarIDs.empty()) {
-    return nullptr;
-  }
-  const bool allClockPinsArePureCarriers =
-      std::all_of(
-          pending.clockTermIDs.begin(),
-          pending.clockTermIDs.end(),
-          [&](const PendingPinTerm& clockTerm) {
-            return pureClockCarrierTermIDs.find(clockTerm.termID) !=
-                   pureClockCarrierTermIDs.end();
-          });
-  if (allClockPinsArePureCarriers) {
     return nullptr;
   }
 
@@ -1105,7 +1286,6 @@ BoolExpr* buildNextStateExpr(
     const PendingTransition& pending,
     const std::vector<size_t>& termDNLID2varID,
     const std::unordered_set<size_t>& topClockCarrierVarIDs,
-    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs,
     const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
   if (pending.stateTermID >= termDNLID2varID.size()) {
@@ -1139,7 +1319,6 @@ BoolExpr* buildNextStateExpr(
           getLocalClockEnableExpr(
               pending,
               topClockCarrierVarIDs,
-              pureClockCarrierTermIDs,
               clockGateLatchDataExprByVarID,
               outputExprByTerm)) {
     next = BoolExpr::Or(
@@ -2092,7 +2271,6 @@ std::unordered_map<size_t, BoolExpr*> collectClockGateLatchDataExprByVarID(
     const std::unordered_set<size_t>& topClockCarrierVarIDs,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
   std::unordered_map<size_t, BoolExpr*> dataExprByVarID;
-  return dataExprByVarID;
   const bool diagEnabled = std::getenv("KEPLER_SEC_CLOCK_GATE_DIAG") != nullptr;
   size_t latchLikeCandidates = 0;
   size_t latchLikeStateOutputs = 0;
@@ -2245,6 +2423,9 @@ void classifyBuilderBoundaryTerms(ExtractContext& ctx, SequentialDesignModel& mo
   // environment/state/output buckets here.
   for (const auto inputTermID : ctx.builder.getInputs()) {
     const auto& term = ctx.dnl->getDNLTerminalFromID(inputTermID);
+    if (isConstantInternalOutputTerm(term)) {
+      continue;
+    }
     SignalKey key = getTerminalPathKey(term);
     ctx.inputKeyByTerm.emplace(inputTermID, key);
     model.displayNameByKey.try_emplace(key, getTerminalDisplayName(term));
@@ -2907,6 +3088,10 @@ void recordBoundaryInputVars(
   // Preserve the symbolic variable chosen by the clause builder for each
   // aligned SEC input/state signal.
   for (const auto inputTermID : builderInputs) {
+    const auto& term = ctx.dnl->getDNLTerminalFromID(inputTermID);
+    if (isConstantInternalOutputTerm(term)) {
+      continue;
+    }
     const auto keyIt = ctx.inputKeyByTerm.find(inputTermID);
     if (keyIt == ctx.inputKeyByTerm.end()) {
       continue;  // LCOV_EXCL_LINE
@@ -3589,7 +3774,7 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
       mergeBuilderTermVarIDs(termDNLID2varID, dependencyOutputs.termDNLID2varID);
       recordBoundaryInputVars(ctx, builderInputs, termDNLID2varID, model);
       for (const auto& [termID, expr] : dependencyOutputs.outputExprByTerm) {
-        outputExprByTerm.emplace(termID, expr);
+        outputExprByTerm.insert_or_assign(termID, expr);
       }
       for (const auto& [termID, info] : dependencyOutputs.skippedOutputsByTerm) {
         skippedOutputsByTerm.emplace(termID, info);
@@ -3669,6 +3854,7 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
 
     std::vector<size_t> batchPendingIndexes;
     std::vector<naja::DNL::DNLID> batchOutputTerms;
+    std::unordered_set<naja::DNL::DNLID> batchOutputTermSet;
     while (!pendingWorkQueue.empty()) {
       const size_t pendingIndex = pendingWorkQueue.front();
       pendingWorkQueue.pop_front();
@@ -3682,13 +3868,21 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
 
       for (const auto& [_, candidates] : pending.pinTermIDs) {
         for (const auto& candidate : candidates) {
-          if (materializedOutputTerms.insert(candidate.termID).second) {
+          if (materializedOutputTerms.insert(candidate.termID).second &&
+              batchOutputTermSet.insert(candidate.termID).second) {
             batchOutputTerms.push_back(candidate.termID);
           }
         }
       }
       for (const auto& clockTerm : pending.clockTermIDs) {
-        if (materializedOutputTerms.insert(clockTerm.termID).second) {
+        // Clock pins may have been materialized earlier as plain carriers.
+        // Rebuild required clocks after boundary/latch dependencies are known
+        // so gated clocks become clk & enable instead of a stale clk frontier.
+        const bool alreadyMaterialized =
+            !materializedOutputTerms.insert(clockTerm.termID).second;
+        if ((!alreadyMaterialized ||
+             hasBuildableCombinationalRoot(ctx.dnl, clockTerm.termID)) &&
+            batchOutputTermSet.insert(clockTerm.termID).second) {
           batchOutputTerms.push_back(clockTerm.termID);
         }
       }
@@ -3707,7 +3901,7 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
       mergeBuilderTermVarIDs(termDNLID2varID, dependencyOutputs.termDNLID2varID);
       recordBoundaryInputVars(ctx, builderInputs, termDNLID2varID, model);
       for (const auto& [termID, expr] : dependencyOutputs.outputExprByTerm) {
-        outputExprByTerm.emplace(termID, expr);
+        outputExprByTerm.insert_or_assign(termID, expr);
       }
       for (const auto& [termID, info] : dependencyOutputs.skippedOutputsByTerm) {
         skippedOutputsByTerm.emplace(termID, info);
@@ -3832,7 +4026,6 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
                 pending,
                 termDNLID2varID,
                 topClockCarrierVarIDs,
-                pureClockCarrierTermIDs,
                 clockGateLatchDataExprByVarID,
                 outputExprByTerm);
         model.nextStateExprByStateKey.emplace(pending.stateKey, nextStateExpr);
@@ -4427,7 +4620,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     mergeBuilderTermVarIDs(termDNLID2varID, dependencyOutputs.termDNLID2varID);
     recordBoundaryInputVars(ctx, builderInputs, termDNLID2varID, model);
     for (const auto& [termID, expr] : dependencyOutputs.outputExprByTerm) {
-      outputExprByTerm.emplace(termID, expr);
+      outputExprByTerm.insert_or_assign(termID, expr);
     }
     for (const auto& [termID, info] : dependencyOutputs.skippedOutputsByTerm) {
       skippedOutputsByTerm.emplace(termID, info);
