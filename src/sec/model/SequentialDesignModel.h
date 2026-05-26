@@ -59,6 +59,10 @@ struct SequentialDesignModel {
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> observedOutputExprByKey;
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> nextStateExprByStateKey;
   std::unordered_map<SignalKey, bool, SignalKeyHash> initialStateValueByKey;
+  // Variables proven during extraction to be pure routed clock carriers.
+  // Downstream SEC matching can classify them with the top clock without
+  // making any name-based assumption about internal sequential state.
+  std::vector<size_t> clockCarrierVarIDs;
   std::unordered_map<SignalKey, ConnectivitySkipInfo, SignalKeyHash>
       connectivitySkipInfoByKey;
   std::vector<ComplementedStateRelation> complementedStateRelations;

@@ -589,6 +589,37 @@ public:
   }
 
   void configureForSecLocalBooleanCheck(size_t coneSymbols = 0) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
+      auto* solver = cadicalSolver_.get();
+      // Structural SEC validators rebuild many small one-shot Boolean queries.
+      // Use CaDiCaL as the assumption-capable default, but keep it on a direct
+      // CDCL path so startup inference does not spend minutes in gate
+      // extraction and inprocessing before the real proof engine starts.
+      setCadicalOptionIfSupported(solver, "inprocessing", 0);
+      setCadicalOptionIfSupported(solver, "compact", 0);
+      setCadicalOptionIfSupported(solver, "arenacompact", 0);
+      setCadicalOptionIfSupported(solver, "elim", 0);
+      setCadicalOptionIfSupported(solver, "fastelim", 0);
+      setCadicalOptionIfSupported(solver, "preprocesslight", 0);
+      setCadicalOptionIfSupported(solver, "probe", 0);
+      setCadicalOptionIfSupported(solver, "inprobing", 0);
+      setCadicalOptionIfSupported(solver, "congruence", 0);
+      setCadicalOptionIfSupported(solver, "decompose", 0);
+      setCadicalOptionIfSupported(solver, "deduplicate", 0);
+      setCadicalOptionIfSupported(solver, "factor", 0);
+      setCadicalOptionIfSupported(solver, "subsume", 0);
+      setCadicalOptionIfSupported(solver, "sweep", 0);
+      setCadicalOptionIfSupported(solver, "lucky", 0);
+      setCadicalOptionIfSupported(solver, "luckyearly", 0);
+      setCadicalOptionIfSupported(solver, "luckylate", 0);
+      setCadicalOptionIfSupported(solver, "minimize", 0);
+      setCadicalOptionIfSupported(solver, "shrink", 0);
+      setCadicalOptionIfSupported(solver, "rephase", 0);
+      setCadicalOptionIfSupported(solver, "walk", 0);
+      (void)coneSymbols;
+      return;
+    }
+
     if (solverType_ != KEPLER_FORMAL::Config::SolverType::KISSAT) {
       return;
     }

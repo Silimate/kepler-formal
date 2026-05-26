@@ -1532,8 +1532,7 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return findBaseCounterexampleImpl(
-      problem, selectBaseCaseSolverType(problem, solverType), k, std::nullopt);
+  return findBaseCounterexampleImpl(problem, solverType, k, std::nullopt);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -1541,8 +1540,7 @@ findBaseCounterexampleAtFrontier(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return findBaseCounterexampleImpl(
-      problem, selectBaseCaseSolverType(problem, solverType), k, k);
+  return findBaseCounterexampleImpl(problem, solverType, k, k);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>

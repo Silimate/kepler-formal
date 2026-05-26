@@ -43,10 +43,15 @@ SATSolverWrapper::SolveStatus solveBoolFormulaStatus(
 
   FrameFormulaEncoder encoder(solver, std::move(leafLits));
   solver.addClause({encoder.encode(formula)});
-  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
-      conflictLimit.has_value()) {
-    return solver.solveWithKissatResourceLimits(
-        *conflictLimit, *conflictLimit);
+  if (conflictLimit.has_value()) {
+    if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      return solver.solveWithKissatResourceLimits(
+          *conflictLimit, *conflictLimit);
+    }
+    return solver.solveWithAssumptionsStatus(
+        {},
+        *conflictLimit,
+        /*propagationLimit=*/-1);
   }
   return solver.solveStatus();
 }

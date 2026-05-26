@@ -36,9 +36,9 @@ constexpr size_t kMaxSatValidatedOrderedStatePairs = 5000;
 constexpr size_t kMaxSatValidatedOrderedCoiStatePairs = 700000;
 constexpr size_t kDefaultResetBootstrapOutputCoiStatePairs =
     kMaxSatValidatedOrderedCoiStatePairs;
-constexpr size_t kMaxSatValidatedOrderedPairSupport = 8192;
+constexpr size_t kMaxSatValidatedOrderedPairSupport = 32768;
 constexpr size_t kMaxOrderedCoiExpansionPasses = 64;
-constexpr unsigned kSatValidatedStructuralConflictLimit = 256;
+constexpr unsigned kSatValidatedStructuralConflictLimit = 4096;
 
 using KEPLER_FORMAL::BoolExpr;
 using FingerprintMemo = std::pmr::unordered_map<BoolExpr*, uint64_t>;
@@ -371,7 +371,8 @@ bool ensureExprPairEquivalentOrExpand(
     AbstractExprPairMemo& structuralMemo,
     std::vector<unsigned char>& selected,
     KEPLER_FORMAL::Config::SolverType solverType,
-    bool& invalidRelation) {
+    bool& invalidRelation,
+    std::string* invalidReason = nullptr) {
   if (areEquivalentUnderAbstractMaps(
           expr0, expr1, abstractMap0, abstractMap1, structuralMemo)) {
     return false;
@@ -383,10 +384,21 @@ bool ensureExprPairEquivalentOrExpand(
     return true;
   }
 
-  if (expr0 == nullptr || expr1 == nullptr ||
-      !isWithinSatValidatedOrderedSupportBudget(expr0, expr1) ||
-      !areSatEquivalentUnderPartialAbstractMaps(
-          expr0, expr1, abstractMap0, abstractMap1, solverType)) {
+  if (expr0 == nullptr || expr1 == nullptr) {
+    if (invalidReason != nullptr) {
+      *invalidReason = "missing_expr";
+    }
+    invalidRelation = true;
+  } else if (!isWithinSatValidatedOrderedSupportBudget(expr0, expr1)) {
+    if (invalidReason != nullptr) {
+      *invalidReason = "support_budget";
+    }
+    invalidRelation = true;
+  } else if (!areSatEquivalentUnderPartialAbstractMaps(
+                 expr0, expr1, abstractMap0, abstractMap1, solverType)) {
+    if (invalidReason != nullptr) {
+      *invalidReason = "sat_validation";
+    }
     invalidRelation = true;
   }
   return false;
@@ -680,8 +692,9 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
       if (structuralCoiDiagEnabled()) {
         std::fprintf(
             stderr,
-            "SEC diag: structural output coi rejected output=%zu pairs=%zu\n",
+            "SEC diag: structural output coi rejected output=%zu name=%s pairs=%zu\n",
             i,
+            alignedOutputs.names[i].c_str(),
             mapping.pairs.size());
       }
       return {};
@@ -815,8 +828,9 @@ AlignedSignals inferStructuralCoiStatePairs(
       if (structuralCoiDiagEnabled()) {
         std::fprintf(
             stderr,
-            "SEC diag: structural coi rejected output=%zu pairs=%zu\n",
+            "SEC diag: structural coi rejected output=%zu name=%s pairs=%zu\n",
             i,
+            alignedOutputs.names[i].c_str(),
             mapping.pairs.size());
       }
       return {};
@@ -899,12 +913,22 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
   expandOrderedCoiFromOutputs(
       model0, model1, alignedOutputs, stateIndexByVar0, stateIndexByVar1, selected);
   if (std::count(selected.begin(), selected.end(), 1) == 0) {
+    if (structuralCoiDiagEnabled()) {
+      std::fprintf(stderr, "SEC diag: ordered coi skipped no selected state\n");
+    }
     return {};
   }
 
   for (size_t pass = 0; pass < kMaxOrderedCoiExpansionPasses; ++pass) {
     if (static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)) >
         kMaxSatValidatedOrderedCoiStatePairs) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: ordered coi rejected budget pass=%zu selected=%zu\n",
+            pass,
+            static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)));
+      }
       return {};
     }
 
@@ -917,12 +941,21 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
     AbstractExprPairMemo structuralMemo{&memoResource};
     bool changed = false;
     bool invalidRelation = false;
+    std::string invalidReason;
 
     for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
       const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
       const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
       if (exprIt0 == model0.observedOutputExprByKey.end() ||
           exprIt1 == model1.observedOutputExprByKey.end()) {
+        if (structuralCoiDiagEnabled()) {
+          std::fprintf(
+              stderr,
+              "SEC diag: ordered coi rejected missing output=%zu pass=%zu selected=%zu\n",
+              i,
+              pass,
+              static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)));
+        }
         return {};  // LCOV_EXCL_LINE
       }
       changed |= ensureExprPairEquivalentOrExpand(
@@ -935,8 +968,20 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
           structuralMemo,
           selected,
           solverType,
-          invalidRelation);
+          invalidRelation,
+          &invalidReason);
       if (invalidRelation) {
+        if (structuralCoiDiagEnabled()) {
+          std::fprintf(
+              stderr,
+              "SEC diag: ordered coi rejected output=%zu name=%s pass=%zu "
+              "selected=%zu reason=%s\n",
+              i,
+              alignedOutputs.names[i].c_str(),
+              pass,
+              static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)),
+              invalidReason.c_str());
+        }
         return {};
       }
     }
@@ -957,8 +1002,19 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
           structuralMemo,
           selected,
           solverType,
-          invalidRelation);
+          invalidRelation,
+          &invalidReason);
       if (invalidRelation) {
+        if (structuralCoiDiagEnabled()) {
+          std::fprintf(
+              stderr,
+              "SEC diag: ordered coi rejected transition=%zu pass=%zu "
+              "selected=%zu reason=%s\n",
+              i,
+              pass,
+              static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)),
+              invalidReason.c_str());
+        }
         return {};
       }
     }
@@ -967,10 +1023,23 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
       // Only the top-output alignment came from names.  Ordered internal state
       // bits were merely candidates, and every reached output/transition formula
       // has now been proven equivalent under the selected relation.
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: ordered coi accepted pass=%zu selected=%zu\n",
+            pass,
+            selectedStates.names.size());
+      }
       return selectedStates;
     }
   }
 
+  if (structuralCoiDiagEnabled()) {
+    std::fprintf(
+        stderr,
+        "SEC diag: ordered coi rejected pass_limit selected=%zu\n",
+        static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)));
+  }
   return {};
 }
 
@@ -978,9 +1047,29 @@ std::unordered_map<size_t, size_t> buildInputClassMap(
     const SequentialDesignModel& model,
     const std::vector<SignalKey>& alignedInputKeys) {
   std::unordered_map<size_t, size_t> classes;
-  classes.reserve(alignedInputKeys.size());
+  classes.reserve(alignedInputKeys.size() + model.clockCarrierVarIDs.size());
+  std::unordered_set<size_t> clockCarrierVars(
+      model.clockCarrierVarIDs.begin(), model.clockCarrierVarIDs.end());
+  size_t clockClass = std::numeric_limits<size_t>::max();
+  bool sawClockClass = false;
+  bool multipleClockClasses = false;
   for (size_t i = 0; i < alignedInputKeys.size(); ++i) {
-    classes.emplace(model.inputVarByKey.at(alignedInputKeys[i]), i);
+    const size_t varID = model.inputVarByKey.at(alignedInputKeys[i]);
+    classes.emplace(varID, i);
+    if (clockCarrierVars.find(varID) == clockCarrierVars.end()) {
+      continue;
+    }
+    if (!sawClockClass) {
+      clockClass = i;
+      sawClockClass = true;
+    } else if (clockClass != i) {
+      multipleClockClasses = true;
+    }
+  }
+  if (sawClockClass && !multipleClockClasses) {
+    for (const auto varID : model.clockCarrierVarIDs) {
+      classes.emplace(varID, clockClass);
+    }
   }
   return classes;
 }

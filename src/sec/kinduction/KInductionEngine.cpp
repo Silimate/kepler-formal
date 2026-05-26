@@ -24,11 +24,10 @@ bool isFrontierFirstEnabled() {
   return std::getenv("KEPLER_SEC_KI_FRONTIER_FIRST") != nullptr;
 }
 
-// Batching protects very wide designs from one enormous OR-of-output-bads SAT
-// query, but medium designs can be faster monolithically because every batch
-// repeats the same reset/bootstrap COI.  Keep AES/BlackParrot-style wide cases
-// batched while allowing sky130hs_ibex-sized designs to close in one proof.
-constexpr size_t kMinOutputsForBatchedProof = 129;
+// Batching protects SEC proofs from one broad OR-of-output-bads SAT query.
+// Keep every true multi-output proof batched; medium designs such as
+// sky130hs_ibex are still sensitive to monolithic base-case witnesses.
+constexpr size_t kMinOutputsForBatchedProof = 2;
 
 void emitKInductionProblemDiag(const KInductionProblem& problem,
                                size_t maxK) {
