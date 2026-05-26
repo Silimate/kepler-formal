@@ -143,17 +143,6 @@ size_t resetBootstrapFrames(const KInductionProblem& problem) {
              : 0u;
 }
 
-KEPLER_FORMAL::Config::SolverType selectBaseCaseSolverType(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  (void)problem;
-  // Base-case checks are short-lived validation oracles shared by KI, IMC and
-  // PDR. Keep Glucose when explicitly requested, but otherwise use the default
-  // assumption-capable backend so these validator queries follow the same solver
-  // semantics as the reset/frontier core checks.
-  return SATSolverWrapper::assumptionSolverTypeFor(solverType);
-}
-
 InitialConstraintMode determineInitialConstraintMode(const KInductionProblem& problem) {
   if (!problem.hasSequentialState()) {
     return InitialConstraintMode::None;
@@ -1422,15 +1411,16 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
   SATSolverWrapper solver(solverType);
   if (solverProfile == BaseCaseSolverProfile::PdrValidation ||
       solverProfile == BaseCaseSolverProfile::PdrValidationProofOnly ||
-      solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch) {
+      solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch ||
+      baseCaseValidationUsesLocalQueryProfile(solverType)) {
     // PDR calls this helper as a short-lived exact CEGAR validation. It asks
     // only whether bad is reachable at this frontier: older public bad frames
     // were checked or learned by earlier PDR refinements, and re-encoding them
     // as a safe-prefix constraint made AES spend minutes inside SAT search.
-    // Use the PDR query profile here as well: samples on the regress PDR flow
-    // showed these medium-sized validation BMCs spending their time in Kissat's
-    // standalone preprocessing/probing, while PDR only needs a quick SAT/UNSAT
-    // answer to decide which learned bad-formula clauses to add.
+    // Use the local query profile here as well: samples on the regress PDR and
+    // dynamic-node KI flows showed medium-sized validation BMCs spending their
+    // time in standalone preprocessing/probing, while the caller only needs a
+    // quick SAT/UNSAT answer before moving to the next frontier.
     solver.configureForSecPdrQuery(coi.solverSymbols.size());
   } else {
     solver.configureForSecConeProof(coi.solverSymbols.size());
@@ -1528,11 +1518,38 @@ struct ResetFrontierReachabilityContext {
   std::shared_ptr<ResetFrontierReachabilityContextData> data;
 };
 
+KEPLER_FORMAL::Config::SolverType baseCaseValidationSolverType(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  (void)problem;
+  // Base-case checks are one-shot BMC oracles, not incremental assumption
+  // queries. Keep the requested proof solver here; reset/frontier helpers that
+  // actually depend on assumptions use SATSolverWrapper::assumptionSolverTypeFor
+  // where they build those assumption-capable solvers.
+  return solverType;
+}
+
+bool baseCaseValidationUsesLocalQueryProfile(
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  // The CaDiCaL backend is selected here specifically for short validation
+  // probes. Its default inprocessing can dominate medium SEC cones before CDCL
+  // starts. Kissat's proof-oriented default has a similar problem on these
+  // rebuilt base BMCs, so both embedded CDCL solvers use the local-query
+  // profile and Glucose keeps its own native defaults.
+  return solverType == KEPLER_FORMAL::Config::SolverType::CADICAL ||
+         solverType == KEPLER_FORMAL::Config::SolverType::KISSAT;
+}
+
 std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return findBaseCounterexampleImpl(problem, solverType, k, std::nullopt);
+  // Keep the public KI base-case path on the one-shot validation policy above:
+  // the selected solver is preserved, while the query profile avoids spending
+  // minutes in standalone preprocessing on medium SEC cones such as
+  // nangate45_dynamic_node.
+  return findBaseCounterexampleImpl(
+      problem, baseCaseValidationSolverType(problem, solverType), k, std::nullopt);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -1540,7 +1557,8 @@ findBaseCounterexampleAtFrontier(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return findBaseCounterexampleImpl(problem, solverType, k, k);
+  return findBaseCounterexampleImpl(
+      problem, baseCaseValidationSolverType(problem, solverType), k, k);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -1554,7 +1572,7 @@ findFastBaseCounterexampleAtFrontier(
   // assumption-capable solver used by the exact frontier validators.
   return findBaseCounterexampleImpl(
       problem,
-      selectBaseCaseSolverType(problem, solverType),
+      baseCaseValidationSolverType(problem, solverType),
       k,
       k,
       /*localizeMultiOutputFrontier=*/true,
@@ -1567,7 +1585,7 @@ bool provesNoBaseCounterexampleAtFrontier(
     size_t k) {
   return !findBaseCounterexampleImpl(
               problem,
-              selectBaseCaseSolverType(problem, solverType),
+              baseCaseValidationSolverType(problem, solverType),
               k,
               k,
               /*localizeMultiOutputFrontier=*/false,

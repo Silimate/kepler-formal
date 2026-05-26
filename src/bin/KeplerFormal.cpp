@@ -1220,8 +1220,8 @@ int KeplerFormalMain(int argc, char** argv) {
             skippedOutputs << "  - " << skippedOutput << "\n";
           }
           SPDLOG_INFO(
-              "SEC skipped observed outputs due to connectivity issues "
-              "(no-driver, multi-driver, or logical-loop):\n{}",
+              "SEC skipped observed outputs due to extraction or coverage "
+              "limitations:\n{}",
               skippedOutputs.str());
         }
         // LCOV_EXCL_START

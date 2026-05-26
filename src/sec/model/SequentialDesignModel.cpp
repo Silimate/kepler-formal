@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <deque>
 #include <limits>
+#include <memory_resource>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -240,9 +241,13 @@ bool hasBuildableCombinationalRoot(
       return false;
     }
 
-    const auto& truthTable = naja::NL::SNLDesignModeling::getTruthTable(
-        model, currentTerm.getSnlBitTerm()->getOrderID());
-    return truthTable.isInitialized();
+    try {
+      const auto& truthTable = naja::NL::SNLDesignModeling::getTruthTable(
+          model, currentTerm.getSnlBitTerm()->getOrderID());
+      return truthTable.isInitialized();
+    } catch (const std::exception&) {
+      return false;
+    }
   }
 
   return false;
@@ -477,22 +482,48 @@ void appendUniqueTermIDs(
   }
 }
 
+bool isUnassignedBuilderVarID(size_t varID) {
+  return varID == static_cast<size_t>(-1);
+}
+
 void mergeBuilderTermVarIDs(
     std::vector<size_t>& dest,
     const std::vector<size_t>& src) {
   if (src.size() > dest.size()) {
-    dest.resize(src.size(), 0);  // LCOV_EXCL_LINE
+    dest.resize(src.size(), static_cast<size_t>(-1));  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   for (size_t index = 0; index < src.size(); ++index) {
-    if (dest[index] == 0) {
+    if (isUnassignedBuilderVarID(dest[index]) &&
+        !isUnassignedBuilderVarID(src[index])) {
       dest[index] = src[index];
     }
   }
 }
 
+std::unordered_map<size_t, size_t> buildStableBuilderVarRemap(
+    const std::vector<size_t>& sourceTermDNLID2varID,
+    const std::vector<size_t>& stableTermDNLID2varID) {
+  std::unordered_map<size_t, size_t> remap;
+  const size_t termCount =
+      std::min(sourceTermDNLID2varID.size(), stableTermDNLID2varID.size());
+  for (size_t termID = 0; termID < termCount; ++termID) {
+    const size_t sourceVarID = sourceTermDNLID2varID[termID];
+    if (isUnassignedBuilderVarID(sourceVarID) || sourceVarID < 2) {
+      continue;
+    }
+    const size_t stableVarID = stableTermDNLID2varID[termID];
+    if (isUnassignedBuilderVarID(stableVarID)) {
+      continue;
+    }
+    remap.emplace(sourceVarID, stableVarID);
+  }
+  return remap;
+}
+
 MaterializedBuilderOutputs materializeBuilderOutputs(
     const std::vector<naja::DNL::DNLID>& requestedOutputs,
     const std::vector<naja::DNL::DNLID>& collectedInputs,
+    const std::vector<size_t>& stableTermDNLID2varID,
     const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>&
         collectedSkippedOutputs,
     bool secDiagEnabled,
@@ -602,7 +633,8 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
     const auto& rootTerm = dnl->getDNLTerminalFromID(*rootTermID);
     if (!(rootTerm.isTopPort() &&
           rootTerm.getSnlBitTerm()->getDirection() !=
-              naja::NL::SNLBitTerm::Direction::Output)) {
+              naja::NL::SNLBitTerm::Direction::Output) &&
+        hasBuildableCombinationalRoot(dnl, *rootTermID)) {
       nonTopRootsToBuild.insert(*rootTermID);
     }
     requestedByRoot[*rootTermID].push_back(requestedTermID);
@@ -616,10 +648,12 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
     }
   }
 
-  // A dependency root can also appear in the carried boundary-input set from an
-  // earlier extraction pass.  If we leave that non-top root marked as a PI, the
-  // cloud stops at the root instead of rebuilding its cone; clock-gated flops
+  // A combinational dependency root can also appear in the carried boundary-input
+  // set from an earlier extraction pass.  If we leave that root marked as a PI,
+  // the cloud stops at the root instead of rebuilding its cone; clock-gated flops
   // then see their gated clock as a stale frontier rather than clk & enable.
+  // Sequential state outputs must remain PIs here: they are the current-state
+  // variables used by reset/bootstrap proofs and must not be rebuilt as logic.
   std::vector<naja::DNL::DNLID> materializationInputs;
   materializationInputs.reserve(collectedInputs.size());
   for (const auto inputTermID : collectedInputs) {
@@ -677,6 +711,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
         const auto single = materializeBuilderOutputs(
             {requestedTermID},
             collectedInputs,
+            stableTermDNLID2varID,
             collectedSkippedOutputs,
             secDiagEnabled,
             topName,
@@ -738,7 +773,10 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
 
   result.inputs = builder.getInputs();
   result.outputs = builder.getOutputs();
-  result.termDNLID2varID = builder.getTermDNLID2VarID();
+  result.termDNLID2varID = stableTermDNLID2varID;
+  mergeBuilderTermVarIDs(result.termDNLID2varID, builder.getTermDNLID2VarID());
+  const auto stableVarRemap = buildStableBuilderVarRemap(
+      builder.getTermDNLID2VarID(), result.termDNLID2varID);
   for (const auto& [termID, info] : builder.getSkippedOutputs()) {
     result.skippedOutputsByTerm.emplace(termID, info);
   }
@@ -769,6 +807,22 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   for (size_t i = 0; i < result.outputs.size(); ++i) {
     BoolExpr* expr = outputExprs[i];
     if (expr == nullptr || !expr->isValid()) {
+      continue;
+    }
+    try {
+      std::unordered_map<BoolExpr*, BoolExpr*> remapMemo;
+      // Dependency materialization may temporarily remove internal roots from
+      // the PI list to force cone rebuilding. That changes builder-local
+      // variable IDs, so normalize every dependency formula back to the stable
+      // SEC model variable space before the expression is shared with proofs.
+      expr = remapBoolExprVariables(expr, stableVarRemap, remapMemo);
+    } catch (const std::exception& e) {
+      result.skippedOutputsByTerm.emplace(
+          result.outputs[i],
+          BuilderSkippedOutputInfo{
+              BuilderSkippedOutputReason::NoDriver,
+              "failed to remap dependency cone to stable SEC variables: " +
+                  std::string(e.what())});
       continue;
     }
     result.outputExprByTerm.emplace(result.outputs[i], expr);
@@ -876,6 +930,95 @@ const std::vector<size_t>& collectCandidateStateDependenciesFromExpr(
     }
   }
   return scratch.dependencies;
+}
+
+void collectCandidateDependenciesIntoSet(
+    BoolExpr* expr,
+    const std::vector<uint8_t>& isCandidateVar,
+    CandidateDependencyScratch& scratch,
+    std::unordered_set<size_t>& dependencies) {
+  for (const auto varID :
+       collectCandidateStateDependenciesFromExpr(expr, isCandidateVar, scratch)) {
+    dependencies.insert(varID);
+  }
+}
+
+std::optional<size_t> findFirstUnpublishedSupportVar(
+    BoolExpr* expr,
+    const std::vector<uint8_t>& isPublishedVar,
+    CandidateDependencyScratch& scratch) {
+  if (expr == nullptr || !expr->isValid()) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+
+  // We only need the first unpublished symbol. Avoid BoolExpr::getSupportVars()
+  // here: BlackParrot-scale formulas spend minutes allocating full support
+  // sets.  A PMR-backed visited set keeps the DAG walk exact without the tiny
+  // per-node heap churn of std::unordered_map/operator[].
+  std::pmr::monotonic_buffer_resource visitedResource;
+  std::pmr::unordered_set<const BoolExpr*> visited{&visitedResource};
+  visited.reserve(4096);
+  scratch.stack.clear();
+  scratch.stack.push_back(expr);
+  while (!scratch.stack.empty()) {
+    const BoolExpr* node = scratch.stack.back();
+    scratch.stack.pop_back();
+    if (node == nullptr || !visited.insert(node).second) {
+      continue;  // LCOV_EXCL_LINE
+    }
+
+    switch (node->getOp()) {
+      case Op::VAR: {
+        const size_t symbol = node->getId();
+        if (symbol >= 2 &&
+            (symbol >= isPublishedVar.size() || isPublishedVar[symbol] == 0)) {
+          return symbol;
+        }
+        break;
+      }
+      case Op::NOT:
+        scratch.stack.push_back(node->getLeft());  // LCOV_EXCL_LINE
+        break;  // LCOV_EXCL_LINE
+      case Op::AND:
+      case Op::OR:
+      case Op::XOR:
+        scratch.stack.push_back(node->getLeft());  // LCOV_EXCL_LINE
+        scratch.stack.push_back(node->getRight());  // LCOV_EXCL_LINE
+        break;  // LCOV_EXCL_LINE
+      case Op::NONE:  // LCOV_EXCL_LINE
+      default:
+        break;  // LCOV_EXCL_LINE
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<uint8_t> buildCandidateVarMask(
+    const std::unordered_map<size_t, BoolExpr*>& candidateExprByVarID) {
+  size_t maxVarID = 0;
+  for (const auto& [varID, _] : candidateExprByVarID) {
+    maxVarID = std::max(maxVarID, varID);
+  }
+  std::vector<uint8_t> isCandidateVar(maxVarID + 1, 0);
+  for (const auto& [varID, _] : candidateExprByVarID) {
+    isCandidateVar[varID] = 1;
+  }
+  return isCandidateVar;
+}
+
+std::string displayNameForSignalKey(
+    const SequentialDesignModel& model,
+    const SignalKey& key) {
+  const auto displayIt = model.displayNameByKey.find(key);
+  return displayIt == model.displayNameByKey.end() ? signalKeyToString(key)
+                                                   : displayIt->second;
+}
+
+ConnectivitySkipInfo makeUnpublishedSupportSkip(size_t varID) {
+  return ConnectivitySkipInfo{
+      ConnectivitySkipOrigin::NoDriver,
+      "Depends on unpublished internal support variable v" + std::to_string(varID),
+  };
 }
 
 SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
@@ -1143,25 +1286,41 @@ BoolExpr* stripClockCarrierFromClockEnable(
         // Remove the carrier polarity, but keep real non-clock gating logic.
         stripped = BoolExpr::createTrue();
       } else {
-        stripped = BoolExpr::Not(stripClockCarrierFromClockEnable(
-            root->getLeft(), topClockCarrierVarIDs, memo));
+        BoolExpr* left = stripClockCarrierFromClockEnable(
+            root->getLeft(), topClockCarrierVarIDs, memo);
+        stripped = left == root->getLeft() ? root : BoolExpr::Not(left);
       }
       break;
-    case Op::AND:
-      stripped = BoolExpr::And(
-          stripClockCarrierFromClockEnable(root->getLeft(), topClockCarrierVarIDs, memo),
-          stripClockCarrierFromClockEnable(root->getRight(), topClockCarrierVarIDs, memo));
+    case Op::AND: {
+      BoolExpr* left = stripClockCarrierFromClockEnable(
+          root->getLeft(), topClockCarrierVarIDs, memo);
+      BoolExpr* right = stripClockCarrierFromClockEnable(
+          root->getRight(), topClockCarrierVarIDs, memo);
+      stripped = left == root->getLeft() && right == root->getRight()
+                     ? root
+                     : BoolExpr::And(left, right);
       break;
-    case Op::OR:
-      stripped = BoolExpr::Or(
-          stripClockCarrierFromClockEnable(root->getLeft(), topClockCarrierVarIDs, memo),
-          stripClockCarrierFromClockEnable(root->getRight(), topClockCarrierVarIDs, memo));
+    }
+    case Op::OR: {
+      BoolExpr* left = stripClockCarrierFromClockEnable(
+          root->getLeft(), topClockCarrierVarIDs, memo);
+      BoolExpr* right = stripClockCarrierFromClockEnable(
+          root->getRight(), topClockCarrierVarIDs, memo);
+      stripped = left == root->getLeft() && right == root->getRight()
+                     ? root
+                     : BoolExpr::Or(left, right);
       break;
-    case Op::XOR:
-      stripped = BoolExpr::Xor(
-          stripClockCarrierFromClockEnable(root->getLeft(), topClockCarrierVarIDs, memo),
-          stripClockCarrierFromClockEnable(root->getRight(), topClockCarrierVarIDs, memo));
+    }
+    case Op::XOR: {
+      BoolExpr* left = stripClockCarrierFromClockEnable(
+          root->getLeft(), topClockCarrierVarIDs, memo);
+      BoolExpr* right = stripClockCarrierFromClockEnable(
+          root->getRight(), topClockCarrierVarIDs, memo);
+      stripped = left == root->getLeft() && right == root->getRight()
+                     ? root
+                     : BoolExpr::Xor(left, right);
       break;
+    }
     case Op::NONE:
     default:
       throw std::runtime_error("Unsupported BoolExpr operator in clock enable");
@@ -1169,6 +1328,28 @@ BoolExpr* stripClockCarrierFromClockEnable(
 
   memo.emplace(root, stripped);
   return stripped;
+}
+
+BoolExpr* simplifyWhenClockCarriersChanged(BoolExpr* original, BoolExpr* stripped) {
+  // Most mapped flops do not actually contain a clock carrier in their data
+  // cone.  Preserve the original expression in that common case instead of
+  // rebuilding and simplifying large ASIC cones just to discover no change.
+  return stripped == original ? original : BoolExpr::simplify(stripped);
+}
+
+BoolExpr* stripClockCarriersFromSequentialUpdate(
+    BoolExpr* update,
+    const std::unordered_set<size_t>& topClockCarrierVarIDs,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
+  if (update == nullptr || topClockCarrierVarIDs.empty()) {
+    return update;
+  }
+
+  // Clock carriers are the implicit SEC step trigger, not data state.  Strip any
+  // carrier variables that leaked through clock-pin materialization before the
+  // transition is exposed to the proof engines.
+  return simplifyWhenClockCarriersChanged(
+      update, stripClockCarrierFromClockEnable(update, topClockCarrierVarIDs, memo));
 }
 
 BoolExpr* substituteClockGateLatchVars(
@@ -1217,12 +1398,38 @@ BoolExpr* substituteClockGateLatchVars(
   return substituted;
 }
 
+bool pendingClockTermsArePureCarriers(
+    const PendingTransition& pending,
+    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs) {
+  if (pending.clockTermIDs.empty()) {
+    return false;
+  }
+  for (const auto& clockTerm : pending.clockTermIDs) {
+    if (pureClockCarrierTermIDs.find(clockTerm.termID) ==
+        pureClockCarrierTermIDs.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 BoolExpr* getLocalClockEnableExpr(
     const PendingTransition& pending,
+    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs,
     const std::unordered_set<size_t>& topClockCarrierVarIDs,
     const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID,
-    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
-  if (pending.clockTermIDs.empty() || topClockCarrierVarIDs.empty()) {
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
+    std::unordered_map<BoolExpr*, BoolExpr*>& clockCarrierStripMemo) {
+  if (pending.clockTermIDs.empty()) {
+    return nullptr;
+  }
+  // CTS-only clock trees can be materialized as internal output expressions that
+  // do not own a stable boundary variable.  The structural pure-clock term set is
+  // therefore the authoritative "this is just a clock" signal for these pins.
+  if (pendingClockTermsArePureCarriers(pending, pureClockCarrierTermIDs)) {
+    return nullptr;
+  }
+  if (topClockCarrierVarIDs.empty()) {
     return nullptr;
   }
 
@@ -1242,16 +1449,16 @@ BoolExpr* getLocalClockEnableExpr(
     clockExpr = BoolExpr::And(clockExpr, clockExprs[index]);  // LCOV_EXCL_LINE
   }
 
-  std::unordered_map<BoolExpr*, BoolExpr*> memo;
-  BoolExpr* enable = BoolExpr::simplify(
-      stripClockCarrierFromClockEnable(clockExpr, topClockCarrierVarIDs, memo));
+  BoolExpr* enable = simplifyWhenClockCarriersChanged(
+      clockExpr, stripClockCarrierFromClockEnable(
+                     clockExpr, topClockCarrierVarIDs, clockCarrierStripMemo));
   if (!clockGateLatchDataExprByVarID.empty()) {
     std::unordered_map<BoolExpr*, BoolExpr*> latchMemo;
     enable = BoolExpr::simplify(substituteClockGateLatchVars(
         enable, clockGateLatchDataExprByVarID, latchMemo));
-    std::unordered_map<BoolExpr*, BoolExpr*> postLatchClockMemo;
-    enable = BoolExpr::simplify(stripClockCarrierFromClockEnable(
-        enable, topClockCarrierVarIDs, postLatchClockMemo));
+    enable = simplifyWhenClockCarriersChanged(
+        enable, stripClockCarrierFromClockEnable(
+                    enable, topClockCarrierVarIDs, clockCarrierStripMemo));
   }
   if (enable == BoolExpr::createTrue()) {
     return nullptr;
@@ -1271,23 +1478,19 @@ void validatePendingTransitionShape(const PendingTransition& pending) {
     }
   }
 
-  int controlKinds = 0;
-  controlKinds += resolvePendingPinRoleTermID(pending, "R").has_value() ? 1 : 0;
-  controlKinds += resolvePendingPinRoleTermID(pending, "RN").has_value() ? 1 : 0;
-  controlKinds += resolvePendingPinRoleTermID(pending, "S").has_value() ? 1 : 0;
-  controlKinds += resolvePendingPinRoleTermID(pending, "SN").has_value() ? 1 : 0;
-  if (controlKinds > 1) {
-    throw std::runtime_error(
-        "Unsupported sequential primitive with multiple control styles");
-  }
+  // Reset/set combinations are common in mapped cells.  They must be modeled
+  // as state transitions instead of abstracted as internal SEC boundary terms,
+  // because SEC may only align top-level terminals by name.
 }
 
 BoolExpr* buildNextStateExpr(
     const PendingTransition& pending,
     const std::vector<size_t>& termDNLID2varID,
+    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs,
     const std::unordered_set<size_t>& topClockCarrierVarIDs,
     const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID,
-    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
+    std::unordered_map<BoolExpr*, BoolExpr*>& clockCarrierStripMemo) {
   if (pending.stateTermID >= termDNLID2varID.size()) {
     throw std::runtime_error("Sequential state term is out of range");  // LCOV_EXCL_LINE
   }
@@ -1318,9 +1521,11 @@ BoolExpr* buildNextStateExpr(
   if (BoolExpr* clockEnable =
           getLocalClockEnableExpr(
               pending,
+              pureClockCarrierTermIDs,
               topClockCarrierVarIDs,
               clockGateLatchDataExprByVarID,
-              outputExprByTerm)) {
+              outputExprByTerm,
+              clockCarrierStripMemo)) {
     next = BoolExpr::Or(
         BoolExpr::And(clockEnable, next),
         BoolExpr::And(BoolExpr::Not(clockEnable), current));
@@ -1330,16 +1535,6 @@ BoolExpr* buildNextStateExpr(
   BoolExpr* resetLow = getRequiredOutputExpr(pending, "RN", outputExprByTerm);
   BoolExpr* setHigh = getRequiredOutputExpr(pending, "S", outputExprByTerm);
   BoolExpr* setLow = getRequiredOutputExpr(pending, "SN", outputExprByTerm);
-
-  int controlKinds = 0;
-  controlKinds += resetHigh != nullptr ? 1 : 0;
-  controlKinds += resetLow != nullptr ? 1 : 0;
-  controlKinds += setHigh != nullptr ? 1 : 0;
-  controlKinds += setLow != nullptr ? 1 : 0;
-  if (controlKinds > 1) {
-    throw std::runtime_error(  // LCOV_EXCL_LINE
-        "Unsupported sequential primitive with multiple control styles");
-  }
 
   auto applyForcedValue = [&](BoolExpr* asserted, bool value) {
     return BoolExpr::Or(
@@ -1351,19 +1546,24 @@ BoolExpr* buildNextStateExpr(
   const bool resetValue = pending.stateOutputIsComplemented;
   const bool setValue = !pending.stateOutputIsComplemented;
 
-  // Support one control style at a time and fail loudly on more complex cells
-  // so we do not silently prove the wrong transition system.
+  // Apply reset before set so set/clear-style controls have the final say when
+  // both are asserted.  This matches ASAP7 reset+set flops whose Liberty views
+  // define the simultaneous clear/preset case as low on the exposed state pin.
   if (resetHigh) {
     next = applyForcedValue(resetHigh, resetValue);
-  } else if (resetLow) {
+  }
+  if (resetLow) {
     next = applyForcedValue(BoolExpr::Not(resetLow), resetValue);
-  } else if (setHigh) {
+  }
+  if (setHigh) {
     next = applyForcedValue(setHigh, setValue);
-  } else if (setLow) {
+  }
+  if (setLow) {
     next = applyForcedValue(BoolExpr::Not(setLow), setValue);
   }
 
-  return next;
+  return stripClockCarriersFromSequentialUpdate(
+      next, topClockCarrierVarIDs, clockCarrierStripMemo);
 }  // LCOV_EXCL_LINE
 
 std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
@@ -1372,20 +1572,12 @@ std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
   const bool hasSetHigh = resolvePendingPinRoleTermID(pending, "S").has_value();
   const bool hasSetLow = resolvePendingPinRoleTermID(pending, "SN").has_value();
 
-  int controlKinds = 0;
-  controlKinds += hasResetHigh ? 1 : 0;
-  controlKinds += hasResetLow ? 1 : 0;
-  controlKinds += hasSetHigh ? 1 : 0;
-  controlKinds += hasSetLow ? 1 : 0;
-  if (controlKinds > 1) {
-    throw std::runtime_error(  // LCOV_EXCL_LINE
-        "Unsupported sequential primitive with multiple control styles");
-  }
-
-  if (hasResetHigh || hasResetLow) {
+  const bool hasReset = hasResetHigh || hasResetLow;
+  const bool hasSet = hasSetHigh || hasSetLow;
+  if (hasReset && !hasSet) {
     return pending.stateOutputIsComplemented;
   }
-  if (hasSetHigh || hasSetLow) {
+  if (hasSet && !hasReset) {
     return !pending.stateOutputIsComplemented;
   }
   return std::nullopt;
@@ -1577,6 +1769,32 @@ bool isClockTreeCarrierBoundaryName(const std::string& displayName) {
          normalized.find("_CLOCK.") != std::string::npos;
 }
 
+bool isClockTreeCarrierTerminalName(const naja::DNL::DNLTerminalFull& term) {
+  if (term.isNull()) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  if (isClockTreeCarrierBoundaryName(getTerminalDisplayName(term))) {
+    return true;
+  }
+  if (isClockTreeCarrierBoundaryName(
+          term.getSnlBitTerm()->getName().getString())) {
+    return true;
+  }
+
+  const auto& instance = term.getDNLInstance();
+  if (const auto* snlInstance = instance.getSNLInstance();
+      snlInstance != nullptr &&
+      isClockTreeCarrierBoundaryName(snlInstance->getName().getString())) {
+    return true;
+  }
+  if (const auto* model = instance.getSNLModel();
+      model != nullptr &&
+      isClockTreeCarrierBoundaryName(model->getName().getString())) {
+    return true;
+  }
+  return false;
+}
+
 bool isClockTreeBufferCellName(const std::string& name) {
   const std::string normalized = normalizePinName(name);
   if (normalized.find("CLOCK_GATE") != std::string::npos ||
@@ -1591,6 +1809,13 @@ bool isClockTreeBufferCellName(const std::string& name) {
 bool isClockTreeBufferCell(const naja::DNL::DNLTerminalFull& term) {
   if (term.isNull() || term.isTopPort()) {
     return false;
+  }
+
+  // CTS tools may keep a generic BUF/INV library cell while marking only the
+  // placed instance or flattened DNL path as clkbuf/clkload.  Use that path
+  // marker so routed clock leaves are not mis-modeled as SEC clock enables.
+  if (isClockTreeCarrierTerminalName(term)) {
+    return true;
   }
 
   if (isClockTreeBufferCellName(term.getSnlBitTerm()->getName().getString())) {
@@ -1729,8 +1954,7 @@ size_t expandClockCarrierVarIDsFromTermNames(
     if (term.isNull()) {
       continue;
     }
-    bool isClockCarrier = isClockTreeCarrierBoundaryName(
-        term.getSnlBitTerm()->getName().getString());
+    bool isClockCarrier = isClockTreeCarrierTerminalName(term);
     if (!isClockCarrier && !term.isTopPort()) {
       const auto& instance = term.getDNLInstance();
       if (const auto* snlInstance = instance.getSNLInstance();
@@ -1760,6 +1984,7 @@ size_t expandClockCarrierVarIDsFromMaterializedTerms(
     std::unordered_set<size_t>& clockCarrierVarIDs) {
   size_t added = 0;
   bool changed = true;
+  std::unordered_map<BoolExpr*, BoolExpr*> clockStripMemo;
   while (changed) {
     changed = false;
     for (const auto& [termID, expr] : outputExprByTerm) {
@@ -1772,9 +1997,9 @@ size_t expandClockCarrierVarIDsFromMaterializedTerms(
         continue;
       }
 
-      std::unordered_map<BoolExpr*, BoolExpr*> memo;
-      BoolExpr* stripped = BoolExpr::simplify(
-          stripClockCarrierFromClockEnable(expr, clockCarrierVarIDs, memo));
+      BoolExpr* stripped = simplifyWhenClockCarriersChanged(
+          expr, stripClockCarrierFromClockEnable(
+                    expr, clockCarrierVarIDs, clockStripMemo));
       if (stripped != BoolExpr::createTrue()) {
         continue;
       }
@@ -1784,6 +2009,29 @@ size_t expandClockCarrierVarIDsFromMaterializedTerms(
       clockCarrierVarIDs.insert(varID);
       ++added;
       changed = true;
+      clockStripMemo.clear();
+    }
+  }
+  return added;
+}
+
+size_t expandClockCarrierVarIDsFromPureClockTermExprs(
+    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs,
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
+    std::unordered_set<size_t>& clockCarrierVarIDs) {
+  size_t added = 0;
+  for (const auto termID : pureClockCarrierTermIDs) {
+    const auto exprIt = outputExprByTerm.find(termID);
+    if (exprIt == outputExprByTerm.end() || exprIt->second == nullptr) {
+      continue;
+    }
+    // A structurally pure clock terminal can be represented by a temporary
+    // builder variable rather than a published SEC input.  Mark that support as
+    // carrier-only too, otherwise it leaks into state transitions as data.
+    for (const auto varID : exprIt->second->getSupportVars()) {
+      if (varID >= 2 && clockCarrierVarIDs.insert(varID).second) {
+        ++added;
+      }
     }
   }
   return added;
@@ -1799,12 +2047,19 @@ size_t expandClockCarrierVarIDsFromStructure(
     return 0;  // LCOV_EXCL_LINE
   }
 
-  std::vector<int8_t> pureClockMemo(dnl->getNBterms(), -1);
-  auto isPureClockCarrier = [&](auto&& self, naja::DNL::DNLID termID) -> bool {
-    if (termID == naja::DNL::DNLID_MAX || termID >= pureClockMemo.size()) {
+  std::vector<int8_t> pureClockMemoStrict(dnl->getNBterms(), -1);
+  std::vector<int8_t> pureClockMemoAfterNamedClockTree(dnl->getNBterms(), -1);
+  auto isPureClockCarrier =
+      [&](auto&& self,
+          naja::DNL::DNLID termID,
+          bool afterNamedClockTree) -> bool {
+    if (termID == naja::DNL::DNLID_MAX ||
+        termID >= pureClockMemoStrict.size()) {
       return false;  // LCOV_EXCL_LINE
     }
-    int8_t& cached = pureClockMemo[termID];
+    int8_t& cached = afterNamedClockTree
+                         ? pureClockMemoAfterNamedClockTree[termID]
+                         : pureClockMemoStrict[termID];
     if (cached != -1) {
       return cached == 1;
     }
@@ -1833,7 +2088,8 @@ size_t expandClockCarrierVarIDsFromStructure(
       if (iso.isConstant() || iso.getDrivers().size() != 1) {
         return false;
       }
-      const bool result = self(self, iso.getDrivers().front());
+      const bool result =
+          self(self, iso.getDrivers().front(), afterNamedClockTree);
       cached = result ? 1 : 0;
       return result;
     }
@@ -1845,7 +2101,18 @@ size_t expandClockCarrierVarIDsFromStructure(
     if (isClockTreeBufferCell(term)) {
       const auto sourceDriver = getClockTreeBufferSourceDriverTerm(dnl, term);
       const bool result =
-          sourceDriver.has_value() && self(self, *sourceDriver);
+          sourceDriver.has_value() && self(self, *sourceDriver, true);
+      cached = result ? 1 : 0;
+      return result;
+    }
+
+    if (afterNamedClockTree) {
+      // Some CTS flows insert a generic root buffer before the named clkbuf
+      // tree. Once a named clock-tree branch has been seen, permit transparent
+      // single-input cells to bridge that root back to the top clock.
+      const auto sourceDriver = getClockTreeBufferSourceDriverTerm(dnl, term);
+      const bool result =
+          sourceDriver.has_value() && self(self, *sourceDriver, true);
       cached = result ? 1 : 0;
       return result;
     }
@@ -1859,8 +2126,8 @@ size_t expandClockCarrierVarIDsFromStructure(
       ++added;
     }
   };
-  for (naja::DNL::DNLID termID = 0; termID < pureClockMemo.size(); ++termID) {
-    if (!isPureClockCarrier(isPureClockCarrier, termID)) {
+  for (naja::DNL::DNLID termID = 0; termID < pureClockMemoStrict.size(); ++termID) {
+    if (!isPureClockCarrier(isPureClockCarrier, termID, false)) {
       continue;
     }
     if (pureClockCarrierTermIDs != nullptr) {
@@ -2149,6 +2416,74 @@ struct ExtractContext {
   std::unordered_map<naja::DNL::DNLID, bool> sequentialInstanceCache;
 };
 
+std::string describeSupportVarOrigins(
+    const ExtractContext& ctx,
+    size_t varID,
+    const std::vector<size_t>& termDNLID2varID,
+    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs) {
+  std::ostringstream out;
+  bool first = true;
+  const size_t termCount = std::min(termDNLID2varID.size(), ctx.dnl->getNBterms());
+  for (naja::DNL::DNLID termID = 0; termID < termCount; ++termID) {
+    if (termDNLID2varID[termID] != varID) {
+      continue;
+    }
+    if (!first) {
+      out << ", ";
+    }
+    first = false;
+    const auto& term = ctx.dnl->getDNLTerminalFromID(termID);
+    out << "term#" << termID << ":" << getTerminalDisplayName(term);
+    out << ":input_key=" << (ctx.inputKeyByTerm.find(termID) != ctx.inputKeyByTerm.end());
+    out << ":pure_clock=" << (pureClockCarrierTermIDs.find(termID) !=
+                               pureClockCarrierTermIDs.end());
+  }
+  if (first) {
+    out << "no direct term";
+  }
+  return out.str();
+}
+
+void logUnpublishedTransitionSupport(
+    const ExtractContext& ctx,
+    const SequentialDesignModel& model,
+    const PendingTransition& pending,
+    BoolExpr* nextStateExpr,
+    const std::vector<size_t>& termDNLID2varID,
+    const std::unordered_set<size_t>& clockCarrierVarIDs,
+    const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs) {
+  if (nextStateExpr == nullptr ||
+      std::getenv("KEPLER_SEC_CLOCK_GATE_DIAG") == nullptr) {
+    return;
+  }
+
+  std::unordered_set<size_t> publishedVars;
+  publishedVars.reserve(model.inputVarByKey.size());
+  for (const auto& [_, varID] : model.inputVarByKey) {
+    publishedVars.insert(varID);
+  }
+
+  for (const auto varID : nextStateExpr->getSupportVars()) {
+    if (varID < 2 || publishedVars.find(varID) != publishedVars.end() ||
+        clockCarrierVarIDs.find(varID) != clockCarrierVarIDs.end()) {
+      continue;
+    }
+    const auto displayIt = model.displayNameByKey.find(pending.stateKey);
+    const std::string stateName =
+        displayIt == model.displayNameByKey.end()
+            ? signalKeyToString(pending.stateKey)
+            : displayIt->second;
+    std::fprintf(
+        stderr,
+        "SEC diag: transition `%s` unpublished support v%zu origins=[%s]\n",
+        stateName.c_str(),
+        varID,
+        describeSupportVarOrigins(
+            ctx, varID, termDNLID2varID, pureClockCarrierTermIDs).c_str());
+  }
+  std::fflush(stderr);
+}
+
 void collectInitialBuilderBoundary(ExtractContext& ctx) {
   naja::DNL::destroy();
   ctx.universe->setTopDesign(ctx.top);
@@ -2343,7 +2678,8 @@ std::unordered_map<size_t, BoolExpr*> collectClockGateLatchDataExprByVarID(
     }
 
     std::unordered_map<BoolExpr*, BoolExpr*> clockStripMemo;
-    BoolExpr* strippedClock = BoolExpr::simplify(
+    BoolExpr* strippedClock = simplifyWhenClockCarriersChanged(
+        latchClockExpr,
         stripClockCarrierFromClockEnable(
             latchClockExpr, topClockCarrierVarIDs, clockStripMemo));
     if (strippedClock != BoolExpr::createTrue()) {
@@ -3583,6 +3919,16 @@ struct RebuiltTransitionArtifacts {
   std::vector<std::pair<naja::DNL::DNLID, SignalKey>> lateAbstractedBoundaryObservedTerms;
 };
 
+constexpr size_t kMaxCompleteStateFrontierForStartupMatching = 5000;
+
+bool shouldRetainCompleteStateFrontierForStartupMatching(size_t stateCount) {
+  // Moderate-size SEC cases benefit from the complete transition relation:
+  // structural startup matching can validate state correspondences without
+  // relying on internal flop names.  Large ASICs still use the COI frontier so
+  // BlackParrot-scale proofs do not materialize every sequential cone up front.
+  return stateCount <= kMaxCompleteStateFrontierForStartupMatching;
+}
+
 template <typename EnqueueStateKey>
 void enqueueStateDependenciesFromFormula(
     BoolExpr* expr,
@@ -3631,6 +3977,16 @@ void enqueueStateDependenciesFromFormula(
     }
   }
 }
+
+void removeDeadFoldedClockGateLatchInputs(
+    SequentialDesignModel& model,
+    const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID);
+void substituteFoldedClockGateLatchVarsInModel(
+    SequentialDesignModel& model,
+    const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID);
+void markFormulasWithUnpublishedSupportAsSkipped(
+    const ExtractContext& ctx,
+    SequentialDesignModel& model);
 
 RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
     ExtractContext& ctx,
@@ -3713,6 +4069,7 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
   std::unordered_set<naja::DNL::DNLID> materializedOutputTerms;
   std::unordered_set<size_t> topClockCarrierVarIDs;
   std::unordered_set<naja::DNL::DNLID> pureClockCarrierTermIDs;
+  std::unordered_map<BoolExpr*, BoolExpr*> transitionClockStripMemo;
   materializedOutputTerms.reserve(outputExprByTerm.size());
   for (const auto& [termID, _] : outputExprByTerm) {
     materializedOutputTerms.insert(termID);
@@ -3734,24 +4091,34 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
         termDNLID2varID,
         topClockCarrierVarIDs,
         &pureClockCarrierTermIDs);
+    const size_t addedPureExprs = expandClockCarrierVarIDsFromPureClockTermExprs(
+        pureClockCarrierTermIDs, outputExprByTerm, topClockCarrierVarIDs);
     const size_t addedMaterialized = expandClockCarrierVarIDsFromMaterializedTerms(
         termDNLID2varID, outputExprByTerm, topClockCarrierVarIDs);
+    const size_t added = addedTop + addedBoundary + addedTermNames +
+                         addedStructure + addedPureExprs + addedMaterialized;
+    if (added != 0) {
+      // The strip memo is keyed by expression pointer and the current carrier
+      // set.  When extraction discovers a new routed-clock variable, previous
+      // no-op answers may become stale, so invalidate once per carrier growth.
+      transitionClockStripMemo.clear();
+    }
     if (std::getenv("KEPLER_SEC_CLOCK_GATE_DIAG") != nullptr) {
       std::fprintf(
           stderr,
           "SEC diag: clock carriers top=%zu boundary=%zu term_names=%zu "
-          "structure=%zu materialized=%zu total=%zu pure_terms=%zu\n",
+          "structure=%zu pure_exprs=%zu materialized=%zu total=%zu pure_terms=%zu\n",
           addedTop,
           addedBoundary,
           addedTermNames,
           addedStructure,
+          addedPureExprs,
           addedMaterialized,
           topClockCarrierVarIDs.size(),
           pureClockCarrierTermIDs.size());
       std::fflush(stderr);
     }
-    return addedTop + addedBoundary + addedTermNames + addedStructure +
-           addedMaterialized;
+    return added;
   };
   refreshClockCarrierVarIDs();
   {
@@ -3765,6 +4132,7 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
       const auto dependencyOutputs = materializeBuilderOutputs(
           latchDependencyTerms,
           builderInputs,
+          termDNLID2varID,
           ctx.collectedSkippedOutputs,
           ctx.secDiagEnabled,
           ctx.topName.c_str(),
@@ -3825,6 +4193,12 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
         scannedDependencyNodes,
         enqueueRequiredStateVarID);
   };
+
+  if (shouldRetainCompleteStateFrontierForStartupMatching(model.stateBits.size())) {
+    for (const auto& key : model.stateBits) {
+      enqueueRequiredStateKey(key);
+    }
+  }
 
   for (const auto& [_, expr] : model.observedOutputExprByKey) {
     enqueueStateDependenciesFromExpr(expr);
@@ -3892,6 +4266,7 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
       const auto dependencyOutputs = materializeBuilderOutputs(
           batchOutputTerms,
           builderInputs,
+          termDNLID2varID,
           ctx.collectedSkippedOutputs,
           ctx.secDiagEnabled,
           ctx.topName.c_str(),
@@ -4025,9 +4400,22 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
             buildNextStateExpr(
                 pending,
                 termDNLID2varID,
+                pureClockCarrierTermIDs,
                 topClockCarrierVarIDs,
                 clockGateLatchDataExprByVarID,
-                outputExprByTerm);
+                outputExprByTerm,
+                transitionClockStripMemo);
+        // This diagnostic is intentionally after clock-carrier stripping: any
+        // remaining unpublished support would become a private proof input and
+        // can hide the real reason state matching stopped converging.
+        logUnpublishedTransitionSupport(
+            ctx,
+            model,
+            pending,
+            nextStateExpr,
+            termDNLID2varID,
+            topClockCarrierVarIDs,
+            pureClockCarrierTermIDs);
         model.nextStateExprByStateKey.emplace(pending.stateKey, nextStateExpr);
         // Liberty flops such as DFF_X1 expose both Q and QN. They share one
         // storage element, so complementary outputs inherit the same next-state
@@ -4070,8 +4458,76 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
   model.clockCarrierVarIDs.assign(
       topClockCarrierVarIDs.begin(), topClockCarrierVarIDs.end());
   std::sort(model.clockCarrierVarIDs.begin(), model.clockCarrierVarIDs.end());
+  substituteFoldedClockGateLatchVarsInModel(model, clockGateLatchDataExprByVarID);
+  removeDeadFoldedClockGateLatchInputs(model, clockGateLatchDataExprByVarID);
 
   return artifacts;
+}
+
+void eraseSignalKeyFromVector(std::vector<SignalKey>& keys, const SignalKey& key) {
+  keys.erase(std::remove(keys.begin(), keys.end(), key), keys.end());
+}
+
+void substituteFoldedClockGateLatchVarsInModel(
+    SequentialDesignModel& model,
+    const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID) {
+  if (clockGateLatchDataExprByVarID.empty()) {
+    return;
+  }
+
+  auto substituteExpr = [&](BoolExpr*& expr) {
+    if (expr == nullptr) {
+      return;  // LCOV_EXCL_LINE
+    }
+    std::unordered_map<BoolExpr*, BoolExpr*> memo;
+    expr = BoolExpr::simplify(
+        substituteClockGateLatchVars(expr, clockGateLatchDataExprByVarID, memo));
+  };
+
+  for (auto& [_, expr] : model.observedOutputExprByKey) {
+    substituteExpr(expr);
+  }
+  for (auto& [_, expr] : model.nextStateExprByStateKey) {
+    substituteExpr(expr);
+  }
+}
+
+void removeDeadFoldedClockGateLatchInputs(
+    SequentialDesignModel& model,
+    const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID) {
+  if (clockGateLatchDataExprByVarID.empty()) {
+    return;
+  }
+
+  const auto isFoldedLatchVar =
+      buildCandidateVarMask(clockGateLatchDataExprByVarID);
+  CandidateDependencyScratch scratch;
+  std::unordered_set<size_t> liveVars;
+  for (const auto& [_, expr] : model.observedOutputExprByKey) {
+    collectCandidateDependenciesIntoSet(expr, isFoldedLatchVar, scratch, liveVars);
+  }
+  for (const auto& [_, expr] : model.nextStateExprByStateKey) {
+    collectCandidateDependenciesIntoSet(expr, isFoldedLatchVar, scratch, liveVars);
+  }
+
+  std::unordered_map<size_t, SignalKey> keyByVarID;
+  keyByVarID.reserve(model.inputVarByKey.size());
+  for (const auto& [key, varID] : model.inputVarByKey) {
+    keyByVarID.emplace(varID, key);
+  }
+
+  for (const auto& [varID, _] : clockGateLatchDataExprByVarID) {
+    if (liveVars.find(varID) != liveVars.end()) {
+      continue;
+    }
+    const auto keyIt = keyByVarID.find(varID);
+    if (keyIt == keyByVarID.end()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    eraseSignalKeyFromVector(model.environmentInputs, keyIt->second);
+    eraseSignalKeyFromVector(model.internalBoundaryInputKeys, keyIt->second);
+    model.inputVarByKey.erase(keyIt->second);
+  }
 }
 
 void applyRebuiltTransitionArtifacts(
@@ -4083,23 +4539,38 @@ void applyRebuiltTransitionArtifacts(
     const std::vector<size_t>& termDNLID2varID,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     const std::unordered_map<naja::DNL::DNLID, BuilderSkippedOutputInfo>& skippedOutputsByTerm) {
+  // The transition rebuild already closes the observed-output frontier while it
+  // can still materialize missing next-state cones.  Pruning must reuse that
+  // frontier instead of rewalking the whole BoolExpr model again; the latter is
+  // redundant and quadratic on large designs such as BlackParrot.
+  const auto& retainedStateKeys = artifacts.requiredStateKeys;
+  std::vector<SignalKey> prunedStateKeys;
   model.stateBits.erase(
       std::remove_if(
           model.stateBits.begin(),
           model.stateBits.end(),
           [&](const SignalKey& key) {
-            return artifacts.requiredStateKeys.find(key) == artifacts.requiredStateKeys.end();
+            if (retainedStateKeys.find(key) != retainedStateKeys.end()) {
+              return false;
+            }
+            prunedStateKeys.push_back(key);
+            return true;
           }),
       model.stateBits.end());
+  for (const auto& key : prunedStateKeys) {
+    model.nextStateExprByStateKey.erase(key);
+    model.initialStateValueByKey.erase(key);
+    model.inputVarByKey.erase(key);
+  }
   model.complementedStateRelations.erase(
       std::remove_if(
           model.complementedStateRelations.begin(),
           model.complementedStateRelations.end(),
           [&](const ComplementedStateRelation& relation) {
-            return artifacts.requiredStateKeys.find(relation.primaryKey) ==
-                       artifacts.requiredStateKeys.end() ||
-                   artifacts.requiredStateKeys.find(relation.complementedKey) ==
-                       artifacts.requiredStateKeys.end();
+            return retainedStateKeys.find(relation.primaryKey) ==
+                       retainedStateKeys.end() ||
+                   retainedStateKeys.find(relation.complementedKey) ==
+                       retainedStateKeys.end();
           }),
       model.complementedStateRelations.end());
 
@@ -4407,6 +4878,80 @@ void propagateConnectivitySkipsThroughDependencies(SequentialDesignModel& model)
   }
 }
 
+void markFormulasWithUnpublishedSupportAsSkipped(
+    const ExtractContext& ctx,
+    SequentialDesignModel& model) {
+  size_t maxPublishedVarID = 1;
+  for (const auto& [_, varID] : model.inputVarByKey) {
+    maxPublishedVarID = std::max(maxPublishedVarID, varID);
+  }
+  std::vector<uint8_t> isPublishedVar(maxPublishedVarID + 1, 0);
+  for (const auto& key : model.environmentInputs) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      isPublishedVar[varIt->second] = 1;
+    }
+  }
+  for (const auto& key : model.stateBits) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      isPublishedVar[varIt->second] = 1;
+    }
+  }
+  CandidateDependencyScratch scratch;
+
+  size_t skippedStates = 0;
+  for (const auto& [key, expr] : model.nextStateExprByStateKey) {
+    if (model.connectivitySkipInfoByKey.find(key) !=
+        model.connectivitySkipInfoByKey.end()) {
+      continue;
+    }
+    if (const auto varID =
+            findFirstUnpublishedSupportVar(expr, isPublishedVar, scratch)) {
+      model.connectivitySkipInfoByKey.emplace(key, makeUnpublishedSupportSkip(*varID));
+      ++skippedStates;
+      if (ctx.secDiagEnabled) {
+        fprintf(
+            stderr,
+            "SEC diag: extract(%s) skipping state `%s`: unpublished support v%zu\n",
+            ctx.topName.c_str(),
+            displayNameForSignalKey(model, key).c_str(),
+            *varID);
+      }
+    }
+  }
+
+  size_t skippedOutputs = 0;
+  for (const auto& [key, expr] : model.observedOutputExprByKey) {
+    if (model.connectivitySkipInfoByKey.find(key) !=
+        model.connectivitySkipInfoByKey.end()) {
+      continue;
+    }
+    if (const auto varID =
+            findFirstUnpublishedSupportVar(expr, isPublishedVar, scratch)) {
+      model.connectivitySkipInfoByKey.emplace(key, makeUnpublishedSupportSkip(*varID));
+      ++skippedOutputs;
+      if (ctx.secDiagEnabled) {
+        fprintf(
+            stderr,
+            "SEC diag: extract(%s) skipping output `%s`: unpublished support v%zu\n",
+            ctx.topName.c_str(),
+            displayNameForSignalKey(model, key).c_str(),
+            *varID);
+      }
+    }
+  }
+  if (ctx.secDiagEnabled && (skippedStates != 0 || skippedOutputs != 0)) {
+    fprintf(
+        stderr,
+        "SEC diag: extract(%s) skipped unpublished-support formulas states=%zu outputs=%zu\n",
+        ctx.topName.c_str(),
+        skippedStates,
+        skippedOutputs);
+    fflush(stderr);
+  }
+}
+
 void partitionCoveredSignals(SequentialDesignModel& model) {
   std::vector<SignalKey> legalStateBits;
   legalStateBits.reserve(model.stateBits.size());
@@ -4611,6 +5156,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
     const auto dependencyOutputs = materializeBuilderOutputs(
         structuredMemoryDependencyTerms,
         builderInputs,
+        termDNLID2varID,
         ctx.collectedSkippedOutputs,
         ctx.secDiagEnabled,
         ctx.topName.c_str(),
@@ -4685,7 +5231,14 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   filterUnsupportedAndUnmappedBoundary(ctx, model);
 
   // Phase 5: propagate connectivity skips through dependent state/output cones,
-  // then partition the final interface into covered vs skipped signals.
+  // then partition the final interface into covered vs skipped signals.  The
+  // proof remapper treats any remaining unpublished internal support as a
+  // design-private free input, so normal SEC extraction should not skip an
+  // otherwise covered top output just because a memory/opaque internal leaf was
+  // not part of the public state/environment interface.
+  if (std::getenv("KEPLER_SEC_STRICT_UNPUBLISHED_SUPPORT") != nullptr) {
+    markFormulasWithUnpublishedSupportAsSkipped(ctx, model);
+  }
   propagateConnectivitySkipsThroughDependencies(model);
   partitionCoveredSignals(model);
 

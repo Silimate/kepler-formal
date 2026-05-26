@@ -363,7 +363,12 @@ void SNLTruthTableTree::updateBorderLeaves() {
     if (!nsp) {
       assert(false && "updateBorderLeaves: null node in tree");  // LCOV_EXCL_LINE
     }
-    assert(nsp->childrenIds.size() > 0);
+    if (nsp->childrenIds.empty()) {
+      // Constant truth-table roots have arity zero, so they legitimately
+      // contribute no external border leaves.
+      assert(nsp->getTruthTable().size() == 0);
+      continue;
+    }
     for (size_t i = 0; i < nsp->childrenIds.size(); ++i) {
       uint32_t cid = nsp->childrenIds[i];
       const auto& ch = nodeFromId(cid).get();

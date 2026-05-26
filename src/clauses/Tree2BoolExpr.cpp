@@ -364,9 +364,18 @@ BoolExpr* Tree2BoolExpr::convert(
       uint64_t rows = uint64_t{1} << k;
       DEBUG_LOG("Node ID %zu has %u inputs and %llu rows\n", id, k, rows);
 
-      // The code expects the table to represent a prime implicant (not all-0 or all-1).
-      assert(!tbl.all0()); // Should be a PI
-      assert(!tbl.all1()); // Should be a PI
+      if (tbl.all0() || tbl.all1()) {
+        BoolExpr* expr =
+            tbl.all1() ? BoolExpr::createTrue() : BoolExpr::createFalse();
+        if (isoID != naja::DNL::DNLID_MAX) {
+          auto result = iso2boolExpr_.insert({isoID, expr});
+          if (!result.second) {
+            expr = result.first->second;
+          }
+        }
+        setMemoETS(id, expr);
+        continue;
+      }
 
       {
         // Gather child BoolExpr pointers into a temporary array for quick access.

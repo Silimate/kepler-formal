@@ -618,6 +618,41 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesConstantTrueOutput) {
   EXPECT_EQ(builder.getPOs()[0]->toString(), "1");
 }
 
+TEST_F(MiterTests, BuildPrimaryOutputClausesConstantFalseOutput) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesign* logic0 =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC0"));
+  auto logic0Out =
+      SNLScalarTerm::create(logic0, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesignModeling::setTruthTable(
+      logic0,
+      SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+  NLLibraryTruthTables::construct(library);
+
+  SNLInstance* inst = SNLInstance::create(top, logic0, NLName("const0"));
+  SNLNet* net = SNLScalarNet::create(top, NLName("const0_net"));
+  inst->getInstTerm(logic0Out)->setNet(net);
+  topOut->setNet(net);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+  builder.build();
+
+  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  EXPECT_EQ(builder.getPOs()[0]->toString(), "0");
+}
+
 TEST_F(MiterTests, BuildPrimaryOutputClausesUsesFlatDependencyCoordinatesForPOs) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);

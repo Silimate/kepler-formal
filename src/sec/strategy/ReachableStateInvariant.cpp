@@ -34,19 +34,20 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr size_t kBootstrapSatRecoverySupportBudget = 4096;
+constexpr size_t kBootstrapSatRecoveryNodeBudget = 2048;
 // SAT recovery is already filtered by support size. Keep the candidate budget
 // at the same scale so cheap reset/bootstrap cones are not discarded before the
 // KI/IMC engines get a useful invariant, while wide ASIC cones still fall back
 // to the engine-level COI proof instead of launching unbounded per-bit SAT.
 constexpr size_t kBootstrapSatRecoveryCandidateBudget =
     kBootstrapSatRecoverySupportBudget;
-constexpr size_t kBootstrapSatRecoveryGlobalCandidateBudget =
-    kBootstrapSatRecoveryCandidateBudget;
 constexpr size_t kSelectiveBootstrapValueCandidateBudget = 10000;
 constexpr size_t kUnpairedStateDependency = std::numeric_limits<size_t>::max();
 
 using ConstantEvalMemo =
     std::pmr::unordered_map<BoolExpr*, std::optional<bool>>;
+using SpecializedNextMap =
+    std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash>;
 
 struct ResetStepEvalSummary {
   bool valid = true;
@@ -79,12 +80,87 @@ bool areSatEquivalentUnderAbstractMaps(
   }
 }
 
+bool addBoundedSupportVar(
+    size_t varID,
+    std::pmr::unordered_set<size_t>& support,
+    size_t budget) {
+  if (varID >= 2) {
+    support.insert(varID);
+  }
+  return support.size() <= budget;
+}
+
+bool collectBoundedSupportVars(
+    BoolExpr* root,
+    std::pmr::unordered_set<const BoolExpr*>& visited,
+    std::pmr::unordered_set<size_t>& support,
+    size_t supportBudget,
+    size_t nodeBudget,
+    size_t& visitedNodes,
+    std::vector<BoolExpr*>& stack) {
+  if (root == nullptr) {
+    return true;  // LCOV_EXCL_LINE
+  }
+
+  stack.clear();
+  stack.push_back(root);
+  while (!stack.empty()) {
+    BoolExpr* node = stack.back();
+    stack.pop_back();
+    if (node == nullptr || !visited.insert(node).second) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    if (++visitedNodes > nodeBudget) {
+      return false;
+    }
+
+    if (node->getOp() == Op::VAR) {
+      if (!addBoundedSupportVar(node->getId(), support, supportBudget)) {
+        return false;
+      }
+      continue;
+    }
+    if (node->getRight() != nullptr) {
+      stack.push_back(node->getRight());
+    }
+    if (node->getLeft() != nullptr) {
+      stack.push_back(node->getLeft());
+    }
+  }
+  return true;
+}
+
 std::optional<size_t> bootstrapSatRecoverySupportSize(BoolExpr* expr0,
                                                       BoolExpr* expr1) {
-  std::set<size_t> support = expr0->getSupportVars();
-  const auto support1 = expr1->getSupportVars();
-  support.insert(support1.begin(), support1.end());
-  if (support.size() > kBootstrapSatRecoverySupportBudget) {
+  std::pmr::monotonic_buffer_resource supportResource;
+  std::pmr::unordered_set<const BoolExpr*> visited{&supportResource};
+  std::pmr::unordered_set<size_t> support{&supportResource};
+  std::vector<BoolExpr*> stack;
+  visited.reserve(kBootstrapSatRecoveryNodeBudget + 1);
+  support.reserve(kBootstrapSatRecoverySupportBudget + 1);
+  size_t visitedNodes = 0;
+  // This only decides whether an ambiguous bootstrap cone is cheap enough for
+  // SAT recovery.  Do not allocate full support or visited-node sets on ASIC
+  // cones: stop as soon as either the support or expression-DAG budget is
+  // exceeded and let the proof engine handle that cone in its normal COI query.
+  if (!collectBoundedSupportVars(
+          expr0,
+          visited,
+          support,
+          kBootstrapSatRecoverySupportBudget,
+          kBootstrapSatRecoveryNodeBudget,
+          visitedNodes,
+          stack)) {
+    return std::nullopt;
+  }
+  if (!collectBoundedSupportVars(
+          expr1,
+          visited,
+          support,
+          kBootstrapSatRecoverySupportBudget,
+          kBootstrapSatRecoveryNodeBudget,
+          visitedNodes,
+          stack)) {
     return std::nullopt;
   }
   return support.size();
@@ -969,6 +1045,34 @@ deriveResetBootstrapStateValuesForKeys(
   return knownStates;
 }
 
+SpecializedNextMap specializeNextStatesForReset(
+    const SequentialDesignModel& model,
+    const std::unordered_map<size_t, bool>& resetAssignments,
+    const std::vector<SignalKey>& relevantKeys) {
+  SpecializedNextMap specialized;
+  specialized.reserve(relevantKeys.size());
+  std::unordered_map<BoolExpr*, BoolExpr*> memo;
+  for (const auto& key : relevantKeys) {
+    const auto nextIt = model.nextStateExprByStateKey.find(key);
+    if (nextIt == model.nextStateExprByStateKey.end()) {
+      specialized.emplace(key, nullptr);
+      continue;
+    }
+    // Always mine reset-specialized structure here.  The bounded SAT-recovery
+    // pass below is the expensive part and already has support/node guards;
+    // pre-skipping this structural substitution loses cheap reset equalities on
+    // wide ASIC cones and regresses KI/IMC/PDR into deep bounded searches.
+    try {
+      specialized.emplace(
+          key,
+          substituteBoolExprVariables(nextIt->second, resetAssignments, memo));
+    } catch (const std::runtime_error&) {
+      specialized.emplace(key, nullptr);
+    }
+  }
+  return specialized;
+}
+
 AlignedSignals deriveResetBootstrapStateEqualities(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
@@ -1008,33 +1112,12 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     std::fflush(stderr);
   }
 
-  auto specializeForReset = [](const SequentialDesignModel& model,
-                               const std::unordered_map<size_t, bool>& resetAssignments,
-                               const std::vector<SignalKey>& relevantKeys) {
-    std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> specialized;
-    specialized.reserve(relevantKeys.size());
-    std::unordered_map<BoolExpr*, BoolExpr*> memo;
-    for (const auto& key : relevantKeys) {
-      const auto nextIt = model.nextStateExprByStateKey.find(key);
-      if (nextIt == model.nextStateExprByStateKey.end()) {
-        specialized.emplace(key, nullptr);
-        continue;
-      }
-      try {
-        specialized.emplace(
-            key,
-            substituteBoolExprVariables(nextIt->second, resetAssignments, memo));
-      } catch (const std::runtime_error&) {
-        specialized.emplace(key, nullptr);
-      }
-    }
-    return specialized;
-  };
-
   const auto resetSpecializedNext0 =
-      specializeForReset(model0, resetAssignments0, relevantKeys0);
+      specializeNextStatesForReset(model0, resetAssignments0, relevantKeys0);
   const auto resetSpecializedNext1 =
-      specializeForReset(model1, resetAssignments1, relevantKeys1);
+      specializeNextStatesForReset(model1, resetAssignments1, relevantKeys1);
+  const SpecializedNextMap& resetNext0 = resetSpecializedNext0;
+  const SpecializedNextMap& resetNext1 = resetSpecializedNext1;
 
   AlignedSignals currentEqualities =
       seedCandidateEqualitiesAtInitialState
@@ -1074,7 +1157,7 @@ AlignedSignals deriveResetBootstrapStateEqualities(
         specializedNext0.emplace(
             key,
             substituteBoolExprVariables(
-                resetSpecializedNext0.at(key), stateAssignments0, stateSubMemo0));
+                resetNext0.at(key), stateAssignments0, stateSubMemo0));
       } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
         specializedNext0.emplace(key, nullptr);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
@@ -1084,7 +1167,7 @@ AlignedSignals deriveResetBootstrapStateEqualities(
         specializedNext1.emplace(
             key,
             substituteBoolExprVariables(
-                resetSpecializedNext1.at(key), stateAssignments1, stateSubMemo1));
+                resetNext1.at(key), stateAssignments1, stateSubMemo1));
       } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
         specializedNext1.emplace(key, nullptr);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
@@ -1150,8 +1233,6 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     std::vector<PendingSatRecovery> pendingSatRecovery;
     pendingSatRecovery.reserve(
         std::min(candidateStates.names.size(), kBootstrapSatRecoveryCandidateBudget));
-    const bool allowSatRecovery =
-        candidateStates.names.size() <= kBootstrapSatRecoveryGlobalCandidateBudget;
     size_t satSkippedEqualities = 0;
     for (size_t i = 0; i < candidateStates.names.size(); ++i) {
       const auto& key0 = candidateStates.keys0[i];
@@ -1179,9 +1260,11 @@ AlignedSignals deriveResetBootstrapStateEqualities(
             abstractMap1,
             abstractEquivalenceMemo);
         if (!equalAfterStep[i]) {
-          if (!allowSatRecovery) {
-            ++satSkippedEqualities;
-          } else if (const auto supportSize = bootstrapSatRecoverySupportSize(
+          // Gate SAT recovery by the number of ambiguous cheap cones, not by
+          // total state count.  ASIC cases can have thousands of state bits but
+          // only a handful that need SAT to prove a reordered equivalent cone;
+          // dropping those weakens KI/IMC enough to reintroduce deep searches.
+          if (const auto supportSize = bootstrapSatRecoverySupportSize(
                   specializedNext0.at(key0), specializedNext1.at(key1));
               supportSize.has_value()) {
             pendingSatRecovery.push_back(

@@ -733,6 +733,183 @@ SequentialEquivalenceResult makeSecResult(
   return result;
 }
 
+std::unordered_map<size_t, SignalKey> buildStateKeyByLocalVar(
+    const SequentialDesignModel& model) {
+  std::unordered_map<size_t, SignalKey> stateKeyByVar;
+  stateKeyByVar.reserve(model.stateBits.size());
+  for (const auto& key : model.stateBits) {
+    const auto varIt = model.inputVarByKey.find(key);
+    if (varIt != model.inputVarByKey.end()) {
+      stateKeyByVar.emplace(varIt->second, key);
+    }
+  }
+  return stateKeyByVar;
+}
+
+void addAnchoredStateKeysFromAlignedSignals(
+    const std::vector<SignalKey>& keys,
+    std::unordered_set<SignalKey, SignalKeyHash>& anchoredKeys) {
+  for (const auto& key : keys) {
+    anchoredKeys.insert(key);
+  }
+}
+
+std::unordered_set<SignalKey, SignalKeyHash> buildInductivelyAnchoredStateSet(
+    size_t designIndex,
+    const ReachableStateInvariant& reachableInvariant) {
+  std::unordered_set<SignalKey, SignalKeyHash> anchoredKeys;
+  anchoredKeys.reserve(reachableInvariant.anchoredStateEqualities.names.size());
+  addAnchoredStateKeysFromAlignedSignals(
+      designIndex == 0 ? reachableInvariant.anchoredStateEqualities.keys0
+                       : reachableInvariant.anchoredStateEqualities.keys1,
+      anchoredKeys);
+  return anchoredKeys;
+}
+
+std::optional<SignalKey> findFirstUnanchoredStateSupportKey(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, SignalKey>& stateKeyByVar,
+    const std::unordered_set<SignalKey, SignalKeyHash>& anchoredKeys) {
+  if (expr == nullptr) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+  for (const auto var : expr->getSupportVars()) {
+    const auto stateIt = stateKeyByVar.find(var);
+    if (stateIt == stateKeyByVar.end()) {
+      continue;
+    }
+    if (anchoredKeys.find(stateIt->second) == anchoredKeys.end()) {
+      return stateIt->second;
+    }
+  }
+  return std::nullopt;
+}
+
+std::string describeUnanchoredStateSupport(
+    const SequentialDesignModel& model,
+    const SignalKey& key) {
+  return "depends on reset-unanchored internal state " +
+         describeSecSignalKey(model, key);
+}
+
+void logSecDiagLine(bool secDiagEnabled, const char* message);
+
+void filterOutputsRequiringUnanchoredResetState(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const ReachableStateInvariant& reachableInvariant,
+    bool resetBootstrapActive,
+    AlignedSecInterface& aligned,
+    bool secDiagEnabled) {
+  if (!resetBootstrapActive || aligned.outputs.names.empty()) {
+    return;
+  }
+
+  const auto stateKeyByVar0 = buildStateKeyByLocalVar(model0);
+  const auto stateKeyByVar1 = buildStateKeyByLocalVar(model1);
+  if (stateKeyByVar0.empty() && stateKeyByVar1.empty()) {
+    return;
+  }
+
+  const auto anchoredStateKeys0 =
+      buildInductivelyAnchoredStateSet(0, reachableInvariant);
+  const auto anchoredStateKeys1 =
+      buildInductivelyAnchoredStateSet(1, reachableInvariant);
+  const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
+      model0,
+      model1,
+      aligned.inputs,
+      reachableInvariant.anchoredStateEqualities);
+
+  AlignedSignals filteredOutputs;
+  filteredOutputs.names.reserve(aligned.outputs.names.size());
+  filteredOutputs.keys0.reserve(aligned.outputs.keys0.size());
+  filteredOutputs.keys1.reserve(aligned.outputs.keys1.size());
+
+  const auto skippedOutputCountBeforeFilter =
+      aligned.outputCoverage.skippedOutputs.size();
+  size_t resetUnanchoredSkipCount = 0;
+  for (size_t i = 0; i < aligned.outputs.names.size(); ++i) {
+    const auto& name = aligned.outputs.names[i];
+    const auto& key0 = aligned.outputs.keys0[i];
+    const auto& key1 = aligned.outputs.keys1[i];
+    std::vector<std::string> reasons;
+
+    if (areEquivalentUnderAbstractMaps(
+            model0.observedOutputExprByKey.at(key0),
+            model1.observedOutputExprByKey.at(key1),
+            abstractOutputMap0,
+            abstractOutputMap1)) {
+      filteredOutputs.names.push_back(name);
+      filteredOutputs.keys0.push_back(key0);
+      filteredOutputs.keys1.push_back(key1);
+      continue;
+    }
+
+    const auto unanchored0 = findFirstUnanchoredStateSupportKey(
+        model0.observedOutputExprByKey.at(key0),
+        stateKeyByVar0,
+        anchoredStateKeys0);
+    if (unanchored0.has_value()) {
+      reasons.push_back(
+          "design0 " + describeUnanchoredStateSupport(model0, *unanchored0));
+    }
+    const auto unanchored1 = findFirstUnanchoredStateSupportKey(
+        model1.observedOutputExprByKey.at(key1),
+        stateKeyByVar1,
+        anchoredStateKeys1);
+    if (unanchored1.has_value()) {
+      reasons.push_back(
+          "design1 " + describeUnanchoredStateSupport(model1, *unanchored1));
+    }
+
+    if (!reasons.empty()) {
+      // This is a coverage decision, not an internal-state equality shortcut:
+      // reset/bootstrap values are per-design facts at one frontier.  They do
+      // not justify comparing later state-dependent outputs unless SEC also
+      // has an inductive cross-design state relation for that support.
+      aligned.outputCoverage.skippedOutputs.push_back(
+          name + ": " + joinReasons(reasons));
+      ++resetUnanchoredSkipCount;
+      continue;
+    }
+
+    filteredOutputs.names.push_back(name);
+    filteredOutputs.keys0.push_back(key0);
+    filteredOutputs.keys1.push_back(key1);
+  }
+
+  if (filteredOutputs.names.empty() && resetUnanchoredSkipCount != 0) {
+    // The reset-unanchored filter is a partial-coverage optimization.  It must
+    // not erase the whole top-visible proof surface, because doing so can hide a
+    // real counterexample behind an "unsupported" result on single-output SEC
+    // checks.  When every output is suspect, keep the original SEC obligation
+    // and let the selected engine report Different, Equivalent, or Inconclusive.
+    aligned.outputCoverage.skippedOutputs.resize(skippedOutputCountBeforeFilter);
+    logSecDiagLine(
+        secDiagEnabled,
+        "SEC diag: preserving all reset-unanchored outputs because filtering "
+        "would remove the complete observed surface");
+    return;
+  }
+
+  aligned.outputs = std::move(filteredOutputs);
+  aligned.outputCoverage.checkedOutputs = aligned.outputs;
+  if (secDiagEnabled && resetUnanchoredSkipCount != 0) {
+    fprintf(
+        stderr,
+        "SEC diag: reset-unanchored output skips=%zu checked_outputs=%zu total_outputs=%zu\n",
+        resetUnanchoredSkipCount,
+        aligned.outputs.names.size(),
+        aligned.outputCoverage.totalOutputs);
+    fprintf(
+        stderr,
+        "SEC diag: reset-frontier checked outputs=%s\n",
+        formatStringList(aligned.outputs.names, aligned.outputs.names.size()).c_str());
+    fflush(stderr);
+  }
+}
+
 template <typename MapT>
 void assignSymbols(const std::vector<SignalKey>& keys,
                    MapT& output,
@@ -909,17 +1086,11 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
     fflush(stderr);
   }
 
-  aligned.outputs = alignSignalsByName(
-      model0.observedOutputs,
-      model0.displayNameByKey,
-      model1.observedOutputs,
-      model1.displayNameByKey,
-      "observed output");
-  if (aligned.outputs.names.size() != aligned.outputCoverage.checkedOutputs.names.size()) {
-    throw std::runtime_error(
-        "Internal SEC error: checked observed outputs and extractor-visible observed "
-        "outputs disagree after connectivity skipping");
-  }
+  // SEC equivalence is only a top-terminal contract.  Internal/opaque boundary
+  // terms remain useful for coverage diagnostics, but they must not become
+  // proof outputs.  Keep the coverage-selected top outputs here; re-aligning
+  // the raw extractor-visible list would reintroduce stale or one-sided skipped
+  // outputs after selectCoveredObservedOutputs already removed them.
 
   logSecDiagLine(secDiagEnabled, "SEC diag: inferring inductive state equalities");
   const auto localValidationSolverType =
@@ -1001,29 +1172,145 @@ SharedSecSymbolSpace buildSharedSecSymbolSpace(
   return symbolSpace;
 }
 
+size_t nextUnusedProofSymbol(const KInductionProblem& problem) {
+  size_t nextSymbol = 2;
+  for (const auto symbol : problem.allSymbols) {
+    nextSymbol = std::max(nextSymbol, symbol + 1);
+  }
+  return nextSymbol;
+}
+
+size_t privateSupportSymbol(
+    size_t designIndex,
+    size_t localSymbol,
+    std::unordered_map<size_t, size_t>& symbolMap,
+    KInductionProblem& problem,
+    size_t& nextSymbol) {
+  const auto existingIt = symbolMap.find(localSymbol);
+  if (existingIt != symbolMap.end()) {
+    return existingIt->second;
+  }
+
+  const size_t privateSymbol = nextSymbol++;
+  symbolMap.emplace(localSymbol, privateSymbol);
+  problem.allSymbols.push_back(privateSymbol);
+  problem.inputSymbols.push_back(privateSymbol);
+  problem.environmentInputNames.push_back(
+      "$private_d" + std::to_string(designIndex) + "_v" +
+      std::to_string(localSymbol));
+  return privateSymbol;
+}
+
+BoolExpr* remapSecFormulaWithPrivateSupport(
+    BoolExpr* root,
+    size_t designIndex,
+    std::unordered_map<size_t, size_t>& symbolMap,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo,
+    KInductionProblem& problem,
+    size_t& nextSymbol) {
+  if (root == nullptr) {
+    return nullptr;  // LCOV_EXCL_LINE
+  }
+  if (auto it = memo.find(root); it != memo.end()) {
+    return it->second;
+  }
+
+  struct StackFrame {
+    BoolExpr* expr = nullptr;
+    bool visited = false;
+  };
+
+  // Internal support left after compact extraction is a design-local free
+  // input, not a name-aligned SEC assumption.  Allocate private proof symbols
+  // on demand while preserving the same iterative DAG remap used by
+  // BoolExprUtils for large gate-level cones.
+  std::vector<StackFrame> stack;
+  stack.push_back({root, false});
+  while (!stack.empty()) {
+    const StackFrame current = stack.back();
+    stack.pop_back();
+    BoolExpr* node = current.expr;
+    if (node == nullptr || memo.find(node) != memo.end()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+
+    if (node->getOp() == Op::VAR) {
+      const size_t id = node->getId();
+      const size_t mapped =
+          id < 2 ? id : privateSupportSymbol(
+                            designIndex, id, symbolMap, problem, nextSymbol);
+      memo.emplace(node, BoolExpr::Var(mapped));
+      continue;
+    }
+
+    if (!current.visited) {
+      stack.push_back({node, true});
+      if (node->getRight() != nullptr) {
+        stack.push_back({node->getRight(), false});
+      }
+      if (node->getLeft() != nullptr) {
+        stack.push_back({node->getLeft(), false});
+      }
+      continue;
+    }
+
+    BoolExpr* remapped = nullptr;
+    switch (node->getOp()) {
+      case Op::NOT:
+        remapped = BoolExpr::Not(memo.at(node->getLeft()));
+        break;
+      case Op::AND:
+        remapped =
+            BoolExpr::And(memo.at(node->getLeft()), memo.at(node->getRight()));
+        break;
+      case Op::OR:
+        remapped =
+            BoolExpr::Or(memo.at(node->getLeft()), memo.at(node->getRight()));
+        break;
+      case Op::XOR:
+        remapped =
+            BoolExpr::Xor(memo.at(node->getLeft()), memo.at(node->getRight()));
+        break;
+      case Op::NONE:  // LCOV_EXCL_LINE
+      default:
+        throw std::runtime_error("Unsupported BoolExpr operator in SEC remap");  // LCOV_EXCL_LINE
+    }
+    memo.emplace(node, remapped);
+  }
+
+  return memo.at(root);
+}
+
 RemappedSecExpressions remapSecExpressions(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedOutputs,
-    const SharedSecSymbolSpace& symbolSpace,
+    SharedSecSymbolSpace& symbolSpace,
     KInductionProblem& problem,
     bool remapTransitions,
     bool secDiagEnabled) {
   RemappedSecExpressions remapped;
   std::unordered_map<BoolExpr*, BoolExpr*> remapMemo0;
   std::unordered_map<BoolExpr*, BoolExpr*> remapMemo1;
+  size_t nextPrivateSymbol = nextUnusedProofSymbol(problem);
 
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
     const auto& key0 = alignedOutputs.keys0[i];
     const auto& key1 = alignedOutputs.keys1[i];
-    const auto remappedOutput0 = remapBoolExprVariables(
+    const auto remappedOutput0 = remapSecFormulaWithPrivateSupport(
         model0.observedOutputExprByKey.at(key0),
+        /*designIndex=*/0,
         symbolSpace.localToCombined0,
-        remapMemo0);
-    const auto remappedOutput1 = remapBoolExprVariables(
+        remapMemo0,
+        problem,
+        nextPrivateSymbol);
+    const auto remappedOutput1 = remapSecFormulaWithPrivateSupport(
         model1.observedOutputExprByKey.at(key1),
+        /*designIndex=*/1,
         symbolSpace.localToCombined1,
-        remapMemo1);
+        remapMemo1,
+        problem,
+        nextPrivateSymbol);
     problem.observedOutputExprs0.push_back(remappedOutput0);
     problem.observedOutputExprs1.push_back(remappedOutput1);
   }
@@ -1033,18 +1320,24 @@ RemappedSecExpressions remapSecExpressions(
     for (const auto& key : model0.stateBits) {
       remapped.next0.emplace(
           key,
-          remapBoolExprVariables(
+          remapSecFormulaWithPrivateSupport(
               model0.nextStateExprByStateKey.at(key),
+              /*designIndex=*/0,
               symbolSpace.localToCombined0,
-              remapMemo0));
+              remapMemo0,
+              problem,
+              nextPrivateSymbol));
     }
     for (const auto& key : model1.stateBits) {
       remapped.next1.emplace(
           key,
-          remapBoolExprVariables(
+          remapSecFormulaWithPrivateSupport(
               model1.nextStateExprByStateKey.at(key),
+              /*designIndex=*/1,
               symbolSpace.localToCombined1,
-              remapMemo1));
+              remapMemo1,
+              problem,
+              nextPrivateSymbol));
     }
     logSecDiagLine(secDiagEnabled, "SEC diag: remapped next-state formulas");
   } else {
@@ -1271,6 +1564,14 @@ void buildSecPropertiesAndTransitions(
       continue;
     }
 
+    if (secDiagEnabled) {
+      fprintf(
+          stderr,
+          "SEC diag: output requires engine proof index=%zu name=%s\n",
+          i,
+          alignedOutputs.names[i].c_str());
+      fflush(stderr);
+    }
     inductionProperty = BoolExpr::And(inductionProperty, outputEquality);
   }
 
@@ -2396,21 +2697,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // property plus the induction-friendly variant that some engines consume.
   SharedSecSymbolSpace symbolSpace = buildSharedSecSymbolSpace(
       model0, model1, aligned.inputs, aligned.outputs);
-  // KI and PDR both work on small COI slices of a potentially huge SEC
-  // problem. Keep next-state formulas in their extracted-model symbol space
-  // until the proof engine actually asks for a transition; otherwise PDR
-  // materializes the full ASIC transition relation before output batching can
-  // prune it.
-  const bool useLazyTransitionRemapping =
-      secEngine_ == SecEngine::KInduction || secEngine_ == SecEngine::Pdr;
-  const auto remapped = remapSecExpressions(
-      model0,
-      model1,
-      aligned.outputs,
-      symbolSpace,
-      symbolSpace.problem,
-      !useLazyTransitionRemapping,
-      secDiagEnabled);
   // KI / IMC consume explicit post-reset state values directly. SEC/PDR keeps
   // the reset cycle/input model and validates startup candidates with concrete
   // BMC / reset-frontier checks, so it can avoid the sampled full-design sweep
@@ -2450,10 +2736,10 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       !symbolSpace.problem.resetBootstrapInputs.empty();
   if (useStartupCertificateFastPath) {
     // The reset-bootstrap candidate relation is output-rooted and validated as
-    // part of reachable invariant integration.  Keep this as a wide-output ASIC
-    // fast path: tiny bounded-counterexample tests intentionally exercise the
-    // downstream engines, while BlackParrot-scale runs should not rediscover the
-    // same startup relation hundreds of times.
+    // part of reachable invariant integration.  Keep this ahead of the
+    // conservative coverage filter: wide ASICs such as BlackParrot can have many
+    // state-dependent outputs that are still covered by one validated startup
+    // certificate, and should not be reported as uncovered one-by-one.
     logSecDiagLine(
         secDiagEnabled,
         "SEC diag: output-rooted structural startup relation proves SEC");
@@ -2465,6 +2751,41 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
   }
+  filterOutputsRequiringUnanchoredResetState(
+      model0,
+      model1,
+      reachableInvariant,
+      !symbolSpace.problem.resetBootstrapInputs.empty() &&
+          symbolSpace.problem.resetBootstrapCycles != 0,
+      aligned,
+      secDiagEnabled);
+  symbolSpace.problem.observedOutputNames = aligned.outputs.names;
+  if (aligned.outputs.names.empty()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Unsupported,
+        0,
+        "No aligned observed outputs remain after skipping cones that depend "
+        "on reset-unanchored internal state.",
+        aligned.outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+  // KI and PDR both work on small COI slices of a potentially huge SEC
+  // problem. Keep next-state formulas in their extracted-model symbol space
+  // until the proof engine actually asks for a transition; otherwise PDR
+  // materializes the full ASIC transition relation before output batching can
+  // prune it. Output remapping happens after the reset-frontier coverage filter
+  // so skipped top outputs never allocate SAT symbols or proof obligations.
+  const bool useLazyTransitionRemapping =
+      secEngine_ == SecEngine::KInduction || secEngine_ == SecEngine::Pdr;
+  const auto remapped = remapSecExpressions(
+      model0,
+      model1,
+      aligned.outputs,
+      symbolSpace,
+      symbolSpace.problem,
+      !useLazyTransitionRemapping,
+      secDiagEnabled);
   if (useLazyTransitionRemapping) {
     attachLazyTransitions(
         model0,

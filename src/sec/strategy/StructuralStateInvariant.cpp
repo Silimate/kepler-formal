@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <memory_resource>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -169,6 +170,44 @@ std::unordered_map<size_t, size_t> buildInputClassMap(
     const SequentialDesignModel& model,
     const std::vector<SignalKey>& alignedInputKeys);
 
+bool structuralCoiDiagEnabled();
+
+const char* displayNameForStructuralDiag(
+    const SequentialDesignModel& model,
+    const SignalKey& key) {
+  const auto it = model.displayNameByKey.find(key);
+  return it == model.displayNameByKey.end() ? "<unnamed>" : it->second.c_str();
+}
+
+std::string formatUnmappedSupportVarsForDiag(
+    const SequentialDesignModel& model,
+    BoolExpr* expr,
+    const LocalToAbstractVarMap& abstractMap) {
+  std::unordered_map<size_t, const SignalKey*> keyByVar;
+  keyByVar.reserve(model.inputVarByKey.size());
+  for (const auto& [key, varID] : model.inputVarByKey) {
+    keyByVar.emplace(varID, &key);
+  }
+
+  std::ostringstream oss;
+  bool first = true;
+  for (const auto varID : expr->getSupportVars()) {
+    if (varID < 2 || abstractMap.find(varID) != abstractMap.end()) {
+      continue;
+    }
+    if (!first) {
+      oss << ", ";
+    }
+    first = false;
+    oss << "v" << varID;
+    const auto keyIt = keyByVar.find(varID);
+    if (keyIt != keyByVar.end()) {
+      oss << ":" << displayNameForStructuralDiag(model, *keyIt->second);
+    }
+  }
+  return oss.str();
+}
+
 bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
                                    const SequentialDesignModel& model1,
                                    const AlignedSignals& alignedInputs,
@@ -190,6 +229,14 @@ bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
             abstractMap0,
             abstractMap1,
             memo)) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: ordered structural first mismatch index=%zu lhs=%s rhs=%s\n",
+            i,
+            displayNameForStructuralDiag(model0, key0),
+            displayNameForStructuralDiag(model1, key1));
+      }
       return false;
     }
   }
@@ -213,7 +260,13 @@ bool areSatEquivalentUnderAbstractMaps(
         solverType,
         kSatValidatedStructuralConflictLimit);
     return implied.value_or(false);
-  } catch (const std::runtime_error&) {
+  } catch (const std::runtime_error& e) {
+    if (structuralCoiDiagEnabled()) {
+      std::fprintf(
+          stderr,
+          "SEC diag: SAT abstract-map validation failed: %s\n",
+          e.what());
+    }
     return false;
   }
 }
@@ -330,10 +383,31 @@ bool areAllOrderedStatesSatEquivalent(
       continue;
     }
     if (!isWithinSatValidatedOrderedSupportBudget(next0, next1)) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: ordered SAT first mismatch support budget index=%zu lhs=%s rhs=%s\n",
+            i,
+            displayNameForStructuralDiag(model0, key0),
+            displayNameForStructuralDiag(model1, key1));
+      }
       return false;
     }
     if (!areSatEquivalentUnderAbstractMaps(
             next0, next1, abstractMap0, abstractMap1, solverType)) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(
+            stderr,
+            "SEC diag: ordered SAT first mismatch index=%zu lhs=%s rhs=%s\n",
+            i,
+            displayNameForStructuralDiag(model0, key0),
+            displayNameForStructuralDiag(model1, key1));
+        std::fprintf(
+            stderr,
+            "SEC diag: ordered SAT unmapped support lhs=[%s] rhs=[%s]\n",
+            formatUnmappedSupportVarsForDiag(model0, next0, abstractMap0).c_str(),
+            formatUnmappedSupportVarsForDiag(model1, next1, abstractMap1).c_str());
+      }
       return false;
     }
   }
@@ -1501,6 +1575,12 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
     // This fast path is purely structural: same order, same transition shape.
     return orderedStates;
   }
+  if (structuralCoiDiagEnabled() && !orderedStates.names.empty()) {
+    std::fprintf(
+        stderr,
+        "SEC diag: ordered structural states rejected pairs=%zu\n",
+        orderedStates.names.size());
+  }
   if (!orderedStates.names.empty() &&
       areAllOrderedStatesSatEquivalent(
           model0, model1, alignedInputs, orderedStates, solverType)) {
@@ -1508,6 +1588,12 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
     // order.  The order only proposes a relation; every next-state equation is
     // SAT-proved equivalent under that relation before it is exposed to SEC.
     return orderedStates;
+  }
+  if (structuralCoiDiagEnabled() && !orderedStates.names.empty()) {
+    std::fprintf(
+        stderr,
+        "SEC diag: ordered SAT-validated states rejected pairs=%zu\n",
+        orderedStates.names.size());
   }
   const AlignedSignals structuralCoiStates = inferStructuralCoiStatePairs(
       model0, model1, alignedInputs, alignedOutputs, solverType);

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "common/BoolExprUtils.h"
+#include "common/PrivateProofSymbol.h"
 
 namespace KEPLER_FORMAL::SEC {
 
@@ -86,17 +87,20 @@ std::set<size_t> collectBoolExprSupport(BoolExpr* formula,
 
 struct SupportVisitKey {
   BoolExpr* node = nullptr;
-  const void* symbolMap = nullptr;
+  std::unordered_map<size_t, size_t>* symbolMap = nullptr;
+  size_t designIndex = 0;
 
   bool operator==(const SupportVisitKey& other) const {
-    return node == other.node && symbolMap == other.symbolMap;
+    return node == other.node && symbolMap == other.symbolMap &&
+           designIndex == other.designIndex;
   }
 };
 
 struct SupportVisitKeyHash {
   size_t operator()(const SupportVisitKey& key) const {
     return std::hash<BoolExpr*>{}(key.node) ^
-           (std::hash<const void*>{}(key.symbolMap) << 1);
+           (std::hash<void*>{}(key.symbolMap) << 1) ^
+           (std::hash<size_t>{}(key.designIndex) << 2);
   }
 };
 
@@ -105,20 +109,33 @@ std::set<size_t> identitySupport(BoolExpr* formula) {
       formula, [](size_t symbol) { return symbol; });
 }
 
+size_t mapLazyTransitionSymbol(
+    size_t designIndex,
+    size_t localSymbol,
+    std::unordered_map<size_t, size_t>& symbolMap) {
+  if (localSymbol < 2) {
+    return localSymbol;  // LCOV_EXCL_LINE
+  }
+  if (const auto mappedIt = symbolMap.find(localSymbol);
+      mappedIt != symbolMap.end()) {
+    return mappedIt->second;
+  }
+
+  const size_t privateSymbol =
+      makePrivateProofLeafSymbol(designIndex, localSymbol);
+  symbolMap.emplace(localSymbol, privateSymbol);
+  return privateSymbol;
+}
+
 std::set<size_t> remappedSupport(
     BoolExpr* formula,
-    const std::unordered_map<size_t, size_t>& symbolMap) {
+    size_t designIndex,
+    std::unordered_map<size_t, size_t>& symbolMap) {
   return collectBoolExprSupport(formula, [&](size_t localSymbol) {
     if (localSymbol < 2) {
       return localSymbol;  // LCOV_EXCL_LINE
     }
-    const auto mappedIt = symbolMap.find(localSymbol);
-    if (mappedIt == symbolMap.end()) {
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          "Missing BoolExpr support remap for variable " +  // LCOV_EXCL_LINE
-          std::to_string(localSymbol));  // LCOV_EXCL_LINE
-    }
-    return mappedIt->second;
+    return mapLazyTransitionSymbol(designIndex, localSymbol, symbolMap);
   });
 }
 
@@ -174,6 +191,13 @@ BoolExpr* TransitionExprResolver::at(size_t stateSymbol) const {
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
   }
 
+  // Populate design-private mappings for transition-only local support before
+  // materializing the lazy BoolExpr.  This keeps unmodeled internal leaves
+  // design-local without forcing a full transition remap during COI discovery.
+  (void)remappedSupport(
+      source.localExpr,
+      source.designIndex,
+      store.localToCombinedByDesign[source.designIndex]);
   BoolExpr* remapped = remapBoolExprVariables(
       source.localExpr,
       store.localToCombinedByDesign[source.designIndex],
@@ -234,7 +258,7 @@ const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) cons
         "Missing transition expression for state symbol " +  // LCOV_EXCL_LINE
         std::to_string(stateSymbol));  // LCOV_EXCL_LINE
   }
-  const auto& store = *problem_.lazyTransitions;
+  auto& store = *problem_.lazyTransitions;
   if (const auto cachedIt = store.supportByStateSymbol.find(stateSymbol);
       cachedIt != store.supportByStateSymbol.end()) {
     return cachedIt->second;
@@ -252,6 +276,7 @@ const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) cons
       stateSymbol,
       remappedSupport(
           sourceIt->second.localExpr,
+          sourceIt->second.designIndex,
           store.localToCombinedByDesign[sourceIt->second.designIndex]));
   return insertedIt->second;
 }
@@ -306,7 +331,7 @@ void TransitionExprResolver::collectSupportForTargets(
           "Missing transition expression for state symbol " +  // LCOV_EXCL_LINE
           std::to_string(stateSymbol));  // LCOV_EXCL_LINE
     }
-    const auto& store = *problem_.lazyTransitions;  // LCOV_EXCL_LINE
+    auto& store = *problem_.lazyTransitions;  // LCOV_EXCL_LINE
     const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);  // LCOV_EXCL_LINE
     if (sourceIt == store.sourceByStateSymbol.end()) {  // LCOV_EXCL_LINE
       throw std::runtime_error(  // LCOV_EXCL_LINE
@@ -318,7 +343,9 @@ void TransitionExprResolver::collectSupportForTargets(
       throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
     }
     stack.push_back(  // LCOV_EXCL_LINE
-        {source.localExpr, &store.localToCombinedByDesign[source.designIndex]});  // LCOV_EXCL_LINE
+        {source.localExpr,
+         &store.localToCombinedByDesign[source.designIndex],
+         source.designIndex});  // LCOV_EXCL_LINE
   }
 
   while (!stack.empty()) {
@@ -331,16 +358,8 @@ void TransitionExprResolver::collectSupportForTargets(
     if (node->getOp() == Op::VAR) {
       size_t symbol = node->getId();
       if (current.symbolMap != nullptr && symbol >= 2) {
-        const auto& map =  // LCOV_EXCL_LINE
-            *static_cast<const std::unordered_map<size_t, size_t>*>(
-                current.symbolMap);  // LCOV_EXCL_LINE
-        const auto mappedIt = map.find(symbol);  // LCOV_EXCL_LINE
-        if (mappedIt == map.end()) {  // LCOV_EXCL_LINE
-          throw std::runtime_error(  // LCOV_EXCL_LINE
-              "Missing BoolExpr support remap for variable " +  // LCOV_EXCL_LINE
-              std::to_string(symbol));  // LCOV_EXCL_LINE
-        }
-        symbol = mappedIt->second;  // LCOV_EXCL_LINE
+        symbol = mapLazyTransitionSymbol(
+            current.designIndex, symbol, *current.symbolMap);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
       if (symbol >= 2) {
         allSupport.insert(symbol);
@@ -351,10 +370,12 @@ void TransitionExprResolver::collectSupportForTargets(
       continue;
     }
     if (node->getRight() != nullptr) {
-      stack.push_back({node->getRight(), current.symbolMap});
+      stack.push_back(
+          {node->getRight(), current.symbolMap, current.designIndex});
     }
     if (node->getLeft() != nullptr) {
-      stack.push_back({node->getLeft(), current.symbolMap});
+      stack.push_back(
+          {node->getLeft(), current.symbolMap, current.designIndex});
     }
   }
 }

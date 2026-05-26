@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <utility>
 
 #include "common/SecDiag.h"
@@ -28,6 +29,21 @@ bool isFrontierFirstEnabled() {
 // Keep every true multi-output proof batched; medium designs such as
 // sky130hs_ibex are still sensitive to monolithic base-case witnesses.
 constexpr size_t kMinOutputsForBatchedProof = 2;
+constexpr unsigned kDefaultBatchedInductionDecisionLimit = 200000;
+
+unsigned batchedInductionDecisionLimit() {
+  const char* value = std::getenv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT");
+  if (value == nullptr || *value == '\0') {
+    return kDefaultBatchedInductionDecisionLimit;
+  }
+  char* end = nullptr;
+  const unsigned long parsed = std::strtoul(value, &end, 10);
+  if (end == value || *end != '\0' ||
+      parsed > std::numeric_limits<unsigned>::max()) {
+    return kDefaultBatchedInductionDecisionLimit;
+  }
+  return static_cast<unsigned>(parsed);
+}
 
 void emitKInductionProblemDiag(const KInductionProblem& problem,
                                size_t maxK) {
@@ -111,11 +127,27 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
       emitSecDiag("SEC diag: k-induction step k=", k, " begin");
     }
 
-    if (SEC::provesByInduction(problem, solverType, k)) {
+    const std::optional<unsigned> inductionDecisionLimit =
+        problem.observedOutputExprs0.size() > 1 &&
+                solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
+            ? std::optional<unsigned>(batchedInductionDecisionLimit())
+            : std::nullopt;
+    const InductionProofStatus inductionStatus =
+        SEC::proveByInductionStatus(
+            problem, solverType, k, inductionDecisionLimit);
+    if (inductionStatus == InductionProofStatus::Proved) {
       if (isKInductionDiagEnabled()) {
         emitSecDiag("SEC diag: k-induction step k=", k, " proved");
       }
       return {KInductionStatus::Equivalent, k};
+    }
+    if (inductionStatus == InductionProofStatus::Unknown) {
+      if (isKInductionDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: k-induction step k=", k,
+            " resource-limited; splitting output batch");
+      }
+      return {KInductionStatus::Inconclusive, k};
     }
     if (isKInductionDiagEnabled()) {
       emitSecDiag("SEC diag: k-induction step k=", k, " inconclusive");
@@ -183,8 +215,19 @@ KInductionResult runOutputRangeKInduction(
     size_t firstOutput,
     size_t endOutput) {
   configureOutputBatchProblem(batchProblem, sourceProblem, firstOutput, endOutput);
+  if (isKInductionDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: k-induction output range [", firstOutput, ",", endOutput,
+        ") outputs=", endOutput - firstOutput);
+  }
   const KInductionResult result =
       runMonolithicKInduction(batchProblem, solverType, maxK);
+  if (isKInductionDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: k-induction output range [", firstOutput, ",", endOutput,
+        ") status=", static_cast<int>(result.status),
+        " bound=", result.bound);
+  }
   if (result.status != KInductionStatus::Inconclusive ||
       endOutput - firstOutput <= 1) {
     return result;

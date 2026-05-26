@@ -2166,7 +2166,9 @@ TEST(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
       contents.find("SEC output coverage: 50.00% (1/2 covered/existing outputs)."),
       std::string::npos);
   EXPECT_NE(
-      contents.find("SEC skipped observed outputs due to connectivity issues"),
+      contents.find(
+          "SEC skipped observed outputs due to extraction or coverage "
+          "limitations"),
       std::string::npos);
   EXPECT_NE(contents.find("bad[0]"), std::string::npos);
   EXPECT_NE(contents.find("no-driver connectivity"), std::string::npos);

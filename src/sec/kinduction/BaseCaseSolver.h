@@ -18,6 +18,21 @@ namespace KEPLER_FORMAL::SEC {
 class TransitionExprResolver;
 struct ResetFrontierReachabilityContext;
 
+// Chooses the SAT backend used by KI/IMC/PDR one-shot base-case validation
+// queries. These BMC checks do not use incremental assumptions, so they keep
+// the requested proof solver; assumption-based reset/frontier helpers use
+// SATSolverWrapper::assumptionSolverTypeFor at their call sites.
+KEPLER_FORMAL::Config::SolverType baseCaseValidationSolverType(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType);
+
+// Returns true when the selected base-case validation backend should use the
+// short-lived local-query profile instead of the proof-oriented cone profile.
+// This keeps KI base BMC probes on a direct CDCL path and gives unit tests a
+// stable policy hook instead of a timing-based regression check.
+bool baseCaseValidationUsesLocalQueryProfile(
+    KEPLER_FORMAL::Config::SolverType solverType);
+
 // Solves the bounded SEC base case for a single horizon k and reconstructs the
 // first concrete counterexample if the property can fail within that prefix.
 std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(

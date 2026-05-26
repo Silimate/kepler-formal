@@ -4,6 +4,7 @@
 #include "kinduction/InductionStepSolver.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -62,6 +63,27 @@ void addFormulaStateSupport(BoolExpr* formula,
   }
   for (const auto symbol : formula->getSupportVars()) {
     if (stateSymbols.find(symbol) != stateSymbols.end()) {
+      output.insert(symbol);
+    }
+  }
+}
+
+void addTransitionStateSupport(const TransitionExprResolver& transitionByState,
+                               size_t target,
+                               const std::unordered_set<size_t>& stateSymbols,
+                               std::unordered_set<size_t>& output) {
+  for (const auto symbol : transitionByState.support(target)) {
+    if (stateSymbols.find(symbol) != stateSymbols.end()) {
+      output.insert(symbol);
+    }
+  }
+}
+
+void addTransitionSupport(const TransitionExprResolver& transitionByState,
+                          size_t target,
+                          std::unordered_set<size_t>& output) {
+  for (const auto symbol : transitionByState.support(target)) {
+    if (symbol >= 2) {
       output.insert(symbol);
     }
   }
@@ -187,8 +209,8 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
         primaryByComplement);
     transitionTargetsByFrame[frame - 1] = targets;
     for (const auto target : targets) {
-      addFormulaStateSupport(
-          transitionByState.at(target), stateSymbols, requiredStates[frame - 1]);
+      addTransitionStateSupport(
+          transitionByState, target, stateSymbols, requiredStates[frame - 1]);
     }
   }
 
@@ -212,7 +234,7 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
     for (const auto target : targets) {
       relevantStateSymbols.insert(target);
       solverSymbols.insert(target);
-      addFormulaSupport(transitionByState.at(target), solverSymbols);
+      addTransitionSupport(transitionByState, target, solverSymbols);
     }
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
@@ -295,9 +317,11 @@ void addInductiveStateEqualities(SATSolverWrapper& solver,
 
 }  // namespace
 
-bool provesByInduction(const KInductionProblem& problem,
-                       KEPLER_FORMAL::Config::SolverType solverType,
-                       size_t k) {
+InductionProofStatus proveByInductionStatus(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k,
+    std::optional<unsigned> kissatDecisionLimit) {
   const bool hasExplicitInductionInvariant = problem.inductionProperty != nullptr;
   BoolExpr* inductionProperty =
       hasExplicitInductionInvariant ? problem.inductionProperty : problem.property;
@@ -353,7 +377,30 @@ bool provesByInduction(const KInductionProblem& problem,
   FrameFormulaEncoder lastFrameEncoder(
       solver, variables.makeLeafLits(k, inductionBadSupport));
   solver.addClause({lastFrameEncoder.encode(inductionBad)});
-  return !solver.solve();
+  SATSolverWrapper::SolveStatus solveStatus;
+  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+      kissatDecisionLimit.has_value()) {
+    solveStatus = solver.solveWithKissatResourceLimits(
+        std::numeric_limits<unsigned>::max(), *kissatDecisionLimit);
+  } else {
+    solveStatus = solver.solveStatus();
+  }
+  switch (solveStatus) {
+    case SATSolverWrapper::SolveStatus::Unsat:
+      return InductionProofStatus::Proved;
+    case SATSolverWrapper::SolveStatus::Sat:
+      return InductionProofStatus::NotProved;
+    case SATSolverWrapper::SolveStatus::Unknown:
+      return InductionProofStatus::Unknown;
+  }
+  return InductionProofStatus::Unknown;  // LCOV_EXCL_LINE
+}
+
+bool provesByInduction(const KInductionProblem& problem,
+                       KEPLER_FORMAL::Config::SolverType solverType,
+                       size_t k) {
+  return proveByInductionStatus(problem, solverType, k) ==
+         InductionProofStatus::Proved;
 }
 
 }  // namespace KEPLER_FORMAL::SEC

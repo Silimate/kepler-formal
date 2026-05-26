@@ -104,12 +104,14 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   batch.property = BoolExpr::simplify(property);
   batch.bad = BoolExpr::simplify(BoolExpr::Not(batch.property));
 
-  // Recompute the induction obligation from the batch property.  The shared
-  // structural/startup invariants stay in the problem as inductive equality
-  // pairs, but output-specific pruning from the monolithic property is not
-  // reused across a narrower output slice.
+  // Keep the shared state-equality strengthening as KI hypotheses for sliced
+  // output proofs.  Rebuilding the monolithic induction property here would ask
+  // every tiny output batch to prove all shared state equalities as goals; large
+  // reset-heavy ASICs then spend the run chasing unrelated equality failures
+  // instead of proving the selected output cone.
   batch.inductionProperty = nullptr;
   batch.inductionBad = nullptr;
+  batch.inductionPropertyAssumesInductiveStateEqualities = false;
   batch.description = source.description + " output batch";
 }
 

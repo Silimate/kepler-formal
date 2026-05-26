@@ -166,7 +166,6 @@ BoolExpr* substituteBoolExprVariables(
   if (root == nullptr) {
     return nullptr;
   }
-
   if (auto it = memo.find(root); it != memo.end()) {
     return it->second;
   }
@@ -176,35 +175,55 @@ BoolExpr* substituteBoolExprVariables(
     case Op::VAR: {
       const size_t id = root->getId();
       if (id < 2) {
-        substituted = BoolExpr::Var(id);
+        substituted = root;
         break;
       }
       auto it = assignments.find(id);
       substituted =
-          it == assignments.end() ? BoolExpr::Var(id)
+          it == assignments.end() ? root
                                   : (it->second ? BoolExpr::createTrue()
                                                 : BoolExpr::createFalse());
       break;
     }
-    case Op::NOT:
-      substituted = BoolExpr::Not(
-          substituteBoolExprVariables(root->getLeft(), assignments, memo));
+    case Op::NOT: {
+      BoolExpr* left =
+          substituteBoolExprVariables(root->getLeft(), assignments, memo);
+      // Preserve no-op subtrees. Reset/bootstrap specialization touches only a
+      // small frontier on large ASIC cones; rebuilding untouched cones made
+      // BlackParrot spend minutes constructing equivalent BoolExpr nodes.
+      substituted = left == root->getLeft() ? root : BoolExpr::Not(left);
       break;
-    case Op::AND:
-      substituted = BoolExpr::And(
-          substituteBoolExprVariables(root->getLeft(), assignments, memo),
-          substituteBoolExprVariables(root->getRight(), assignments, memo));
+    }
+    case Op::AND: {
+      BoolExpr* left =
+          substituteBoolExprVariables(root->getLeft(), assignments, memo);
+      BoolExpr* right =
+          substituteBoolExprVariables(root->getRight(), assignments, memo);
+      substituted = left == root->getLeft() && right == root->getRight()
+                        ? root
+                        : BoolExpr::And(left, right);
       break;
-    case Op::OR:
-      substituted = BoolExpr::Or(
-          substituteBoolExprVariables(root->getLeft(), assignments, memo),
-          substituteBoolExprVariables(root->getRight(), assignments, memo));
+    }
+    case Op::OR: {
+      BoolExpr* left =
+          substituteBoolExprVariables(root->getLeft(), assignments, memo);
+      BoolExpr* right =
+          substituteBoolExprVariables(root->getRight(), assignments, memo);
+      substituted = left == root->getLeft() && right == root->getRight()
+                        ? root
+                        : BoolExpr::Or(left, right);
       break;
-    case Op::XOR:
-      substituted = BoolExpr::Xor(
-          substituteBoolExprVariables(root->getLeft(), assignments, memo),
-          substituteBoolExprVariables(root->getRight(), assignments, memo));
+    }
+    case Op::XOR: {
+      BoolExpr* left =
+          substituteBoolExprVariables(root->getLeft(), assignments, memo);
+      BoolExpr* right =
+          substituteBoolExprVariables(root->getRight(), assignments, memo);
+      substituted = left == root->getLeft() && right == root->getRight()
+                        ? root
+                        : BoolExpr::Xor(left, right);
       break;
+    }
     case Op::NONE:
     default:
       throw std::runtime_error("Unsupported BoolExpr operator in substitution");
