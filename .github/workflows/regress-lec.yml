@@ -45,6 +45,10 @@ jobs:
       working-directory: ${{github.workspace}}
       run: git clone https://github.com/keplertech/kepler-formal-regress
 
+    - name: Clone kepler-formal-examples
+      working-directory: ${{github.workspace}}
+      run: git clone https://github.com/keplertech/kepler-formal-examples
+
     - name: Run cts_aes_asap7_base
       working-directory: ${{github.workspace}}
       run: |
@@ -86,6 +90,36 @@ jobs:
           objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml \
           expect-identical \
           po-cnfs
+
+    - name: Run nangate45_swerv
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_cnf_regress.sh \
+          nangate45_swerv \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_swerv" \
+          "${{github.workspace}}/build/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-identical
+
+    - name: Run nangate45_ariane136
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_cnf_regress.sh \
+          nangate45_ariane136 \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_ariane136" \
+          "${{github.workspace}}/build/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-identical
+
+    - name: Run asap7_ethmac
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_cnf_regress.sh \
+          asap7_ethmac \
+          "${{github.workspace}}/kepler-formal-examples/asap7_ethmac" \
+          "${{github.workspace}}/build/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-identical
 
     - name: Run on naja if
       working-directory: ${{github.workspace}}

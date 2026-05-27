@@ -136,6 +136,17 @@ std::string normalizeSignalBaseNameForTest(const std::string& name) {
   return normalizePinNameForTest(base);
 }
 
+bool hasSuffixForTest(const std::string& value, const std::string& suffix) {
+  return value.size() >= suffix.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool isResetNameTokenForTest(
+    const std::string& candidate,
+    const std::string& token) {
+  return candidate == token || hasSuffixForTest(candidate, "_" + token);
+}
+
 std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
     const std::string& displayName);
 
@@ -667,24 +678,25 @@ namespace {
 
 std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
     const std::string& displayName) {
-  const auto hasSuffix = [](const std::string& value, const std::string& suffix) {
-    return value.size() >= suffix.size() &&
-           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-  };
   const std::string normalized = normalizeSignalBaseNameForTest(displayName);
   std::vector<std::string> candidates = {normalized};
-  if (hasSuffix(normalized, "_I")) {
+  if (hasSuffixForTest(normalized, "_I")) {
     candidates.push_back(normalized.substr(0, normalized.size() - 2));
   }
-  if (hasSuffix(normalized, "_NI")) {
+  if (hasSuffixForTest(normalized, "_NI")) {
     candidates.push_back(normalized.substr(0, normalized.size() - 1));
   }
   for (const auto& candidate : candidates) {
-    if (candidate == "RESET" || candidate == "RST") {
+    if (isResetNameTokenForTest(candidate, "RESET") ||
+        isResetNameTokenForTest(candidate, "RST")) {
       return true;
     }
-    if (candidate == "RESET_N" || candidate == "RESETN" ||
-        candidate == "RST_N" || candidate == "RSTN") {
+    if (isResetNameTokenForTest(candidate, "RESET_N") ||
+        isResetNameTokenForTest(candidate, "RESETN") ||
+        isResetNameTokenForTest(candidate, "RESET_L") ||
+        isResetNameTokenForTest(candidate, "RST_N") ||
+        isResetNameTokenForTest(candidate, "RSTN") ||
+        isResetNameTokenForTest(candidate, "RST_L")) {
       return false;
     }
   }
@@ -11347,6 +11359,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralStateInvariantSkipsGlobalRefinementAboveStateLimit) {
+  const ScopedEnvVar stateLimit(
+      "KEPLER_SEC_GLOBAL_STRUCTURAL_REFINEMENT_STATE_LIMIT", "1");
+  const SignalKey false0 = makeSignalKey("false0");
+  const SignalKey true0 = makeSignalKey("true0");
+  const SignalKey false1 = makeSignalKey("false1");
+  const SignalKey true1 = makeSignalKey("true1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {false0, true0};
+  model0.inputVarByKey.emplace(false0, 2);
+  model0.inputVarByKey.emplace(true0, 3);
+  model0.initialStateValueByKey.emplace(false0, false);
+  model0.initialStateValueByKey.emplace(true0, true);
+  model0.nextStateExprByStateKey.emplace(false0, BoolExpr::createFalse());
+  model0.nextStateExprByStateKey.emplace(true0, BoolExpr::createTrue());
+
+  SequentialDesignModel model1;
+  model1.stateBits = {true1, false1};
+  model1.inputVarByKey.emplace(true1, 4);
+  model1.inputVarByKey.emplace(false1, 5);
+  model1.initialStateValueByKey.emplace(true1, true);
+  model1.initialStateValueByKey.emplace(false1, false);
+  model1.nextStateExprByStateKey.emplace(true1, BoolExpr::createTrue());
+  model1.nextStateExprByStateKey.emplace(false1, BoolExpr::createFalse());
+
+  const auto aligned = inferStructurallyEquivalentStatePairs(
+      model0, model1, AlignedSignals{});
+
+  EXPECT_TRUE(aligned.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        StructuralStateInvariantReturnsEmptyWhenOneSideHasNoState) {
   SequentialDesignModel model0;
   SequentialDesignModel model1;
@@ -13475,6 +13520,26 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BoolExprVariableRemapPreservesIdentitySubtrees) {
+  BoolExpr* left = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+  BoolExpr* right = BoolExpr::Or(BoolExpr::Var(4), BoolExpr::Var(5));
+  BoolExpr* root = BoolExpr::Xor(left, right);
+
+  std::unordered_map<BoolExpr*, BoolExpr*> memo;
+  EXPECT_EQ(
+      remapBoolExprVariables(
+          root, {{2, 2}, {3, 3}, {4, 4}, {5, 5}}, memo),
+      root);
+
+  memo.clear();
+  BoolExpr* remapped =
+      remapBoolExprVariables(root, {{2, 2}, {3, 6}, {4, 4}, {5, 5}}, memo);
+  EXPECT_NE(remapped, root);
+  EXPECT_NE(remapped->getLeft(), left);
+  EXPECT_EQ(remapped->getRight(), right);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelDetailResetInferenceAndReachableStateHelpersCoverBranches) {
   const auto requiredOutputs = detail::selectRequiredBuilderOutputsForTest(
       {10, 11, 12, 13, 14},
@@ -13496,6 +13561,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::optional<bool>(true));
   EXPECT_EQ(
       detail::getResetAssertionValueForTest("rst_ni[0]"),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("rst_l[0]"),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("reset_l[0]"),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("wb_rst_i[0]"),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("wb_reset_i[0]"),
+      std::optional<bool>(true));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("wb_rst_ni[0]"),
       std::optional<bool>(false));
   EXPECT_EQ(detail::getResetAssertionValueForTest("enable[0]"), std::nullopt);
 

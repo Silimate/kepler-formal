@@ -105,6 +105,13 @@ rm -f "${output_cnf}" "${output_cnf_archive}" "${output_po_cnf_archive}"
 (
   cd "${case_dir}"
   awk '
+    # Some shared OpenROAD-flow configs are SEC-first.  CNF regressions must
+    # force the LEC/miter path below and drop SEC-only knobs before appending
+    # export settings.
+    /^[[:space:]]*verification:/ { next }
+    /^[[:space:]]*sec_engine:/ { next }
+    /^[[:space:]]*max_k:/ { next }
+    /^[[:space:]]*compact_mode:/ { next }
     /^[[:space:]]*cnf_export:/ { next }
     /^[[:space:]]*cnf_export_path:/ { next }
     /^[[:space:]]*po_cnf_export:/ { next }
@@ -114,6 +121,7 @@ rm -f "${output_cnf}" "${output_cnf_archive}" "${output_po_cnf_archive}"
   ' "${config_path}" > "${tmp_config}"
   {
     echo
+    echo "verification: lec"
     echo "log_file: ${output_log}"
     echo "cnf_export: true"
     echo "cnf_export_path: ${output_cnf}"

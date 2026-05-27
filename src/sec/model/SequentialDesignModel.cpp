@@ -500,6 +500,20 @@ void mergeBuilderTermVarIDs(
   }
 }
 
+void mergeMaterializedBuilderOutputs(
+    MaterializedBuilderOutputs& dest,
+    const MaterializedBuilderOutputs& src) {
+  appendUniqueTermIDs(dest.inputs, src.inputs);
+  appendUniqueTermIDs(dest.outputs, src.outputs);
+  mergeBuilderTermVarIDs(dest.termDNLID2varID, src.termDNLID2varID);
+  for (const auto& [termID, expr] : src.outputExprByTerm) {
+    dest.outputExprByTerm.insert_or_assign(termID, expr);
+  }
+  for (const auto& [termID, info] : src.skippedOutputsByTerm) {
+    dest.skippedOutputsByTerm.emplace(termID, info);
+  }
+}
+
 std::unordered_map<size_t, size_t> buildStableBuilderVarRemap(
     const std::vector<size_t>& sourceTermDNLID2varID,
     const std::vector<size_t>& stableTermDNLID2varID) {
@@ -518,6 +532,15 @@ std::unordered_map<size_t, size_t> buildStableBuilderVarRemap(
     remap.emplace(sourceVarID, stableVarID);
   }
   return remap;
+}
+
+bool varRemapChangesAnySymbol(const std::unordered_map<size_t, size_t>& remap) {
+  for (const auto& [sourceVarID, stableVarID] : remap) {
+    if (sourceVarID != stableVarID) {
+      return true;
+    }
+  }
+  return false;
 }
 
 MaterializedBuilderOutputs materializeBuilderOutputs(
@@ -706,26 +729,42 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
     const std::string detail =
         "failed to materialize dependency cone: " + std::string(e.what());
     if (requestedOutputs.size() > 1) {
-      MaterializedBuilderOutputs merged;
-      for (const auto requestedTermID : requestedOutputs) {
-        const auto single = materializeBuilderOutputs(
-            {requestedTermID},
-            collectedInputs,
-            stableTermDNLID2varID,
-            collectedSkippedOutputs,
-            secDiagEnabled,
+      if (secDiagEnabled) {
+        std::fprintf(
+            stderr,
+            "SEC diag: extract(%s) %s split fallback outputs=%zu: %s\n",
             topName,
-            phaseLabel);
-        appendUniqueTermIDs(merged.inputs, single.inputs);
-        appendUniqueTermIDs(merged.outputs, single.outputs);
-        mergeBuilderTermVarIDs(merged.termDNLID2varID, single.termDNLID2varID);
-        for (const auto& [termID, expr] : single.outputExprByTerm) {
-          merged.outputExprByTerm.insert_or_assign(termID, expr);
-        }
-        for (const auto& [termID, info] : single.skippedOutputsByTerm) {
-          merged.skippedOutputsByTerm.emplace(termID, info);
-        }
+            phaseLabel,
+            requestedOutputs.size(),
+            detail.c_str());
+        std::fflush(stderr);
       }
+      MaterializedBuilderOutputs merged;
+      const auto midpoint = requestedOutputs.begin() + requestedOutputs.size() / 2;
+      // Keep the common case batched: isolate the bad root by halves instead of
+      // rebuilding every good root as an independent DNL/cloud extraction.
+      const std::vector<naja::DNL::DNLID> left(
+          requestedOutputs.begin(), midpoint);
+      const std::vector<naja::DNL::DNLID> right(
+          midpoint, requestedOutputs.end());
+      const auto leftResult = materializeBuilderOutputs(
+          left,
+          collectedInputs,
+          stableTermDNLID2varID,
+          collectedSkippedOutputs,
+          secDiagEnabled,
+          topName,
+          phaseLabel);
+      mergeMaterializedBuilderOutputs(merged, leftResult);
+      const auto rightResult = materializeBuilderOutputs(
+          right,
+          collectedInputs,
+          stableTermDNLID2varID,
+          collectedSkippedOutputs,
+          secDiagEnabled,
+          topName,
+          phaseLabel);
+      mergeMaterializedBuilderOutputs(merged, rightResult);
       return merged;
     }
     if (secDiagEnabled) {
@@ -777,6 +816,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   mergeBuilderTermVarIDs(result.termDNLID2varID, builder.getTermDNLID2VarID());
   const auto stableVarRemap = buildStableBuilderVarRemap(
       builder.getTermDNLID2VarID(), result.termDNLID2varID);
+  const bool needsStableVarRemap = varRemapChangesAnySymbol(stableVarRemap);
   for (const auto& [termID, info] : builder.getSkippedOutputs()) {
     result.skippedOutputsByTerm.emplace(termID, info);
   }
@@ -810,12 +850,14 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
       continue;
     }
     try {
-      std::unordered_map<BoolExpr*, BoolExpr*> remapMemo;
       // Dependency materialization may temporarily remove internal roots from
       // the PI list to force cone rebuilding. That changes builder-local
       // variable IDs, so normalize every dependency formula back to the stable
       // SEC model variable space before the expression is shared with proofs.
-      expr = remapBoolExprVariables(expr, stableVarRemap, remapMemo);
+      if (needsStableVarRemap) {
+        std::unordered_map<BoolExpr*, BoolExpr*> remapMemo;
+        expr = remapBoolExprVariables(expr, stableVarRemap, remapMemo);
+      }
     } catch (const std::exception& e) {
       result.skippedOutputsByTerm.emplace(
           result.outputs[i],
@@ -1702,6 +1744,13 @@ std::string normalizeSignalBaseName(const std::string& name) {
   return normalizePinName(base);
 }
 
+bool isResetNameToken(const std::string& candidate, const std::string& token) {
+  // Domain-prefixed top resets, for example `wb_rst_i`, normalize to `WB_RST`
+  // after input-suffix stripping.  Match only a final underscore-separated
+  // reset token so synthesized reset inference remains conservative.
+  return candidate == token || hasSuffix(candidate, "_" + token);
+}
+
 std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   // Synthesized-reset inference runs before the final SEC symbol space exists.
   // Use the same top-port spelling policy as later SEC phases so names such as
@@ -1722,11 +1771,16 @@ std::vector<std::string> resetNameCandidates(const std::string& displayName) {
 
 std::optional<bool> getResetAssertionValue(const std::string& displayName) {
   for (const auto& candidate : resetNameCandidates(displayName)) {
-    if (candidate == "RESET" || candidate == "RST") {
+    if (isResetNameToken(candidate, "RESET") ||
+        isResetNameToken(candidate, "RST")) {
       return true;
     }
-    if (candidate == "RESET_N" || candidate == "RESETN" ||
-        candidate == "RST_N" || candidate == "RSTN") {
+    if (isResetNameToken(candidate, "RESET_N") ||
+        isResetNameToken(candidate, "RESETN") ||
+        isResetNameToken(candidate, "RESET_L") ||
+        isResetNameToken(candidate, "RST_N") ||
+        isResetNameToken(candidate, "RSTN") ||
+        isResetNameToken(candidate, "RST_L")) {
       return false;
     }
   }

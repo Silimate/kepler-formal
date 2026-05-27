@@ -183,6 +183,13 @@ bool hasSuffix(const std::string& value, const std::string& suffix) {
          value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+bool isResetNameToken(const std::string& candidate, const std::string& token) {
+  // Domain-prefixed top resets, for example `wb_rst_i`, normalize to `WB_RST`
+  // after input-suffix stripping.  Match only a final underscore-separated
+  // reset token so prefixes do not block reachable-state reset bootstrap.
+  return candidate == token || hasSuffix(candidate, "_" + token);
+}
+
 std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   // Reset ports frequently carry RTL direction suffixes (`reset_i`, `rst_ni`).
   // Strip only those common input suffixes before classification so a real
@@ -203,11 +210,16 @@ std::vector<std::string> resetNameCandidates(const std::string& displayName) {
 
 std::optional<bool> getResetAssertionValue(const std::string& displayName) {
   for (const auto& candidate : resetNameCandidates(displayName)) {
-    if (candidate == "RESET" || candidate == "RST") {
+    if (isResetNameToken(candidate, "RESET") ||
+        isResetNameToken(candidate, "RST")) {
       return true;
     }
-    if (candidate == "RESET_N" || candidate == "RESETN" ||
-        candidate == "RST_N" || candidate == "RSTN") {
+    if (isResetNameToken(candidate, "RESET_N") ||
+        isResetNameToken(candidate, "RESETN") ||
+        isResetNameToken(candidate, "RESET_L") ||
+        isResetNameToken(candidate, "RST_N") ||
+        isResetNameToken(candidate, "RSTN") ||
+        isResetNameToken(candidate, "RST_L")) {
       return false;
     }
   }

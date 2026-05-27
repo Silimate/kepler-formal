@@ -4,6 +4,7 @@
 #include "strategy/StructuralStateInvariant.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -39,6 +40,7 @@ constexpr size_t kDefaultResetBootstrapOutputCoiStatePairs =
     kMaxSatValidatedOrderedCoiStatePairs;
 constexpr size_t kMaxSatValidatedOrderedPairSupport = 32768;
 constexpr size_t kMaxOrderedCoiExpansionPasses = 64;
+constexpr size_t kDefaultGlobalStructuralRefinementStateLimit = 30000;
 constexpr unsigned kSatValidatedStructuralConflictLimit = 4096;
 
 using KEPLER_FORMAL::BoolExpr;
@@ -318,6 +320,46 @@ bool resetBootstrapOutputCoiTransitionClosureEnabled() {
     return !(env != nullptr && env[0] != '\0' && std::string(env) != "0");
   }();
   return enabled;
+}
+
+size_t parseStateLimitEnv(const char* env, size_t defaultValue) {
+  if (env == nullptr || env[0] == '\0') {
+    return defaultValue;
+  }
+  errno = 0;
+  char* end = nullptr;
+  const auto parsed = std::strtoull(env, &end, 10);
+  if (end == env || errno == ERANGE) {
+    return defaultValue;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();  // LCOV_EXCL_LINE
+  }
+  return static_cast<size_t>(parsed);
+}
+
+size_t globalStructuralRefinementStateLimit() {
+  return parseStateLimitEnv(
+      std::getenv("KEPLER_SEC_GLOBAL_STRUCTURAL_REFINEMENT_STATE_LIMIT"),
+      kDefaultGlobalStructuralRefinementStateLimit);
+}
+
+bool globalStructuralRefinementWithinStateLimit(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1) {
+  const size_t limit = globalStructuralRefinementStateLimit();
+  const size_t stateCount0 = model0.stateBits.size();
+  const size_t stateCount1 = model1.stateBits.size();
+  const bool overLimit = stateCount0 > limit || stateCount1 > limit - stateCount0;
+  if (overLimit && structuralCoiDiagEnabled()) {
+    std::fprintf(
+        stderr,
+        "SEC diag: global structural refinement skipped states=%zu+%zu limit=%zu\n",
+        stateCount0,
+        stateCount1,
+        limit);
+  }
+  return !overLimit;
 }
 
 void assignPrivateSupportSymbols(BoolExpr* expr,
@@ -1607,6 +1649,13 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
       model0, model1, alignedInputs, alignedOutputs, solverType);
   if (!orderedCoiStates.names.empty()) {
     return orderedCoiStates;
+  }
+
+  if (!globalStructuralRefinementWithinStateLimit(model0, model1)) {
+    // The final fixed-point matcher is intentionally not rooted at top outputs.
+    // Keep it for small renamed designs, but do not let it dominate large ASIC
+    // SEC runs once the ordered/SAT/top-output-rooted candidates are exhausted.
+    return {};
   }
 
   const auto inputClasses0 = buildInputClassMap(model0, alignedInputs.keys0);

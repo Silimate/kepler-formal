@@ -96,14 +96,14 @@ BoolExpr* remapBoolExprVariables(
     if (node->getOp() == Op::VAR) {
       const size_t id = node->getId();
       if (id < 2) {
-        memo.emplace(node, BoolExpr::Var(id));
+        memo.emplace(node, node);
       } else {
         auto it = varMap.find(id);
         if (it == varMap.end()) {
           throw std::runtime_error("Missing BoolExpr remap for variable " +
                                    std::to_string(id));
         }
-        memo.emplace(node, BoolExpr::Var(it->second));
+        memo.emplace(node, it->second == id ? node : BoolExpr::Var(it->second));
       }
       continue;
     }
@@ -127,18 +127,38 @@ BoolExpr* remapBoolExprVariables(
 
     BoolExpr* remapped = nullptr;
     switch (node->getOp()) {
-      case Op::NOT:
-        remapped = BoolExpr::Not(memo.at(node->getLeft()));
+      case Op::NOT: {
+        BoolExpr* left = memo.at(node->getLeft());
+        // Stable-variable remapping is often identity on most of a large SEC
+        // cone. Preserve unchanged sub-DAGs instead of rebuilding them through
+        // the global BoolExpr cache.
+        remapped = left == node->getLeft() ? node : BoolExpr::Not(left);
         break;
-      case Op::AND:
-        remapped = BoolExpr::And(memo.at(node->getLeft()), memo.at(node->getRight()));
+      }
+      case Op::AND: {
+        BoolExpr* left = memo.at(node->getLeft());
+        BoolExpr* right = memo.at(node->getRight());
+        remapped = left == node->getLeft() && right == node->getRight()
+                       ? node
+                       : BoolExpr::And(left, right);
         break;
-      case Op::OR:
-        remapped = BoolExpr::Or(memo.at(node->getLeft()), memo.at(node->getRight()));
+      }
+      case Op::OR: {
+        BoolExpr* left = memo.at(node->getLeft());
+        BoolExpr* right = memo.at(node->getRight());
+        remapped = left == node->getLeft() && right == node->getRight()
+                       ? node
+                       : BoolExpr::Or(left, right);
         break;
-      case Op::XOR:
-        remapped = BoolExpr::Xor(memo.at(node->getLeft()), memo.at(node->getRight()));
+      }
+      case Op::XOR: {
+        BoolExpr* left = memo.at(node->getLeft());
+        BoolExpr* right = memo.at(node->getRight());
+        remapped = left == node->getLeft() && right == node->getRight()
+                       ? node
+                       : BoolExpr::Xor(left, right);
         break;
+      }
       // LCOV_EXCL_START
       case Op::VAR:
       case Op::NONE:

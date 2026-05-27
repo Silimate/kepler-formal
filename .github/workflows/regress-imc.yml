@@ -112,6 +112,30 @@ jobs:
           expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          nangate45_swerv \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_swerv" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          nangate45_ariane136 \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_ariane136" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
+        bash regress/run_sec_strategies_regress.sh \
+          asap7_ethmac \
+          "${{github.workspace}}/kepler-formal-examples/asap7_ethmac" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}
