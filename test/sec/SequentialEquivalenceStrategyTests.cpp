@@ -3751,7 +3751,8 @@ SNLDesign* createClockGateLatchDataDffTop(
     NLLibrary* library,
     const std::string& name,
     SNLDesign* andModel,
-    SNLDesign* latchModel) {
+    SNLDesign* latchModel,
+    bool includeIndependentDff = false) {
   auto* top =
       SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
   auto* topIn =
@@ -3762,10 +3763,23 @@ SNLDesign* createClockGateLatchDataDffTop(
       SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
   auto* topOut =
       SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  SNLScalarTerm* topIndependentIn = nullptr;
+  SNLScalarTerm* topIndependentOut = nullptr;
+  if (includeIndependentDff) {
+    topIndependentIn = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Input, NLName("independent_in"));
+    topIndependentOut = SNLScalarTerm::create(
+        top, SNLTerm::Direction::Output, NLName("independent_out"));
+  }
 
   auto* latch = SNLInstance::create(top, latchModel, NLName("clock_gate_i.en_latch"));
   auto* dataAnd = SNLInstance::create(top, andModel, NLName("data_and"));
   auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+  SNLInstance* independentFf = nullptr;
+  if (includeIndependentDff) {
+    independentFf = SNLInstance::create(
+        top, NLDB0::getDFF(), NLName("independent_ff"));
+  }
 
   auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
   auto* netEnable = SNLScalarNet::create(top, NLName("net_en"));
@@ -3773,11 +3787,22 @@ SNLDesign* createClockGateLatchDataDffTop(
   auto* netLatchQ = SNLScalarNet::create(top, NLName("net_latch_q"));
   auto* netData = SNLScalarNet::create(top, NLName("net_data"));
   auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+  SNLScalarNet* netIndependentIn = nullptr;
+  SNLScalarNet* netIndependentOut = nullptr;
+  if (includeIndependentDff) {
+    netIndependentIn = SNLScalarNet::create(top, NLName("net_independent_in"));
+    netIndependentOut =
+        SNLScalarNet::create(top, NLName("net_independent_out"));
+  }
 
   topIn->setNet(netIn);
   topEnable->setNet(netEnable);
   topClock->setNet(netClock);
   topOut->setNet(netOut);
+  if (includeIndependentDff) {
+    topIndependentIn->setNet(netIndependentIn);
+    topIndependentOut->setNet(netIndependentOut);
+  }
 
   latch->getInstTerm(latchModel->getScalarTerm(NLName("D")))->setNet(netEnable);
   latch->getInstTerm(latchModel->getScalarTerm(NLName("GATE")))->setNet(netClock);
@@ -3790,6 +3815,14 @@ SNLDesign* createClockGateLatchDataDffTop(
   ff->getInstTerm(NLDB0::getDFFData())->setNet(netData);
   ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
   ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netOut);
+  if (includeIndependentDff) {
+    // This cone intentionally does not reference the folded latch output. It
+    // catches regressions where latch substitution rebuilds unrelated SEC
+    // state expressions instead of preserving no-op subtrees.
+    independentFf->getInstTerm(NLDB0::getDFFData())->setNet(netIndependentIn);
+    independentFf->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+    independentFf->getInstTerm(NLDB0::getDFFOutput())->setNet(netIndependentOut);
+  }
 
   return top;
 }
@@ -12548,6 +12581,42 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractPreservesUnrelatedClockGateLatchCones) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* andModel = createAnd2Model(primitives);
+  auto* latchModel = createOpaqueClockGateLatchModel(primitives);
+  auto* top = createClockGateLatchDataDffTop(
+      library, "top", andModel, latchModel, true);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+  expectAllExpressionSupportIsPublished(extracted);
+  const auto independentStateKey =
+      findKeyByDisplayName(extracted, "independent_ff.Q[0]");
+  const auto independentInKey =
+      findKeyByDisplayName(extracted, "independent_in[0]");
+  const auto enableKey = findKeyByDisplayName(extracted, "en[0]");
+  const auto latchKey =
+      findKeyByDisplayName(extracted, "clock_gate_i.en_latch.Q[0]");
+  auto* independentExpr =
+      extracted.nextStateExprByStateKey.at(independentStateKey);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_EQ(extracted.inputVarByKey.find(latchKey), extracted.inputVarByKey.end());
+  EXPECT_EQ(independentExpr->getSupportVars().count(
+                extracted.inputVarByKey.at(enableKey)),
+            0u);
+  EXPECT_TRUE(independentExpr->evaluate(
+      {{extracted.inputVarByKey.at(independentInKey), true}}));
+  EXPECT_FALSE(independentExpr->evaluate(
+      {{extracted.inputVarByKey.at(independentInKey), false}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractDoesNotPublishConstantInternalBoundaryInputs) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -13537,6 +13606,27 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(remapped, root);
   EXPECT_NE(remapped->getLeft(), left);
   EXPECT_EQ(remapped->getRight(), right);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       BoolExprVariableRemapCanReuseBatchMemoForSharedCones) {
+  BoolExpr* shared = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+  BoolExpr* firstRoot = BoolExpr::Or(shared, BoolExpr::Var(4));
+  BoolExpr* secondRoot = BoolExpr::Xor(shared, BoolExpr::Var(5));
+
+  std::unordered_map<BoolExpr*, BoolExpr*> memo;
+  static_cast<void>(
+      remapBoolExprVariables(firstRoot, {{2, 7}, {3, 8}, {4, 4}}, memo));
+  ASSERT_NE(memo.find(shared), memo.end());
+  BoolExpr* remappedShared = memo.at(shared);
+
+  // Dependency materialization remaps many output formulas from one builder
+  // batch. Reusing the memo across outputs is safe because the variable map is
+  // fixed, and it keeps large shared cones from being rebuilt repeatedly.
+  static_cast<void>(
+      remapBoolExprVariables(secondRoot, {{2, 7}, {3, 8}, {5, 5}}, memo));
+  ASSERT_NE(memo.find(shared), memo.end());
+  EXPECT_EQ(memo.at(shared), remappedShared);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

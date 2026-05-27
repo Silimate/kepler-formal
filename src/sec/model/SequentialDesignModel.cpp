@@ -844,6 +844,10 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
     }
   }
   const auto& outputExprs = builder.getPOs();
+  // All formulas in this materialized batch use the same builder-local to
+  // stable-variable map. Reuse one memo across outputs so shared ASIC cones are
+  // remapped once instead of once per requested root.
+  std::unordered_map<BoolExpr*, BoolExpr*> stableRemapMemo;
   for (size_t i = 0; i < result.outputs.size(); ++i) {
     BoolExpr* expr = outputExprs[i];
     if (expr == nullptr || !expr->isValid()) {
@@ -855,8 +859,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
       // variable IDs, so normalize every dependency formula back to the stable
       // SEC model variable space before the expression is shared with proofs.
       if (needsStableVarRemap) {
-        std::unordered_map<BoolExpr*, BoolExpr*> remapMemo;
-        expr = remapBoolExprVariables(expr, stableVarRemap, remapMemo);
+        expr = remapBoolExprVariables(expr, stableVarRemap, stableRemapMemo);
       }
     } catch (const std::exception& e) {
       result.skippedOutputsByTerm.emplace(
@@ -1412,25 +1415,42 @@ BoolExpr* substituteClockGateLatchVars(
       substituted = it == latchDataExprByVarID.end() ? root : it->second;
       break;
     }
-    case Op::NOT:
-      substituted = BoolExpr::Not(substituteClockGateLatchVars(
-          root->getLeft(), latchDataExprByVarID, memo));
+    case Op::NOT: {
+      BoolExpr* left = substituteClockGateLatchVars(
+          root->getLeft(), latchDataExprByVarID, memo);
+      substituted = left == root->getLeft() ? root : BoolExpr::Not(left);
       break;
-    case Op::AND:
-      substituted = BoolExpr::And(
-          substituteClockGateLatchVars(root->getLeft(), latchDataExprByVarID, memo),
-          substituteClockGateLatchVars(root->getRight(), latchDataExprByVarID, memo));
+    }
+    case Op::AND: {
+      BoolExpr* left = substituteClockGateLatchVars(
+          root->getLeft(), latchDataExprByVarID, memo);
+      BoolExpr* right = substituteClockGateLatchVars(
+          root->getRight(), latchDataExprByVarID, memo);
+      substituted = left == root->getLeft() && right == root->getRight()
+                        ? root
+                        : BoolExpr::And(left, right);
       break;
-    case Op::OR:
-      substituted = BoolExpr::Or(
-          substituteClockGateLatchVars(root->getLeft(), latchDataExprByVarID, memo),
-          substituteClockGateLatchVars(root->getRight(), latchDataExprByVarID, memo));
+    }
+    case Op::OR: {
+      BoolExpr* left = substituteClockGateLatchVars(
+          root->getLeft(), latchDataExprByVarID, memo);
+      BoolExpr* right = substituteClockGateLatchVars(
+          root->getRight(), latchDataExprByVarID, memo);
+      substituted = left == root->getLeft() && right == root->getRight()
+                        ? root
+                        : BoolExpr::Or(left, right);
       break;
-    case Op::XOR:
-      substituted = BoolExpr::Xor(
-          substituteClockGateLatchVars(root->getLeft(), latchDataExprByVarID, memo),
-          substituteClockGateLatchVars(root->getRight(), latchDataExprByVarID, memo));
+    }
+    case Op::XOR: {
+      BoolExpr* left = substituteClockGateLatchVars(
+          root->getLeft(), latchDataExprByVarID, memo);
+      BoolExpr* right = substituteClockGateLatchVars(
+          root->getRight(), latchDataExprByVarID, memo);
+      substituted = left == root->getLeft() && right == root->getRight()
+                        ? root
+                        : BoolExpr::Xor(left, right);
       break;
+    }
     case Op::NONE:
     default:
       throw std::runtime_error("Unsupported BoolExpr operator in latch substitution");
@@ -1438,6 +1458,24 @@ BoolExpr* substituteClockGateLatchVars(
 
   memo.emplace(root, substituted);
   return substituted;
+}
+
+BoolExpr* simplifyWhenClockGateLatchVarsChanged(
+    BoolExpr* original, BoolExpr* substituted) {
+  // Folded latch outputs are rare. Preserve untouched shared subtrees so large
+  // SEC models only simplify cones that actually reference the latch output.
+  return substituted == original ? original : BoolExpr::simplify(substituted);
+}
+
+BoolExpr* substituteClockGateLatchVarsInExpr(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, BoolExpr*>& latchDataExprByVarID) {
+  if (expr == nullptr || latchDataExprByVarID.empty()) {
+    return expr;
+  }
+  std::unordered_map<BoolExpr*, BoolExpr*> memo;
+  return simplifyWhenClockGateLatchVarsChanged(
+      expr, substituteClockGateLatchVars(expr, latchDataExprByVarID, memo));
 }
 
 bool pendingClockTermsArePureCarriers(
@@ -1495,9 +1533,8 @@ BoolExpr* getLocalClockEnableExpr(
       clockExpr, stripClockCarrierFromClockEnable(
                      clockExpr, topClockCarrierVarIDs, clockCarrierStripMemo));
   if (!clockGateLatchDataExprByVarID.empty()) {
-    std::unordered_map<BoolExpr*, BoolExpr*> latchMemo;
-    enable = BoolExpr::simplify(substituteClockGateLatchVars(
-        enable, clockGateLatchDataExprByVarID, latchMemo));
+    enable = substituteClockGateLatchVarsInExpr(
+        enable, clockGateLatchDataExprByVarID);
     enable = simplifyWhenClockCarriersChanged(
         enable, stripClockCarrierFromClockEnable(
                     enable, topClockCarrierVarIDs, clockCarrierStripMemo));
@@ -4529,20 +4566,13 @@ void substituteFoldedClockGateLatchVarsInModel(
     return;
   }
 
-  auto substituteExpr = [&](BoolExpr*& expr) {
-    if (expr == nullptr) {
-      return;  // LCOV_EXCL_LINE
-    }
-    std::unordered_map<BoolExpr*, BoolExpr*> memo;
-    expr = BoolExpr::simplify(
-        substituteClockGateLatchVars(expr, clockGateLatchDataExprByVarID, memo));
-  };
-
   for (auto& [_, expr] : model.observedOutputExprByKey) {
-    substituteExpr(expr);
+    expr = substituteClockGateLatchVarsInExpr(
+        expr, clockGateLatchDataExprByVarID);
   }
   for (auto& [_, expr] : model.nextStateExprByStateKey) {
-    substituteExpr(expr);
+    expr = substituteClockGateLatchVarsInExpr(
+        expr, clockGateLatchDataExprByVarID);
   }
 }
 

@@ -60,8 +60,13 @@ struct BoolExprCache::Impl {
 };
 
 BoolExprCache::Impl& BoolExprCache::impl() {
-  static Impl instance;
-  return instance;
+  // Large SEC regressions can create millions of hash-consed BoolExpr nodes.
+  // Releasing that cache through a function-local static destructor made the
+  // proof finish quickly but then spend minutes in process shutdown.  Keep the
+  // production cache alive until process exit and let the OS reclaim it; tests
+  // and long-lived embedding flows still use destroy() for explicit cleanup.
+  static Impl* instance = new Impl();
+  return *instance;
 }
 
 static inline TupleKey make_tuple_key(Op op,
