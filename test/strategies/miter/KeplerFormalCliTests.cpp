@@ -2370,6 +2370,41 @@ TEST(KeplerFormalCliTests, WriteBoundaryTermsReportSkipsEmptyReports) {
   std::filesystem::remove_all(tempDir);
 }
 
+TEST(KeplerFormalCliTests, WriteResetUnanchoredSkippedOutputsReportFormatsEntries) {
+  const auto tempDir =
+      makeUniqueTempDir("kepler_formal_cli_reset_unanchored_report");
+  const auto reportPath = tempDir / "skipped_reset_unanchored_pos.txt";
+
+  writeResetUnanchoredSkippedOutputsReport(
+      reportPath,
+      {"bad[0]: design0 depends on reset-unanchored internal state u0.q[0] | "
+       "design1 depends on reset-unanchored internal state u1.q[0]"});
+
+  const auto content = readFileContents(reportPath);
+  EXPECT_NE(
+      content.find("# SEC reset-unanchored skipped observed outputs"),
+      std::string::npos);
+  EXPECT_NE(
+      content.find("SEC does not assume internal flop equality"),
+      std::string::npos);
+  EXPECT_NE(content.find("- bad[0]: design0 depends"), std::string::npos);
+  EXPECT_NE(content.find("u0.q[0]"), std::string::npos);
+  EXPECT_NE(content.find("u1.q[0]"), std::string::npos);
+
+  std::filesystem::remove_all(tempDir);
+}
+
+TEST(KeplerFormalCliTests, WriteResetUnanchoredSkippedOutputsReportSkipsEmptyEntries) {
+  const auto tempDir =
+      makeUniqueTempDir("kepler_formal_cli_empty_reset_unanchored_report");
+  const auto reportPath = tempDir / "skipped_reset_unanchored_pos.txt";
+
+  writeResetUnanchoredSkippedOutputsReport(reportPath, {});
+
+  EXPECT_FALSE(std::filesystem::exists(reportPath));
+  std::filesystem::remove_all(tempDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",

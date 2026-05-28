@@ -244,6 +244,7 @@ void appendUniqueRole(std::vector<std::string>& roles, const char* role) {
 struct OutputCoverageSelection {
   AlignedSignals checkedOutputs;
   std::vector<std::string> skippedOutputs;
+  std::vector<std::string> resetUnanchoredSkippedOutputs;
   size_t totalOutputs = 0;
 };
 
@@ -739,6 +740,8 @@ SequentialEquivalenceResult makeSecResult(
   result.coveredOutputs = coverage.checkedOutputs.names.size();
   result.totalOutputs = coverage.totalOutputs;
   result.skippedObservedOutputs = coverage.skippedOutputs;
+  result.resetUnanchoredSkippedOutputs =
+      coverage.resetUnanchoredSkippedOutputs;
   result.abstractedSequentialBoundaries =
       std::move(abstractedSequentialBoundaries);
   result.extractedBoundaryReports = std::move(extractedBoundaryReports);
@@ -840,6 +843,8 @@ void filterOutputsRequiringUnanchoredResetState(
 
   const auto skippedOutputCountBeforeFilter =
       aligned.outputCoverage.skippedOutputs.size();
+  const auto resetUnanchoredSkippedOutputCountBeforeFilter =
+      aligned.outputCoverage.resetUnanchoredSkippedOutputs.size();
   size_t resetUnanchoredSkipCount = 0;
   for (size_t i = 0; i < aligned.outputs.names.size(); ++i) {
     const auto& name = aligned.outputs.names[i];
@@ -880,8 +885,10 @@ void filterOutputsRequiringUnanchoredResetState(
       // reset/bootstrap values are per-design facts at one frontier.  They do
       // not justify comparing later state-dependent outputs unless SEC also
       // has an inductive cross-design state relation for that support.
-      aligned.outputCoverage.skippedOutputs.push_back(
-          name + ": " + joinReasons(reasons));
+      const auto skippedOutput = name + ": " + joinReasons(reasons);
+      aligned.outputCoverage.skippedOutputs.push_back(skippedOutput);
+      aligned.outputCoverage.resetUnanchoredSkippedOutputs.push_back(
+          skippedOutput);
       ++resetUnanchoredSkipCount;
       continue;
     }
@@ -898,6 +905,8 @@ void filterOutputsRequiringUnanchoredResetState(
     // checks.  When every output is suspect, keep the original SEC obligation
     // and let the selected engine report Different, Equivalent, or Inconclusive.
     aligned.outputCoverage.skippedOutputs.resize(skippedOutputCountBeforeFilter);
+    aligned.outputCoverage.resetUnanchoredSkippedOutputs.resize(
+        resetUnanchoredSkippedOutputCountBeforeFilter);
     logSecDiagLine(
         secDiagEnabled,
         "SEC diag: preserving all reset-unanchored outputs because filtering "

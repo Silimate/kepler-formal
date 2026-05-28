@@ -7270,6 +7270,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       result.skippedObservedOutputs.front().find("reset-unanchored"),
       std::string::npos);
+  ASSERT_EQ(result.resetUnanchoredSkippedOutputs.size(), 1u);
+  EXPECT_EQ(
+      result.resetUnanchoredSkippedOutputs.front(),
+      result.skippedObservedOutputs.front());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13142,6 +13146,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
   EXPECT_NE(result.skippedObservedOutputs.front().find("bad[0]"), std::string::npos);
   EXPECT_NE(result.skippedObservedOutputs.front().find("no-driver"), std::string::npos);
+  EXPECT_TRUE(result.resetUnanchoredSkippedOutputs.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

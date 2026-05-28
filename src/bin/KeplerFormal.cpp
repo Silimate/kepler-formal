@@ -40,6 +40,8 @@
 #include "strategy/SequentialEquivalenceStrategy.h"
 
 static const char* kBoundaryTermsReport = "boundary_terms.txt";
+static const char* kSkippedResetUnanchoredPOReport =
+    "skipped_reset_unanchored_pos.txt";
 
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
@@ -338,6 +340,24 @@ void writeBoundaryTermsReport(
     if (i + 1 != reports.size()) {
       report << "\n";
     }
+  }
+}
+
+void writeResetUnanchoredSkippedOutputsReport(
+    const std::filesystem::path& reportPath,
+    const std::vector<std::string>& skippedOutputs) {
+  if (skippedOutputs.empty()) {
+    return;
+  }
+
+  std::ofstream report(reportPath, std::ios::trunc);
+  report << "# SEC reset-unanchored skipped observed outputs\n";
+  report << "# These top outputs were removed from the proof surface because\n";
+  report << "# their cones depend on internal state without an inductive\n";
+  report << "# cross-design anchor. SEC does not assume internal flop equality\n";
+  report << "# by name; only top-level interface signals are name-aligned.\n\n";
+  for (const auto& skippedOutput : skippedOutputs) {
+    report << "- " << skippedOutput << "\n";
   }
 }
 
@@ -1240,6 +1260,9 @@ int KeplerFormalMain(int argc, char** argv) {
         if (reportSkippedPOs) {
           writeBoundaryTermsReport(
               kBoundaryTermsReport, result.extractedBoundaryReports);
+          writeResetUnanchoredSkippedOutputsReport(
+              kSkippedResetUnanchoredPOReport,
+              result.resetUnanchoredSkippedOutputs);
         }
         switch (result.status) {
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:

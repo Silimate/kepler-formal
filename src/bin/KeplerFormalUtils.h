@@ -15,3 +15,7 @@ std::string sanitizeFileToken(const std::string& input);
 void writeBoundaryTermsReport(
     const std::filesystem::path& reportPath,
     const std::vector<KEPLER_FORMAL::SEC::ExtractedBoundaryReportEntry>& reports);
+
+void writeResetUnanchoredSkippedOutputsReport(
+    const std::filesystem::path& reportPath,
+    const std::vector<std::string>& skippedOutputs);
