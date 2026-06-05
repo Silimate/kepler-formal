@@ -100,6 +100,26 @@ void addComplementedStateRelations(
   }
 }
 
+void addDualRailStateValidity(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<DualRailSymbolPair>& railPairs,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& rails : railPairs) {
+      if (!variables.hasSymbol(rails.mayBeOne) ||
+          !variables.hasSymbol(rails.mayBeZero)) {
+        continue;
+      }
+      // Valid dual-rail values are 0, 1, and X.  The empty set is not a
+      // reachable ternary value and must not be considered by invariant checks.
+      solver.addClause({
+          variables.getLiteral(rails.mayBeOne, frame),
+          variables.getLiteral(rails.mayBeZero, frame)});
+    }
+  }
+}
+
 std::unordered_map<size_t, BoolExpr*> buildTransitionExprByStateSymbol(
     const KInductionProblem& problem) {
   std::unordered_map<size_t, BoolExpr*> transitionExprByStateSymbol;
@@ -148,6 +168,18 @@ void addRelevantComplementedStatePartners(
         symbols.find(complementedSymbol) != symbols.end()) {
       symbols.insert(primarySymbol);
       symbols.insert(complementedSymbol);
+    }
+  }
+}
+
+void addRelevantDualRailPartners(
+    const std::vector<DualRailSymbolPair>& railPairs,
+    std::unordered_set<size_t>& symbols) {
+  for (const auto& rails : railPairs) {
+    if (symbols.find(rails.mayBeOne) != symbols.end() ||
+        symbols.find(rails.mayBeZero) != symbols.end()) {
+      symbols.insert(rails.mayBeOne);
+      symbols.insert(rails.mayBeZero);
     }
   }
 }
@@ -209,6 +241,7 @@ std::vector<size_t> inductiveInvariantQuerySymbols(
 
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, symbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, symbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, symbols);
   return sortUniqueSymbols(std::move(symbols));
 }
 
@@ -459,6 +492,7 @@ bool isInductiveInvariant(
   FrameVariableStore variables(solver, querySymbols, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
+  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 2);
   addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
   // Only next-state symbols read by the candidate invariant need transition
   // equations. Encoding every flop transition here made PDR's immediate

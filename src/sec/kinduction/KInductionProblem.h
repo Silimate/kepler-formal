@@ -13,12 +13,25 @@
 
 #include "BoolExpr.h"
 #include "common/SignalKey.h"
+#include "proof/DualRailEncoding.h"
 
 namespace KEPLER_FORMAL::SEC {
+
+enum class LazyTransitionRail {
+  Binary,
+  DualRailOne,
+  DualRailZero,
+};
+
+struct DualRailSymbolPair {
+  size_t mayBeOne = 0;
+  size_t mayBeZero = 0;
+};
 
 struct LazyTransitionSource {
   size_t designIndex = 0;
   BoolExpr* localExpr = nullptr;
+  LazyTransitionRail rail = LazyTransitionRail::Binary;
 };
 
 struct LazyTransitionStore {
@@ -31,7 +44,11 @@ struct LazyTransitionStore {
   // pulled into the current proof cone.
   std::unordered_map<size_t, LazyTransitionSource> sourceByStateSymbol;
   std::array<std::unordered_map<size_t, size_t>, 2> localToCombinedByDesign;
+  std::array<std::unordered_map<size_t, DualRailSymbolPair>, 2>
+      dualRailStateByLocalSymbolByDesign;
   mutable std::array<std::unordered_map<BoolExpr*, BoolExpr*>, 2> remapMemoByDesign;
+  mutable std::array<std::unordered_map<BoolExpr*, DualRailBoolExpr>, 2>
+      dualRailRemapMemoByDesign;
   mutable std::unordered_map<size_t, BoolExpr*> remappedByStateSymbol;
   // Output-batched SEC creates a fresh transition resolver for each PDR slice.
   // Keep lazy support and size metadata with the shared transition store so
@@ -59,6 +76,7 @@ struct KInductionProblem {
   std::vector<size_t> allSymbols;
   std::vector<std::pair<size_t, size_t>> complementedStatePairs0;
   std::vector<std::pair<size_t, size_t>> complementedStatePairs1;
+  std::vector<DualRailSymbolPair> dualRailStatePairs;
   std::vector<BoolExpr*> observedOutputExprs0;
   std::vector<BoolExpr*> observedOutputExprs1;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
@@ -72,6 +90,10 @@ struct KInductionProblem {
   BoolExpr* inductionProperty = nullptr;
   BoolExpr* inductionBad = nullptr;
   bool inductionPropertyAssumesInductiveStateEqualities = false;
+  // Dual-rail SEC has a complete rail-valued boot state, but it still needs
+  // the normal reset-bootstrap prefix so reset controls are driven exactly as
+  // they are in the binary SEC flow.
+  bool usesDualRailStateEncoding = false;
   std::string description;
 
   bool hasSequentialState() const {

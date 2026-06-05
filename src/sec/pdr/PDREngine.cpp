@@ -966,6 +966,11 @@ void addComplementedStateRelations(
     const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
     size_t numFrames);
 
+void addDualRailStateValidity(SATSolverWrapper& solver,
+                              const FrameVariableStore& variables,
+                              const std::vector<DualRailSymbolPair>& railPairs,
+                              size_t numFrames);
+
 void addCubeAssumptions(SATSolverWrapper& solver,
                         const FrameVariableStore& variables,
                         const StateCube& cube,
@@ -4179,6 +4184,18 @@ void addRelevantComplementedStatePartners(
   }
 }
 
+void addRelevantDualRailPartners(
+    const std::vector<DualRailSymbolPair>& railPairs,
+    std::unordered_set<size_t>& symbols) {
+  for (const auto& rails : railPairs) {
+    if (symbols.find(rails.mayBeOne) != symbols.end() ||
+        symbols.find(rails.mayBeZero) != symbols.end()) {
+      symbols.insert(rails.mayBeOne);
+      symbols.insert(rails.mayBeZero);
+    }
+  }
+}
+
 bool hasStructuredInitFacts(const KInductionProblem& problem) {
   if (problem.resetBootstrapCycles != 0) {
     return !problem.bootstrapStateAssignments.empty() ||
@@ -4343,6 +4360,7 @@ void addFrameConstraintSymbols(const KInductionProblem& problem,
     }
   }
   addRelevantComplementedStatePartners(complementPartners, symbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, symbols);
 }
 
 std::vector<size_t> findBadQuerySymbols(const KInductionProblem& problem,
@@ -4406,6 +4424,7 @@ std::vector<size_t> predecessorCurrentFrameQuerySymbols(
     }
   }
   addRelevantComplementedStatePartners(complementPartners, symbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, symbols);
   if (excludeTargetOnCurrentFrame) {
     addCubeSymbols(targetCube, symbols);
   }
@@ -4431,6 +4450,7 @@ std::vector<size_t> initIntersectionSymbols(const KInductionProblem& problem,
   }
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, symbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, symbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, symbols);
   return sortUniqueSymbols(std::move(symbols));
 }
 
@@ -4749,6 +4769,7 @@ std::optional<StateCube> findPreviousResetCoreImpliedByOneStepTransition(
         problem.complementedStatePairs0, querySymbols);
     addRelevantComplementedStatePartners(
         problem.complementedStatePairs1, querySymbols);
+    addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
     const std::vector<size_t> solverSymbols =
         sortUniqueSymbols(std::move(querySymbols));
     if (solverSymbols.size() >
@@ -4763,6 +4784,7 @@ std::optional<StateCube> findPreviousResetCoreImpliedByOneStepTransition(
         solver, variables, problem.complementedStatePairs0, 1);
     addComplementedStateRelations(
         solver, variables, problem.complementedStatePairs1, 1);
+    addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
     addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
     addTransitionConstraintsForTargetCube(
         solver,
@@ -4898,6 +4920,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
         problem.complementedStatePairs0, querySymbols);
     addRelevantComplementedStatePartners(
         problem.complementedStatePairs1, querySymbols);
+    addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
     const std::vector<size_t> solverSymbols =
         sortUniqueSymbols(std::move(querySymbols));
     if (solverSymbols.size() > kMaxTransitionImpossibleResetCoreSupport) {
@@ -4912,6 +4935,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
         solver, variables, problem.complementedStatePairs0, 1);
     addComplementedStateRelations(
         solver, variables, problem.complementedStatePairs1, 1);
+    addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
     addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
     addTransitionConstraintsForTargetCube(
         solver,
@@ -5140,6 +5164,25 @@ void addComplementedStateRelations(
           solver,
           variables.getLiteral(complementedSymbol, frame),
           -variables.getLiteral(primarySymbol, frame));
+    }
+  }
+}
+
+void addDualRailStateValidity(SATSolverWrapper& solver,
+                              const FrameVariableStore& variables,
+                              const std::vector<DualRailSymbolPair>& railPairs,
+                              size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& rails : railPairs) {
+      if (!variables.hasSymbol(rails.mayBeOne) ||
+          !variables.hasSymbol(rails.mayBeZero)) {
+        continue;
+      }
+      // The dual-rail state space contains only 0, 1, and X.  PDR must block
+      // and generalize over that legal state space, not over the empty value.
+      solver.addClause({
+          variables.getLiteral(rails.mayBeOne, frame),
+          variables.getLiteral(rails.mayBeZero, frame)});
     }
   }
 }
@@ -7338,6 +7381,7 @@ std::optional<StateCube> findBadCubeForFormula(
   FrameVariableStore variables(solver, solverSymbols, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
+  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       solver, variables, problem, initFormula, frameInvariant, frames, level, 0,
       solverSymbols, exactFrameClauses);
@@ -7608,6 +7652,7 @@ std::optional<StateCube> findPredecessorCube(
   FrameVariableStore variables(solver, solverSymbols, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
+  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       solver, variables, problem, initFormula, frameInvariant, frames, level, 0,
       solverSymbols, exactFrameClauses);
@@ -7681,6 +7726,7 @@ bool cubeIntersectsInit(const KInductionProblem& problem,
   FrameVariableStore variables(solver, solverSymbols, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
+  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
   solver.addClause({encoder.encode(initFormula)});
   addCubeAssumptions(solver, variables, cube, 0);
@@ -8013,6 +8059,7 @@ std::optional<StateCube> findValidatedPredecessorCore(
       coreSolver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(
       coreSolver, variables, problem.complementedStatePairs1, 1);
+  addDualRailStateValidity(coreSolver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       coreSolver,
       variables,
@@ -10153,12 +10200,14 @@ pruneStateEqualitySubsetByInductiveCounterexample(
       transitionSupportSymbols.begin(), transitionSupportSymbols.end());
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, querySymbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, querySymbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
 
   SATSolverWrapper solver(solverType);
   const auto solverSymbols = sortUniqueSymbols(std::move(querySymbols));
   FrameVariableStore variables(solver, solverSymbols, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
+  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 2);
   addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
   addTransitionRelationForTargets(
       solver,

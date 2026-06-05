@@ -174,6 +174,18 @@ void addRelevantComplementPartners(
   }
 }
 
+void addRelevantDualRailPartners(
+    const std::vector<DualRailSymbolPair>& railPairs,
+    std::unordered_set<size_t>& solverSymbols) {
+  for (const auto& rails : railPairs) {
+    if (solverSymbols.find(rails.mayBeOne) != solverSymbols.end() ||
+        solverSymbols.find(rails.mayBeZero) != solverSymbols.end()) {
+      solverSymbols.insert(rails.mayBeOne);
+      solverSymbols.insert(rails.mayBeZero);
+    }
+  }
+}
+
 InductionCoi buildInductionCoi(const KInductionProblem& problem,
                                BoolExpr* inductionProperty,
                                BoolExpr* inductionBad,
@@ -239,6 +251,7 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
 
   InductionCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
@@ -315,6 +328,28 @@ void addInductiveStateEqualities(SATSolverWrapper& solver,
   }
 }
 
+void addDualRailStateValidity(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<DualRailSymbolPair>& railPairs,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& rails : railPairs) {
+      if (solverSymbols.find(rails.mayBeOne) == solverSymbols.end() ||
+          solverSymbols.find(rails.mayBeZero) == solverSymbols.end()) {
+        continue;
+      }
+      // Dual-rail encodes a non-empty possible-value set.  The empty set
+      // (may1=0, may0=0) is not a legal ternary value and must not be available
+      // to induction as a synthetic predecessor.
+      solver.addClause({
+          variables.getLiteral(rails.mayBeOne, frame),
+          variables.getLiteral(rails.mayBeZero, frame)});
+    }
+  }
+}
+
 }  // namespace
 
 InductionProofStatus proveByInductionStatus(
@@ -350,6 +385,8 @@ InductionProofStatus proveByInductionStatus(
       solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet, k + 1);
   addComplementedStateRelations(
       solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet, k + 1);
+  addDualRailStateValidity(
+      solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet, k + 1);
 
   for (size_t frame = 0; frame < k; ++frame) {
     addTransitionRelation(

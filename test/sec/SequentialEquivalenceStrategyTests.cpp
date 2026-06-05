@@ -7277,6 +7277,81 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailCoversMatchingResetlessOutput) {
+  const SignalKey good = makeSignalKey("dualRailResetlessGood");
+  const SignalKey out = makeSignalKey("dualRailResetlessOut");
+  const SignalKey rst = makeSignalKey("dualRailResetlessRst");
+  const SignalKey data = makeSignalKey("dualRailResetlessData");
+  const SignalKey state0 = makeSignalKey("dualRailResetlessState0");
+  const SignalKey state1 = makeSignalKey("dualRailResetlessState1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst, data};
+  model0.stateBits = {state0};
+  model0.allObservedOutputs = {good, out};
+  model0.observedOutputs = {good, out};
+  model0.inputVarByKey.emplace(rst, 4);
+  model0.inputVarByKey.emplace(data, 6);
+  model0.inputVarByKey.emplace(state0, 2);
+  model0.displayNameByKey.emplace(rst, "rst");
+  model0.displayNameByKey.emplace(data, "data[0]");
+  model0.displayNameByKey.emplace(good, "good[0]");
+  model0.displayNameByKey.emplace(out, "resetless_out[0]");
+  model0.displayNameByKey.emplace(state0, "left_state_q[0]");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+  model0.observedOutputExprByKey.emplace(good, BoolExpr::Var(6));
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst, data};
+  model1.stateBits = {state1};
+  model1.allObservedOutputs = {good, out};
+  model1.observedOutputs = {good, out};
+  model1.inputVarByKey.emplace(rst, 5);
+  model1.inputVarByKey.emplace(data, 7);
+  model1.inputVarByKey.emplace(state1, 3);
+  model1.displayNameByKey.emplace(rst, "rst");
+  model1.displayNameByKey.emplace(data, "data[0]");
+  model1.displayNameByKey.emplace(good, "good[0]");
+  model1.displayNameByKey.emplace(out, "resetless_out[0]");
+  model1.displayNameByKey.emplace(state1, "right_state_q[0]");
+  // Binary SEC cannot use a cross-design state equality here: one side holds
+  // the resetless state while the other toggles it.  In dual-rail mode both
+  // still remain X, so the rail-encoded output obligation is provable.
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
+  model1.observedOutputExprByKey.emplace(good, BoolExpr::Var(7));
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(3));
+
+  SequentialEquivalenceStrategy binaryStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction);
+  const auto binaryResult = binaryStrategy.runExtractedModels(model0, model1, 1);
+  EXPECT_EQ(binaryResult.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(binaryResult.coveredOutputs, 1u);
+  EXPECT_EQ(binaryResult.totalOutputs, 2u);
+  ASSERT_EQ(binaryResult.resetUnanchoredSkippedOutputs.size(), 1u);
+  EXPECT_NE(
+      binaryResult.resetUnanchoredSkippedOutputs.front().find("resetless_out[0]"),
+      std::string::npos);
+
+  SequentialEquivalenceStrategy dualRailStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecXMode::DualRailSteady);
+  const auto dualRailResult =
+      dualRailStrategy.runExtractedModels(model0, model1, 2);
+
+  EXPECT_EQ(dualRailResult.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(dualRailResult.coveredOutputs, 2u);
+  EXPECT_EQ(dualRailResult.totalOutputs, 2u);
+  EXPECT_TRUE(dualRailResult.skippedObservedOutputs.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsKeepsOnlyResetUnanchoredOutputForCounterexamples) {
   const SignalKey rst = makeSignalKey("keepOnlyResetUnanchoredRst");
   const SignalKey out = makeSignalKey("keepOnlyResetUnanchoredOut");

@@ -33,6 +33,7 @@
 #include "kinduction/OutputBatching.h"
 #include "model/SequentialDesignModel.h"
 #include "pdr/PDREngine.h"
+#include "proof/DualRailEncoding.h"
 #include "proof/TransitionExprResolver.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/StructuralStateInvariant.h"
@@ -269,6 +270,71 @@ struct SharedSecSymbolSpace {
 struct RemappedSecExpressions {
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> next0;
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> next1;
+};
+
+struct DualRailStateSymbolMaps {
+  std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash> state0ByKey;
+  std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash> state1ByKey;
+  std::unordered_map<size_t, DualRailSymbolPair> localState0BySymbol;
+  std::unordered_map<size_t, DualRailSymbolPair> localState1BySymbol;
+};
+
+size_t privateSupportSymbol(
+    size_t designIndex,
+    size_t localSymbol,
+    std::unordered_map<size_t, size_t>& symbolMap,
+    KInductionProblem& problem,
+    size_t& nextSymbol);
+
+class SecDualRailVariableMapper final : public DualRailVariableMapper {
+ public:
+  SecDualRailVariableMapper(
+      size_t designIndex,
+      const std::unordered_map<size_t, DualRailSymbolPair>& stateRails,
+      std::unordered_map<size_t, size_t>& binarySymbolMap,
+      KInductionProblem& problem,
+      size_t& nextSymbol)
+      : designIndex_(designIndex),
+        stateRails_(stateRails),
+        binarySymbolMap_(binarySymbolMap),
+        problem_(problem),
+        nextSymbol_(nextSymbol) {}
+
+  DualRailBoolExpr mapVariable(size_t symbol) override {
+    if (const auto stateIt = stateRails_.find(symbol);
+        stateIt != stateRails_.end()) {
+      return DualRailBoolExpr{
+          BoolExpr::Var(stateIt->second.mayBeOne),
+          BoolExpr::Var(stateIt->second.mayBeZero)};
+    }
+
+    if (symbol < 2) {
+      return symbol == 1
+                 ? DualRailBoolExpr{
+                       BoolExpr::createTrue(), BoolExpr::createFalse()}
+                 : DualRailBoolExpr{
+                       BoolExpr::createFalse(), BoolExpr::createTrue()};
+    }
+
+    size_t binarySymbol = 0;
+    if (const auto mappedIt = binarySymbolMap_.find(symbol);
+        mappedIt != binarySymbolMap_.end()) {
+      binarySymbol = mappedIt->second;
+    } else {
+      binarySymbol = privateSupportSymbol(
+          designIndex_, symbol, binarySymbolMap_, problem_, nextSymbol_);
+    }
+    return DualRailBoolExpr{
+        BoolExpr::Var(binarySymbol),
+        BoolExpr::Not(BoolExpr::Var(binarySymbol))};
+  }
+
+ private:
+  size_t designIndex_ = 0;
+  const std::unordered_map<size_t, DualRailSymbolPair>& stateRails_;
+  std::unordered_map<size_t, size_t>& binarySymbolMap_;
+  KInductionProblem& problem_;
+  size_t& nextSymbol_;
 };
 
 struct ScopedDnlContext {
@@ -1408,6 +1474,171 @@ void attachLazyTransitions(
   problem.lazyTransitions = std::move(store);
 }
 
+DualRailSymbolPair allocateDualRailStateSymbols(
+    KInductionProblem& problem,
+    size_t& nextSymbol) {
+  const DualRailSymbolPair rails{nextSymbol++, nextSymbol++};
+  problem.allSymbols.push_back(rails.mayBeOne);
+  problem.allSymbols.push_back(rails.mayBeZero);
+  return rails;
+}
+
+void addDualRailStateAssignment(
+    std::vector<std::pair<size_t, bool>>& assignments,
+    const DualRailSymbolPair& rails,
+    std::optional<bool> value) {
+  if (value.has_value()) {
+    assignments.emplace_back(rails.mayBeOne, *value);
+    assignments.emplace_back(rails.mayBeZero, !*value);
+    return;
+  }
+
+  // Resetless X is represented as the set {0,1}: both possible-value rails
+  // are true.  This follows the dual-rail/ternary encoding from the SEC BMC
+  // paper and avoids choosing one arbitrary boot value.
+  assignments.emplace_back(rails.mayBeOne, true);
+  assignments.emplace_back(rails.mayBeZero, true);
+}
+
+std::optional<bool> lookupStateValue(
+    const std::unordered_map<SignalKey, bool, SignalKeyHash>& values,
+    const SignalKey& key) {
+  const auto valueIt = values.find(key);
+  if (valueIt == values.end()) {
+    return std::nullopt;
+  }
+  return valueIt->second;
+}
+
+std::optional<bool> lookupBootstrapValue(
+    const std::unordered_map<SignalKey, bool, SignalKeyHash>& values,
+    const SignalKey& key) {
+  const auto valueIt = values.find(key);
+  if (valueIt == values.end()) {
+    return std::nullopt;
+  }
+  return valueIt->second;
+}
+
+void addDualRailInitialAssignments(
+    const SequentialDesignModel& model,
+    const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& railsByKey,
+    KInductionProblem& problem,
+    BoolExpr*& initialCondition) {
+  for (const auto& key : model.stateBits) {
+    const auto rails = railsByKey.at(key);
+    const auto value = lookupStateValue(model.initialStateValueByKey, key);
+    addDualRailStateAssignment(problem.initialStateAssignments, rails, value);
+    problem.initializedStateCount += 2;
+    initialCondition = BoolExpr::And(
+        initialCondition,
+        value.has_value()
+            ? (*value ? BoolExpr::Var(rails.mayBeOne)
+                      : BoolExpr::Not(BoolExpr::Var(rails.mayBeOne)))
+            : BoolExpr::Var(rails.mayBeOne));
+    initialCondition = BoolExpr::And(
+        initialCondition,
+        value.has_value()
+            ? (*value ? BoolExpr::Not(BoolExpr::Var(rails.mayBeZero))
+                      : BoolExpr::Var(rails.mayBeZero))
+            : BoolExpr::Var(rails.mayBeZero));
+  }
+}
+
+void addDualRailBootstrapAssignments(
+    const SequentialDesignModel& model,
+    const std::unordered_map<SignalKey, bool, SignalKeyHash>& bootstrapValues,
+    const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& railsByKey,
+    KInductionProblem& problem) {
+  if (problem.resetBootstrapInputs.empty() || problem.resetBootstrapCycles == 0) {
+    return;
+  }
+  for (const auto& key : model.stateBits) {
+    addDualRailStateAssignment(
+        problem.bootstrapStateAssignments,
+        railsByKey.at(key),
+        lookupBootstrapValue(bootstrapValues, key));
+  }
+}
+
+void addDualRailEqualityPairs(
+    const AlignedSignals& equalities,
+    const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& rails0,
+    const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& rails1,
+    std::vector<std::pair<size_t, size_t>>& targetPairs) {
+  for (size_t i = 0; i < equalities.names.size(); ++i) {
+    const auto lhs = rails0.at(equalities.keys0[i]);
+    const auto rhs = rails1.at(equalities.keys1[i]);
+    targetPairs.emplace_back(lhs.mayBeOne, rhs.mayBeOne);
+    targetPairs.emplace_back(lhs.mayBeZero, rhs.mayBeZero);
+  }
+}
+
+void allocateDualRailStateMaps(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    KInductionProblem& problem,
+    size_t& nextSymbol,
+    DualRailStateSymbolMaps& maps) {
+  maps.state0ByKey.reserve(model0.stateBits.size());
+  maps.state1ByKey.reserve(model1.stateBits.size());
+  maps.localState0BySymbol.reserve(model0.stateBits.size());
+  maps.localState1BySymbol.reserve(model1.stateBits.size());
+
+  for (const auto& key : model0.stateBits) {
+    const auto rails = allocateDualRailStateSymbols(problem, nextSymbol);
+    maps.state0ByKey.emplace(key, rails);
+    maps.localState0BySymbol.emplace(model0.inputVarByKey.at(key), rails);
+    problem.dualRailStatePairs.push_back(rails);
+    problem.state0Symbols.push_back(rails.mayBeOne);
+    problem.state0Symbols.push_back(rails.mayBeZero);
+  }
+  for (const auto& key : model1.stateBits) {
+    const auto rails = allocateDualRailStateSymbols(problem, nextSymbol);
+    maps.state1ByKey.emplace(key, rails);
+    maps.localState1BySymbol.emplace(model1.inputVarByKey.at(key), rails);
+    problem.dualRailStatePairs.push_back(rails);
+    problem.state1Symbols.push_back(rails.mayBeOne);
+    problem.state1Symbols.push_back(rails.mayBeZero);
+  }
+}
+
+void attachLazyDualRailTransitions(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const DualRailStateSymbolMaps& maps,
+    std::unordered_map<size_t, size_t>&& localToCombined0,
+    std::unordered_map<size_t, size_t>&& localToCombined1,
+    KInductionProblem& problem) {
+  auto store = std::make_shared<LazyTransitionStore>();
+  store->localToCombinedByDesign[0] = std::move(localToCombined0);
+  store->localToCombinedByDesign[1] = std::move(localToCombined1);
+  store->dualRailStateByLocalSymbolByDesign[0] = maps.localState0BySymbol;
+  store->dualRailStateByLocalSymbolByDesign[1] = maps.localState1BySymbol;
+
+  for (const auto& key : model0.stateBits) {
+    const auto rails = maps.state0ByKey.at(key);
+    BoolExpr* expr = model0.nextStateExprByStateKey.at(key);
+    store->sourceByStateSymbol.emplace(
+        rails.mayBeOne,
+        LazyTransitionSource{0, expr, LazyTransitionRail::DualRailOne});
+    store->sourceByStateSymbol.emplace(
+        rails.mayBeZero,
+        LazyTransitionSource{0, expr, LazyTransitionRail::DualRailZero});
+  }
+  for (const auto& key : model1.stateBits) {
+    const auto rails = maps.state1ByKey.at(key);
+    BoolExpr* expr = model1.nextStateExprByStateKey.at(key);
+    store->sourceByStateSymbol.emplace(
+        rails.mayBeOne,
+        LazyTransitionSource{1, expr, LazyTransitionRail::DualRailOne});
+    store->sourceByStateSymbol.emplace(
+        rails.mayBeZero,
+        LazyTransitionSource{1, expr, LazyTransitionRail::DualRailZero});
+  }
+  problem.lazyTransitions = std::move(store);
+}
+
 void applyInitialStateAssignments(
     const std::unordered_map<SignalKey, bool, SignalKeyHash>& initialValues,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& stateSymbols,
@@ -1629,6 +1860,164 @@ void buildSecPropertiesAndTransitions(
   }
 }
 
+KInductionProblem buildDualRailSecProblem(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    const ReachableStateInvariant& reachableInvariant,
+    SharedSecSymbolSpace& symbolSpace,
+    bool useLazyTransitionRemapping,
+    bool secDiagEnabled) {
+  KInductionProblem problem;
+  problem.environmentInputs = alignedInputs.keys0;
+  problem.environmentInputNames = symbolSpace.problem.environmentInputNames;
+  problem.inputSymbols = symbolSpace.problem.inputSymbols;
+  problem.resetBootstrapCycles = symbolSpace.problem.resetBootstrapCycles;
+  problem.resetBootstrapInputs = symbolSpace.problem.resetBootstrapInputs;
+  problem.allSymbols = symbolSpace.problem.inputSymbols;
+  problem.usesDualRailStateEncoding = true;
+
+  size_t nextSymbol = nextUnusedProofSymbol(symbolSpace.problem);
+  DualRailStateSymbolMaps railMaps;
+  allocateDualRailStateMaps(model0, model1, problem, nextSymbol, railMaps);
+  problem.totalStateCount =
+      problem.state0Symbols.size() + problem.state1Symbols.size();
+
+  BoolExpr* initialCondition = BoolExpr::createTrue();
+  addDualRailInitialAssignments(
+      model0, railMaps.state0ByKey, problem, initialCondition);
+  addDualRailInitialAssignments(
+      model1, railMaps.state1ByKey, problem, initialCondition);
+  problem.initialCondition = BoolExpr::simplify(initialCondition);
+
+  addDualRailBootstrapAssignments(
+      model0, reachableInvariant.bootstrapValues0, railMaps.state0ByKey, problem);
+  addDualRailBootstrapAssignments(
+      model1, reachableInvariant.bootstrapValues1, railMaps.state1ByKey, problem);
+  addDualRailEqualityPairs(
+      reachableInvariant.initialStateCorrespondence,
+      railMaps.state0ByKey,
+      railMaps.state1ByKey,
+      problem.initialStateEqualityPairs);
+  addDualRailEqualityPairs(
+      reachableInvariant.anchoredStateEqualities,
+      railMaps.state0ByKey,
+      railMaps.state1ByKey,
+      problem.inductiveStateEqualityPairs);
+  if (!problem.resetBootstrapInputs.empty()) {
+    addDualRailEqualityPairs(
+        reachableInvariant.anchoredStateEqualities,
+        railMaps.state0ByKey,
+        railMaps.state1ByKey,
+        problem.bootstrapStateEqualityPairs);
+    addDualRailEqualityPairs(
+        reachableInvariant.bootstrapOnlyStateEqualities,
+        railMaps.state0ByKey,
+        railMaps.state1ByKey,
+        problem.bootstrapStateEqualityPairs);
+  }
+
+  SecDualRailVariableMapper mapper0(
+      0,
+      railMaps.localState0BySymbol,
+      symbolSpace.localToCombined0,
+      problem,
+      nextSymbol);
+  SecDualRailVariableMapper mapper1(
+      1,
+      railMaps.localState1BySymbol,
+      symbolSpace.localToCombined1,
+      problem,
+      nextSymbol);
+  std::unordered_map<BoolExpr*, DualRailBoolExpr> memo0;
+  std::unordered_map<BoolExpr*, DualRailBoolExpr> memo1;
+
+  BoolExpr* property = BoolExpr::createTrue();
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto out0 = buildDualRailBoolExpr(
+        model0.observedOutputExprByKey.at(alignedOutputs.keys0[i]),
+        mapper0,
+        memo0);
+    const auto out1 = buildDualRailBoolExpr(
+        model1.observedOutputExprByKey.at(alignedOutputs.keys1[i]),
+        mapper1,
+        memo1);
+
+    BoolExpr* outputRailEquality = BoolExpr::And(
+        makeEqualityExpr(out0.mayBeOne, out1.mayBeOne),
+        makeEqualityExpr(out0.mayBeZero, out1.mayBeZero));
+    // Keep batching/reporting aligned to real top outputs.  The rail pair is a
+    // single ternary output value, so its may-one and may-zero equalities are
+    // one SEC obligation rather than two independent output bits.
+    problem.observedOutputNames.push_back(alignedOutputs.names[i]);
+    problem.observedOutputExprs0.push_back(outputRailEquality);
+    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+    property = BoolExpr::And(property, outputRailEquality);
+  }
+
+  if (useLazyTransitionRemapping) {
+    attachLazyDualRailTransitions(
+        model0,
+        model1,
+        railMaps,
+        std::move(symbolSpace.localToCombined0),
+        std::move(symbolSpace.localToCombined1),
+        problem);
+  } else {
+    for (const auto& key : model0.stateBits) {
+      const auto rails = railMaps.state0ByKey.at(key);
+      const auto next = buildDualRailBoolExpr(
+          model0.nextStateExprByStateKey.at(key), mapper0, memo0);
+      problem.transitions0.emplace_back(rails.mayBeOne, next.mayBeOne);
+      problem.transitions0.emplace_back(rails.mayBeZero, next.mayBeZero);
+    }
+    for (const auto& key : model1.stateBits) {
+      const auto rails = railMaps.state1ByKey.at(key);
+      const auto next = buildDualRailBoolExpr(
+          model1.nextStateExprByStateKey.at(key), mapper1, memo1);
+      problem.transitions1.emplace_back(rails.mayBeOne, next.mayBeOne);
+      problem.transitions1.emplace_back(rails.mayBeZero, next.mayBeZero);
+    }
+  }
+
+  BoolExpr* inductionProperty = BoolExpr::createTrue();
+  for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
+    inductionProperty = BoolExpr::And(
+        inductionProperty,
+        makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));
+  }
+  inductionProperty = BoolExpr::And(inductionProperty, property);
+
+  problem.property = BoolExpr::simplify(property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = BoolExpr::simplify(inductionProperty);
+  problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
+  problem.inductionPropertyAssumesInductiveStateEqualities =
+      !problem.inductiveStateEqualityPairs.empty();
+  problem.description =
+      "SEC dual-rail steady-state property with aligned observed outputs";
+
+  if (secDiagEnabled || secSummaryStatsEnabled()) {
+    printf(
+        "SEC summary: x_mode=dual_rail_steady rail_state_bits=%zu "
+        "rail_outputs=%zu reset_bootstrap_inputs=%zu bootstrap_cycles=%zu "
+        "bootstrap_assignments=%zu initial_equalities=%zu "
+        "bootstrap_equalities=%zu inductive_equalities=%zu\n",
+        problem.totalStateCount,
+        problem.observedOutputExprs0.size(),
+        problem.resetBootstrapInputs.size(),
+        problem.resetBootstrapCycles,
+        problem.bootstrapStateAssignments.size(),
+        problem.initialStateEqualityPairs.size(),
+        problem.bootstrapStateEqualityPairs.size(),
+        problem.inductiveStateEqualityPairs.size());
+    fflush(stdout);
+  }
+
+  return problem;
+}
+
 const char* describeSecEngine(SecEngine secEngine) {
   switch (secEngine) {
     case SecEngine::Pdr:
@@ -1659,18 +2048,21 @@ SequentialEquivalenceResult runPdrSecEngine(
   // bounded engine run at k=0 is necessarily inconclusive for sequential
   // problems, which made the output-batching fallback split every output and
   // repeat the same BMC setup hundreds of times before PDR even started.
-  if (auto witness = SEC::findBaseCounterexample(problem, solverType, 0);
-      witness.has_value()) {
-    const KInductionResult witnessResult{  // LCOV_EXCL_LINE
-        KInductionStatus::Different, witness->badFrame, std::move(witness)};  // LCOV_EXCL_LINE
-    return makeSecResult(  // LCOV_EXCL_LINE
-        SequentialEquivalenceStatus::Different,
-        witnessResult.bound,  // LCOV_EXCL_LINE
-        formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
-        outputCoverage,  // LCOV_EXCL_LINE
-        abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-        extractedBoundaryReports);  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
+  const bool broadBasePrecheckDone = !problem.usesDualRailStateEncoding;
+  if (broadBasePrecheckDone) {
+    if (auto witness = SEC::findBaseCounterexample(problem, solverType, 0);
+        witness.has_value()) {
+      const KInductionResult witnessResult{  // LCOV_EXCL_LINE
+          KInductionStatus::Different, witness->badFrame, std::move(witness)};  // LCOV_EXCL_LINE
+      return makeSecResult(  // LCOV_EXCL_LINE
+          SequentialEquivalenceStatus::Different,
+          witnessResult.bound,  // LCOV_EXCL_LINE
+          formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
+          outputCoverage,  // LCOV_EXCL_LINE
+          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+          extractedBoundaryReports);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+  }
 
   if (problem.combinedStateSymbols().empty()) {
     return makeSecResult(
@@ -1720,7 +2112,6 @@ SequentialEquivalenceResult runPdrSecEngine(
           makeEqualityExpr(
               batch.observedOutputExprs0[i], batch.observedOutputExprs1[i]));
     }
-
     // PDR consumes this only as a candidate frame-strengthening lemma. The
     // engine validates both Init => lemma and lemma /\ T => lemma' before the
     // formula can constrain any bad-cube or predecessor query.
@@ -1884,6 +2275,10 @@ SequentialEquivalenceResult runPdrSecEngine(
   // avoid broad concrete-BMC validation until the final exact retry.
   constexpr size_t kMinOutputsForBatchedPdrProof = 129;
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
+  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{8, 256};
+  const OutputBatchingLimits pdrOutputBatchingLimits =
+      problem.usesDualRailStateEncoding ? kDualRailPdrOutputBatchingLimits
+                                        : kPdrOutputBatchingLimits;
   constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
   constexpr size_t kMaxSmallDesignCertificateStateBits = 4096;
@@ -1935,7 +2330,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     outputBatches.push_back({0, problem.observedOutputExprs0.size(), false});
   } else {
     for (const auto& [firstOutput, endOutput] :
-         buildSupportBoundedOutputBatches(problem, kPdrOutputBatchingLimits)) {
+         buildSupportBoundedOutputBatches(problem, pdrOutputBatchingLimits)) {
       outputBatches.push_back({firstOutput, endOutput, false});
     }
   }
@@ -1952,8 +2347,8 @@ SequentialEquivalenceResult runPdrSecEngine(
           size_t firstOutput,
           size_t endOutput) -> FinalPdrStageOutcome {
     constexpr size_t kMaxPdrConcreteValidationOutputs = 1;  // LCOV_EXCL_LINE
-    constexpr size_t kMaxFinalExactPdrOutputBatchSize =  // LCOV_EXCL_LINE
-        kPdrOutputBatchingLimits.maxOutputBatchSize;
+    const size_t kMaxFinalExactPdrOutputBatchSize =  // LCOV_EXCL_LINE
+        pdrOutputBatchingLimits.maxOutputBatchSize;
     // The final exact repair already carries exact frame clauses and validated
     // bad-formula clauses. Keeping both predecessor and bad cubes bounded avoids
     // large single-output loops from enumerating thousands of sibling cubes.
@@ -1991,7 +2386,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     const bool finalBatchCanRefineProjectedCounterexamples = true;  // LCOV_EXCL_LINE
     const bool finalSliceUsesBadFormulaValidation =  // LCOV_EXCL_LINE
         endOutput - firstOutput <=  // LCOV_EXCL_LINE
-        kPdrOutputBatchingLimits.maxOutputBatchSize;
+        pdrOutputBatchingLimits.maxOutputBatchSize;
     // Glucose-backed assumption checks were previously too expensive for the
     // BlackParrot final repair, so this stage stayed on the abstract reset
     // frontier and then enumerated many neighboring bad assignments. CaDiCaL
@@ -2026,7 +2421,12 @@ SequentialEquivalenceResult runPdrSecEngine(
             kFinalExactPdrRootGeneralizationAttempts,
         /*learnValidatedBadFormulaClauses=*/finalSliceUsesBadFormulaValidation,  // LCOV_EXCL_LINE
         /*useExactResetFrontierChecks=*/finalSliceUsesResetFrontier);
-    const auto fullExactPdrResult = fullExactPdrEngine.run(maxK, true);  // LCOV_EXCL_LINE
+    // Dual-rail properties are intentionally batched before the reset
+    // bootstrap proof, otherwise the frame-0 precheck materializes the entire
+    // wide rail-encoded SEC property. Binary SEC kept the historical broad
+    // precheck above, so those batches may still reuse it.
+    const auto fullExactPdrResult =
+        fullExactPdrEngine.run(maxK, broadBasePrecheckDone);  // LCOV_EXCL_LINE
     if (fullExactPdrResult.status == PDRStatus::Equivalent) {  // LCOV_EXCL_LINE
       if (finalBatchCanValidateConcrete) {  // LCOV_EXCL_LINE
         if (auto fullExactWitness = SEC::findBaseCounterexample(  // LCOV_EXCL_LINE
@@ -2153,7 +2553,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         PDREngine::kDefaultBoundedRootGeneralizationAttempts,
         /*learnValidatedBadFormulaClauses=*/false,
         /*useExactResetFrontierChecks=*/false);
-    const auto pdrResult = pdrEngine.run(maxK, true);
+    const auto pdrResult = pdrEngine.run(maxK, broadBasePrecheckDone);
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:
         provedBound = std::max(provedBound, pdrResult.bound);
@@ -2590,8 +2990,13 @@ SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
     KEPLER_FORMAL::Config::SolverType solverType,
-    SecEngine secEngine)
-    : top0_(top0), top1_(top1), solverType_(solverType), secEngine_(secEngine) {}
+    SecEngine secEngine,
+    SecXMode xMode)
+    : top0_(top0),
+      top1_(top1),
+      solverType_(solverType),
+      secEngine_(secEngine),
+      xMode_(xMode) {}
 
 SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) const {
   const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
@@ -2752,6 +3157,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       secDiagEnabled);
   constexpr size_t kMinOutputsForStartupCertificateFastPath = 129;
   const bool useStartupCertificateFastPath =
+      xMode_ == SecXMode::Binary &&
       aligned.outputs.names.size() >= kMinOutputsForStartupCertificateFastPath &&
       !aligned.resetBootstrapCandidateStateEqualities.names.empty() &&
       !symbolSpace.problem.resetBootstrapInputs.empty();
@@ -2768,18 +3174,25 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         SequentialEquivalenceStatus::Equivalent,
         0,
         "",
-        aligned.outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
+      aligned.outputCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
   }
-  filterOutputsRequiringUnanchoredResetState(
-      model0,
-      model1,
-      reachableInvariant,
-      !symbolSpace.problem.resetBootstrapInputs.empty() &&
-          symbolSpace.problem.resetBootstrapCycles != 0,
-      aligned,
-      secDiagEnabled);
+  if (xMode_ == SecXMode::Binary) {
+    filterOutputsRequiringUnanchoredResetState(
+        model0,
+        model1,
+        reachableInvariant,
+        !symbolSpace.problem.resetBootstrapInputs.empty() &&
+            symbolSpace.problem.resetBootstrapCycles != 0,
+        aligned,
+        secDiagEnabled);
+  } else {
+    logSecDiagLine(
+        secDiagEnabled,
+        "SEC diag: dual-rail mode keeps reset-unanchored outputs in the "
+        "rail-encoded proof");
+  }
   symbolSpace.problem.observedOutputNames = aligned.outputs.names;
   if (aligned.outputs.names.empty()) {
     return makeSecResult(
@@ -2799,36 +3212,50 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // so skipped top outputs never allocate SAT symbols or proof obligations.
   const bool useLazyTransitionRemapping =
       secEngine_ == SecEngine::KInduction || secEngine_ == SecEngine::Pdr;
-  const auto remapped = remapSecExpressions(
-      model0,
-      model1,
-      aligned.outputs,
-      symbolSpace,
-      symbolSpace.problem,
-      !useLazyTransitionRemapping,
-      secDiagEnabled);
-  if (useLazyTransitionRemapping) {
-    attachLazyTransitions(
+  KInductionProblem proofProblem;
+  if (xMode_ == SecXMode::DualRailSteady) {
+    proofProblem = buildDualRailSecProblem(
         model0,
         model1,
+        aligned.inputs,
+        aligned.outputs,
+        reachableInvariant,
+        symbolSpace,
+        useLazyTransitionRemapping,
+        secDiagEnabled);
+  } else {
+    const auto remapped = remapSecExpressions(
+        model0,
+        model1,
+        aligned.outputs,
+        symbolSpace,
+        symbolSpace.problem,
+        !useLazyTransitionRemapping,
+        secDiagEnabled);
+    if (useLazyTransitionRemapping) {
+      attachLazyTransitions(
+          model0,
+          model1,
+          symbolSpace.state0Symbols,
+          symbolSpace.state1Symbols,
+          std::move(symbolSpace.localToCombined0),
+          std::move(symbolSpace.localToCombined1),
+          symbolSpace.problem);
+    }
+    buildSecPropertiesAndTransitions(
+        model0,
+        model1,
+        aligned.inputs,
+        aligned.outputs,
+        reachableInvariant,
         symbolSpace.state0Symbols,
         symbolSpace.state1Symbols,
-        std::move(symbolSpace.localToCombined0),
-        std::move(symbolSpace.localToCombined1),
-        symbolSpace.problem);
+        remapped,
+        symbolSpace.problem,
+        solverType_,
+        secDiagEnabled);
+    proofProblem = symbolSpace.problem;
   }
-  buildSecPropertiesAndTransitions(
-      model0,
-      model1,
-      aligned.inputs,
-      aligned.outputs,
-      reachableInvariant,
-      symbolSpace.state0Symbols,
-      symbolSpace.state1Symbols,
-      remapped,
-      symbolSpace.problem,
-      solverType_,
-      secDiagEnabled);
 
   // Phase 4: hand the fully normalized SEC transition system to the requested
   // top-level engine. From here on, every engine sees the same problem and only
@@ -2841,7 +3268,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   switch (secEngine_) {
     case SecEngine::Pdr:
       return runPdrSecEngine(
-          symbolSpace.problem,
+          proofProblem,
           maxK,
           solverType_,
           model0,
@@ -2853,7 +3280,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
           extractedBoundaryReports);
     case SecEngine::KInduction:
       return runKInductionSecEngine(
-          symbolSpace.problem,
+          proofProblem,
           maxK,
           solverType_,
           model0,
@@ -2865,7 +3292,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
           extractedBoundaryReports);
     case SecEngine::Imc:
       return runImcSecEngine(
-          symbolSpace.problem,
+          proofProblem,
           maxK,
           solverType_,
           model0,
@@ -2878,7 +3305,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
     case SecEngine::Legacy:
     default:
       return runLegacySecEngine(
-          symbolSpace.problem,
+          proofProblem,
           maxK,
           solverType_,
           model0,

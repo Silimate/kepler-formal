@@ -138,7 +138,8 @@ enum class InitialConstraintMode {
 };
 
 size_t resetBootstrapFrames(const KInductionProblem& problem) {
-  return (!problem.hasCompleteInitialState() && problem.hasResetBootstrap())
+  return ((!problem.hasCompleteInitialState() || problem.usesDualRailStateEncoding) &&
+          problem.hasResetBootstrap())
              ? problem.resetBootstrapCycles
              : 0u;
 }
@@ -505,6 +506,18 @@ void addRelevantComplementPartners(
   }
 }
 
+void addRelevantDualRailPartners(
+    const std::vector<DualRailSymbolPair>& railPairs,
+    std::unordered_set<size_t>& solverSymbols) {
+  for (const auto& rails : railPairs) {
+    if (solverSymbols.find(rails.mayBeOne) != solverSymbols.end() ||
+        solverSymbols.find(rails.mayBeZero) != solverSymbols.end()) {
+      solverSymbols.insert(rails.mayBeOne);
+      solverSymbols.insert(rails.mayBeZero);
+    }
+  }
+}
+
 BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
                              InitialConstraintMode initialMode,
                              size_t bootstrapFrames,
@@ -594,6 +607,7 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
 
   BaseCaseCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
@@ -682,6 +696,7 @@ BaseCaseCoi buildStateCubeReachabilityCoiForTargetFrames(
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
 
   BaseCaseCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
@@ -1021,6 +1036,29 @@ void addComplementedStateRelations(
           solver,
           variables.getLiteral(complementedSymbol, frame),
           -variables.getLiteral(primarySymbol, frame));
+    }
+  }
+}
+
+void addDualRailStateValidity(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<DualRailSymbolPair>& railPairs,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& rails : railPairs) {
+      if (solverSymbols.find(rails.mayBeOne) == solverSymbols.end() ||
+          solverSymbols.find(rails.mayBeZero) == solverSymbols.end()) {
+        continue;
+      }
+      // Keep dual-rail BMC inside legal ternary states.  Initial/reset
+      // assignments produce legal rails, and the encoded transition preserves
+      // legality; this clause prevents SAT from inventing empty rail values in
+      // partially projected validation queries.
+      solver.addClause({
+          variables.getLiteral(rails.mayBeOne, frame),
+          variables.getLiteral(rails.mayBeZero, frame)});
     }
   }
 }
@@ -1435,6 +1473,9 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
       internalK + 1);
   addComplementedStateRelations(
       solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet,
+      internalK + 1);
+  addDualRailStateValidity(
+      solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet,
       internalK + 1);
   addInitialStateEqualities(solver, variables, problem, coi.solverSymbolSet);
 
@@ -2124,6 +2165,12 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolver(
       problem.complementedStatePairs1,
       cached->coi.solverSymbolSet,
       targetFrame + 1);
+  addDualRailStateValidity(
+      *cached->solver,
+      *cached->variables,
+      problem.dualRailStatePairs,
+      cached->coi.solverSymbolSet,
+      targetFrame + 1);
   addInitialStateEqualities(
       *cached->solver, *cached->variables, data, cached->coi.solverSymbolSet);
   addResetFrontierFrameInvariantConstraints(
@@ -2215,6 +2262,12 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolverForCoi(  // L
       *cached->solver,  // LCOV_EXCL_LINE
       *cached->variables,  // LCOV_EXCL_LINE
       problem.complementedStatePairs1,  // LCOV_EXCL_LINE
+      cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
+      targetFrame + 1);  // LCOV_EXCL_LINE
+  addDualRailStateValidity(  // LCOV_EXCL_LINE
+      *cached->solver,  // LCOV_EXCL_LINE
+      *cached->variables,  // LCOV_EXCL_LINE
+      problem.dualRailStatePairs,  // LCOV_EXCL_LINE
       cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
       targetFrame + 1);  // LCOV_EXCL_LINE
   addInitialStateEqualities(  // LCOV_EXCL_LINE
@@ -2613,6 +2666,12 @@ bool resetSummaryPrecheckProvesUnreachable(
         solver,
         variables,
         problem.complementedStatePairs1,
+        coi.solverSymbolSet,
+        postBootstrapSteps + 1);
+    addDualRailStateValidity(
+        solver,
+        variables,
+        problem.dualRailStatePairs,
         coi.solverSymbolSet,
         postBootstrapSteps + 1);
     addBootstrapStateAssignments(

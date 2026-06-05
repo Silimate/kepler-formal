@@ -10,6 +10,7 @@ add_library(kepler_sec STATIC
     kinduction/OutputBatching.cpp
     model/SequentialDesignModel.cpp
     pdr/PDREngine.cpp
+    proof/DualRailEncoding.cpp
     proof/ProofEngineShared.cpp
     proof/TransitionExprResolver.cpp
     kinduction/BaseCaseSolver.cpp

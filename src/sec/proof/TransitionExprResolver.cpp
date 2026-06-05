@@ -19,6 +19,49 @@ namespace {
 
 constexpr size_t kCachedUnionSupportTargetThreshold = 16;
 
+size_t mapLazyTransitionSymbol(
+    size_t designIndex,
+    size_t localSymbol,
+    std::unordered_map<size_t, size_t>& symbolMap);
+
+class LazyDualRailVariableMapper final : public DualRailVariableMapper {
+ public:
+  LazyDualRailVariableMapper(
+      size_t designIndex,
+      std::unordered_map<size_t, size_t>& binaryMap,
+      const std::unordered_map<size_t, DualRailSymbolPair>& stateRails)
+      : designIndex_(designIndex),
+        binaryMap_(binaryMap),
+        stateRails_(stateRails) {}
+
+  DualRailBoolExpr mapVariable(size_t symbol) override {
+    if (const auto stateIt = stateRails_.find(symbol);
+        stateIt != stateRails_.end()) {
+      return DualRailBoolExpr{
+          BoolExpr::Var(stateIt->second.mayBeOne),
+          BoolExpr::Var(stateIt->second.mayBeZero)};
+    }
+
+    if (symbol < 2) {
+      return symbol == 1
+                 ? DualRailBoolExpr{
+                       BoolExpr::createTrue(), BoolExpr::createFalse()}
+                 : DualRailBoolExpr{
+                       BoolExpr::createFalse(), BoolExpr::createTrue()};
+    }
+
+    const size_t mapped = mapLazyTransitionSymbol(designIndex_, symbol, binaryMap_);
+    return DualRailBoolExpr{
+        BoolExpr::Var(mapped),
+        BoolExpr::Not(BoolExpr::Var(mapped))};
+  }
+
+ private:
+  size_t designIndex_ = 0;
+  std::unordered_map<size_t, size_t>& binaryMap_;
+  const std::unordered_map<size_t, DualRailSymbolPair>& stateRails_;
+};
+
 size_t countBoolExprNodes(BoolExpr* formula) {
   if (formula == nullptr) {
     return 0;  // LCOV_EXCL_LINE
@@ -139,6 +182,51 @@ std::set<size_t> remappedSupport(
   });
 }
 
+std::set<size_t> remappedDualRailSupport(
+    BoolExpr* formula,
+    size_t designIndex,
+    std::unordered_map<size_t, size_t>& binaryMap,
+    const std::unordered_map<size_t, DualRailSymbolPair>& stateRails) {
+  std::set<size_t> support;
+  for (const auto localSymbol : formula->getSupportVars()) {
+    if (localSymbol < 2) {
+      continue;
+    }
+    if (const auto stateIt = stateRails.find(localSymbol);
+        stateIt != stateRails.end()) {
+      support.insert(stateIt->second.mayBeOne);
+      support.insert(stateIt->second.mayBeZero);
+      continue;
+    }
+    support.insert(mapLazyTransitionSymbol(designIndex, localSymbol, binaryMap));
+  }
+  return support;
+}
+
+BoolExpr* materializeLazyDualRailTransition(
+    LazyTransitionSource source,
+    LazyTransitionStore& store) {
+  if (source.designIndex >= store.localToCombinedByDesign.size()) {
+    throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+  }
+
+  LazyDualRailVariableMapper mapper(
+      source.designIndex,
+      store.localToCombinedByDesign[source.designIndex],
+      store.dualRailStateByLocalSymbolByDesign[source.designIndex]);
+  const auto lifted = buildDualRailBoolExpr(
+      source.localExpr,
+      mapper,
+      store.dualRailRemapMemoByDesign[source.designIndex]);
+  if (source.rail == LazyTransitionRail::DualRailOne) {
+    return lifted.mayBeOne;
+  }
+  if (source.rail == LazyTransitionRail::DualRailZero) {
+    return lifted.mayBeZero;
+  }
+  throw std::runtime_error("Lazy dual-rail transition requested for binary rail");  // LCOV_EXCL_LINE
+}
+
 }  // namespace
 
 TransitionExprResolver::TransitionExprResolver(const KInductionProblem& problem)
@@ -190,6 +278,11 @@ BoolExpr* TransitionExprResolver::at(size_t stateSymbol) const {
   if (source.designIndex >= store.localToCombinedByDesign.size()) {
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
   }
+  if (source.rail != LazyTransitionRail::Binary) {
+    BoolExpr* remapped = materializeLazyDualRailTransition(source, store);
+    store.remappedByStateSymbol.emplace(stateSymbol, remapped);
+    return remapped;
+  }
 
   // Populate design-private mappings for transition-only local support before
   // materializing the lazy BoolExpr.  This keeps unmodeled internal leaves
@@ -228,6 +321,9 @@ TransitionExprView TransitionExprResolver::expressionView(size_t stateSymbol) co
   const LazyTransitionSource& source = sourceIt->second;  // LCOV_EXCL_LINE
   if (source.designIndex >= store.localToCombinedByDesign.size()) {  // LCOV_EXCL_LINE
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+  }
+  if (source.rail != LazyTransitionRail::Binary) {
+    return TransitionExprView{at(stateSymbol), nullptr};
   }
   return TransitionExprView{  // LCOV_EXCL_LINE
       source.localExpr, &store.localToCombinedByDesign[source.designIndex]};  // LCOV_EXCL_LINE
@@ -271,6 +367,16 @@ const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) cons
   }
   if (sourceIt->second.designIndex >= store.localToCombinedByDesign.size()) {
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+  }
+  if (sourceIt->second.rail != LazyTransitionRail::Binary) {
+    auto [insertedIt, _] = store.supportByStateSymbol.emplace(
+        stateSymbol,
+        remappedDualRailSupport(
+            sourceIt->second.localExpr,
+            sourceIt->second.designIndex,
+            store.localToCombinedByDesign[sourceIt->second.designIndex],
+            store.dualRailStateByLocalSymbolByDesign[sourceIt->second.designIndex]));
+    return insertedIt->second;
   }
   auto [insertedIt, _] = store.supportByStateSymbol.emplace(
       stateSymbol,
@@ -342,6 +448,15 @@ void TransitionExprResolver::collectSupportForTargets(
     if (source.designIndex >= store.localToCombinedByDesign.size()) {  // LCOV_EXCL_LINE
       throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
     }
+    if (source.rail != LazyTransitionRail::Binary) {
+      for (const auto symbol : support(stateSymbol)) {
+        allSupport.insert(symbol);
+        if (knownStateSymbols.find(symbol) != knownStateSymbols.end()) {
+          stateSupport.insert(symbol);
+        }
+      }
+      continue;
+    }
     stack.push_back(  // LCOV_EXCL_LINE
         {source.localExpr,
          &store.localToCombinedByDesign[source.designIndex],
@@ -405,7 +520,11 @@ size_t TransitionExprResolver::nodeCount(size_t stateSymbol) const {
     }
     const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);
     if (sourceIt != store.sourceByStateSymbol.end()) {
-      expr = sourceIt->second.localExpr;
+      if (sourceIt->second.rail == LazyTransitionRail::Binary) {
+        expr = sourceIt->second.localExpr;
+      } else {
+        expr = at(stateSymbol);
+      }
     }
   }
   if (expr == nullptr) {

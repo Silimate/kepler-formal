@@ -1683,6 +1683,25 @@ TEST(KeplerFormalCliTests, ConfigSecEngineMustBeScalar) {
   std::filesystem::remove(cfgPath);
 }
 
+TEST(KeplerFormalCliTests, ConfigInvalidSecXModeFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "verification: sec\n"
+      "sec_x_mode: mystery\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
+TEST(KeplerFormalCliTests, ConfigSecXModeMustBeScalar) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "verification: sec\n"
+      "sec_x_mode:\n"
+      "  - dual_rail_steady\n");
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
 TEST(KeplerFormalCliTests, ConfigExplicitLecVerificationAccepted) {
   const auto fixture = createEquivalentDesignFixture(
       "v",
@@ -2543,6 +2562,26 @@ TEST(KeplerFormalCliTests, CliImcSecEngineAcceptedBeforeFormat) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST(KeplerFormalCliTests, CliDualRailXModeAcceptedBeforeFormat) {
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-v",
+                   "sec",
+                   "-k",
+                   "4",
+                   "--sec-engine",
+                   "k_induction",
+                   "--sec-x-mode",
+                   "dual_rail_steady",
+                   "-naja_if",
+                   fixture.design0IfPath.string(),
+                   fixture.design1IfPath.string()}),
+      EXIT_SUCCESS);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST(KeplerFormalCliTests, CliExplicitLecVerificationAcceptedBeforeFormat) {
   const auto fixture = createEquivalentDesignFixture(
       "v",
@@ -2581,6 +2620,10 @@ TEST(KeplerFormalCliTests, CliMissingSecEngineBeforeFormatFails) {
   EXPECT_EQ(runWithArgs({"kepler-formal", "--sec-engine"}), EXIT_FAILURE);
 }
 
+TEST(KeplerFormalCliTests, CliMissingSecXModeBeforeFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "--sec-x-mode"}), EXIT_FAILURE);
+}
+
 TEST(KeplerFormalCliTests, CliOutOfRangeMaxKBeforeFormatFails) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal", "-k", "999999999999999999999999999999999999"}),
@@ -2598,6 +2641,12 @@ TEST(KeplerFormalCliTests, CliMissingInputFormatAfterPreOptionsFails) {
 TEST(KeplerFormalCliTests, CliInvalidSecEngineBeforeFormatFails) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal", "-v", "sec", "--sec-engine", "bad", "-verilog"}),
+      EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliInvalidSecXModeBeforeFormatFails) {
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal", "-v", "sec", "--sec-x-mode", "bad", "-verilog"}),
       EXIT_FAILURE);
 }
 
@@ -2688,15 +2737,32 @@ TEST(KeplerFormalCliTests, CliMissingSecEngineAfterFormatFails) {
             EXIT_FAILURE);
 }
 
+TEST(KeplerFormalCliTests, CliMissingSecXModeAfterFormatFails) {
+  EXPECT_EQ(runWithArgs({"kepler-formal", "-verilog", "--sec-x-mode"}),
+            EXIT_FAILURE);
+}
+
 TEST(KeplerFormalCliTests, CliSecEngineAcceptedAfterFormat) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal", "-verilog", "--sec-engine", "pdr"}),
       EXIT_FAILURE);
 }
 
+TEST(KeplerFormalCliTests, CliSecXModeAcceptedAfterFormat) {
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal", "-verilog", "--sec-x-mode", "dual_rail_steady"}),
+      EXIT_FAILURE);
+}
+
 TEST(KeplerFormalCliTests, CliInvalidSecEngineAfterFormatFails) {
   EXPECT_EQ(
       runWithArgs({"kepler-formal", "-verilog", "--sec-engine", "bad"}),
+      EXIT_FAILURE);
+}
+
+TEST(KeplerFormalCliTests, CliInvalidSecXModeAfterFormatFails) {
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal", "-verilog", "--sec-x-mode", "bad"}),
       EXIT_FAILURE);
 }
 
