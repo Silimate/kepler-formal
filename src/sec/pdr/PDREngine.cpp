@@ -180,6 +180,7 @@ constexpr size_t kMaxPreciseBadCubeSupportNodes = 262144;
 // enumeration deliberately small: this is for one-output ASIC cones such as
 // BlackParrot's six-state-bit bad predicates, not arbitrary datapath CNF.
 constexpr size_t kMaxValidatedBadFormulaCnfSupport = 8;
+constexpr size_t kMaxDualRailValidatedBadFormulaCnfSupport = 12;
 // Batched SEC bad predicates are an OR of per-output mismatches. Each output
 // may have a small state-only bad cone even when the union across the batch is
 // too wide to enumerate. Cap the total learned clauses so the batched
@@ -210,6 +211,11 @@ constexpr size_t kMaxWholeBadFormulaBaseValidationAfterCachedRootFrame = 1;
 // thousands of neighboring root-cube predecessor checks, so allow that compact
 // exact repair without relaxing the multi-output/batched path.
 constexpr size_t kMaxSingleOutputExactValidatedBadFormulaClauses = 64;
+// Dual-rail output predicates often stay local in logical state but enumerate
+// many Boolean rail assignments. Keep the binary SEC cap untouched, and allow
+// the wider assignment set only when the problem explicitly uses rail state.
+constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
+    kMaxValidatedBadFormulaClauses;
 // Exact reset-frontier validation can batch a small state-only bad CNF into
 // one prefix query. This replaces many neighboring per-assignment frontier
 // solves with a single real bounded proof, and stays limited to local
@@ -226,6 +232,8 @@ constexpr size_t kMaxResetFrontierBatchedBadFormulaSupport = 16;
 // eager bad-formula loop.
 constexpr size_t kMaxPartialTargetResetFrontierBadFormulaFrame = 8;
 constexpr size_t kMaxPartialTargetResetFrontierBadFormulaCheapChecks = 64;
+constexpr size_t kMaxDualRailPartialTargetResetFrontierBadFormulaCheapChecks =
+    512;
 constexpr long long kOptionalStartupResetFrontierConflictLimit = 1000;
 constexpr long long kOptionalStartupResetFrontierPropagationLimit = 25000;
 // Multi-output SEC/PDR batches can still use exact bad-formula repair when the
@@ -243,6 +251,8 @@ constexpr size_t kMaxBatchResetCubeValidatedBadFormulaClauses = 2048;
 // clauses were already handled by reset-specialized conflicts. For larger
 // batches, keep the exact cheap conflicts and let ordinary PDR handle the rest.
 constexpr size_t kMaxExactResetCubeValidatedBadFormulaClauses = 16;
+constexpr size_t kMaxDualRailExactResetCubeValidatedBadFormulaClauses =
+    kMaxValidatedBadFormulaClauses;
 // Deep single-output bad predicates can still be tiny in state support even
 // when they enumerate to more than the broad reset-cube cap above. In that
 // measured BlackParrot shape, cache-only repair left 8-22 clauses unvalidated
@@ -5420,15 +5430,69 @@ bool addClauseToFrames(std::vector<FrameClauses>& frames,
   return addedAny;
 }  // LCOV_EXCL_LINE
 
+size_t validatedBadFormulaCnfSupportLimit(const KInductionProblem& problem) {
+  // Dual rail represents one ternary state bit with two Boolean rails.  Keep
+  // the binary SEC limit unchanged, but allow the same small logical support
+  // after rail expansion so PDR can learn local bad-formula clauses instead of
+  // rediscovering sibling rail assignments one cube at a time.
+  return problem.usesDualRailStateEncoding
+             ? kMaxDualRailValidatedBadFormulaCnfSupport
+             : kMaxValidatedBadFormulaCnfSupport;
+}
+
+size_t singleOutputBadFormulaClauseLimit(const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding
+             ? kMaxDualRailSingleOutputExactValidatedBadFormulaClauses
+             : kMaxSingleOutputExactValidatedBadFormulaClauses;
+}
+
+size_t exactResetCubeBadFormulaClauseLimit(const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding
+             ? kMaxDualRailExactResetCubeValidatedBadFormulaClauses
+             : kMaxExactResetCubeValidatedBadFormulaClauses;
+}
+
+bool canExactlyValidateBadFormulaGroup(const KInductionProblem& problem,
+                                       size_t targetFrame,
+                                       const std::vector<StateClause>& clauses) {
+  return targetFrame <= 1 &&
+         clauses.size() <= exactResetCubeBadFormulaClauseLimit(problem);
+}
+
+size_t partialTargetResetFrontierBadFormulaCheapCheckLimit(
+    const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding
+             ? kMaxDualRailPartialTargetResetFrontierBadFormulaCheapChecks
+             : kMaxPartialTargetResetFrontierBadFormulaCheapChecks;
+}
+
+void emitSkippedPerOutputBadFormulaGroupDiag(
+    size_t targetFrame,
+    const ObservedOutputBadClauseGroup& group,
+    std::string_view reason,
+    size_t limit = 0) {
+  if (!pdrStatsEnabled()) {
+    return;
+  }
+  emitSecDiag(
+      "SEC PDR stats: skipped per-output bad-formula validation ",
+      "bad_frame=", targetFrame,
+      " output=", group.outputIndex,
+      " clauses=", group.clauses.size(),
+      " reason=", reason,
+      " limit=", limit);
+}
+
 std::optional<std::vector<StateClause>> stateOnlyBadFormulaClauses(
     BoolExpr* badFormula,
-    const std::unordered_set<size_t>& stateSymbols) {
+    const std::unordered_set<size_t>& stateSymbols,
+    size_t supportLimit) {
   if (badFormula == nullptr) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
 
   const auto supportSet = badFormula->getSupportVars();
-  if (supportSet.size() > kMaxValidatedBadFormulaCnfSupport) {
+  if (supportSet.size() > supportLimit) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
   for (const auto symbol : supportSet) {
@@ -5467,8 +5531,10 @@ std::optional<std::vector<StateClause>> stateOnlyBadFormulaClauses(
 bool appendStateOnlyBadFormulaClauses(
     std::vector<StateClause>& target,
     BoolExpr* badFormula,
-    const std::unordered_set<size_t>& stateSymbols) {
-  const auto clauses = stateOnlyBadFormulaClauses(badFormula, stateSymbols);
+    const std::unordered_set<size_t>& stateSymbols,
+    size_t supportLimit) {
+  const auto clauses =
+      stateOnlyBadFormulaClauses(badFormula, stateSymbols, supportLimit);
   if (!clauses.has_value() || clauses->empty()) {
     return false;  // LCOV_EXCL_LINE
   }
@@ -5488,7 +5554,7 @@ std::vector<ObservedOutputBadClauseGroup> observedOutputBadFormulaClauseGroups(
   }
 
   std::vector<ObservedOutputBadClauseGroup> groups;
-  size_t totalClauses = 0;
+  const size_t supportLimit = validatedBadFormulaCnfSupportLimit(problem);
   for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
     BoolExpr* outputBad = BoolExpr::simplify(
         BoolExpr::Xor(
@@ -5499,14 +5565,11 @@ std::vector<ObservedOutputBadClauseGroup> observedOutputBadFormulaClauseGroups(
     // be learned independently, while unsupported or too-wide disjuncts simply
     // remain for normal PDR search.
     std::vector<StateClause> clauses;
-    appendStateOnlyBadFormulaClauses(clauses, outputBad, stateSymbols);
+    appendStateOnlyBadFormulaClauses(
+        clauses, outputBad, stateSymbols, supportLimit);
     if (!clauses.empty()) {
-      totalClauses += clauses.size();
       groups.push_back(ObservedOutputBadClauseGroup{
           output, outputBad, std::move(clauses)});
-    }
-    if (totalClauses >= kMaxValidatedBadFormulaClauses) {
-      break;  // LCOV_EXCL_LINE
     }
   }
   return groups;
@@ -6017,6 +6080,8 @@ std::optional<bool> learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_E
   size_t cachedClauses = 0;  // LCOV_EXCL_LINE
   size_t cheapChecks = 0;  // LCOV_EXCL_LINE
   size_t learnedClauses = 0;  // LCOV_EXCL_LINE
+  const size_t cheapCheckLimit =
+      partialTargetResetFrontierBadFormulaCheapCheckLimit(problem);  // LCOV_EXCL_LINE
   for (const auto& clause : clauses) {  // LCOV_EXCL_LINE
     if (frameHasSubsumingClause(frames[targetFrame], clause)) {  // LCOV_EXCL_LINE
       continue;  // LCOV_EXCL_LINE
@@ -6034,8 +6099,7 @@ std::optional<bool> learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_E
       continue;  // LCOV_EXCL_LINE
     }
 
-    if (cheapChecks >=  // LCOV_EXCL_LINE
-        kMaxPartialTargetResetFrontierBadFormulaCheapChecks) {
+    if (cheapChecks >= cheapCheckLimit) {
       continue;  // LCOV_EXCL_LINE
     }
 
@@ -6067,6 +6131,7 @@ std::optional<bool> learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_E
         " clauses=", learnedClauses,
         " total=", clauses.size(),  // LCOV_EXCL_LINE
         " cheap_checks=", cheapChecks,
+        " cheap_limit=", cheapCheckLimit,
         " cached_clauses=", cachedClauses);
   }  // LCOV_EXCL_LINE
   return true;  // LCOV_EXCL_LINE
@@ -6092,14 +6157,35 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
   size_t checkedGroups = 0;
   size_t learnedClauses = 0;
   size_t learnedResetConflictClausesTotal = 0;
+  // Dual-rail batches can contain many independent output-local bad
+  // predicates.  Once one predicate learns a reset-frontier repair, keep
+  // draining the current batch so PDR does not re-enter this function once per
+  // output.  Binary SEC keeps the historical early-return behavior.
+  const bool continueAfterLocalRepair = problem.usesDualRailStateEncoding;
+  const size_t perOutputClauseLimit =
+      singleOutputBadFormulaClauseLimit(problem);
   for (const auto& group : groups) {
     const bool targetFrameOnlyRepair = targetFrame > 1;
-    if (group.clauses.empty() ||
-        group.clauses.size() > kMaxSingleOutputExactValidatedBadFormulaClauses ||
-        (targetFrameOnlyRepair &&
-         !hasNewValidatedBadFormulaClauseAtFrame(  // LCOV_EXCL_LINE
-             frames, group.clauses, targetFrame)) ||
-        !hasNewValidatedBadFormulaClause(frames, group.clauses, targetFrame)) {
+    if (group.clauses.empty()) {
+      emitSkippedPerOutputBadFormulaGroupDiag(
+          targetFrame, group, "empty");
+      continue;
+    }
+    if (group.clauses.size() > perOutputClauseLimit) {
+      emitSkippedPerOutputBadFormulaGroupDiag(
+          targetFrame, group, "clause_limit", perOutputClauseLimit);
+      continue;
+    }
+    if (targetFrameOnlyRepair &&
+        !hasNewValidatedBadFormulaClauseAtFrame(  // LCOV_EXCL_LINE
+            frames, group.clauses, targetFrame)) {
+      emitSkippedPerOutputBadFormulaGroupDiag(
+          targetFrame, group, "target_frame_already_present");
+      continue;
+    }
+    if (!hasNewValidatedBadFormulaClause(frames, group.clauses, targetFrame)) {
+      emitSkippedPerOutputBadFormulaGroupDiag(
+          targetFrame, group, "already_present");
       continue;
     }
 
@@ -6111,8 +6197,7 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
     const KInductionProblem validationProblem =
         outputBadValidationProblem(problem, group);
     const bool allowExactResetValidation =
-        targetFrame <= 1 &&
-        group.clauses.size() <= kMaxExactResetCubeValidatedBadFormulaClauses;
+        canExactlyValidateBadFormulaGroup(problem, targetFrame, group.clauses);
     bool validatedGroup = false;
     size_t learnedResetConflictClauses = 0;
     if (const auto resetCubeValidation =
@@ -6153,6 +6238,9 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
             " output=", group.outputIndex,  // LCOV_EXCL_LINE
             " learned_reset_conflicts=", learnedResetConflictClauses);
       }  // LCOV_EXCL_LINE
+      if (continueAfterLocalRepair) {  // LCOV_EXCL_LINE
+        continue;  // LCOV_EXCL_LINE
+      }
       return true;  // LCOV_EXCL_LINE
     }
     if (!validatedGroup) {
@@ -6164,8 +6252,7 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
               (targetFrame > 1  // LCOV_EXCL_LINE
                    ? kMaxPartialTargetResetFrontierBadFormulaFrame
                    : kMaxResetFrontierBatchedBadFormulaFrame) &&  // LCOV_EXCL_LINE
-          group.clauses.size() <=  // LCOV_EXCL_LINE
-              kMaxSingleOutputExactValidatedBadFormulaClauses &&  // LCOV_EXCL_LINE
+          group.clauses.size() <= perOutputClauseLimit &&  // LCOV_EXCL_LINE
           !validationSupportCube.empty() &&  // LCOV_EXCL_LINE
           validationSupportCube.size() <=  // LCOV_EXCL_LINE
               kMaxResetFrontierBatchedBadFormulaSupport;
@@ -6183,6 +6270,10 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
                       targetFrame,  // LCOV_EXCL_LINE
                       resetFrontierCache);  // LCOV_EXCL_LINE
               partialTargetRepair.has_value() && *partialTargetRepair) {  // LCOV_EXCL_LINE
+            learnedAnyClause = true;  // LCOV_EXCL_LINE
+            if (continueAfterLocalRepair) {  // LCOV_EXCL_LINE
+              continue;  // LCOV_EXCL_LINE
+            }
             return true;  // LCOV_EXCL_LINE
           }
         } else {  // LCOV_EXCL_LINE
@@ -6218,8 +6309,7 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
       const bool allowWholeGroupAfterCachedRoot =  // LCOV_EXCL_LINE
           targetFrame <=  // LCOV_EXCL_LINE
               kMaxWholeBadFormulaBaseValidationAfterCachedRootFrame &&  // LCOV_EXCL_LINE
-          group.clauses.size() <=  // LCOV_EXCL_LINE
-              kMaxSingleOutputExactValidatedBadFormulaClauses &&  // LCOV_EXCL_LINE
+          group.clauses.size() <= perOutputClauseLimit &&  // LCOV_EXCL_LINE
           cachedResetValidatedAssignments != 0;  // LCOV_EXCL_LINE
       if (allowWholeGroupAfterCachedRoot) {  // LCOV_EXCL_LINE
         const StateClauseSetKey validationKey =
@@ -6275,11 +6365,14 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
             "SEC PDR stats: refined projected counterexample with per-output "
             "validated bad-formula clauses ",
             "bad_frame=", targetFrame,
+            " output=", group.outputIndex,
             " outputs=", checkedGroups,
             " clauses=", learnedClauses,
             " learned_reset_conflicts=", learnedResetConflictClausesTotal);
       }
-      return true;
+      if (!continueAfterLocalRepair) {
+        return true;
+      }
     }
   }
 
@@ -6316,14 +6409,17 @@ std::optional<bool> learnValidatedBadFormulaClauses(
           problem, transitionByState.stateSymbols());
   if (!badClauses.has_value()) {
     badClauses =
-        stateOnlyBadFormulaClauses(problem.bad, transitionByState.stateSymbols());
+        stateOnlyBadFormulaClauses(
+            problem.bad,
+            transitionByState.stateSymbols(),
+            validatedBadFormulaCnfSupportLimit(problem));
   }
   if (!badClauses.has_value() || badClauses->empty()) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
   const size_t exactValidatedBadFormulaClauseLimit =
       problem.observedOutputExprs0.size() == 1
-          ? kMaxSingleOutputExactValidatedBadFormulaClauses
+          ? singleOutputBadFormulaClauseLimit(problem)
           : kMaxExactValidatedBadFormulaClauses;
   const bool useWholeBatchValidation =
       preferWholeBadFormulaValidation &&
@@ -6335,9 +6431,7 @@ std::optional<bool> learnValidatedBadFormulaClauses(
         hasNewValidatedBadFormulaClause(frames, *badClauses, targetFrame)) {
       size_t learnedResetConflictClauses = 0;
       const bool allowBroadExactResetValidation =
-          targetFrame <= 1 &&
-          badClauses->size() <=
-              kMaxExactResetCubeValidatedBadFormulaClauses;
+          canExactlyValidateBadFormulaGroup(problem, targetFrame, *badClauses);
       if (const auto resetCubeValidation =  // LCOV_EXCL_LINE
               validateBadFormulaClausesWithResetCubes(
                   problem,
@@ -6502,7 +6596,7 @@ std::optional<bool> learnValidatedBadFormulaClauses(
           (targetFrame > 1  // LCOV_EXCL_LINE
                ? kMaxPartialTargetResetFrontierBadFormulaFrame
                : kMaxResetFrontierBatchedBadFormulaFrame) &&  // LCOV_EXCL_LINE
-      badClauses->size() <= kMaxSingleOutputExactValidatedBadFormulaClauses &&  // LCOV_EXCL_LINE
+      badClauses->size() <= singleOutputBadFormulaClauseLimit(problem) &&  // LCOV_EXCL_LINE
       !validationSupportCube.empty() &&  // LCOV_EXCL_LINE
       validationSupportCube.size() <=  // LCOV_EXCL_LINE
           kMaxResetFrontierBatchedBadFormulaSupport;
@@ -6556,7 +6650,7 @@ std::optional<bool> learnValidatedBadFormulaClauses(
       problem.observedOutputExprs0.size() == 1 &&
       targetFrame <=  // LCOV_EXCL_LINE
           kMaxWholeBadFormulaBaseValidationAfterCachedRootFrame &&  // LCOV_EXCL_LINE
-      badClauses->size() <= kMaxSingleOutputExactValidatedBadFormulaClauses &&  // LCOV_EXCL_LINE
+      badClauses->size() <= singleOutputBadFormulaClauseLimit(problem) &&  // LCOV_EXCL_LINE
       cachedResetValidatedAssignments != 0;  // LCOV_EXCL_LINE
   const bool allowWholeBadFormulaBaseValidation =
       useWholeBatchValidation ||
@@ -9498,11 +9592,14 @@ bool blockProofObligations(const KInductionProblem& problem,
         problem, transitionByState.stateSymbols());  // LCOV_EXCL_LINE
     if (!badClauses.has_value()) {  // LCOV_EXCL_LINE
       badClauses =  // LCOV_EXCL_LINE
-          stateOnlyBadFormulaClauses(problem.bad, transitionByState.stateSymbols());  // LCOV_EXCL_LINE
+          stateOnlyBadFormulaClauses(  // LCOV_EXCL_LINE
+              problem.bad,
+              transitionByState.stateSymbols(),
+              validatedBadFormulaCnfSupportLimit(problem));  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     if (badClauses.has_value() &&  // LCOV_EXCL_LINE
         badClauses->size() > kMaxExactValidatedBadFormulaClauses &&  // LCOV_EXCL_LINE
-        badClauses->size() <= kMaxSingleOutputExactValidatedBadFormulaClauses) {  // LCOV_EXCL_LINE
+        badClauses->size() <= singleOutputBadFormulaClauseLimit(problem)) {  // LCOV_EXCL_LINE
       size_t seededObligations = 0;  // LCOV_EXCL_LINE
       for (const auto& clause : *badClauses) {  // LCOV_EXCL_LINE
         const StateCube badCube = cubeForbiddenByStateClause(clause);  // LCOV_EXCL_LINE
@@ -10568,7 +10665,12 @@ std::optional<PDRResult> checkResetBootstrapFrameZero(
 
 BoolExpr* buildPdrInitFormula(const KInductionProblem& problem,
                               bool resetBootstrapFrameCheckedSafe) {
-  BoolExpr* initFormula = buildProofInitFormula(problem);
+  // PDR encodes structured init/bootstrap facts cone-locally in every query.
+  // When those facts exist, a monolithic BoolExpr init formula is only a
+  // placeholder for invariant/property composition and can be `true`.
+  BoolExpr* initFormula = hasStructuredInitFacts(problem)
+                              ? BoolExpr::createTrue()
+                              : buildProofInitFormula(problem);
   if (problem.resetBootstrapCycles == 0 ||
       !resetBootstrapFrameCheckedSafe ||
       problem.property == nullptr) {

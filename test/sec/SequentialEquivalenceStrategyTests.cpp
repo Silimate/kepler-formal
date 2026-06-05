@@ -11153,6 +11153,233 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailLearnsValidatedBadFormulaWithRailExpandedSupport) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  BoolExpr* bad = BoolExpr::createTrue();
+
+  for (size_t offset = 0; offset < 12; ++offset) {
+    const size_t symbol = 2 + offset;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.push_back({symbol, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    bad = BoolExpr::And(bad, BoolExpr::Var(symbol));
+
+    // Keep one rail permanently false.  The full bad predicate is unreachable,
+    // but a projected PDR cube can still need the validated-bad-formula repair.
+    problem.transitions0.emplace_back(
+        symbol,
+        offset == 1 ? BoolExpr::createFalse() : BoolExpr::createTrue());
+  }
+
+  problem.usesDualRailStateEncoding = true;
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.observedOutputExprs0 = {bad};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"rail_expanded_output"};
+  problem.bad = BoolExpr::simplify(bad);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 3)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "refined projected counterexample with validated bad-formula clauses"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailUsesStructuredInitWhenInitialFormulaIsPlaceholder) {
+  KInductionProblem problem;
+  constexpr size_t state = 2;
+
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {state};
+  problem.allSymbols = {state};
+  problem.initialStateAssignments = {{state, false}};
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  // Dual-rail extraction keeps the real startup facts structured and uses this
+  // non-null formula only to select the structured-init encoder path.
+  problem.initialCondition = BoolExpr::createTrue();
+  problem.transitions0.emplace_back(state, BoolExpr::createFalse());
+  problem.bad = BoolExpr::Var(state);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailLearnsPerOutputBadFormulaPastBinaryClauseLimit) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  std::vector<BoolExpr*> outputs;
+  size_t nextSymbol = 2;
+
+  for (size_t output = 0; output < 2; ++output) {
+    std::vector<size_t> symbols;
+    symbols.reserve(8);
+    for (size_t bit = 0; bit < 8; ++bit) {
+      const size_t symbol = nextSymbol++;
+      symbols.push_back(symbol);
+      problem.state0Symbols.push_back(symbol);
+      problem.allSymbols.push_back(symbol);
+      problem.initialStateAssignments.push_back({symbol, false});
+      init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+      problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+    }
+    // OR over eight rails produces 255 state-only bad assignments.  Binary SEC
+    // intentionally keeps that above its eager repair cap; dual rail needs it
+    // because a small unknown/known output can enumerate many Boolean rail
+    // combinations.
+    outputs.push_back(BoolExpr::simplify(makeOrChain(symbols)));
+    problem.observedOutputNames.push_back("rail_or_" + std::to_string(output));
+  }
+
+  problem.usesDualRailStateEncoding = true;
+  problem.observedOutputExprs0 = outputs;
+  problem.observedOutputExprs1.assign(outputs.size(), BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = BoolExpr::createFalse();
+  for (auto* outputExpr : outputs) {
+    problem.bad = BoolExpr::Or(problem.bad, outputExpr);
+  }
+  problem.bad = BoolExpr::simplify(problem.bad);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "per-output validated bad-formula clauses bad_frame=1 output=0 "
+          "outputs=1 "
+          "clauses=255"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          "skipped per-output bad-formula validation bad_frame=1 output=0 "
+          "clauses=255 reason=clause_limit"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailKeepsPerOutputGroupsPastTotalClauseCap) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  std::vector<BoolExpr*> outputs;
+  size_t nextSymbol = 2;
+
+  for (size_t output = 0; output < 10; ++output) {
+    std::vector<size_t> symbols;
+    symbols.reserve(9);
+    for (size_t bit = 0; bit < 9; ++bit) {
+      const size_t symbol = nextSymbol++;
+      symbols.push_back(symbol);
+      problem.state0Symbols.push_back(symbol);
+      problem.allSymbols.push_back(symbol);
+      problem.initialStateAssignments.push_back({symbol, false});
+      init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+      problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+    }
+    outputs.push_back(BoolExpr::simplify(makeOrChain(symbols)));
+    problem.observedOutputNames.push_back("rail_group_" + std::to_string(output));
+  }
+
+  problem.usesDualRailStateEncoding = true;
+  problem.observedOutputExprs0 = outputs;
+  problem.observedOutputExprs1.assign(outputs.size(), BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = BoolExpr::createFalse();
+  for (auto* outputExpr : outputs) {
+    problem.bad = BoolExpr::Or(problem.bad, outputExpr);
+  }
+  problem.bad = BoolExpr::simplify(problem.bad);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "per-output validated bad-formula clauses bad_frame=1 output=9 "
+          "outputs=10"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineLearnsValidatedBadFormulaClausesPerOutputInBatchedSecSlice) {
   KInductionProblem problem;
   const std::vector<std::vector<size_t>> outputStateGroups = {
@@ -11332,7 +11559,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "per-output validated bad-formula clauses bad_frame=1 outputs=1 clauses=1"),
+          "per-output validated bad-formula clauses bad_frame=1 output=0 "
+          "outputs=1 clauses=1"),
       std::string::npos)
       << stderrOutput;
 }

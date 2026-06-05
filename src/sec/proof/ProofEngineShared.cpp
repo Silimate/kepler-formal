@@ -17,6 +17,18 @@ BoolExpr* buildEqualityFormula(size_t lhs, size_t rhs) {
   return makeEqualityExpr(BoolExpr::Var(lhs), BoolExpr::Var(rhs));
 }
 
+BoolExpr* appendStructuredAssignmentFacts(
+    BoolExpr* init,
+    const std::vector<std::pair<size_t, bool>>& assignments,
+    bool& hasConstraint) {
+  for (const auto& [symbol, value] : assignments) {
+    init = BoolExpr::And(
+        init, value ? BoolExpr::Var(symbol) : BoolExpr::Not(BoolExpr::Var(symbol)));
+    hasConstraint = true;
+  }
+  return init;
+}
+
 std::vector<size_t> sortUniqueSymbols(std::vector<size_t> symbols) {
   std::sort(symbols.begin(), symbols.end());
   symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
@@ -302,7 +314,15 @@ BoolExpr* buildProofInitFormula(const KInductionProblem& problem) {
   } else {
     const bool hasInitialStateRelation =
         !problem.initialStateEqualityPairs.empty();
-    if (problem.initialCondition != nullptr) {
+    if (problem.initialCondition == BoolExpr::createTrue() &&
+        !problem.initialStateAssignments.empty()) {
+      // Dual-rail SEC keeps the boot rails as structured unit facts so PDR and
+      // k-induction can encode only the local COI.  Formula-based callers such
+      // as exact IMC still need a real BoolExpr frontier, so materialize it
+      // here rather than during SEC problem construction.
+      init = appendStructuredAssignmentFacts(
+          init, problem.initialStateAssignments, hasConstraint);
+    } else if (problem.initialCondition != nullptr) {
       init = BoolExpr::And(init, problem.initialCondition);
       hasConstraint = true;
     }

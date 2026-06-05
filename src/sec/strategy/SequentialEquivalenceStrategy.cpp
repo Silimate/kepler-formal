@@ -1523,25 +1523,12 @@ std::optional<bool> lookupBootstrapValue(
 void addDualRailInitialAssignments(
     const SequentialDesignModel& model,
     const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& railsByKey,
-    KInductionProblem& problem,
-    BoolExpr*& initialCondition) {
+    KInductionProblem& problem) {
   for (const auto& key : model.stateBits) {
     const auto rails = railsByKey.at(key);
     const auto value = lookupStateValue(model.initialStateValueByKey, key);
     addDualRailStateAssignment(problem.initialStateAssignments, rails, value);
     problem.initializedStateCount += 2;
-    initialCondition = BoolExpr::And(
-        initialCondition,
-        value.has_value()
-            ? (*value ? BoolExpr::Var(rails.mayBeOne)
-                      : BoolExpr::Not(BoolExpr::Var(rails.mayBeOne)))
-            : BoolExpr::Var(rails.mayBeOne));
-    initialCondition = BoolExpr::And(
-        initialCondition,
-        value.has_value()
-            ? (*value ? BoolExpr::Not(BoolExpr::Var(rails.mayBeZero))
-                      : BoolExpr::Var(rails.mayBeZero))
-            : BoolExpr::Var(rails.mayBeZero));
   }
 }
 
@@ -1884,12 +1871,13 @@ KInductionProblem buildDualRailSecProblem(
   problem.totalStateCount =
       problem.state0Symbols.size() + problem.state1Symbols.size();
 
-  BoolExpr* initialCondition = BoolExpr::createTrue();
-  addDualRailInitialAssignments(
-      model0, railMaps.state0ByKey, problem, initialCondition);
-  addDualRailInitialAssignments(
-      model1, railMaps.state1ByKey, problem, initialCondition);
-  problem.initialCondition = BoolExpr::simplify(initialCondition);
+  addDualRailInitialAssignments(model0, railMaps.state0ByKey, problem);
+  addDualRailInitialAssignments(model1, railMaps.state1ByKey, problem);
+  // The rail-valued boot frontier is already represented as structured unit
+  // facts in initialStateAssignments.  Keep initialCondition non-null so the
+  // existing base-case encoders enter their structured-init path without
+  // materializing a huge duplicate conjunction over every rail.
+  problem.initialCondition = BoolExpr::createTrue();
 
   addDualRailBootstrapAssignments(
       model0, reachableInvariant.bootstrapValues0, railMaps.state0ByKey, problem);
@@ -2275,7 +2263,10 @@ SequentialEquivalenceResult runPdrSecEngine(
   // avoid broad concrete-BMC validation until the final exact retry.
   constexpr size_t kMinOutputsForBatchedPdrProof = 129;
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
-  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{8, 256};
+  // Dual-rail final repair now drains all output-local bad-formula clauses in
+  // one PDR invocation. Keep larger rail slices together so BlackParrot-scale
+  // runs do not pay the reset-frontier setup once per small bus chunk.
+  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{64, 4096};
   const OutputBatchingLimits pdrOutputBatchingLimits =
       problem.usesDualRailStateEncoding ? kDualRailPdrOutputBatchingLimits
                                         : kPdrOutputBatchingLimits;
@@ -2711,6 +2702,24 @@ SequentialEquivalenceResult runPdrSecEngine(
                   extractedBoundaryReports);  // LCOV_EXCL_LINE
             }  // LCOV_EXCL_LINE
           }  // LCOV_EXCL_LINE
+          if (problem.usesDualRailStateEncoding) {  // LCOV_EXCL_LINE
+            // Dual-rail PDR needs the final validated bad-formula repair for
+            // local rail assignment sets. The intermediate exact-frame stage
+            // has that repair disabled and can enumerate thousands of sibling
+            // predecessors before reaching the same final proof/split logic.
+            const FinalPdrStageOutcome finalOutcome =
+                runFinalExactPdrStage(batchIndex, firstOutput, endOutput);  // LCOV_EXCL_LINE
+            if (finalOutcome.terminalResult.has_value()) {  // LCOV_EXCL_LINE
+              return *finalOutcome.terminalResult;  // LCOV_EXCL_LINE
+            }
+            if (finalOutcome.equivalent) {  // LCOV_EXCL_LINE
+              break;  // LCOV_EXCL_LINE
+            }
+            if (finalOutcome.shouldSplit) {  // LCOV_EXCL_LINE
+              splitPdrBatchAtFinalStage(batchIndex, firstOutput, endOutput);  // LCOV_EXCL_LINE
+              break;  // LCOV_EXCL_LINE
+            }
+          }  // LCOV_EXCL_LINE
           // Last retry on the widened relation slice: keep the complete
           // learned frame, but keep carried predecessor cubes bounded. Sampling
           // on BlackParrot showed that unbounded predecessor cubes made exact
@@ -3142,12 +3151,21 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         kMaxPdrGlobalResetBootstrapEqualityStates);
     fflush(stderr);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
+  const AlignedSignals emptyResetBootstrapCandidateStateEqualities;
+  const AlignedSignals& resetBootstrapCandidatesForInvariant =
+      xMode_ == SecXMode::DualRailSteady
+          ? emptyResetBootstrapCandidateStateEqualities
+          : aligned.resetBootstrapCandidateStateEqualities;
+  // Dual-rail SEC proves unknown-state behavior explicitly in the rail
+  // encoding.  Do not spend minutes mining cross-design bootstrap candidate
+  // facts before PDR; those facts are optional strengthening and are not the
+  // proof rule for this mode.
   const auto reachableInvariant = integrateReachableStateInvariant(
       model0,
       model1,
       aligned.inputs,
       aligned.inductiveStateEqualities,
-      aligned.resetBootstrapCandidateStateEqualities,
+      resetBootstrapCandidatesForInvariant,
       symbolSpace.state0Symbols,
       symbolSpace.state1Symbols,
       symbolSpace.problem,

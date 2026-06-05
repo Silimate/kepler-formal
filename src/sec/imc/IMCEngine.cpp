@@ -208,6 +208,16 @@ bool provesByOutputBatchedInduction(const KInductionProblem& problem,
   return true;
 }
 
+bool shouldBuildExplicitImcInitFormula(const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding) {
+    return true;
+  }
+  // Exact IMC enumerates reachable combined states only for tiny systems.
+  // Large dual-rail ASIC problems should go directly to the shared
+  // k-induction fallback instead of materializing a full rail-init formula.
+  return problem.totalStateCount <= 12;
+}
+
 }  // namespace
 
 IMCEngine::IMCEngine(const KInductionProblem& problem,
@@ -226,7 +236,9 @@ IMCResult IMCEngine::run(size_t maxK) const {
     return {IMCStatus::Equivalent, 0};
   }
 
-  BoolExpr* initFormula = buildProofInitFormula(problem_);
+  BoolExpr* initFormula =
+      shouldBuildExplicitImcInitFormula(problem_) ? buildProofInitFormula(problem_)
+                                                  : nullptr;
   const BoolExpr* sharedStrengthening =
       buildInitialImcStrengthening(problem_, solverType_, initFormula);
   if (initFormula != nullptr &&
