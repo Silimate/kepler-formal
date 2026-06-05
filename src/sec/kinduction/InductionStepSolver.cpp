@@ -186,6 +186,17 @@ void addRelevantDualRailPartners(
   }
 }
 
+void addPostBootstrapResetInputSymbols(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& solverSymbols) {
+  if (problem.resetBootstrapCycles == 0) {
+    return;
+  }
+  for (const auto& [symbol, _] : problem.resetBootstrapInputs) {
+    solverSymbols.insert(symbol);
+  }
+}
+
 InductionCoi buildInductionCoi(const KInductionProblem& problem,
                                BoolExpr* inductionProperty,
                                BoolExpr* inductionBad,
@@ -252,6 +263,7 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
+  addPostBootstrapResetInputSymbols(problem, solverSymbols);
 
   InductionCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
@@ -350,6 +362,31 @@ void addDualRailStateValidity(
   }
 }
 
+void addPostBootstrapResetInputConstraints(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t numFrames) {
+  if (problem.resetBootstrapCycles == 0) {
+    return;
+  }
+
+  for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
+    if (!variables.hasSymbol(symbol)) {  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
+    }
+    for (size_t frame = 0; frame < numFrames; ++frame) {
+      // The induction query starts at the post-bootstrap frontier.  Match the
+      // base-case/PDR environment by keeping reset controls deasserted
+      // throughout this window instead of proving across arbitrary reset
+      // reassertion.
+      solver.addClause(
+          {assertedValue ? -variables.getLiteral(symbol, frame)
+                         : variables.getLiteral(symbol, frame)});
+    }
+  }
+}
+
 }  // namespace
 
 InductionProofStatus proveByInductionStatus(
@@ -387,6 +424,7 @@ InductionProofStatus proveByInductionStatus(
       solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet, k + 1);
   addDualRailStateValidity(
       solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet, k + 1);
+  addPostBootstrapResetInputConstraints(solver, variables, problem, k + 1);
 
   for (size_t frame = 0; frame < k; ++frame) {
     addTransitionRelation(

@@ -3152,14 +3152,17 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
     fflush(stderr);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   const AlignedSignals emptyResetBootstrapCandidateStateEqualities;
+  const bool skipDualRailResetBootstrapCandidates =
+      xMode_ == SecXMode::DualRailSteady && secEngine_ == SecEngine::Pdr;
   const AlignedSignals& resetBootstrapCandidatesForInvariant =
-      xMode_ == SecXMode::DualRailSteady
+      skipDualRailResetBootstrapCandidates
           ? emptyResetBootstrapCandidateStateEqualities
           : aligned.resetBootstrapCandidateStateEqualities;
-  // Dual-rail SEC proves unknown-state behavior explicitly in the rail
-  // encoding.  Do not spend minutes mining cross-design bootstrap candidate
-  // facts before PDR; those facts are optional strengthening and are not the
-  // proof rule for this mode.
+  // Dual-rail PDR proves unknown-state behavior explicitly in the rail
+  // encoding and learns its own state clauses. KI/IMC still benefit from the
+  // same validated reset-bootstrap strengthening as binary SEC; otherwise KI
+  // tries to prove from arbitrary post-reset rail states and falls back to
+  // expensive BMC frontiers.
   const auto reachableInvariant = integrateReachableStateInvariant(
       model0,
       model1,

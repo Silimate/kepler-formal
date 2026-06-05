@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <utility>
 
 #include "common/SecDiag.h"
@@ -31,18 +32,49 @@ bool isFrontierFirstEnabled() {
 constexpr size_t kMinOutputsForBatchedProof = 2;
 constexpr unsigned kDefaultBatchedInductionDecisionLimit = 200000;
 
-unsigned batchedInductionDecisionLimit() {
-  const char* value = std::getenv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT");
+std::optional<unsigned> readUnsignedEnv(const char* name) {
+  const char* value = std::getenv(name);
   if (value == nullptr || *value == '\0') {
-    return kDefaultBatchedInductionDecisionLimit;
+    return std::nullopt;
   }
   char* end = nullptr;
   const unsigned long parsed = std::strtoul(value, &end, 10);
   if (end == value || *end != '\0' ||
       parsed > std::numeric_limits<unsigned>::max()) {
-    return kDefaultBatchedInductionDecisionLimit;
+    return std::nullopt;
   }
   return static_cast<unsigned>(parsed);
+}
+
+unsigned binaryBatchedInductionDecisionLimit() {
+  return readUnsignedEnv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT")
+      .value_or(kDefaultBatchedInductionDecisionLimit);
+}
+
+std::optional<unsigned> batchedInductionDecisionLimit(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (problem.observedOutputExprs0.size() <= 1 ||
+      solverType != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+    return std::nullopt;
+  }
+
+  if (!problem.usesDualRailStateEncoding) {
+    return binaryBatchedInductionDecisionLimit();
+  }
+
+  // Dual-rail proofs are already state-space expanded.  The binary default
+  // limit is useful to protect broad OR-of-output-bads queries, but on
+  // dual-rail BlackParrot it can turn a solvable batch into Unknown, causing a
+  // recursive split storm and repeated transition-support construction.  Leave
+  // dual-rail batches uncapped by default, while still allowing explicit local
+  // tuning when a developer asks for it.
+  if (const auto dualRailLimit =
+          readUnsignedEnv("KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT");
+      dualRailLimit.has_value()) {
+    return dualRailLimit;
+  }
+  return readUnsignedEnv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT");
 }
 
 void emitKInductionProblemDiag(const KInductionProblem& problem,
@@ -60,6 +92,25 @@ void emitKInductionProblemDiag(const KInductionProblem& problem,
       " inductive_equalities=", problem.inductiveStateEqualityPairs.size(),
       " reset_bootstrap_cycles=", problem.resetBootstrapCycles,
       " max_k=", maxK);
+}
+
+bool provesDualRailFrontierWithoutWitness(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  if (!problem.usesDualRailStateEncoding ||
+      problem.observedOutputExprs0.size() <= 1) {
+    return false;
+  }
+  if (!SEC::provesNoBaseCounterexampleAtFrontier(problem, solverType, k)) {
+    return false;
+  }
+  if (isKInductionDiagEnabled()) {
+    emitSecDiag(
+        "SEC diag: k-induction dual-rail proof-only base k=", k,
+        " unsat");
+  }
+  return true;
 }
 
 KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
@@ -128,10 +179,7 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     }
 
     const std::optional<unsigned> inductionDecisionLimit =
-        problem.observedOutputExprs0.size() > 1 &&
-                solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
-            ? std::optional<unsigned>(batchedInductionDecisionLimit())
-            : std::nullopt;
+        batchedInductionDecisionLimit(problem, solverType);
     const InductionProofStatus inductionStatus =
         SEC::proveByInductionStatus(
             problem, solverType, k, inductionDecisionLimit);
@@ -160,13 +208,20 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     // Check only the newly exposed frontier instead of re-solving an
     // OR-of-all-previous-bads query at every depth.
     if (!frontierAlreadyChecked) {
-      if (auto witness = SEC::findBaseCounterexampleAtFrontier(
-              problem, solverType, k);
-          witness.has_value()) {
-        if (isKInductionDiagEnabled()) {
-          emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
+      const bool frontierProvedWithoutWitness =
+          provesDualRailFrontierWithoutWitness(problem, solverType, k);
+      if (!frontierProvedWithoutWitness) {
+        if (auto witness = SEC::findBaseCounterexampleAtFrontier(
+                problem, solverType, k);
+            witness.has_value()) {
+          if (isKInductionDiagEnabled()) {
+            emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
+          }
+          return {
+              KInductionStatus::Different,
+              witness->badFrame,
+              std::move(witness)};
         }
-        return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
       }
       if (isKInductionDiagEnabled()) {
         emitSecDiag("SEC diag: k-induction base k=", k, " unsat");

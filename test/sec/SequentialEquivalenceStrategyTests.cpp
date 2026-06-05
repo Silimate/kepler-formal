@@ -6806,6 +6806,33 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionStepConstrainsResetInputsAfterBootstrap) {
+  KInductionProblem problem;
+  constexpr size_t state0 = 2;
+  constexpr size_t state1 = 3;
+  constexpr size_t reset = 4;
+  problem.state0Symbols = {state0};
+  problem.state1Symbols = {state1};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {state0, state1, reset};
+  problem.transitions0 = {{state0, BoolExpr::Var(reset)}};
+  problem.transitions1 = {{state1, BoolExpr::createFalse()}};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.property =
+      makeEqualityExpr(BoolExpr::Var(state0), BoolExpr::Var(state1));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  // The induction query starts after the boot/reset prefix.  If reset is left
+  // unconstrained here, the proof can invent a later reset assertion and break
+  // a property that is valid in the post-bootstrap SEC environment.
+  EXPECT_TRUE(provesByInduction(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SupportBoundedOutputBatchingKeepsModerateOutputSlicesTogether) {
   KInductionProblem problem;
   for (size_t i = 0; i < 40; ++i) {
@@ -10430,6 +10457,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(
       transitionByState.at(combinedState1)->getSupportVars(),
       (std::set<size_t>{combinedState1, private1}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LazyDualRailTransitionSupportUsesBothRailsWithoutDagRemap) {
+  KInductionProblem problem;
+  constexpr size_t railOne = 10;
+  constexpr size_t railZero = 11;
+  constexpr size_t combinedInput = 12;
+  constexpr size_t localState = 2;
+  constexpr size_t localInput = 3;
+  BoolExpr* localNext =
+      BoolExpr::Xor(BoolExpr::Var(localState), BoolExpr::Var(localInput));
+
+  auto lazyTransitions = std::make_shared<LazyTransitionStore>();
+  lazyTransitions->dualRailStateByLocalSymbolByDesign[0].emplace(
+      localState, DualRailSymbolPair{railOne, railZero});
+  lazyTransitions->localToCombinedByDesign[0].emplace(localInput, combinedInput);
+  lazyTransitions->sourceByStateSymbol.emplace(
+      railOne, LazyTransitionSource{0, localNext, LazyTransitionRail::DualRailOne});
+  problem.lazyTransitions = lazyTransitions;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {railOne, railZero};
+  problem.inputSymbols = {combinedInput};
+  problem.allSymbols = {railOne, railZero, combinedInput};
+
+  const TransitionExprResolver transitionByState(problem);
+  EXPECT_EQ(
+      transitionByState.support(railOne),
+      (std::set<size_t>{railOne, railZero, combinedInput}));
+  // A support-only query must stay in the lazy source-expression layer; the
+  // lifted dual-rail BoolExpr is materialized later only if SAT encoding needs
+  // this transition.
+  EXPECT_TRUE(lazyTransitions->remappedByStateSymbol.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -187,19 +187,26 @@ std::set<size_t> remappedDualRailSupport(
     size_t designIndex,
     std::unordered_map<size_t, size_t>& binaryMap,
     const std::unordered_map<size_t, DualRailSymbolPair>& stateRails) {
-  std::set<size_t> support;
-  for (const auto localSymbol : formula->getSupportVars()) {
+  std::vector<DualRailSymbolPair> touchedStateRails;
+  std::set<size_t> support = collectBoolExprSupport(formula, [&](size_t localSymbol) {
     if (localSymbol < 2) {
-      continue;
+      return localSymbol;  // LCOV_EXCL_LINE
     }
     if (const auto stateIt = stateRails.find(localSymbol);
         stateIt != stateRails.end()) {
-      support.insert(stateIt->second.mayBeOne);
-      support.insert(stateIt->second.mayBeZero);
-      continue;
+      // A local state bit becomes two possible-value rails in the shared
+      // dual-rail SEC problem.  Support queries need both rails even when only
+      // one of the lifted transition rails is being requested.
+      touchedStateRails.push_back(stateIt->second);
+      return stateIt->second.mayBeOne;
     }
-    support.insert(mapLazyTransitionSymbol(designIndex, localSymbol, binaryMap));
+    return mapLazyTransitionSymbol(designIndex, localSymbol, binaryMap);
+  });
+  for (const auto& rails : touchedStateRails) {
+    support.insert(rails.mayBeZero);
   }
+  support.erase(0);
+  support.erase(1);
   return support;
 }
 
