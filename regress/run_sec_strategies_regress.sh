@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different] [max-k=<n>] [compact] [engine=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different] [max-k=<n>] [compact] [engine=<name>] [sec-x-mode=<name>]" >&2
   exit 2
 fi
 
@@ -16,6 +16,7 @@ config_path="$4"
 expectation=""
 max_k_override=""
 compact_mode=""
+sec_x_mode="${SEC_X_MODE:-}"
 # By default the helper is useful for local all-engine smoke checks.  CI passes
 # engine=<name> from the split regress workflows so each job owns one strategy.
 engines=(k_induction imc pdr)
@@ -40,6 +41,9 @@ for option in "${@:5}"; do
           ;;
       esac
       ;;
+    sec-x-mode=*|x-mode=*)
+      sec_x_mode="${option#*=}"
+      ;;
     max-k=*)
       max_k_override="${option#max-k=}"
       if [[ ! "${max_k_override}" =~ ^[0-9]+$ ]]; then
@@ -53,6 +57,15 @@ for option in "${@:5}"; do
       ;;
   esac
 done
+
+case "${sec_x_mode}" in
+  ""|binary|default|dual_rail_steady)
+    ;;
+  *)
+    echo "Invalid SEC X mode override: ${sec_x_mode}" >&2
+    exit 2
+    ;;
+esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
@@ -77,6 +90,7 @@ run_engine() {
     awk -v max_k_override="${max_k_override}" -v compact_mode="${compact_mode}" '
       /^[[:space:]]*verification:/ { next }
       /^[[:space:]]*sec_engine:/ { next }
+      /^[[:space:]]*sec_x_mode:/ { next }
       /^[[:space:]]*max_k:/ { next }
       /^[[:space:]]*compact_mode:/ {
         if (compact_mode != "") {
@@ -94,6 +108,9 @@ run_engine() {
       echo
       echo "verification: sec"
       echo "sec_engine: ${engine}"
+      if [[ -n "${sec_x_mode}" ]]; then
+        echo "sec_x_mode: ${sec_x_mode}"
+      fi
       if [[ -n "${max_k_override}" ]]; then
         echo "max_k: ${max_k_override}"
       fi

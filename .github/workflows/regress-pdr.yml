@@ -7,9 +7,16 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      sec_x_mode:
+        required: false
+        type: string
+        default: ""
 
 env:
   SEC_ENGINE: pdr
+  SEC_X_MODE: ${{ inputs.sec_x_mode }}
 
 jobs:
   build:
