@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "DNL.h"
+#include "BoolExprCache.h"
 #include "Config.h"
 #include "KeplerFormalUtils.h"
 #include "NLDB0.h"
@@ -63,7 +64,11 @@ int runWithConfigFile(const std::filesystem::path& cfgPath) {
   std::string argv2 = cfgPath.string();
   char* argv[] = {argv0.data(), argv1.data(), argv2.data()};
   int argc = 3;
-  return KeplerFormalMain(argc, argv);
+  const int rc = KeplerFormalMain(argc, argv);
+  // CLI tests invoke the tool in-process, so clear the production BoolExpr
+  // cache explicitly instead of relying on OS cleanup at process exit.
+  KEPLER_FORMAL::BoolExprCache::destroy();
+  return rc;
 }
 
 int runWithArgs(std::vector<std::string> args) {
@@ -72,7 +77,9 @@ int runWithArgs(std::vector<std::string> args) {
   for (auto& arg : args) {
     argv.push_back(arg.data());
   }
-  return KeplerFormalMain(static_cast<int>(argv.size()), argv.data());
+  const int rc = KeplerFormalMain(static_cast<int>(argv.size()), argv.data());
+  KEPLER_FORMAL::BoolExprCache::destroy();
+  return rc;
 }
 
 std::filesystem::path findBuiltNajaModuleDir() {

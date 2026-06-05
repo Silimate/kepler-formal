@@ -7497,6 +7497,34 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.coveredOutputs, kWideStartupCertificateOutputs);
   EXPECT_EQ(result.totalOutputs, kWideStartupCertificateOutputs);
   EXPECT_TRUE(result.skippedObservedOutputs.empty());
+
+  SequentialEquivalenceStrategy dualRailKiStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecXMode::DualRailSteady);
+  const auto dualRailKiResult =
+      dualRailKiStrategy.runExtractedModels(model0, model1, 1);
+  EXPECT_EQ(dualRailKiResult.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(dualRailKiResult.bound, 0u);
+  EXPECT_EQ(dualRailKiResult.coveredOutputs, kWideStartupCertificateOutputs);
+  EXPECT_EQ(dualRailKiResult.totalOutputs, kWideStartupCertificateOutputs);
+  EXPECT_TRUE(dualRailKiResult.skippedObservedOutputs.empty());
+
+  SequentialEquivalenceStrategy dualRailImcStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecXMode::DualRailSteady);
+  const auto dualRailImcResult =
+      dualRailImcStrategy.runExtractedModels(model0, model1, 1);
+  EXPECT_EQ(dualRailImcResult.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(dualRailImcResult.bound, 0u);
+  EXPECT_EQ(dualRailImcResult.coveredOutputs, kWideStartupCertificateOutputs);
+  EXPECT_EQ(dualRailImcResult.totalOutputs, kWideStartupCertificateOutputs);
+  EXPECT_TRUE(dualRailImcResult.skippedObservedOutputs.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

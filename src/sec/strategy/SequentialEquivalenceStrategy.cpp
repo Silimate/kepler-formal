@@ -3178,7 +3178,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       secDiagEnabled);
   constexpr size_t kMinOutputsForStartupCertificateFastPath = 129;
   const bool useStartupCertificateFastPath =
-      xMode_ == SecXMode::Binary &&
       aligned.outputs.names.size() >= kMinOutputsForStartupCertificateFastPath &&
       !aligned.resetBootstrapCandidateStateEqualities.names.empty() &&
       !symbolSpace.problem.resetBootstrapInputs.empty();
@@ -3187,7 +3186,11 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
     // part of reachable invariant integration.  Keep this ahead of the
     // conservative coverage filter: wide ASICs such as BlackParrot can have many
     // state-dependent outputs that are still covered by one validated startup
-    // certificate, and should not be reported as uncovered one-by-one.
+    // certificate, and should not be reported as uncovered one-by-one.  The
+    // certificate is stronger than the later binary/dual-rail encoding choice:
+    // it proves the checked top-output relation after reset from arbitrary
+    // startup state, so KI/IMC do not need to rediscover that reachable-state
+    // invariant by broad induction queries.
     logSecDiagLine(
         secDiagEnabled,
         "SEC diag: output-rooted structural startup relation proves SEC");
