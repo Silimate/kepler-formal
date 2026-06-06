@@ -280,6 +280,56 @@ public:
     return solveStatus();
   }  // LCOV_EXCL_LINE
 
+  SolveStatus solveWithResourceLimits(
+      unsigned conflictLimit,
+      unsigned decisionLimit =
+          std::numeric_limits<unsigned>::max()) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      return solveWithKissatResourceLimits(conflictLimit, decisionLimit);
+    }
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
+      if (conflictLimit != std::numeric_limits<unsigned>::max()) {
+        cadicalSolver_->limit(
+            "conflicts",
+            static_cast<int>(std::min<unsigned>(
+                conflictLimit, static_cast<unsigned>(std::numeric_limits<int>::max()))));
+      }
+      if (decisionLimit != std::numeric_limits<unsigned>::max()) {
+        cadicalSolver_->limit(
+            "decisions",
+            static_cast<int>(std::min<unsigned>(
+                decisionLimit, static_cast<unsigned>(std::numeric_limits<int>::max()))));
+      }
+      return solveStatus();
+    }
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
+      Glucose::vec<Glucose::Lit> noAssumptions;
+      if (conflictLimit != std::numeric_limits<unsigned>::max()) {
+        glucoseSolver_->setConfBudget(conflictLimit);
+      }
+      if (decisionLimit != std::numeric_limits<unsigned>::max()) {
+        // Glucose has no decision budget here; a propagation budget is the
+        // closest local limiter and preserves UNKNOWN as non-proof.
+        glucoseSolver_->setPropBudget(decisionLimit);
+      }
+      const auto result = glucoseSolver_->solveLimited(
+          noAssumptions,
+          /*do_simp=*/false,
+          /*turn_off_simp=*/true);
+      glucoseSolver_->budgetOff();
+      if (Glucose::toInt(result) == 0) {
+        return SolveStatus::Sat;
+      }
+      if (Glucose::toInt(result) == 1) {
+        return SolveStatus::Unsat;
+      }
+      return SolveStatus::Unknown;
+    }
+    // LCOV_EXCL_START
+    throw std::runtime_error("Unknown solver type");
+    // LCOV_EXCL_STOP
+  }
+
   SolveStatus solveWithAssumptionsStatus(
       const std::vector<int>& assumptions,
       int64_t conflictLimit = -1,
@@ -511,6 +561,44 @@ public:
     // equivalence cones, so disable it only for this large-cone profile.
     setKissatOptionOrThrow(solver, "minimize", 0);  // LCOV_EXCL_LINE
     setKissatOptionOrThrow(solver, "shrink", 0);  // LCOV_EXCL_LINE
+  }
+
+  void configureForSecDualRailConeProof(size_t coneSymbols = 0) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
+      configureForSecPdrQuery(coneSymbols);
+      return;
+    }
+
+    configureForSecConeProof(coneSymbols);
+    if (solverType_ != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      return;  // LCOV_EXCL_LINE
+    }
+
+    // Dual-rail formulas double each state bit into may-one/may-zero rails.
+    // Medium cones can therefore look small by symbol count while still
+    // triggering expensive Kissat probe/vivify passes.  Keep the generic SEC
+    // profile unchanged, but use the direct large-cone path earlier for
+    // dual-rail induction leaves.
+    constexpr size_t kDualRailMediumConeSymbolThreshold = 4096;
+    if (coneSymbols < kDualRailMediumConeSymbolThreshold) {
+      return;
+    }
+
+    auto* solver = static_cast<kissat*>(kissatSolver_);
+    setKissatOptionOrThrow(solver, "preprocess", 0);
+    setKissatOptionOrThrow(solver, "simplify", 0);
+    setKissatOptionOrThrow(solver, "preprocesscongruence", 0);
+    setKissatOptionOrThrow(solver, "preprocessprobe", 0);
+    setKissatOptionOrThrow(solver, "congruence", 0);
+    setKissatOptionOrThrow(solver, "probe", 0);
+    setKissatOptionOrThrow(solver, "probeinit", 0);
+    setKissatOptionOrThrow(solver, "eliminate", 0);
+    setKissatOptionOrThrow(solver, "eliminateinit", 0);
+    setKissatOptionOrThrow(solver, "lucky", 0);
+    setKissatOptionOrThrow(solver, "luckyearly", 0);
+    setKissatOptionOrThrow(solver, "luckylate", 0);
+    setKissatOptionOrThrow(solver, "minimize", 0);
+    setKissatOptionOrThrow(solver, "shrink", 0);
   }
 
   void configureForSecPdrQuery(size_t coneSymbols = 0) {

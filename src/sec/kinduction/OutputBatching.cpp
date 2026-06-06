@@ -17,6 +17,7 @@ namespace {
 // These limits keep nearby outputs together while preventing one batch from
 // dragging most of the design into one SAT cone.
 constexpr OutputBatchingLimits kDefaultOutputBatchingLimits;
+constexpr OutputBatchingLimits kDualRailOutputBatchingLimits{16, 512};
 
 void appendOutputSupport(const KInductionProblem& problem,
                          size_t outputIndex,
@@ -33,7 +34,8 @@ void appendOutputSupport(const KInductionProblem& problem,
 
 std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
     const KInductionProblem& problem) {
-  return buildSupportBoundedOutputBatches(problem, kDefaultOutputBatchingLimits);
+  return buildSupportBoundedOutputBatches(
+      problem, defaultOutputBatchingLimitsForProblem(problem));
 }
 
 std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
@@ -70,6 +72,17 @@ std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
   return batches;
 }
 
+OutputBatchingLimits defaultOutputBatchingLimitsForProblem(
+    const KInductionProblem& problem) {
+  if (problem.usesDualRailStateEncoding) {
+    // Dual-rail output obligations already carry both may-one/may-zero rails.
+    // Start with moderate shared-cone batches, then let KI's recursive
+    // splitter localize only the conjunctions that are actually hard.
+    return kDualRailOutputBatchingLimits;
+  }
+  return kDefaultOutputBatchingLimits;
+}
+
 void configureOutputBatchProblem(KInductionProblem& batch,
                                  const KInductionProblem& source,
                                  size_t firstOutput,
@@ -90,6 +103,14 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   batch.observedOutputExprs1.assign(
       source.observedOutputExprs1.begin() + firstOutput,
       source.observedOutputExprs1.begin() + endOutput);
+  if (source.outputImpliedByInductionCore.size() ==
+      source.observedOutputExprs0.size()) {
+    batch.outputImpliedByInductionCore.assign(
+        source.outputImpliedByInductionCore.begin() + firstOutput,
+        source.outputImpliedByInductionCore.begin() + endOutput);
+  } else {
+    batch.outputImpliedByInductionCore.clear();
+  }
 
   // SEC output equality is a conjunction. Proving smaller conjunctions and
   // combining the results is logically equivalent to one monolithic property,

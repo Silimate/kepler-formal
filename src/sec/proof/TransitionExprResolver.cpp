@@ -131,11 +131,12 @@ std::set<size_t> collectBoolExprSupport(BoolExpr* formula,
 struct SupportVisitKey {
   BoolExpr* node = nullptr;
   std::unordered_map<size_t, size_t>* symbolMap = nullptr;
+  const std::unordered_map<size_t, DualRailSymbolPair>* stateRails = nullptr;
   size_t designIndex = 0;
 
   bool operator==(const SupportVisitKey& other) const {
     return node == other.node && symbolMap == other.symbolMap &&
-           designIndex == other.designIndex;
+           stateRails == other.stateRails && designIndex == other.designIndex;
   }
 };
 
@@ -143,7 +144,8 @@ struct SupportVisitKeyHash {
   size_t operator()(const SupportVisitKey& key) const {
     return std::hash<BoolExpr*>{}(key.node) ^
            (std::hash<void*>{}(key.symbolMap) << 1) ^
-           (std::hash<size_t>{}(key.designIndex) << 2);
+           (std::hash<const void*>{}(key.stateRails) << 2) ^
+           (std::hash<size_t>{}(key.designIndex) << 3);
   }
 };
 
@@ -208,6 +210,20 @@ std::set<size_t> remappedDualRailSupport(
   support.erase(0);
   support.erase(1);
   return support;
+}
+
+void addCollectedSupportSymbol(
+    size_t symbol,
+    const std::unordered_set<size_t>& knownStateSymbols,
+    std::unordered_set<size_t>& stateSupport,
+    std::unordered_set<size_t>& allSupport) {
+  if (symbol < 2) {
+    return;
+  }
+  allSupport.insert(symbol);
+  if (knownStateSymbols.find(symbol) != knownStateSymbols.end()) {
+    stateSupport.insert(symbol);
+  }
 }
 
 BoolExpr* materializeLazyDualRailTransition(
@@ -403,16 +419,15 @@ void TransitionExprResolver::collectSupportForTargets(
     return;
   }
 
-  if (stateSymbols.size() >= kCachedUnionSupportTargetThreshold) {
+  if (!problem_.usesDualRailStateEncoding &&
+      stateSymbols.size() >= kCachedUnionSupportTargetThreshold) {
     // Large reset-frontier COI builders repeatedly ask for neighboring target
     // sets. Reuse the resolver's per-transition support cache instead of
     // rebuilding a large per-query visited table and throwing it away.
     for (const auto stateSymbol : stateSymbols) {
       for (const auto symbol : support(stateSymbol)) {
-        allSupport.insert(symbol);
-        if (knownStateSymbols.find(symbol) != knownStateSymbols.end()) {
-          stateSupport.insert(symbol);
-        }
+        addCollectedSupportSymbol(
+            symbol, knownStateSymbols, stateSupport, allSupport);
       }
     }
     return;
@@ -435,7 +450,7 @@ void TransitionExprResolver::collectSupportForTargets(
   for (const auto stateSymbol : stateSymbols) {
     if (const auto eagerIt = eagerByStateSymbol_.find(stateSymbol);
         eagerIt != eagerByStateSymbol_.end()) {
-      stack.push_back({eagerIt->second, nullptr});
+      stack.push_back({eagerIt->second, nullptr, nullptr});
       continue;
     }
 
@@ -456,17 +471,20 @@ void TransitionExprResolver::collectSupportForTargets(
       throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
     }
     if (source.rail != LazyTransitionRail::Binary) {
-      for (const auto symbol : support(stateSymbol)) {
-        allSupport.insert(symbol);
-        if (knownStateSymbols.find(symbol) != knownStateSymbols.end()) {
-          stateSupport.insert(symbol);
-        }
-      }
-      continue;
+      // Dual-rail lazy transitions for a wide bus often share most of their
+      // source DAG. Walk those roots together instead of computing one full
+      // support set per rail/state bit while building the same COI.
+      stack.push_back(
+          {source.localExpr,
+           &store.localToCombinedByDesign[source.designIndex],
+           &store.dualRailStateByLocalSymbolByDesign[source.designIndex],
+           source.designIndex});
+      continue;  // LCOV_EXCL_LINE
     }
     stack.push_back(  // LCOV_EXCL_LINE
         {source.localExpr,
          &store.localToCombinedByDesign[source.designIndex],
+         nullptr,
          source.designIndex});  // LCOV_EXCL_LINE
   }
 
@@ -479,25 +497,43 @@ void TransitionExprResolver::collectSupportForTargets(
     }
     if (node->getOp() == Op::VAR) {
       size_t symbol = node->getId();
+      if (current.stateRails != nullptr && symbol >= 2) {
+        if (const auto stateIt = current.stateRails->find(symbol);
+            stateIt != current.stateRails->end()) {
+          addCollectedSupportSymbol(
+              stateIt->second.mayBeOne,
+              knownStateSymbols,
+              stateSupport,
+              allSupport);
+          addCollectedSupportSymbol(
+              stateIt->second.mayBeZero,
+              knownStateSymbols,
+              stateSupport,
+              allSupport);
+          continue;
+        }
+      }
       if (current.symbolMap != nullptr && symbol >= 2) {
         symbol = mapLazyTransitionSymbol(
             current.designIndex, symbol, *current.symbolMap);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
-      if (symbol >= 2) {
-        allSupport.insert(symbol);
-        if (knownStateSymbols.find(symbol) != knownStateSymbols.end()) {
-          stateSupport.insert(symbol);
-        }
-      }
+      addCollectedSupportSymbol(
+          symbol, knownStateSymbols, stateSupport, allSupport);
       continue;
     }
     if (node->getRight() != nullptr) {
       stack.push_back(
-          {node->getRight(), current.symbolMap, current.designIndex});
+          {node->getRight(),
+           current.symbolMap,
+           current.stateRails,
+           current.designIndex});
     }
     if (node->getLeft() != nullptr) {
       stack.push_back(
-          {node->getLeft(), current.symbolMap, current.designIndex});
+          {node->getLeft(),
+           current.symbolMap,
+           current.stateRails,
+           current.designIndex});
     }
   }
 }

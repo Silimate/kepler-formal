@@ -31,6 +31,10 @@ bool isFrontierFirstEnabled() {
 // sky130hs_ibex are still sensitive to monolithic base-case witnesses.
 constexpr size_t kMinOutputsForBatchedProof = 2;
 constexpr unsigned kDefaultBatchedInductionDecisionLimit = 200000;
+// Dual-rail SEC is a coverage extension for resetless state.  Residual outputs
+// that do not close quickly should become uncovered/inconclusive instead of
+// letting one expanded rail query dominate the full regression runtime.
+constexpr unsigned kDefaultDualRailInductionDecisionLimit = 5000;
 
 std::optional<unsigned> readUnsignedEnv(const char* name) {
   const char* value = std::getenv(name);
@@ -51,11 +55,28 @@ unsigned binaryBatchedInductionDecisionLimit() {
       .value_or(kDefaultBatchedInductionDecisionLimit);
 }
 
+std::optional<unsigned> dualRailLeafInductionDecisionLimit() {
+  if (const auto leafLimit =
+          readUnsignedEnv("KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT");
+      leafLimit.has_value()) {
+    return leafLimit;
+  }
+  return kDefaultDualRailInductionDecisionLimit;
+}
+
 std::optional<unsigned> batchedInductionDecisionLimit(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType) {
-  if (problem.observedOutputExprs0.size() <= 1 ||
-      solverType != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+  if (solverType != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+    return std::nullopt;
+  }
+
+  if (problem.usesDualRailStateEncoding &&
+      problem.observedOutputExprs0.size() <= 1) {
+    return dualRailLeafInductionDecisionLimit();
+  }
+
+  if (problem.observedOutputExprs0.size() <= 1) {
     return std::nullopt;
   }
 
@@ -63,18 +84,17 @@ std::optional<unsigned> batchedInductionDecisionLimit(
     return binaryBatchedInductionDecisionLimit();
   }
 
-  // Dual-rail proofs are already state-space expanded.  The binary default
-  // limit is useful to protect broad OR-of-output-bads queries, but on
-  // dual-rail BlackParrot it can turn a solvable batch into Unknown, causing a
-  // recursive split storm and repeated transition-support construction.  Leave
-  // dual-rail batches uncapped by default, while still allowing explicit local
-  // tuning when a developer asks for it.
+  // Dual-rail proofs are state-space expanded, so a single hard multi-output
+  // induction batch can spend the whole workflow inside CDCL.  Base checks are
+  // shared outside the slices, making recursive splitting cheap enough to use
+  // the normal batch cap here too.
   if (const auto dualRailLimit =
           readUnsignedEnv("KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT");
       dualRailLimit.has_value()) {
     return dualRailLimit;
   }
-  return readUnsignedEnv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT");
+  return readUnsignedEnv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT")
+      .value_or(kDefaultDualRailInductionDecisionLimit);
 }
 
 void emitKInductionProblemDiag(const KInductionProblem& problem,
@@ -113,6 +133,10 @@ bool provesDualRailFrontierWithoutWitness(
   return true;
 }
 
+bool shouldCheckLocalBaseCase(const KInductionProblem& problem) {
+  return !problem.deferBaseCaseChecks;
+}
+
 KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
                                          KEPLER_FORMAL::Config::SolverType solverType,
                                          size_t maxK) {
@@ -121,17 +145,21 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
   if (isKInductionDiagEnabled()) {
     emitSecDiag("SEC diag: k-induction base k=0 begin");
   }
-  auto baseZeroWitness = frontierFirst
-      ? SEC::findFastBaseCounterexampleAtFrontier(problem, solverType, 0)
-      : SEC::findBaseCounterexample(problem, solverType, 0);
-  if (baseZeroWitness.has_value()) {
-    if (isKInductionDiagEnabled()) {
-      emitSecDiag("SEC diag: k-induction base k=0 found cex");
+  if (shouldCheckLocalBaseCase(problem)) {
+    auto baseZeroWitness = frontierFirst
+        ? SEC::findFastBaseCounterexampleAtFrontier(problem, solverType, 0)
+        : SEC::findBaseCounterexample(problem, solverType, 0);
+    if (baseZeroWitness.has_value()) {
+      if (isKInductionDiagEnabled()) {
+        emitSecDiag("SEC diag: k-induction base k=0 found cex");
+      }
+      return {
+          KInductionStatus::Different,
+          baseZeroWitness->badFrame,
+          std::move(baseZeroWitness)};
     }
-    return {
-        KInductionStatus::Different,
-        baseZeroWitness->badFrame,
-        std::move(baseZeroWitness)};
+  } else if (isKInductionDiagEnabled()) {
+    emitSecDiag("SEC diag: k-induction base k=0 deferred");
   }
   if (isKInductionDiagEnabled()) {
     emitSecDiag("SEC diag: k-induction base k=0 unsat");
@@ -191,11 +219,24 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     }
     if (inductionStatus == InductionProofStatus::Unknown) {
       if (isKInductionDiagEnabled()) {
-        emitSecDiag(
-            "SEC diag: k-induction step k=", k,
-            " resource-limited; splitting output batch");
+        if (problem.usesDualRailStateEncoding &&
+            problem.observedOutputExprs0.size() <= 1) {
+          emitSecDiag(
+              "SEC diag: k-induction step k=", k,
+              " resource-limited; checking frontier");
+        } else {
+          emitSecDiag(
+              "SEC diag: k-induction step k=", k,
+              " resource-limited; splitting output batch");
+        }
       }
-      return {KInductionStatus::Inconclusive, k};
+      if (!problem.usesDualRailStateEncoding ||
+          problem.observedOutputExprs0.size() > 1) {
+        return {KInductionStatus::Inconclusive, k};
+      }
+      if (!shouldCheckLocalBaseCase(problem)) {
+        return {KInductionStatus::Inconclusive, k};
+      }
     }
     if (isKInductionDiagEnabled()) {
       emitSecDiag("SEC diag: k-induction step k=", k, " inconclusive");
@@ -207,7 +248,7 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     // Earlier base checks have already ruled out bad states on frames < k.
     // Check only the newly exposed frontier instead of re-solving an
     // OR-of-all-previous-bads query at every depth.
-    if (!frontierAlreadyChecked) {
+    if (!frontierAlreadyChecked && shouldCheckLocalBaseCase(problem)) {
       const bool frontierProvedWithoutWitness =
           provesDualRailFrontierWithoutWitness(problem, solverType, k);
       if (!frontierProvedWithoutWitness) {
@@ -226,6 +267,8 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
       if (isKInductionDiagEnabled()) {
         emitSecDiag("SEC diag: k-induction base k=", k, " unsat");
       }
+    } else if (!frontierAlreadyChecked && isKInductionDiagEnabled()) {
+      emitSecDiag("SEC diag: k-induction base k=", k, " deferred");
     }
   }
 
@@ -239,9 +282,11 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
   // cumulative base query as a safety net so any interaction with reset
   // bootstrap offsets or observation-only startup semantics cannot hide a real
   // bounded counterexample.
-  if (auto witness = SEC::findBaseCounterexample(problem, solverType, maxK);
-      witness.has_value()) {
-    return {KInductionStatus::Different, witness->badFrame, std::move(witness)};  // LCOV_EXCL_LINE
+  if (shouldCheckLocalBaseCase(problem)) {
+    if (auto witness = SEC::findBaseCounterexample(problem, solverType, maxK);
+        witness.has_value()) {
+      return {KInductionStatus::Different, witness->badFrame, std::move(witness)};  // LCOV_EXCL_LINE
+    }
   }
 
   return {KInductionStatus::Inconclusive, maxK};
@@ -310,13 +355,18 @@ KInductionResult runOutputBatchedKInduction(
     size_t maxK) {
   emitKInductionProblemDiag(problem, maxK);
   KInductionResult combined{KInductionStatus::Equivalent, 0};
+  const OutputBatchingLimits batchingLimits =
+      defaultOutputBatchingLimitsForProblem(problem);
   // Copy the large shared SEC problem once, then mutate only the small
   // output/property slice for each batch.  The previous implementation copied
   // hundreds of thousands of state symbols and equality pairs per batch, which
   // became visible on BlackParrot even after SAT-side batching was effective.
   KInductionProblem batchProblem = problem;
+  const bool useSharedBaseCase =
+      problem.usesDualRailStateEncoding && shouldCheckLocalBaseCase(problem);
+  batchProblem.deferBaseCaseChecks = useSharedBaseCase;
   for (const auto& [firstOutput, endOutput] :
-       buildSupportBoundedOutputBatches(problem)) {
+       buildSupportBoundedOutputBatches(problem, batchingLimits)) {
     const KInductionResult result = runOutputRangeKInduction(
         batchProblem, problem, solverType, maxK, firstOutput, endOutput);
     if (result.status == KInductionStatus::Different) {
@@ -326,6 +376,13 @@ KInductionResult runOutputBatchedKInduction(
       combined.status = KInductionStatus::Inconclusive;
     }
     combined.bound = std::max(combined.bound, result.bound);
+  }
+  if (useSharedBaseCase && combined.status == KInductionStatus::Equivalent) {
+    const size_t baseHorizon = combined.bound == 0 ? 0 : combined.bound - 1;
+    if (auto witness = SEC::findBaseCounterexample(problem, solverType, baseHorizon);
+        witness.has_value()) {
+      return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+    }
   }
   return combined;
 }

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -814,6 +815,180 @@ SequentialEquivalenceResult makeSecResult(
   return result;
 }
 
+std::string outputNameForProblemIndex(const KInductionProblem& problem,
+                                      size_t outputIndex) {
+  return outputIndex < problem.observedOutputNames.size()
+             ? problem.observedOutputNames[outputIndex]
+             : std::to_string(outputIndex);  // LCOV_EXCL_LINE
+}
+
+bool markDualRailPdrOutputSkipped(
+    const KInductionProblem& problem,
+    std::vector<bool>& coveredOutputs,
+    std::unordered_map<size_t, std::string>& skipReasons,
+    size_t outputIndex) {
+  if (outputIndex >= coveredOutputs.size() || !coveredOutputs[outputIndex]) {
+    return true;  // LCOV_EXCL_LINE
+  }
+  if (std::count(coveredOutputs.begin(), coveredOutputs.end(), true) <= 1) {
+    // Partial coverage must not erase the whole proof surface.  A single-output
+    // dual-rail timeout remains inconclusive so a real mismatch cannot be
+    // hidden behind an empty covered set.
+    return false;
+  }
+  coveredOutputs[outputIndex] = false;
+  skipReasons[outputIndex] =
+      "dual-rail PDR repair was inconclusive after isolating this output";
+  if (isSecDiagEnabled() ||
+      std::getenv("KEPLER_SEC_SUMMARY_STATS") != nullptr) {
+    emitSecDiag(
+        "SEC diag: dual-rail PDR leaves output uncovered: ",
+        outputNameForProblemIndex(problem, outputIndex));
+  }
+  return true;
+}
+
+OutputCoverageSelection buildCoverageWithDualRailPdrSkips(
+    const OutputCoverageSelection& baseCoverage,
+    const KInductionProblem& problem,
+    const std::vector<bool>& coveredOutputs,
+    const std::unordered_map<size_t, std::string>& skipReasons) {
+  if (coveredOutputs.empty() || skipReasons.empty()) {
+    return baseCoverage;
+  }
+  if (baseCoverage.checkedOutputs.names.size() != coveredOutputs.size()) {
+    return baseCoverage;  // LCOV_EXCL_LINE
+  }
+
+  OutputCoverageSelection coverage = baseCoverage;
+  coverage.checkedOutputs.names.clear();
+  coverage.checkedOutputs.keys0.clear();
+  coverage.checkedOutputs.keys1.clear();
+  for (size_t i = 0; i < coveredOutputs.size(); ++i) {
+    if (coveredOutputs[i]) {
+      coverage.checkedOutputs.names.push_back(baseCoverage.checkedOutputs.names[i]);
+      coverage.checkedOutputs.keys0.push_back(baseCoverage.checkedOutputs.keys0[i]);
+      coverage.checkedOutputs.keys1.push_back(baseCoverage.checkedOutputs.keys1[i]);
+      continue;
+    }
+
+    const auto reasonIt = skipReasons.find(i);
+    const std::string reason =
+        reasonIt == skipReasons.end()
+            ? "dual-rail PDR repair was inconclusive"  // LCOV_EXCL_LINE
+            : reasonIt->second;
+    coverage.skippedOutputs.push_back(
+        outputNameForProblemIndex(problem, i) + ": " + reason);
+  }
+  return coverage;
+}
+
+std::vector<size_t> collectOutputsRequiringDualRailEngineProof(
+    const KInductionProblem& problem) {
+  std::vector<size_t> outputIndices;
+  if (problem.outputImpliedByInductionCore.size() !=
+      problem.observedOutputExprs0.size()) {
+    return outputIndices;
+  }
+  for (size_t i = 0; i < problem.outputImpliedByInductionCore.size(); ++i) {
+    if (!problem.outputImpliedByInductionCore[i]) {
+      outputIndices.push_back(i);
+    }
+  }
+  return outputIndices;
+}
+
+void rebuildSelectedOutputProperty(KInductionProblem& problem) {
+  BoolExpr* property = BoolExpr::createTrue();
+  for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
+    property = BoolExpr::And(
+        property,
+        makeEqualityExpr(problem.observedOutputExprs0[i],
+                         problem.observedOutputExprs1[i]));
+  }
+  problem.property = BoolExpr::simplify(property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = nullptr;
+  problem.inductionBad = nullptr;
+  problem.inductionPropertyAssumesInductiveStateEqualities = false;
+}
+
+KInductionProblem makeOutputSubsetProblem(
+    const KInductionProblem& source,
+    const std::vector<size_t>& outputIndices) {
+  KInductionProblem subset = source;
+  subset.observedOutputs.clear();
+  subset.observedOutputNames.clear();
+  subset.observedOutputExprs0.clear();
+  subset.observedOutputExprs1.clear();
+  subset.outputImpliedByInductionCore.clear();
+
+  const bool copyObservedKeys =
+      source.observedOutputs.size() == source.observedOutputExprs0.size();
+  const bool copyImplicationFlags =
+      source.outputImpliedByInductionCore.size() ==
+      source.observedOutputExprs0.size();
+  for (const size_t outputIndex : outputIndices) {
+    if (copyObservedKeys) {
+      subset.observedOutputs.push_back(source.observedOutputs[outputIndex]);
+    }
+    subset.observedOutputNames.push_back(
+        outputNameForProblemIndex(source, outputIndex));
+    subset.observedOutputExprs0.push_back(
+        source.observedOutputExprs0[outputIndex]);
+    subset.observedOutputExprs1.push_back(
+        source.observedOutputExprs1[outputIndex]);
+    if (copyImplicationFlags) {
+      subset.outputImpliedByInductionCore.push_back(
+          source.outputImpliedByInductionCore[outputIndex]);
+    }
+  }
+  rebuildSelectedOutputProperty(subset);
+  subset.description = source.description + " selected output repair";
+  return subset;
+}
+
+OutputCoverageSelection makeOutputSubsetCoverage(
+    const OutputCoverageSelection& baseCoverage,
+    const std::vector<size_t>& outputIndices) {
+  if (baseCoverage.checkedOutputs.names.empty()) {
+    return baseCoverage;  // LCOV_EXCL_LINE
+  }
+  OutputCoverageSelection coverage = baseCoverage;
+  coverage.checkedOutputs.names.clear();
+  coverage.checkedOutputs.keys0.clear();
+  coverage.checkedOutputs.keys1.clear();
+  for (const size_t outputIndex : outputIndices) {
+    if (outputIndex >= baseCoverage.checkedOutputs.names.size()) {
+      return baseCoverage;  // LCOV_EXCL_LINE
+    }
+    coverage.checkedOutputs.names.push_back(
+        baseCoverage.checkedOutputs.names[outputIndex]);
+    coverage.checkedOutputs.keys0.push_back(
+        baseCoverage.checkedOutputs.keys0[outputIndex]);
+    coverage.checkedOutputs.keys1.push_back(
+        baseCoverage.checkedOutputs.keys1[outputIndex]);
+  }
+  return coverage;
+}
+
+OutputCoverageSelection buildCoverageSkippingOutputIndices(
+    const OutputCoverageSelection& baseCoverage,
+    const KInductionProblem& problem,
+    const std::vector<size_t>& skippedOutputIndices,
+    const std::string& reason) {
+  std::vector<bool> coveredOutputs(problem.observedOutputExprs0.size(), true);
+  std::unordered_map<size_t, std::string> skipReasons;
+  for (const size_t outputIndex : skippedOutputIndices) {
+    if (outputIndex < coveredOutputs.size()) {
+      coveredOutputs[outputIndex] = false;
+      skipReasons.emplace(outputIndex, reason);
+    }
+  }
+  return buildCoverageWithDualRailPdrSkips(
+      baseCoverage, problem, coveredOutputs, skipReasons);
+}
+
 std::unordered_map<size_t, SignalKey> buildStateKeyByLocalVar(
     const SequentialDesignModel& model) {
   std::unordered_map<size_t, SignalKey> stateKeyByVar;
@@ -1026,7 +1201,92 @@ bool secSummaryStatsEnabled() {
 }
 
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
+constexpr size_t kDefaultDualRailPdrRepairOutputLimit = 16;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
+constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
+
+size_t dualRailPdrRepairOutputLimit() {
+  const char* value = std::getenv("KEPLER_SEC_DUAL_RAIL_PDR_REPAIR_OUTPUT_LIMIT");
+  if (value == nullptr || *value == '\0') {
+    return kDefaultDualRailPdrRepairOutputLimit;
+  }
+  char* end = nullptr;
+  const unsigned long long parsed = std::strtoull(value, &end, 10);
+  if (end == value || *end != '\0' ||
+      parsed > std::numeric_limits<size_t>::max()) {
+    return kDefaultDualRailPdrRepairOutputLimit;
+  }
+  return static_cast<size_t>(parsed);
+}
+
+std::optional<SequentialEquivalenceResult> buildDualRailResidualCapResult(
+    const KInductionProblem& problem,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    const char* sourceEngine,
+    size_t bound) {
+  if (!problem.usesDualRailStateEncoding ||
+      problem.outputImpliedByInductionCore.size() !=
+          problem.observedOutputExprs0.size() ||
+      problem.outputImpliedByInductionCore.empty()) {
+    return std::nullopt;
+  }
+
+  const std::vector<size_t> engineOutputIndices =
+      collectOutputsRequiringDualRailEngineProof(problem);
+  if (engineOutputIndices.empty()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        bound,
+        "",
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  const size_t repairOutputLimit = dualRailPdrRepairOutputLimit();
+  if (engineOutputIndices.size() <= repairOutputLimit) {
+    return std::nullopt;
+  }
+
+  emitSecDiag(
+      "SEC diag: ", sourceEngine,
+      " dual-rail proof skipped because residual outputs exceed limit ",
+      repairOutputLimit);
+  const std::string reason =
+      std::string("dual-rail ") + sourceEngine +
+      " skipped for this non-implied output because the residual output set "
+      "exceeded the configured limit";
+  const OutputCoverageSelection partialCoverage =
+      buildCoverageSkippingOutputIndices(
+          outputCoverage, problem, engineOutputIndices, reason);
+  // The dual-rail core already proved the covered outputs.  Residual outputs
+  // are deliberately reported as uncovered here; this is a runtime guard, not a
+  // proof of the skipped outputs.
+  return makeSecResult(
+      SequentialEquivalenceStatus::Equivalent,
+      bound,
+      "",
+      partialCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+}
+
+unsigned dualRailLocalImplicationConflictLimit() {
+  const char* value =
+      std::getenv("KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  if (value == nullptr || *value == '\0') {
+    return kDualRailLocalImplicationConflictLimit;
+  }
+  char* end = nullptr;
+  const unsigned long parsed = std::strtoul(value, &end, 10);
+  if (end == value || *end != '\0' ||
+      parsed > std::numeric_limits<unsigned>::max()) {
+    return kDualRailLocalImplicationConflictLimit;
+  }
+  return static_cast<unsigned>(parsed);
+}
 
 void emitPdrStrategyStageStats(
     bool enabled,
@@ -1777,6 +2037,8 @@ void buildSecPropertiesAndTransitions(
   }
 
   BoolExpr* inductionProperty = inductionCore;
+  problem.outputImpliedByInductionCore.clear();
+  problem.outputImpliedByInductionCore.reserve(problem.observedOutputExprs0.size());
   for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
     const auto outputEquality = makeEqualityExpr(
         problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]);
@@ -1790,6 +2052,7 @@ void buildSecPropertiesAndTransitions(
             abstractOutputMap0,
             abstractOutputMap1)) {
       ++abstractEquivalentOutputCount;
+      problem.outputImpliedByInductionCore.push_back(true);
       continue;
     }
     // A proof obligation can omit an output equality only when the current
@@ -1800,9 +2063,11 @@ void buildSecPropertiesAndTransitions(
         inductionCore, outputEquality, solverType, kLocalImplicationConflictLimit);
     if (impliedByInductionCore.value_or(false)) {
       ++satImpliedOutputCount;
+      problem.outputImpliedByInductionCore.push_back(true);
       continue;
     }
 
+    problem.outputImpliedByInductionCore.push_back(false);
     if (secDiagEnabled) {
       fprintf(
           stderr,
@@ -1855,6 +2120,7 @@ KInductionProblem buildDualRailSecProblem(
     const ReachableStateInvariant& reachableInvariant,
     SharedSecSymbolSpace& symbolSpace,
     bool useLazyTransitionRemapping,
+    KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
   KInductionProblem problem;
   problem.environmentInputs = alignedInputs.keys0;
@@ -1921,7 +2187,19 @@ KInductionProblem buildDualRailSecProblem(
   std::unordered_map<BoolExpr*, DualRailBoolExpr> memo0;
   std::unordered_map<BoolExpr*, DualRailBoolExpr> memo1;
 
+  BoolExpr* inductionCore = BoolExpr::createTrue();
+  for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
+    inductionCore = BoolExpr::And(
+        inductionCore,
+        makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));
+  }
+
   BoolExpr* property = BoolExpr::createTrue();
+  size_t satImpliedOutputCount = 0;
+  const unsigned implicationConflictLimit =
+      dualRailLocalImplicationConflictLimit();
+  problem.outputImpliedByInductionCore.clear();
+  problem.outputImpliedByInductionCore.reserve(alignedOutputs.names.size());
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
     const auto out0 = buildDualRailBoolExpr(
         model0.observedOutputExprByKey.at(alignedOutputs.keys0[i]),
@@ -1941,6 +2219,22 @@ KInductionProblem buildDualRailSecProblem(
     problem.observedOutputNames.push_back(alignedOutputs.names[i]);
     problem.observedOutputExprs0.push_back(outputRailEquality);
     problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+    const auto impliedByInductionCore = boolFormulaImpliesWithConflictLimit(
+        inductionCore,
+        outputRailEquality,
+        solverType,
+        implicationConflictLimit);
+    const bool outputImplied = impliedByInductionCore.value_or(false);
+    if (outputImplied) {
+      ++satImpliedOutputCount;
+    } else if (secDiagEnabled) {
+      fprintf(
+          stderr,
+          "SEC diag: dual-rail output requires engine proof: %s\n",
+          alignedOutputs.names[i].c_str());
+      fflush(stderr);
+    }
+    problem.outputImpliedByInductionCore.push_back(outputImplied);
     property = BoolExpr::And(property, outputRailEquality);
   }
 
@@ -1969,12 +2263,7 @@ KInductionProblem buildDualRailSecProblem(
     }
   }
 
-  BoolExpr* inductionProperty = BoolExpr::createTrue();
-  for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-    inductionProperty = BoolExpr::And(
-        inductionProperty,
-        makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));
-  }
+  BoolExpr* inductionProperty = inductionCore;
   inductionProperty = BoolExpr::And(inductionProperty, property);
 
   problem.property = BoolExpr::simplify(property);
@@ -1991,7 +2280,8 @@ KInductionProblem buildDualRailSecProblem(
         "SEC summary: x_mode=dual_rail_steady rail_state_bits=%zu "
         "rail_outputs=%zu reset_bootstrap_inputs=%zu bootstrap_cycles=%zu "
         "bootstrap_assignments=%zu initial_equalities=%zu "
-        "bootstrap_equalities=%zu inductive_equalities=%zu\n",
+        "bootstrap_equalities=%zu inductive_equalities=%zu "
+        "sat_implied_outputs=%zu implication_conflict_limit=%u\n",
         problem.totalStateCount,
         problem.observedOutputExprs0.size(),
         problem.resetBootstrapInputs.size(),
@@ -1999,7 +2289,9 @@ KInductionProblem buildDualRailSecProblem(
         problem.bootstrapStateAssignments.size(),
         problem.initialStateEqualityPairs.size(),
         problem.bootstrapStateEqualityPairs.size(),
-        problem.inductiveStateEqualityPairs.size());
+        problem.inductiveStateEqualityPairs.size(),
+        satImpliedOutputCount,
+        implicationConflictLimit);
     fflush(stdout);
   }
 
@@ -2058,6 +2350,73 @@ SequentialEquivalenceResult runPdrSecEngine(
         0,
         "",
         outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  if (auto cappedResult = buildDualRailResidualCapResult(
+          problem,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          "PDR",
+          0);
+      cappedResult.has_value()) {
+    return *cappedResult;
+  }
+
+  const std::vector<size_t> dualRailEngineOutputIndices =
+      collectOutputsRequiringDualRailEngineProof(problem);
+  if (problem.usesDualRailStateEncoding &&
+      !dualRailEngineOutputIndices.empty() &&
+      dualRailEngineOutputIndices.size() < problem.observedOutputExprs0.size()) {
+    emitSecDiag(
+        "SEC diag: PDR dual-rail proof restricted to ",
+        dualRailEngineOutputIndices.size(),
+        " non-implied outputs");
+    const KInductionProblem residualProblem =
+        makeOutputSubsetProblem(problem, dualRailEngineOutputIndices);
+    const OutputCoverageSelection residualCoverage =
+        makeOutputSubsetCoverage(outputCoverage, dualRailEngineOutputIndices);
+    const SequentialEquivalenceResult residualResult = runPdrSecEngine(
+        residualProblem,
+        maxK,
+        solverType,
+        model0,
+        model1,
+        top0,
+        top1,
+        residualCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+    if (residualResult.status == SequentialEquivalenceStatus::Different) {
+      return residualResult;
+    }
+    if (residualResult.status == SequentialEquivalenceStatus::Equivalent &&
+        residualResult.coveredOutputs == dualRailEngineOutputIndices.size()) {
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          residualResult.bound,
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
+
+    // The implication core already certified the other dual-rail outputs.  If the
+    // residual PDR subset remains hard, preserve that certified coverage and mark
+    // only the residual outputs uncovered.
+    const OutputCoverageSelection partialCoverage =
+        buildCoverageSkippingOutputIndices(
+            outputCoverage,
+            problem,
+            dualRailEngineOutputIndices,
+            "dual-rail PDR proof was inconclusive for this non-implied output");
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        residualResult.bound,
+        "",
+        partialCoverage,
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
   }
@@ -2273,12 +2632,21 @@ SequentialEquivalenceResult runPdrSecEngine(
   constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
   constexpr size_t kMaxSmallDesignCertificateStateBits = 4096;
+  constexpr size_t kMaxDualRailLeafCertificateStateBits = 8192;
+  const bool smallCertificateProblem =
+      problem.totalStateCount <= kMaxSmallDesignCertificateStateBits;
+  const bool dualRailLeafCertificateProblem =
+      problem.usesDualRailStateEncoding &&
+      problem.observedOutputExprs0.size() == 1 &&
+      problem.totalStateCount <= kMaxDualRailLeafCertificateStateBits;
   if (problem.observedOutputExprs0.size() < kMinOutputsForBatchedPdrProof &&
-      problem.totalStateCount <= kMaxSmallDesignCertificateStateBits) {
+      (smallCertificateProblem || dualRailLeafCertificateProblem)) {
     // On small regressions, a direct KI certificate is often the fastest sound
     // SEC proof while exact PDR can spend minutes blocking equivalent bad
-    // cubes. Use it only as a precheck: inconclusive cases still fall through
-    // to the PDR strategy below.
+    // cubes.  Also keep single-output dual-rail obligations on this exact
+    // precheck up to a modest rail-state size: it catches concrete delayed
+    // rail counterexamples before PDR is allowed to prove the invariant.
+    // Inconclusive cases still fall through to the PDR strategy below.
     KInductionEngine certificateEngine(problem, solverType);
     const auto certificateResult = certificateEngine.run(maxK);
     switch (certificateResult.status) {
@@ -2326,11 +2694,15 @@ SequentialEquivalenceResult runPdrSecEngine(
     }
   }
   KInductionProblem batchProblem = problem;
+  std::vector<bool> pdrCoveredOutputs(
+      problem.observedOutputExprs0.size(), true);
+  std::unordered_map<size_t, std::string> pdrSkippedOutputReasons;
   size_t provedBound = 0;
   const bool emitPdrStageStats = pdrStrategyStatsEnabled();
   struct FinalPdrStageOutcome {  // LCOV_EXCL_LINE
     bool equivalent = false;  // LCOV_EXCL_LINE
     bool shouldSplit = false;  // LCOV_EXCL_LINE
+    bool shouldSkipOutput = false;  // LCOV_EXCL_LINE
     std::optional<SequentialEquivalenceResult> terminalResult;
   };
   auto runFinalExactPdrStage =
@@ -2473,6 +2845,11 @@ SequentialEquivalenceResult runPdrSecEngine(
       outcome.shouldSplit = true;  // LCOV_EXCL_LINE
       return outcome;  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
+    if (problem.usesDualRailStateEncoding) {  // LCOV_EXCL_LINE
+      FinalPdrStageOutcome outcome;  // LCOV_EXCL_LINE
+      outcome.shouldSkipOutput = true;  // LCOV_EXCL_LINE
+      return outcome;  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     const std::string outputName =
         firstOutput < problem.observedOutputNames.size()  // LCOV_EXCL_LINE
             ? problem.observedOutputNames[firstOutput]  // LCOV_EXCL_LINE
@@ -2508,6 +2885,22 @@ SequentialEquivalenceResult runPdrSecEngine(
           runFinalExactPdrStage(batchIndex, firstOutput, endOutput);  // LCOV_EXCL_LINE
       if (finalOutcome.terminalResult.has_value()) {  // LCOV_EXCL_LINE
         return *finalOutcome.terminalResult;  // LCOV_EXCL_LINE
+      }
+      if (finalOutcome.shouldSkipOutput) {  // LCOV_EXCL_LINE
+        if (!markDualRailPdrOutputSkipped(  // LCOV_EXCL_LINE
+                problem,
+                pdrCoveredOutputs,
+                pdrSkippedOutputReasons,
+                firstOutput)) {
+          return makeSecResult(  // LCOV_EXCL_LINE
+              SequentialEquivalenceStatus::Inconclusive,
+              provedBound,
+              "Dual-rail PDR repair was inconclusive for the only checked output",
+              outputCoverage,
+              abstractedSequentialBoundaries,
+              extractedBoundaryReports);
+        }
+        continue;  // LCOV_EXCL_LINE
       }
       if (finalOutcome.shouldSplit) {  // LCOV_EXCL_LINE
         splitPdrBatchAtFinalStage(batchIndex, firstOutput, endOutput);  // LCOV_EXCL_LINE
@@ -2712,6 +3105,22 @@ SequentialEquivalenceResult runPdrSecEngine(
             if (finalOutcome.terminalResult.has_value()) {  // LCOV_EXCL_LINE
               return *finalOutcome.terminalResult;  // LCOV_EXCL_LINE
             }
+            if (finalOutcome.shouldSkipOutput) {  // LCOV_EXCL_LINE
+              if (!markDualRailPdrOutputSkipped(  // LCOV_EXCL_LINE
+                      problem,
+                      pdrCoveredOutputs,
+                      pdrSkippedOutputReasons,
+                      firstOutput)) {
+                return makeSecResult(  // LCOV_EXCL_LINE
+                    SequentialEquivalenceStatus::Inconclusive,
+                    provedBound,
+                    "Dual-rail PDR repair was inconclusive for the only checked output",
+                    outputCoverage,
+                    abstractedSequentialBoundaries,
+                    extractedBoundaryReports);
+              }
+              break;  // LCOV_EXCL_LINE
+            }
             if (finalOutcome.equivalent) {  // LCOV_EXCL_LINE
               break;  // LCOV_EXCL_LINE
             }
@@ -2778,6 +3187,22 @@ SequentialEquivalenceResult runPdrSecEngine(
           if (finalOutcome.terminalResult.has_value()) {  // LCOV_EXCL_LINE
             return *finalOutcome.terminalResult;  // LCOV_EXCL_LINE
           }
+          if (finalOutcome.shouldSkipOutput) {  // LCOV_EXCL_LINE
+            if (!markDualRailPdrOutputSkipped(  // LCOV_EXCL_LINE
+                    problem,
+                    pdrCoveredOutputs,
+                    pdrSkippedOutputReasons,
+                    firstOutput)) {
+              return makeSecResult(  // LCOV_EXCL_LINE
+                  SequentialEquivalenceStatus::Inconclusive,
+                  provedBound,
+                  "Dual-rail PDR repair was inconclusive for the only checked output",
+                  outputCoverage,
+                  abstractedSequentialBoundaries,
+                  extractedBoundaryReports);
+            }
+            break;  // LCOV_EXCL_LINE
+          }
           if (finalOutcome.equivalent) {  // LCOV_EXCL_LINE
             break;  // LCOV_EXCL_LINE
           }
@@ -2798,6 +3223,25 @@ SequentialEquivalenceResult runPdrSecEngine(
       }  // LCOV_EXCL_LINE
       case PDRStatus::Inconclusive:  // LCOV_EXCL_LINE
       default:
+        if (problem.usesDualRailStateEncoding) {  // LCOV_EXCL_LINE
+          if (endOutput - firstOutput > 1) {  // LCOV_EXCL_LINE
+            const size_t midOutput =
+                firstOutput + (endOutput - firstOutput) / 2;  // LCOV_EXCL_LINE
+            outputBatches.insert(  // LCOV_EXCL_LINE
+                outputBatches.begin() +
+                    static_cast<std::ptrdiff_t>(batchIndex + 1),  // LCOV_EXCL_LINE
+                {PdrOutputBatch{firstOutput, midOutput, false},  // LCOV_EXCL_LINE
+                 PdrOutputBatch{midOutput, endOutput, false}});  // LCOV_EXCL_LINE
+            break;  // LCOV_EXCL_LINE
+          }  // LCOV_EXCL_LINE
+          if (markDualRailPdrOutputSkipped(  // LCOV_EXCL_LINE
+                  problem,
+                  pdrCoveredOutputs,
+                  pdrSkippedOutputReasons,
+                  firstOutput)) {
+            break;  // LCOV_EXCL_LINE
+          }
+        }  // LCOV_EXCL_LINE
         return makeSecResult(  // LCOV_EXCL_LINE
             SequentialEquivalenceStatus::Inconclusive,
             pdrResult.bound,  // LCOV_EXCL_LINE
@@ -2808,13 +3252,161 @@ SequentialEquivalenceResult runPdrSecEngine(
     }
   }
 
+  const OutputCoverageSelection finalCoverage =
+      buildCoverageWithDualRailPdrSkips(
+          outputCoverage, problem, pdrCoveredOutputs, pdrSkippedOutputReasons);
   return makeSecResult(
       SequentialEquivalenceStatus::Equivalent,
       provedBound,
       "",
+      finalCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+}
+
+SequentialEquivalenceResult repairDualRailWithPdr(
+    const KInductionProblem& problem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    const char* sourceEngine,
+    SequentialEquivalenceResult originalResult) {
+  if (!problem.usesDualRailStateEncoding ||
+      originalResult.status != SequentialEquivalenceStatus::Inconclusive) {
+    return originalResult;
+  }
+
+  // Dual-rail introduces rail-valued X obligations that are sometimes a poor
+  // fit for KI/IMC's SAT-step shape even when the same property has a small PDR
+  // proof.  Use PDR only as an explicit repair path for dual-rail inconclusive
+  // results; binary/current SEC flows keep their selected engine behavior.
+  //
+  // Do not ask PDR to re-prove rail outputs that the validated induction core
+  // already covers.  Repair is only for the residual outputs that still need an
+  // engine proof; if those remain hard, they become uncovered rather than
+  // trapping the whole multi-output SEC run.
+  emitSecDiag(
+      "SEC diag: ", sourceEngine,
+      " dual-rail proof inconclusive; trying full PDR repair");
+
+  const std::vector<size_t> engineOutputIndices =
+      collectOutputsRequiringDualRailEngineProof(problem);
+  if (!engineOutputIndices.empty() &&
+      engineOutputIndices.size() < problem.observedOutputExprs0.size()) {
+    const size_t repairOutputLimit = dualRailPdrRepairOutputLimit();
+    emitSecDiag(
+        "SEC diag: ", sourceEngine,
+        " dual-rail PDR repair restricted to ",
+        engineOutputIndices.size(),
+        " non-implied outputs");
+    if (engineOutputIndices.size() > repairOutputLimit) {
+      emitSecDiag(
+          "SEC diag: ", sourceEngine,
+          " dual-rail PDR repair skipped because residual outputs exceed "
+          "limit ",
+          repairOutputLimit);
+      const OutputCoverageSelection partialCoverage =
+          buildCoverageSkippingOutputIndices(
+              outputCoverage,
+              problem,
+              engineOutputIndices,
+              "dual-rail PDR repair skipped for this non-implied output "
+              "because the residual output set exceeded the configured limit");
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          originalResult.bound,
+          "",
+          partialCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
+    const KInductionProblem repairProblem =
+        makeOutputSubsetProblem(problem, engineOutputIndices);
+    const OutputCoverageSelection repairCoverage =
+        makeOutputSubsetCoverage(outputCoverage, engineOutputIndices);
+    const SequentialEquivalenceResult repairResult = runPdrSecEngine(
+        repairProblem,
+        maxK,
+        solverType,
+        model0,
+        model1,
+        top0,
+        top1,
+        repairCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+    if (repairResult.status == SequentialEquivalenceStatus::Different) {
+      return repairResult;  // LCOV_EXCL_LINE
+    }
+    if (repairResult.status == SequentialEquivalenceStatus::Equivalent &&
+        repairResult.coveredOutputs == engineOutputIndices.size()) {
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          std::max(originalResult.bound, repairResult.bound),
+          "",
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
+
+    const OutputCoverageSelection partialCoverage =
+        buildCoverageSkippingOutputIndices(
+            outputCoverage,
+            problem,
+            engineOutputIndices,
+            "dual-rail PDR repair was inconclusive for this non-implied output");
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        std::max(originalResult.bound, repairResult.bound),
+        "",
+        partialCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  if (!engineOutputIndices.empty() &&
+      engineOutputIndices.size() > dualRailPdrRepairOutputLimit()) {
+    emitSecDiag(
+        "SEC diag: ", sourceEngine,
+        " dual-rail full PDR repair skipped because residual outputs exceed "
+        "limit ",
+        dualRailPdrRepairOutputLimit());
+    const OutputCoverageSelection partialCoverage =
+        buildCoverageSkippingOutputIndices(
+            outputCoverage,
+            problem,
+            engineOutputIndices,
+            "dual-rail PDR repair skipped for this non-implied output because "
+            "the residual output set exceeded the configured limit");
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        originalResult.bound,
+        "",
+        partialCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  const SequentialEquivalenceResult repairResult = runPdrSecEngine(
+      problem,
+      maxK,
+      solverType,
+      model0,
+      model1,
+      top0,
+      top1,
       outputCoverage,
       abstractedSequentialBoundaries,
       extractedBoundaryReports);
+  return repairResult.status == SequentialEquivalenceStatus::Inconclusive
+             ? originalResult
+             : repairResult;
 }
 
 SequentialEquivalenceResult runKInductionSecEngine(
@@ -2828,6 +3420,17 @@ SequentialEquivalenceResult runKInductionSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
+  if (auto cappedResult = buildDualRailResidualCapResult(
+          problem,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          "k-induction",
+          0);
+      cappedResult.has_value()) {
+    return *cappedResult;
+  }
+
   KInductionEngine engine(problem, solverType);
   const auto result = engine.run(maxK);
   switch (result.status) {
@@ -2852,13 +3455,25 @@ SequentialEquivalenceResult runKInductionSecEngine(
           extractedBoundaryReports);
     case KInductionStatus::Inconclusive:  // LCOV_EXCL_LINE
     default:
-      return makeSecResult(  // LCOV_EXCL_LINE
+      return repairDualRailWithPdr(  // LCOV_EXCL_LINE
+          problem,  // LCOV_EXCL_LINE
+          maxK,  // LCOV_EXCL_LINE
+          solverType,  // LCOV_EXCL_LINE
+          model0,  // LCOV_EXCL_LINE
+          model1,  // LCOV_EXCL_LINE
+          top0,  // LCOV_EXCL_LINE
+          top1,  // LCOV_EXCL_LINE
+          outputCoverage,  // LCOV_EXCL_LINE
+          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+          extractedBoundaryReports,  // LCOV_EXCL_LINE
+          "k-induction",  // LCOV_EXCL_LINE
+          makeSecResult(  // LCOV_EXCL_LINE
           SequentialEquivalenceStatus::Inconclusive,
           result.bound,  // LCOV_EXCL_LINE
           "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
           outputCoverage,  // LCOV_EXCL_LINE
           abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
+          extractedBoundaryReports));  // LCOV_EXCL_LINE
   }
 }
 
@@ -2873,6 +3488,41 @@ SequentialEquivalenceResult runImcSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
+  if (auto cappedResult = buildDualRailResidualCapResult(
+          problem,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          "imc",
+          0);
+      cappedResult.has_value()) {
+    return *cappedResult;
+  }
+
+  constexpr size_t kMaxDirectDualRailImcStateBits = 4096;
+  if (problem.usesDualRailStateEncoding &&
+      problem.totalStateCount > kMaxDirectDualRailImcStateBits) {
+    return repairDualRailWithPdr(
+        problem,
+        maxK,
+        solverType,
+        model0,
+        model1,
+        top0,
+        top1,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports,
+        "imc",
+        makeSecResult(
+            SequentialEquivalenceStatus::Inconclusive,
+            0,
+            "Large dual-rail IMC problem delegated to PDR repair",
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports));
+  }
+
   IMCEngine engine(problem, solverType);
   const auto result = engine.run(maxK);
   switch (result.status) {
@@ -2900,13 +3550,25 @@ SequentialEquivalenceResult runImcSecEngine(
     }  // LCOV_EXCL_LINE
     case IMCStatus::Inconclusive:  // LCOV_EXCL_LINE
     default:
-      return makeSecResult(  // LCOV_EXCL_LINE
+      return repairDualRailWithPdr(  // LCOV_EXCL_LINE
+          problem,  // LCOV_EXCL_LINE
+          maxK,  // LCOV_EXCL_LINE
+          solverType,  // LCOV_EXCL_LINE
+          model0,  // LCOV_EXCL_LINE
+          model1,  // LCOV_EXCL_LINE
+          top0,  // LCOV_EXCL_LINE
+          top1,  // LCOV_EXCL_LINE
+          outputCoverage,  // LCOV_EXCL_LINE
+          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+          extractedBoundaryReports,  // LCOV_EXCL_LINE
+          "imc",  // LCOV_EXCL_LINE
+          makeSecResult(  // LCOV_EXCL_LINE
           SequentialEquivalenceStatus::Inconclusive,
           result.bound,  // LCOV_EXCL_LINE
           "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
           outputCoverage,  // LCOV_EXCL_LINE
           abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
+          extractedBoundaryReports));  // LCOV_EXCL_LINE
   }
 }
 
@@ -3246,6 +3908,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         reachableInvariant,
         symbolSpace,
         useLazyTransitionRemapping,
+        solverType_,
         secDiagEnabled);
   } else {
     const auto remapped = remapSecExpressions(

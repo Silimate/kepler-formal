@@ -825,6 +825,12 @@ struct ResetFrontierCache {
   // not retry the same proof every time PDR rediscovers a neighboring root.
   std::unordered_set<StateClauseSetKey, StateClauseSetKeyHash>
       wholeBadFormulaValidationMisses;
+  // Validated bad-formula repair may revisit many projected root cubes for
+  // the same PDR problem. The per-output bad predicates are immutable across
+  // those attempts, so build their small CNFs once per engine run.
+  bool observedOutputBadClauseCacheBuilt = false;
+  std::vector<ObservedOutputBadClauseGroup> observedOutputBadClauseGroups;
+  std::optional<std::vector<StateClause>> observedOutputBadClauses;
 };
 
 enum class ConcreteCubeReachabilityMode {
@@ -835,7 +841,7 @@ enum class ConcreteCubeReachabilityMode {
 class PdrQueryBudgetExceeded : public std::runtime_error {
  public:
   PdrQueryBudgetExceeded()  // LCOV_EXCL_LINE
-      : std::runtime_error("PDR predecessor query budget exceeded") {}  // LCOV_EXCL_LINE
+      : std::runtime_error("PDR local query budget exceeded") {}  // LCOV_EXCL_LINE
 };
 
 void consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
@@ -864,6 +870,30 @@ KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
   return solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
              ? KEPLER_FORMAL::Config::SolverType::CADICAL
              : solverType;
+}
+
+size_t envSizeLimitOrDefault(const char* name, size_t defaultValue);
+
+KEPLER_FORMAL::Config::SolverType badCubeQuerySolverType(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t solverSymbols) {
+  constexpr size_t kLargeDualRailBadCubeQuerySymbols = 2048;
+  // Large dual-rail bad predicates are shallow, model-producing queries.  The
+  // main PDR loop still uses the selected solver, but this local query is a bad
+  // fit for Kissat when thousands of rail literals are present: a single bad
+  // query can spend minutes before PDR gets a cube to block.  CaDiCaL already
+  // serves the same role for wide exact validation and keeps the result fully
+  // sound because SAT still supplies the concrete model used below.
+  const size_t largeDualRailQuerySymbols = envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_LOCAL_SOLVER_SYMBOLS",
+      kLargeDualRailBadCubeQuerySymbols);
+  if (problem.usesDualRailStateEncoding &&
+      solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+      solverSymbols >= largeDualRailQuerySymbols) {
+    return KEPLER_FORMAL::Config::SolverType::CADICAL;
+  }
+  return solverType;
 }
 
 bool pdrResetShortcutDiagEnabled() {
@@ -916,6 +946,12 @@ unsigned resetExpressionProofConflictLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
       "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT",
       kDefaultResetExpressionProofConflictLimit);
+}
+
+unsigned dualRailBadCubeConflictLimit() {
+  return envUnsignedLimitOrDefaultAllowZero(
+      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_CONFLICT_LIMIT",
+      5000);
 }
 
 size_t maxProjectedFrameClausesPerQuery() {
@@ -5575,10 +5611,18 @@ std::vector<ObservedOutputBadClauseGroup> observedOutputBadFormulaClauseGroups(
   return groups;
 }
 
+std::optional<std::vector<StateClause>> observedOutputBadFormulaClausesFromGroups(
+    const std::vector<ObservedOutputBadClauseGroup>& groups);
+
 std::optional<std::vector<StateClause>> observedOutputBadFormulaClauses(
     const KInductionProblem& problem,
     const std::unordered_set<size_t>& stateSymbols) {
   const auto groups = observedOutputBadFormulaClauseGroups(problem, stateSymbols);
+  return observedOutputBadFormulaClausesFromGroups(groups);
+}
+
+std::optional<std::vector<StateClause>> observedOutputBadFormulaClausesFromGroups(
+    const std::vector<ObservedOutputBadClauseGroup>& groups) {
   if (groups.empty()) {
     return std::nullopt;
   }
@@ -5594,6 +5638,21 @@ std::optional<std::vector<StateClause>> observedOutputBadFormulaClauses(
     return std::nullopt;  // LCOV_EXCL_LINE
   }
   return clauses;
+}
+
+void ensureObservedOutputBadClauseCache(
+    ResetFrontierCache& resetFrontierCache,
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& stateSymbols) {
+  if (resetFrontierCache.observedOutputBadClauseCacheBuilt) {
+    return;
+  }
+  resetFrontierCache.observedOutputBadClauseGroups =
+      observedOutputBadFormulaClauseGroups(problem, stateSymbols);
+  resetFrontierCache.observedOutputBadClauses =
+      observedOutputBadFormulaClausesFromGroups(
+          resetFrontierCache.observedOutputBadClauseGroups);
+  resetFrontierCache.observedOutputBadClauseCacheBuilt = true;
 }
 
 bool hasNewValidatedBadFormulaClause(
@@ -6401,20 +6460,26 @@ std::optional<bool> learnValidatedBadFormulaClauses(
     size_t& badFrame,
     ResetFrontierCache& resetFrontierCache,
     bool preferWholeBadFormulaValidation = false) {
-  const auto outputBadClauseGroups =
-      observedOutputBadFormulaClauseGroups(
-          problem, transitionByState.stateSymbols());
-  auto badClauses =
-      observedOutputBadFormulaClauses(
-          problem, transitionByState.stateSymbols());
-  if (!badClauses.has_value()) {
-    badClauses =
+  ensureObservedOutputBadClauseCache(
+      resetFrontierCache, problem, transitionByState.stateSymbols());
+  const auto& outputBadClauseGroups =
+      resetFrontierCache.observedOutputBadClauseGroups;
+  const std::vector<StateClause>* badClauses =
+      resetFrontierCache.observedOutputBadClauses.has_value()
+          ? &*resetFrontierCache.observedOutputBadClauses
+          : nullptr;
+  std::optional<std::vector<StateClause>> fallbackBadClauses;
+  if (badClauses == nullptr) {
+    fallbackBadClauses =
         stateOnlyBadFormulaClauses(
             problem.bad,
             transitionByState.stateSymbols(),
             validatedBadFormulaCnfSupportLimit(problem));
+    if (fallbackBadClauses.has_value()) {
+      badClauses = &*fallbackBadClauses;
+    }
   }
-  if (!badClauses.has_value() || badClauses->empty()) {
+  if (badClauses == nullptr || badClauses->empty()) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
   const size_t exactValidatedBadFormulaClauseLimit =
@@ -7466,7 +7531,14 @@ std::optional<StateCube> findBadCubeForFormula(
           level,
           complementPartners,
           exactFrameClauses);
-  SATSolverWrapper solver(solverType);
+  const auto querySolverType =
+      badCubeQuerySolverType(problem, solverType, solverSymbols.size());
+  if (pdrStatsEnabled() && querySolverType != solverType) {
+    emitSecDiag(
+        "SEC PDR stats: bad cube query solver=cadical symbols=",
+        solverSymbols.size());
+  }
+  SATSolverWrapper solver(querySolverType);
   // Bad-state queries are local PDR obligations and are rebuilt repeatedly as
   // frames advance. Keep them on the PDR-local profile: small regressions such
   // as GCD can otherwise spend minutes in Kissat's speculative
@@ -7488,7 +7560,33 @@ std::optional<StateCube> findBadCubeForFormula(
         "PDR bad-state encoding failed at level " + std::to_string(level) +  // LCOV_EXCL_LINE
         ": " + error.what());  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
-  if (!solver.solve()) {
+  SATSolverWrapper::SolveStatus badSolveStatus =
+      SATSolverWrapper::SolveStatus::Sat;
+  const unsigned badCubeConflictLimit =
+      problem.usesDualRailStateEncoding ? dualRailBadCubeConflictLimit() : 0;
+  if (badCubeConflictLimit != 0) {
+    // Dual-rail residual repairs can be SAT and decision-heavy even when they
+    // do not accumulate many conflicts. Bound both resources so a single
+    // uncovered output cannot dominate the whole workflow.
+    badSolveStatus = solver.solveWithResourceLimits(
+        badCubeConflictLimit,
+        /*decisionLimit=*/badCubeConflictLimit);
+  } else {
+    badSolveStatus = solver.solveStatus();
+  }
+  if (badSolveStatus == SATSolverWrapper::SolveStatus::Unknown) {
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: bad cube query budget exhausted limit=",
+          badCubeConflictLimit,
+          " symbols=",
+          solverSymbols.size(),
+          " level=",
+          level);
+    }  // LCOV_EXCL_LINE
+    throw PdrQueryBudgetExceeded();  // LCOV_EXCL_LINE
+  }
+  if (badSolveStatus == SATSolverWrapper::SolveStatus::Unsat) {
     return std::nullopt;
   }
 
@@ -10765,6 +10863,7 @@ PDRResult PDREngine::run(size_t maxFrames,
   std::vector<FrameClauses> frames(1);
   emitPdrTraceFrames("initial_frames", frames);
 
+  try {
   // Before growing any frame sequence, check whether Init itself already
   // contains a bad state.
   if (!(problem_.resetBootstrapCycles != 0 && resetBootstrapFrameCheckedSafe)) {
@@ -10793,7 +10892,6 @@ PDRResult PDREngine::run(size_t maxFrames,
   const auto seedClauses = buildSeedClauses(problem_);
   frames.emplace_back(FrameClauses{seedClauses});
   emitPdrTraceFrames("seeded_frames", frames);
-  try {
   for (size_t level = 1; level <= maxFrames; ++level) {
     // Phase 1: exhaust the proof obligations created by bad states that still
     // survive in the current frontier.
@@ -10876,7 +10974,7 @@ PDRResult PDREngine::run(size_t maxFrames,
   } catch (const PdrQueryBudgetExceeded&) {  // LCOV_EXCL_LINE
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
-          "SEC PDR stats: predecessor query budget exhausted limit=",
+          "SEC PDR stats: local query budget exhausted predecessor_limit=",
           maxPredecessorQueries_);  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE

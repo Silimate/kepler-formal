@@ -79,6 +79,7 @@ struct KInductionProblem {
   std::vector<DualRailSymbolPair> dualRailStatePairs;
   std::vector<BoolExpr*> observedOutputExprs0;
   std::vector<BoolExpr*> observedOutputExprs1;
+  std::vector<bool> outputImpliedByInductionCore;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
   std::vector<std::pair<size_t, BoolExpr*>> transitions1;
   std::shared_ptr<LazyTransitionStore> lazyTransitions;
@@ -94,6 +95,10 @@ struct KInductionProblem {
   // the normal reset-bootstrap prefix so reset controls are driven exactly as
   // they are in the binary SEC flow.
   bool usesDualRailStateEncoding = false;
+  // Output-batched dual-rail KI proves each output slice independently.  When
+  // this flag is set, the slice skips local base checks because the caller will
+  // validate the shared full-output base prefix once after all slices prove.
+  bool deferBaseCaseChecks = false;
   std::string description;
 
   bool hasSequentialState() const {

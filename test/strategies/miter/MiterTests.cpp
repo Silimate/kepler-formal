@@ -15,6 +15,7 @@
 #include "gtest/gtest.h"
 
 #include "BuildPrimaryOutputClauses.h"
+#include "BoolExprCache.h"
 #include "ConstantPropagation.h"
 #include "MiterStrategy.h"
 #include "SNLLogicCloud.h"
@@ -150,6 +151,13 @@ class ScopedEnvVar {
   std::string name_;
   bool hadOriginal_ = false;
   std::string original_;
+};
+
+class MiterStrategyStandaloneTests : public ::testing::Test {
+ protected:
+  void TearDown() override {
+    KEPLER_FORMAL::BoolExprCache::destroy();
+  }
 };
 
 std::vector<uint64_t> getInputFlatDependencies(const SNLDesign* design) {
@@ -1402,7 +1410,7 @@ TEST(MiterStandaloneTests, KissatClauseAutoExpandsTrackedVariableCount) {
   EXPECT_EQ(solver.newVar(), 4);
 }
 
-TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSecondNetlist) {
+TEST_F(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSecondNetlist) {
   MiterStrategy strategy(nullptr, nullptr, "normalizeOutputs");
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   using OutputMap = std::unordered_map<PathKey, naja::DNL::DNLID,
@@ -1426,7 +1434,7 @@ TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSe
   EXPECT_EQ(outputs1, std::vector<naja::DNL::DNLID>({200}));
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWritesCnf) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWritesCnf) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
     return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
@@ -1481,7 +1489,7 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWrit
   std::filesystem::remove_all(tmpDir);
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWriteFailure) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWriteFailure) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
     return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
@@ -1522,7 +1530,7 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWrit
   std::filesystem::remove_all(tmpDir);
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreationFailure) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreationFailure) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
     return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
@@ -1560,7 +1568,7 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreat
   std::filesystem::remove_all(tmpDir);
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsWithNoCommonOutputsIsVacuouslyEquivalent) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsWithNoCommonOutputsIsVacuouslyEquivalent) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
     return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},

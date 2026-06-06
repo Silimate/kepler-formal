@@ -178,7 +178,10 @@ bool provesImcInvariant(const KInductionProblem& problem,
 std::optional<IMCResult> findImcCounterexample(const KInductionProblem& problem,
                                                KEPLER_FORMAL::Config::SolverType solverType,
                                                size_t depth) {
-  if (auto witness = findBaseCounterexample(problem, solverType, depth);
+  // IMC checks depths monotonically.  Only the newly exposed frontier can hold
+  // a fresh counterexample, so avoid rebuilding a cumulative BMC query that
+  // re-walks already-cleared frames and all earlier output bad clauses.
+  if (auto witness = findBaseCounterexampleAtFrontier(problem, solverType, depth);
       witness.has_value()) {
     return IMCResult{IMCStatus::Different, witness->badFrame, std::move(witness)};
   }
@@ -198,8 +201,10 @@ bool provesByOutputBatchedInduction(const KInductionProblem& problem,
   // by the same k-induction rule is equivalent to proving the full conjunction,
   // but each query gets a much smaller cone of influence.
   KInductionProblem batchProblem = problem;
+  const OutputBatchingLimits batchingLimits =
+      defaultOutputBatchingLimitsForProblem(problem);
   for (const auto& [firstOutput, endOutput] :
-       buildSupportBoundedOutputBatches(problem)) {
+       buildSupportBoundedOutputBatches(problem, batchingLimits)) {
     configureOutputBatchProblem(batchProblem, problem, firstOutput, endOutput);
     if (!provesByInduction(batchProblem, solverType, k)) {
       return false;

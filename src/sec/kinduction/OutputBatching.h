@@ -27,6 +27,9 @@ std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
     const KInductionProblem& problem,
     const OutputBatchingLimits& limits);
 
+OutputBatchingLimits defaultOutputBatchingLimitsForProblem(
+    const KInductionProblem& problem);
+
 // Reuse the large shared SEC problem object while replacing only the observed
 // output/property slice.  This avoids copying all state, transition, and memory
 // metadata per output batch.

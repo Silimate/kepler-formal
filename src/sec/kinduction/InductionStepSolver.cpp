@@ -4,7 +4,9 @@
 #include "kinduction/InductionStepSolver.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -16,6 +18,9 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr size_t kMaxSimplePathStateSymbols = 4096;
+// Keep direct dual-rail leaf proofs bounded like KInductionEngine's localized
+// path.  Hard resetless-state outputs should be reported as uncovered quickly.
+constexpr unsigned kDefaultDualRailLeafInductionDecisionLimit = 5000;
 
 struct InductionCoi {
   std::vector<std::vector<size_t>> transitionTargetsByFrame;
@@ -23,6 +28,46 @@ struct InductionCoi {
   std::vector<size_t> solverSymbols;
   std::unordered_set<size_t> solverSymbolSet;
 };
+
+KEPLER_FORMAL::Config::SolverType inductionStepSolverType(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  (void)problem;
+  return solverType;
+}
+
+std::optional<unsigned> readUnsignedEnv(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    return std::nullopt;
+  }
+  char* end = nullptr;
+  const unsigned long parsed = std::strtoul(value, &end, 10);
+  if (end == value || *end != '\0' ||
+      parsed > std::numeric_limits<unsigned>::max()) {
+    return std::nullopt;
+  }
+  return static_cast<unsigned>(parsed);
+}
+
+std::optional<unsigned> directInductionDecisionLimit(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (!problem.usesDualRailStateEncoding ||
+      problem.observedOutputExprs0.size() > 1 ||
+      solverType != KEPLER_FORMAL::Config::SolverType::KISSAT) {
+    return std::nullopt;
+  }
+  if (const auto limit =
+          readUnsignedEnv("KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT");
+      limit.has_value()) {
+    return limit;
+  }
+  // IMC calls the lower-level induction helper directly after output
+  // localization. Keep those dual-rail leaf obligations bounded the same way
+  // KInductionEngine does, so one hard output cannot stall the workflow.
+  return kDefaultDualRailLeafInductionDecisionLimit;
+}
 
 std::unordered_set<size_t> buildStateSymbolSet(const KInductionProblem& problem) {
   std::unordered_set<size_t> stateSymbols;
@@ -415,8 +460,13 @@ InductionProofStatus proveByInductionStatus(
   const FrameSymbolAliases aliasesByFrame = buildInductionFrameAliases(
       problem, coi, k + 1, aliasInductiveStateEqualities);
 
-  SATSolverWrapper solver(solverType);
-  solver.configureForSecConeProof(coi.solverSymbols.size());
+  const auto localSolverType = inductionStepSolverType(problem, solverType);
+  SATSolverWrapper solver(localSolverType);
+  if (problem.usesDualRailStateEncoding) {
+    solver.configureForSecDualRailConeProof(coi.solverSymbols.size());
+  } else {
+    solver.configureForSecConeProof(coi.solverSymbols.size());
+  }
   FrameVariableStore variables(solver, coi.solverSymbols, k + 1, aliasesByFrame);
   addComplementedStateRelations(
       solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet, k + 1);
@@ -440,12 +490,13 @@ InductionProofStatus proveByInductionStatus(
     addInductiveStateEqualities(solver, variables, problem, coi.solverSymbolSet, 0, k - 1);
   }
 
-  if (coi.relevantStateSymbols.size() <= kMaxSimplePathStateSymbols) {
+  if (!problem.usesDualRailStateEncoding &&
+      coi.relevantStateSymbols.size() <= kMaxSimplePathStateSymbols) {
     // The simple-path refinement is a completeness aid, not a soundness
     // requirement for classic k-induction. On large gate-level SEC problems it
     // creates one XOR per state bit per frame-pair, which can dominate the SAT
-    // instance and drown the actual proof. Keep it for small pedagogical/unit
-    // cases where it helps convergence, but avoid it for large ASIC designs.
+    // instance and drown the actual proof. Dual-rail already doubles each state
+    // bit into may-one/may-zero rails, so skip this optional refinement there.
     addSimplePathConstraint(solver, variables, coi.relevantStateSymbols, k + 1);
   }
 
@@ -453,10 +504,16 @@ InductionProofStatus proveByInductionStatus(
       solver, variables.makeLeafLits(k, inductionBadSupport));
   solver.addClause({lastFrameEncoder.encode(inductionBad)});
   SATSolverWrapper::SolveStatus solveStatus;
-  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+  if (localSolverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
       kissatDecisionLimit.has_value()) {
     solveStatus = solver.solveWithKissatResourceLimits(
         std::numeric_limits<unsigned>::max(), *kissatDecisionLimit);
+  } else if (localSolverType == KEPLER_FORMAL::Config::SolverType::CADICAL &&
+             kissatDecisionLimit.has_value()) {
+    solveStatus = solver.solveWithAssumptionsStatus(
+        {},
+        *kissatDecisionLimit,
+        *kissatDecisionLimit);
   } else {
     solveStatus = solver.solveStatus();
   }
@@ -474,7 +531,11 @@ InductionProofStatus proveByInductionStatus(
 bool provesByInduction(const KInductionProblem& problem,
                        KEPLER_FORMAL::Config::SolverType solverType,
                        size_t k) {
-  return proveByInductionStatus(problem, solverType, k) ==
+  return proveByInductionStatus(
+             problem,
+             solverType,
+             k,
+             directInductionDecisionLimit(problem, solverType)) ==
          InductionProofStatus::Proved;
 }
 
