@@ -11384,6 +11384,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LazyDualRailMaterializationUsesRailsInsteadOfBinaryPrivateLeaves) {
+  KInductionProblem problem;
+  constexpr size_t railOne = 10;
+  constexpr size_t railZero = 11;
+  constexpr size_t combinedInput = 12;
+  constexpr size_t localState = 2;
+  constexpr size_t localInput = 3;
+  BoolExpr* localNext =
+      BoolExpr::Xor(BoolExpr::Var(localState), BoolExpr::Var(localInput));
+
+  auto lazyTransitions = std::make_shared<LazyTransitionStore>();
+  lazyTransitions->dualRailStateByLocalSymbolByDesign[0].emplace(
+      localState, DualRailSymbolPair{railOne, railZero});
+  lazyTransitions->localToCombinedByDesign[0].emplace(localInput, combinedInput);
+  lazyTransitions->sourceByStateSymbol.emplace(
+      railOne, LazyTransitionSource{0, localNext, LazyTransitionRail::DualRailOne});
+  problem.lazyTransitions = lazyTransitions;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {railOne, railZero};
+  problem.inputSymbols = {combinedInput};
+  problem.allSymbols = {railOne, railZero, combinedInput};
+
+  const TransitionExprResolver transitionByState(problem);
+
+  EXPECT_EQ(
+      transitionByState.at(railOne)->getSupportVars(),
+      (std::set<size_t>{railOne, railZero, combinedInput}));
+  EXPECT_NE(
+      lazyTransitions->remappedByStateSymbol.find(railOne),
+      lazyTransitions->remappedByStateSymbol.end());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LazyDualRailWideTargetSupportIsCollectedAsOneUnion) {
   KInductionProblem problem;
   constexpr size_t railOne = 10;

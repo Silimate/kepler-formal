@@ -2935,30 +2935,20 @@ SequentialEquivalenceResult runPdrSecEngine(
       }
       batch.transitions0.reserve(support.size());
       batch.transitions1.reserve(support.size());
+      const TransitionExprResolver batchTransitionByState(batch);
 
       // Sampling on BlackParrot showed the proof spending time lazily remapping
       // next-state expressions inside predecessor queries. Once the batch cone
       // is already pruned to the output support closure, remap those relevant
-      // transitions eagerly here so PDR reuses them across all obligations in
-      // the batch instead of materializing them piecemeal during SAT queries.
+      // transitions eagerly through the resolver so binary and dual-rail lazy
+      // transitions are materialized in the same symbol space used by COI.
       for (const auto symbol : support) {
         const auto sourceIt = store.sourceByStateSymbol.find(symbol);
         if (sourceIt == store.sourceByStateSymbol.end()) {
           continue;
         }
 
-        BoolExpr* remapped = nullptr;
-        if (const auto cachedIt = store.remappedByStateSymbol.find(symbol);
-            cachedIt != store.remappedByStateSymbol.end()) {
-          remapped = cachedIt->second;  // LCOV_EXCL_LINE
-        } else {  // LCOV_EXCL_LINE
-          const LazyTransitionSource& source = sourceIt->second;
-          remapped = remapBoolExprVariables(
-              source.localExpr,
-              store.localToCombinedByDesign[source.designIndex],
-              store.remapMemoByDesign[source.designIndex]);
-          store.remappedByStateSymbol.emplace(symbol, remapped);
-        }
+        BoolExpr* remapped = batchTransitionByState.at(symbol);
 
         if (sourceIt->second.designIndex == 0) {
           batch.transitions0.emplace_back(symbol, remapped);
@@ -3090,11 +3080,14 @@ SequentialEquivalenceResult runPdrSecEngine(
     constexpr size_t kFinalExactPdrBadCubeStateLimit = 32;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrRootGeneralizationAttempts = 0;  // LCOV_EXCL_LINE
     // Dual-rail final PDR validates projected roots exactly.  Give that exact
-    // CEGAR repair a tiny literal-drop budget so Ibex-size rail roots do not
-    // learn one full 32-literal unreachable cube per sibling assignment.
+    // CEGAR repair a tiny budget so Ibex-size rail roots do not learn one full
+    // unreachable cube per sibling assignment. Multi-output slices split after
+    // a couple of failed repairs; isolated leaves get a little more effort
+    // before the existing uncovered-output path takes over.
     constexpr size_t kDualRailFinalExactPdrRootGeneralizationAttempts = 4;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 5000;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 8;  // LCOV_EXCL_LINE
     if (endOutput - firstOutput > kMaxFinalExactPdrOutputBatchSize) {  // LCOV_EXCL_LINE
       if (emitPdrStageStats) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
@@ -3168,8 +3161,10 @@ SequentialEquivalenceResult runPdrSecEngine(
         /*learnValidatedBadFormulaClauses=*/finalSliceUsesBadFormulaValidation,  // LCOV_EXCL_LINE
         /*useExactResetFrontierChecks=*/finalSliceUsesResetFrontier,
         /*maxProjectedCounterexampleRefinements=*/
-            problem.usesDualRailStateEncoding && endOutput - firstOutput > 1
-                ? kDualRailFinalExactPdrMultiOutputRepairBudget
+            problem.usesDualRailStateEncoding
+                ? (endOutput - firstOutput > 1
+                       ? kDualRailFinalExactPdrMultiOutputRepairBudget
+                       : kDualRailFinalExactPdrSingleOutputRepairBudget)
                 : 0);
     // Dual-rail properties are intentionally batched before the reset
     // bootstrap proof, otherwise the frame-0 precheck materializes the entire
