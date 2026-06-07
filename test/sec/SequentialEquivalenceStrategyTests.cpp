@@ -7807,7 +7807,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsDualRailCoversMatchingResetlessOutput) {
+       RunExtractedModelsDualRailLeavesMatchingResetlessResidualWithoutPdrFallback) {
   const SignalKey good = makeSignalKey("dualRailResetlessGood");
   const SignalKey out = makeSignalKey("dualRailResetlessOut");
   const SignalKey rst = makeSignalKey("dualRailResetlessRst");
@@ -7846,8 +7846,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.displayNameByKey.emplace(out, "resetless_out[0]");
   model1.displayNameByKey.emplace(state1, "right_state_q[0]");
   // Binary SEC cannot use a cross-design state equality here: one side holds
-  // the resetless state while the other toggles it.  In dual-rail mode both
-  // still remain X, so the rail-encoded output obligation is provable.
+  // the resetless state while the other toggles it.  Dual-rail mode can keep
+  // the known-good output covered, but KI must not invoke PDR to repair the
+  // resetless residual behind the selected engine.
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
   model1.observedOutputExprByKey.emplace(good, BoolExpr::Var(7));
   model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(3));
@@ -7876,13 +7877,19 @@ TEST_F(SequentialEquivalenceStrategyTests,
       dualRailStrategy.runExtractedModels(model0, model1, 2);
 
   EXPECT_EQ(dualRailResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(dualRailResult.coveredOutputs, 2u);
+  EXPECT_EQ(dualRailResult.coveredOutputs, 1u);
   EXPECT_EQ(dualRailResult.totalOutputs, 2u);
-  EXPECT_TRUE(dualRailResult.skippedObservedOutputs.empty());
+  ASSERT_EQ(dualRailResult.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(
+      dualRailResult.skippedObservedOutputs.front().find("resetless_out[0]"),
+      std::string::npos);
+  EXPECT_NE(
+      dualRailResult.skippedObservedOutputs.front().find("rerun with sec_engine=pdr"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsDualRailSkipsBroadResidualPdrRepair) {
+       RunExtractedModelsDualRailLeavesResidualsUncoveredWithoutPdrFallback) {
   const SignalKey good = makeSignalKey("dualRailPdrRepairCapGood");
   const SignalKey residual0 = makeSignalKey("dualRailPdrRepairCapResidual0");
   const SignalKey residual1 = makeSignalKey("dualRailPdrRepairCapResidual1");
@@ -7924,71 +7931,133 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.observedOutputExprByKey.emplace(residual0, BoolExpr::Var(5));
   model1.observedOutputExprByKey.emplace(residual1, BoolExpr::Not(BoolExpr::Var(5)));
 
-  const ScopedEnvVar repairLimit(
-      "KEPLER_SEC_DUAL_RAIL_PDR_REPAIR_OUTPUT_LIMIT", "1");
-  const ScopedEnvVar batchLimit(
-      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
-  const ScopedEnvVar leafLimit(
-      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction,
-      SecXMode::DualRailSteady);
-  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  {
+    const ScopedEnvVar residualLimit(
+        "KEPLER_SEC_DUAL_RAIL_PDR_REPAIR_OUTPUT_LIMIT", "1");
+    const ScopedEnvVar batchLimit(
+        "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+    const ScopedEnvVar leafLimit(
+        "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
+    SequentialEquivalenceStrategy strategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        SecEngine::KInduction,
+        SecXMode::DualRailSteady);
+    const auto result = strategy.runExtractedModels(model0, model1, 1);
 
-  // The constant output is certified by the dual-rail induction core. The two
-  // resetless residual outputs would require engine repair, but the configured
-  // cap makes them explicitly uncovered instead of launching a broad PDR run.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, 3u);
-  ASSERT_EQ(result.skippedObservedOutputs.size(), 2u);
-  EXPECT_NE(
-      result.skippedObservedOutputs[0].find("configured limit"),
-      std::string::npos);
-  EXPECT_NE(
-      result.skippedObservedOutputs[1].find("configured limit"),
-      std::string::npos);
+    // The constant output is certified by the dual-rail induction core. KI
+    // keeps that coverage and leaves residual dual-rail outputs uncovered
+    // instead of invoking PDR behind the selected engine.
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(result.coveredOutputs, 1u);
+    EXPECT_EQ(result.totalOutputs, 3u);
+    ASSERT_EQ(result.skippedObservedOutputs.size(), 2u);
+    EXPECT_NE(
+        result.skippedObservedOutputs[0].find("rerun with sec_engine=pdr"),
+        std::string::npos);
+    EXPECT_NE(
+        result.skippedObservedOutputs[1].find("rerun with sec_engine=pdr"),
+        std::string::npos);
 
-  SequentialEquivalenceStrategy pdrStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecXMode::DualRailSteady);
-  const auto pdrResult = pdrStrategy.runExtractedModels(model0, model1, 1);
+    SequentialEquivalenceStrategy pdrStrategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        SecEngine::Pdr,
+        SecXMode::DualRailSteady);
+    const auto pdrResult = pdrStrategy.runExtractedModels(model0, model1, 1);
 
-  EXPECT_EQ(pdrResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(pdrResult.coveredOutputs, 1u);
-  EXPECT_EQ(pdrResult.totalOutputs, 3u);
-  ASSERT_EQ(pdrResult.skippedObservedOutputs.size(), 2u);
-  EXPECT_NE(
-      pdrResult.skippedObservedOutputs[0].find("configured limit"),
-      std::string::npos);
-  EXPECT_NE(
-      pdrResult.skippedObservedOutputs[1].find("configured limit"),
-      std::string::npos);
+    EXPECT_EQ(pdrResult.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(pdrResult.coveredOutputs, 1u);
+    EXPECT_EQ(pdrResult.totalOutputs, 3u);
+    ASSERT_EQ(pdrResult.skippedObservedOutputs.size(), 2u);
+    EXPECT_NE(
+        pdrResult.skippedObservedOutputs[0].find("configured limit"),
+        std::string::npos);
+    EXPECT_NE(
+        pdrResult.skippedObservedOutputs[1].find("configured limit"),
+        std::string::npos);
 
-  SequentialEquivalenceStrategy imcStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Imc,
-      SecXMode::DualRailSteady);
-  const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 1);
+    SequentialEquivalenceStrategy imcStrategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        SecEngine::Imc,
+        SecXMode::DualRailSteady);
+    const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 1);
 
-  EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(imcResult.coveredOutputs, 1u);
-  EXPECT_EQ(imcResult.totalOutputs, 3u);
-  ASSERT_EQ(imcResult.skippedObservedOutputs.size(), 2u);
-  EXPECT_NE(
-      imcResult.skippedObservedOutputs[0].find("configured limit"),
-      std::string::npos);
-  EXPECT_NE(
-      imcResult.skippedObservedOutputs[1].find("configured limit"),
-      std::string::npos);
+    EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(imcResult.coveredOutputs, 1u);
+    EXPECT_EQ(imcResult.totalOutputs, 3u);
+    ASSERT_EQ(imcResult.skippedObservedOutputs.size(), 2u);
+    EXPECT_NE(
+        imcResult.skippedObservedOutputs[0].find("rerun with sec_engine=pdr"),
+        std::string::npos);
+    EXPECT_NE(
+        imcResult.skippedObservedOutputs[1].find("rerun with sec_engine=pdr"),
+        std::string::npos);
+  }
+
+  {
+    const ScopedEnvVar residualLimit(
+        "KEPLER_SEC_DUAL_RAIL_PDR_REPAIR_OUTPUT_LIMIT", "4");
+    const ScopedEnvVar batchLimit(
+        "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+    const ScopedEnvVar leafLimit(
+        "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
+    const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    SequentialEquivalenceStrategy strategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        SecEngine::KInduction,
+        SecXMode::DualRailSteady);
+    const auto result = strategy.runExtractedModels(model0, model1, 1);
+    const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    // KI must honor the selected engine.  Even when residual outputs are within
+    // the PDR residual cap, KI keeps only the dual-rail implied coverage and
+    // leaves residuals uncovered rather than launching a hidden PDR retry.
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(result.coveredOutputs, 1u);
+    EXPECT_EQ(result.totalOutputs, 3u);
+    ASSERT_EQ(result.skippedObservedOutputs.size(), 2u);
+    EXPECT_NE(
+        result.skippedObservedOutputs[0].find("rerun with sec_engine=pdr"),
+        std::string::npos);
+    EXPECT_EQ(stdoutOutput.find("PDR repair"), std::string::npos);
+    EXPECT_EQ(stderrOutput.find("PDR repair"), std::string::npos);
+  }
+
+  {
+    const ScopedEnvVar residualLimit(
+        "KEPLER_SEC_DUAL_RAIL_PDR_REPAIR_OUTPUT_LIMIT", "4");
+    const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    SequentialEquivalenceStrategy imcStrategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        SecEngine::Imc,
+        SecXMode::DualRailSteady);
+    const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 0);
+    const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    // IMC has the same contract: selecting IMC must not silently run PDR.  On
+    // this small model IMC may reach its own result directly, so the assertion
+    // is about engine isolation rather than a forced coverage shape.
+    EXPECT_EQ(imcResult.totalOutputs, 3u);
+    EXPECT_EQ(stdoutOutput.find("PDR repair"), std::string::npos);
+    EXPECT_EQ(stderrOutput.find("PDR repair"), std::string::npos);
+  }
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14773,7 +14842,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
       remapBoolExprVariables(root, {{2, 2}, {3, 6}, {4, 4}, {5, 5}}, memo);
   EXPECT_NE(remapped, root);
   EXPECT_NE(remapped->getLeft(), left);
-  EXPECT_EQ(remapped->getRight(), right);
+  // The rebuilt parent may be canonicalized by the global BoolExpr cache when
+  // this test runs after other large SEC tests. The remapper contract is that
+  // unchanged sub-DAGs are preserved in the memo before parent construction.
+  ASSERT_NE(memo.find(right), memo.end());
+  EXPECT_EQ(memo.at(right), right);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

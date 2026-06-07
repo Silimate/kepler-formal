@@ -1225,7 +1225,8 @@ std::optional<SequentialEquivalenceResult> buildDualRailResidualCapResult(
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
     const char* sourceEngine,
-    size_t bound) {
+    size_t bound,
+    std::optional<size_t> residualOutputLimitOverride = std::nullopt) {
   if (!problem.usesDualRailStateEncoding ||
       problem.outputImpliedByInductionCore.size() !=
           problem.observedOutputExprs0.size() ||
@@ -1244,20 +1245,27 @@ std::optional<SequentialEquivalenceResult> buildDualRailResidualCapResult(
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
   }
+  if (engineOutputIndices.size() == problem.observedOutputExprs0.size()) {
+    return std::nullopt;
+  }
 
-  const size_t repairOutputLimit = dualRailPdrRepairOutputLimit();
-  if (engineOutputIndices.size() <= repairOutputLimit) {
+  const size_t residualOutputLimit =
+      residualOutputLimitOverride.value_or(dualRailPdrRepairOutputLimit());
+  if (engineOutputIndices.size() <= residualOutputLimit) {
     return std::nullopt;
   }
 
   emitSecDiag(
       "SEC diag: ", sourceEngine,
       " dual-rail proof skipped because residual outputs exceed limit ",
-      repairOutputLimit);
-  const std::string reason =
-      std::string("dual-rail ") + sourceEngine +
-      " skipped for this non-implied output because the residual output set "
-      "exceeded the configured limit";
+      residualOutputLimit);
+  const std::string reason = residualOutputLimit == 0
+      ? std::string("dual-rail ") + sourceEngine +
+            " left this non-implied output uncovered; rerun with sec_engine=pdr "
+            "to try proving residual dual-rail outputs"
+      : std::string("dual-rail ") + sourceEngine +
+            " skipped for this non-implied output because the residual output "
+            "set exceeded the configured limit";
   const OutputCoverageSelection partialCoverage =
       buildCoverageSkippingOutputIndices(
           outputCoverage, problem, engineOutputIndices, reason);
@@ -1267,6 +1275,48 @@ std::optional<SequentialEquivalenceResult> buildDualRailResidualCapResult(
   return makeSecResult(
       SequentialEquivalenceStatus::Equivalent,
       bound,
+      "",
+      partialCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+}
+
+SequentialEquivalenceResult keepDualRailImpliedCoverageOnEngineInconclusive(
+    const KInductionProblem& problem,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    const char* sourceEngine,
+    SequentialEquivalenceResult originalResult) {
+  if (!problem.usesDualRailStateEncoding ||
+      originalResult.status != SequentialEquivalenceStatus::Inconclusive) {
+    return originalResult;
+  }
+
+  const std::vector<size_t> engineOutputIndices =
+      collectOutputsRequiringDualRailEngineProof(problem);
+  if (engineOutputIndices.empty() ||
+      engineOutputIndices.size() == problem.observedOutputExprs0.size()) {
+    return originalResult;
+  }
+
+  emitSecDiag(
+      "SEC diag: ", sourceEngine,
+      " dual-rail proof inconclusive; leaving ",
+      engineOutputIndices.size(),
+      " non-implied outputs uncovered");
+  const std::string reason =
+      std::string("dual-rail ") + sourceEngine +
+      " proof was inconclusive for this non-implied output";
+  const OutputCoverageSelection partialCoverage =
+      buildCoverageSkippingOutputIndices(
+          outputCoverage, problem, engineOutputIndices, reason);
+  // The dual-rail induction core has already certified the implied outputs.
+  // Keep that coverage and report residual engine failures as uncovered rather
+  // than invoking another SEC engine behind the user's selected mode.
+  return makeSecResult(
+      SequentialEquivalenceStatus::Equivalent,
+      originalResult.bound,
       "",
       partialCoverage,
       abstractedSequentialBoundaries,
@@ -3264,151 +3314,6 @@ SequentialEquivalenceResult runPdrSecEngine(
       extractedBoundaryReports);
 }
 
-SequentialEquivalenceResult repairDualRailWithPdr(
-    const KInductionProblem& problem,
-    size_t maxK,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    naja::NL::SNLDesign* top0,
-    naja::NL::SNLDesign* top1,
-    const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries,
-    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
-    const char* sourceEngine,
-    SequentialEquivalenceResult originalResult) {
-  if (!problem.usesDualRailStateEncoding ||
-      originalResult.status != SequentialEquivalenceStatus::Inconclusive) {
-    return originalResult;
-  }
-
-  // Dual-rail introduces rail-valued X obligations that are sometimes a poor
-  // fit for KI/IMC's SAT-step shape even when the same property has a small PDR
-  // proof.  Use PDR only as an explicit repair path for dual-rail inconclusive
-  // results; binary/current SEC flows keep their selected engine behavior.
-  //
-  // Do not ask PDR to re-prove rail outputs that the validated induction core
-  // already covers.  Repair is only for the residual outputs that still need an
-  // engine proof; if those remain hard, they become uncovered rather than
-  // trapping the whole multi-output SEC run.
-  emitSecDiag(
-      "SEC diag: ", sourceEngine,
-      " dual-rail proof inconclusive; trying full PDR repair");
-
-  const std::vector<size_t> engineOutputIndices =
-      collectOutputsRequiringDualRailEngineProof(problem);
-  if (!engineOutputIndices.empty() &&
-      engineOutputIndices.size() < problem.observedOutputExprs0.size()) {
-    const size_t repairOutputLimit = dualRailPdrRepairOutputLimit();
-    emitSecDiag(
-        "SEC diag: ", sourceEngine,
-        " dual-rail PDR repair restricted to ",
-        engineOutputIndices.size(),
-        " non-implied outputs");
-    if (engineOutputIndices.size() > repairOutputLimit) {
-      emitSecDiag(
-          "SEC diag: ", sourceEngine,
-          " dual-rail PDR repair skipped because residual outputs exceed "
-          "limit ",
-          repairOutputLimit);
-      const OutputCoverageSelection partialCoverage =
-          buildCoverageSkippingOutputIndices(
-              outputCoverage,
-              problem,
-              engineOutputIndices,
-              "dual-rail PDR repair skipped for this non-implied output "
-              "because the residual output set exceeded the configured limit");
-      return makeSecResult(
-          SequentialEquivalenceStatus::Equivalent,
-          originalResult.bound,
-          "",
-          partialCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    }
-    const KInductionProblem repairProblem =
-        makeOutputSubsetProblem(problem, engineOutputIndices);
-    const OutputCoverageSelection repairCoverage =
-        makeOutputSubsetCoverage(outputCoverage, engineOutputIndices);
-    const SequentialEquivalenceResult repairResult = runPdrSecEngine(
-        repairProblem,
-        maxK,
-        solverType,
-        model0,
-        model1,
-        top0,
-        top1,
-        repairCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-    if (repairResult.status == SequentialEquivalenceStatus::Different) {
-      return repairResult;  // LCOV_EXCL_LINE
-    }
-    if (repairResult.status == SequentialEquivalenceStatus::Equivalent &&
-        repairResult.coveredOutputs == engineOutputIndices.size()) {
-      return makeSecResult(
-          SequentialEquivalenceStatus::Equivalent,
-          std::max(originalResult.bound, repairResult.bound),
-          "",
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    }
-
-    const OutputCoverageSelection partialCoverage =
-        buildCoverageSkippingOutputIndices(
-            outputCoverage,
-            problem,
-            engineOutputIndices,
-            "dual-rail PDR repair was inconclusive for this non-implied output");
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        std::max(originalResult.bound, repairResult.bound),
-        "",
-        partialCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-
-  if (!engineOutputIndices.empty() &&
-      engineOutputIndices.size() > dualRailPdrRepairOutputLimit()) {
-    emitSecDiag(
-        "SEC diag: ", sourceEngine,
-        " dual-rail full PDR repair skipped because residual outputs exceed "
-        "limit ",
-        dualRailPdrRepairOutputLimit());
-    const OutputCoverageSelection partialCoverage =
-        buildCoverageSkippingOutputIndices(
-            outputCoverage,
-            problem,
-            engineOutputIndices,
-            "dual-rail PDR repair skipped for this non-implied output because "
-            "the residual output set exceeded the configured limit");
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        originalResult.bound,
-        "",
-        partialCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-
-  const SequentialEquivalenceResult repairResult = runPdrSecEngine(
-      problem,
-      maxK,
-      solverType,
-      model0,
-      model1,
-      top0,
-      top1,
-      outputCoverage,
-      abstractedSequentialBoundaries,
-      extractedBoundaryReports);
-  return repairResult.status == SequentialEquivalenceStatus::Inconclusive
-             ? originalResult
-             : repairResult;
-}
-
 SequentialEquivalenceResult runKInductionSecEngine(
     const KInductionProblem& problem,
     size_t maxK,
@@ -3426,6 +3331,7 @@ SequentialEquivalenceResult runKInductionSecEngine(
           abstractedSequentialBoundaries,
           extractedBoundaryReports,
           "k-induction",
+          0,
           0);
       cappedResult.has_value()) {
     return *cappedResult;
@@ -3455,25 +3361,21 @@ SequentialEquivalenceResult runKInductionSecEngine(
           extractedBoundaryReports);
     case KInductionStatus::Inconclusive:  // LCOV_EXCL_LINE
     default:
-      return repairDualRailWithPdr(  // LCOV_EXCL_LINE
-          problem,  // LCOV_EXCL_LINE
-          maxK,  // LCOV_EXCL_LINE
-          solverType,  // LCOV_EXCL_LINE
-          model0,  // LCOV_EXCL_LINE
-          model1,  // LCOV_EXCL_LINE
-          top0,  // LCOV_EXCL_LINE
-          top1,  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports,  // LCOV_EXCL_LINE
-          "k-induction",  // LCOV_EXCL_LINE
-          makeSecResult(  // LCOV_EXCL_LINE
-          SequentialEquivalenceStatus::Inconclusive,
-          result.bound,  // LCOV_EXCL_LINE
-          "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports));  // LCOV_EXCL_LINE
+      // Honor the selected SEC engine.  KI must not silently invoke PDR as a
+      // secondary prover; callers can rerun with sec_engine=pdr if desired.
+      return keepDualRailImpliedCoverageOnEngineInconclusive(
+          problem,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          "k-induction",
+          makeSecResult(
+              SequentialEquivalenceStatus::Inconclusive,
+              result.bound,  // LCOV_EXCL_LINE
+              "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
+              outputCoverage,  // LCOV_EXCL_LINE
+              abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+              extractedBoundaryReports));  // LCOV_EXCL_LINE
   }
 }
 
@@ -3494,33 +3396,10 @@ SequentialEquivalenceResult runImcSecEngine(
           abstractedSequentialBoundaries,
           extractedBoundaryReports,
           "imc",
+          0,
           0);
       cappedResult.has_value()) {
     return *cappedResult;
-  }
-
-  constexpr size_t kMaxDirectDualRailImcStateBits = 4096;
-  if (problem.usesDualRailStateEncoding &&
-      problem.totalStateCount > kMaxDirectDualRailImcStateBits) {
-    return repairDualRailWithPdr(
-        problem,
-        maxK,
-        solverType,
-        model0,
-        model1,
-        top0,
-        top1,
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports,
-        "imc",
-        makeSecResult(
-            SequentialEquivalenceStatus::Inconclusive,
-            0,
-            "Large dual-rail IMC problem delegated to PDR repair",
-            outputCoverage,
-            abstractedSequentialBoundaries,
-            extractedBoundaryReports));
   }
 
   IMCEngine engine(problem, solverType);
@@ -3550,25 +3429,21 @@ SequentialEquivalenceResult runImcSecEngine(
     }  // LCOV_EXCL_LINE
     case IMCStatus::Inconclusive:  // LCOV_EXCL_LINE
     default:
-      return repairDualRailWithPdr(  // LCOV_EXCL_LINE
-          problem,  // LCOV_EXCL_LINE
-          maxK,  // LCOV_EXCL_LINE
-          solverType,  // LCOV_EXCL_LINE
-          model0,  // LCOV_EXCL_LINE
-          model1,  // LCOV_EXCL_LINE
-          top0,  // LCOV_EXCL_LINE
-          top1,  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports,  // LCOV_EXCL_LINE
-          "imc",  // LCOV_EXCL_LINE
-          makeSecResult(  // LCOV_EXCL_LINE
-          SequentialEquivalenceStatus::Inconclusive,
-          result.bound,  // LCOV_EXCL_LINE
-          "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports));  // LCOV_EXCL_LINE
+      // Honor the selected SEC engine.  IMC must not silently invoke PDR as a
+      // secondary prover; callers can rerun with sec_engine=pdr if desired.
+      return keepDualRailImpliedCoverageOnEngineInconclusive(
+          problem,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          "imc",
+          makeSecResult(
+              SequentialEquivalenceStatus::Inconclusive,
+              result.bound,  // LCOV_EXCL_LINE
+              "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
+              outputCoverage,  // LCOV_EXCL_LINE
+              abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+              extractedBoundaryReports));  // LCOV_EXCL_LINE
   }
 }
 
