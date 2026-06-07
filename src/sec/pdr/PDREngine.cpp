@@ -222,6 +222,9 @@ constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
 // remains sound without this repair because it then proves the property over a
 // larger abstract frontier; concrete validation still guards any Difference.
 constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 4096;
+constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 4096;
+constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 10000;
+constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 1024;
 // Exact reset-frontier validation can batch a small state-only bad CNF into
 // one prefix query. This replaces many neighboring per-assignment frontier
 // solves with a single real bounded proof, and stays limited to local
@@ -890,13 +893,23 @@ size_t pdrDualRailStateSymbolCount(const KInductionProblem& problem) {
   return problem.dualRailStatePairs.size() * 2;
 }
 
+size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
+  size_t count = problem.transitions0.size() + problem.transitions1.size();
+  if (problem.lazyTransitions != nullptr) {
+    count += problem.lazyTransitions->sourceByStateSymbol.size();
+  }
+  return count;
+}
+
 bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
                                        bool requested) {
   if (!requested || !problem.usesDualRailStateEncoding) {
     return requested;
   }
   return pdrDualRailStateSymbolCount(problem) <=
-         kMaxExactResetFrontierDualRailStateSymbols;
+             kMaxExactResetFrontierDualRailStateSymbols &&
+         pdrTransitionSourceCount(problem) <=
+             kMaxDualRailResetBootstrapBmcTransitionSources;
 }
 
 KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
@@ -992,7 +1005,31 @@ unsigned resetExpressionProofConflictLimit() {
 unsigned dualRailBadCubeConflictLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
       "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_CONFLICT_LIMIT",
-      5000);
+      100);
+}
+
+unsigned dualRailPredecessorConflictLimit() {
+  return envUnsignedLimitOrDefaultAllowZero(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT",
+      500);
+}
+
+unsigned dualRailPredecessorDecisionLimit(unsigned defaultValue) {
+  return envUnsignedLimitOrDefaultAllowZero(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT",
+      defaultValue);
+}
+
+size_t dualRailPredecessorEncodingNodeLimit() {
+  return envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_ENCODING_NODE_LIMIT",
+      kDefaultDualRailPredecessorEncodingNodeLimit);
+}
+
+size_t dualRailPredecessorEncodingSupportLimit() {
+  return envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_ENCODING_SUPPORT_LIMIT",
+      kDefaultDualRailPredecessorEncodingSupportLimit);
 }
 
 size_t maxProjectedFrameClausesPerQuery() {
@@ -1037,6 +1074,11 @@ size_t nextPdrPredecessorQueryNumber() {
 size_t nextPdrProjectedBlockedRetryNumber() {
   static size_t retryNumber = 0;
   return ++retryNumber;
+}
+
+size_t nextPdrDualRailPredecessorCoreSkipNumber() {
+  static size_t skipNumber = 0;
+  return ++skipNumber;
 }
 
 bool shouldEmitPdrStats(size_t queryNumber) {
@@ -5529,6 +5571,14 @@ size_t exactResetCubeBadFormulaClauseLimit(const KInductionProblem& problem) {
              : kMaxExactResetCubeValidatedBadFormulaClauses;
 }
 
+bool hasLargeDualRailResetFrontierSurface(const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding &&
+         (pdrDualRailStateSymbolCount(problem) >
+              kMaxExactResetFrontierDualRailStateSymbols ||
+          pdrTransitionSourceCount(problem) >
+              kMaxDualRailResetBootstrapBmcTransitionSources);
+}
+
 bool canExactlyValidateBadFormulaGroup(const KInductionProblem& problem,
                                        size_t targetFrame,
                                        const std::vector<StateClause>& clauses) {
@@ -6640,10 +6690,21 @@ std::optional<bool> learnValidatedBadFormulaClauses(
     return learnedAnyClause ? std::optional<bool>{true} : std::nullopt;  // LCOV_EXCL_LINE
   }
 
+  // Large rail-encoded frontiers make the reset-cube bad-formula repair build
+  // a second bounded reset solver for one leaf.  That repair is optional:
+  // ordinary PDR remains sound, and the SEC strategy can leave the leaf
+  // uncovered instead of spending the workflow in this CEGAR shortcut.
+  const bool largeDualRailResetFrontierSurface =
+      hasLargeDualRailResetFrontierSurface(problem);
   bool validatedBadClauses = false;
   bool validatedBadClausesAtTargetOnly = false;
+  // Dual-rail final repairs can have small output support but a wide reset
+  // frontier. Leave those leaves to ordinary PDR/whole-bad validation instead
+  // of building a reset-cube solver for every residual rail assignment.
   if (problem.observedOutputExprs0.size() == 1 &&
-      badClauses->size() > kMaxExactValidatedBadFormulaClauses) {  // LCOV_EXCL_LINE
+      badClauses->size() > kMaxExactValidatedBadFormulaClauses &&
+      !problem.usesDualRailStateEncoding &&
+      !largeDualRailResetFrontierSurface) {  // LCOV_EXCL_LINE
     // A one-output state-only bad predicate can still enumerate to a few dozen
     // assignments. Sampling on BlackParrot showed one broad frontier proof for
     // that whole disjunction becoming the wall, while the concrete reset-cube
@@ -6696,6 +6757,8 @@ std::optional<bool> learnValidatedBadFormulaClauses(
       validationSupportCubeForStateClauses(*badClauses);
   const bool allowBatchedResetFrontierValidation =
       !validatedBadClauses &&
+      !largeDualRailResetFrontierSurface &&
+      !problem.usesDualRailStateEncoding &&
       problem.resetBootstrapCycles != 0 &&
       problem.observedOutputExprs0.size() == 1 &&
       targetFrame <=  // LCOV_EXCL_LINE
@@ -6760,7 +6823,8 @@ std::optional<bool> learnValidatedBadFormulaClauses(
       cachedResetValidatedAssignments != 0;  // LCOV_EXCL_LINE
   const bool allowWholeBadFormulaBaseValidation =
       useWholeBatchValidation ||
-      targetFrame <= kMaxWholeBadFormulaBaseValidationFrame ||
+      (!largeDualRailResetFrontierSurface &&
+       targetFrame <= kMaxWholeBadFormulaBaseValidationFrame) ||
       badClauses->size() <= kMaxExactValidatedBadFormulaClauses ||
       allowDeepWholeBadFormulaAfterCachedRoot;  // LCOV_EXCL_LINE
   if (!validatedBadClauses && !allowWholeBadFormulaBaseValidation) {
@@ -7774,11 +7838,41 @@ std::optional<StateCube> findPredecessorCube(
       expandTransitionTargets(problem, targetSymbols, transitionByState);
   const std::vector<size_t> transitionSupportSymbols =
       collectTransitionSupportSymbols(transitionByState, encodedTargets);
+  const size_t transitionEncodingNodes =
+      estimateTransitionEncodingNodes(transitionByState, encodedTargets);
   const size_t statsQueryNumber = nextPdrPredecessorQueryNumber();
   const bool emitStatsForQuery = shouldEmitPdrStats(statsQueryNumber);
   const bool predecessorQueryIsAlreadyExact = predecessorProjectionLimit == 0;
   const size_t exactResetPrecheckSupportLimit =
       maxExactResetPrecheckTransitionSupport(solverType);
+  if (problem.usesDualRailStateEncoding) {
+    const size_t encodingNodeLimit = dualRailPredecessorEncodingNodeLimit();
+    const size_t encodingSupportLimit =
+        dualRailPredecessorEncodingSupportLimit();
+    const bool unknownNodeCount =
+        transitionEncodingNodes == 0 &&
+        encodedTargets.size() > kMaxExactTransitionNodeCountHintTargets;
+    if (unknownNodeCount ||
+        transitionEncodingNodes > encodingNodeLimit ||
+        transitionSupportSymbols.size() > encodingSupportLimit) {
+      if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
+            "SEC PDR stats: predecessor encoding budget exhausted targets=",
+            encodedTargets.size(),
+            " nodes=",
+            transitionEncodingNodes,
+            " node_limit=",
+            encodingNodeLimit,
+            " transition_support=",
+            transitionSupportSymbols.size(),
+            " support_limit=",
+            encodingSupportLimit,
+            " level=",
+            level);
+      }  // LCOV_EXCL_LINE
+      throw PdrQueryBudgetExceeded();  // LCOV_EXCL_LINE
+    }
+  }
 
   // This reset-frontier precheck is an optional accelerator for projected PDR
   // queries: it can reject fake F[0] predecessors before they become root
@@ -7914,7 +8008,40 @@ std::optional<StateCube> findPredecessorCube(
   if (excludeTargetOnCurrentFrame) {
     addNegatedCubeClause(solver, variables, targetCube, 0);
   }
-  const bool hasPredecessor = solver.solve();
+  SATSolverWrapper::SolveStatus predecessorSolveStatus =
+      SATSolverWrapper::SolveStatus::Sat;
+  const unsigned predecessorConflictLimit =
+      problem.usesDualRailStateEncoding ? dualRailPredecessorConflictLimit() : 0;
+  const unsigned predecessorDecisionLimit =
+      problem.usesDualRailStateEncoding
+          ? dualRailPredecessorDecisionLimit(predecessorConflictLimit)
+          : std::numeric_limits<unsigned>::max();
+  if (problem.usesDualRailStateEncoding) {
+    // Predecessor queries are local PDR obligations. A limit hit is not a
+    // proof of UNSAT, so dual-rail mode turns it into an inconclusive leaf
+    // instead of letting one hard residual output dominate the regress run.
+    predecessorSolveStatus = solver.solveWithResourceLimits(
+        predecessorConflictLimit,
+        predecessorDecisionLimit);
+  } else {
+    predecessorSolveStatus = solver.solveStatus();
+  }
+  if (predecessorSolveStatus == SATSolverWrapper::SolveStatus::Unknown) {
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: predecessor query budget exhausted limit=",
+          predecessorConflictLimit,
+          " decision_limit=",
+          predecessorDecisionLimit,
+          " symbols=",
+          solverSymbols.size(),
+          " level=",
+          level);
+    }  // LCOV_EXCL_LINE
+    throw PdrQueryBudgetExceeded();  // LCOV_EXCL_LINE
+  }
+  const bool hasPredecessor =
+      predecessorSolveStatus == SATSolverWrapper::SolveStatus::Sat;
   if (emitStatsForQuery) {
     emitSecDiag(
         "SEC PDR stats: predecessor #", statsQueryNumber,
@@ -8602,6 +8729,9 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
       blockedCubeTransitionSupportSize(problem, transitionByState, cube);
   const bool cheapTransitionSurface =
       blockedCubeSupportSize <= kCheapBlockedCubeTransitionSupportLimit;
+  const bool broadDualRailTransitionSurface =
+      problem.usesDualRailStateEncoding &&
+      blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport;
   const size_t effectiveCheckLimit =
       cheapTransitionSurface
           ? std::max(
@@ -8612,10 +8742,27 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
           : checkLimit;
   const bool shouldTryPredecessorCore =
       level <= kMaxPredecessorCoreGeneralizationLevel &&
+      !broadDualRailTransitionSurface &&
       !cheapTransitionSurface &&
       (cube.size() > kLargeBlockedCubeGeneralizationThreshold ||
        (cube.size() >= kMinMediumCubePredecessorCoreTargetSize &&
         blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport));
+  const size_t dualRailCoreSkipNumber = broadDualRailTransitionSurface
+                                            ? nextPdrDualRailPredecessorCoreSkipNumber()
+                                            : 0;
+  if (broadDualRailTransitionSurface &&
+      shouldEmitPdrStats(dualRailCoreSkipNumber)) {  // LCOV_EXCL_LINE
+    // Predecessor-core extraction is optional clause minimization. In dual-rail
+    // mode the target cube already contains rail-expanded state, and sampled
+    // Swerv regressions showed the core SAT query becoming the runtime wall.
+    // Learning the already-proven cube below remains sound; it only gives up
+    // this local strengthening shortcut for broad rail surfaces.
+    emitSecDiag(  // LCOV_EXCL_LINE
+        "SEC PDR stats: skipped dual-rail predecessor core ",
+        "cube=", cube.size(),
+        " level=", level,
+        " support=", blockedCubeSupportSize);
+  }  // LCOV_EXCL_LINE
   if (level == 1 && resetFrontierCache != nullptr &&
       problem.resetBootstrapCycles != 0) {
     // A failed exact reset-frontier predecessor precheck already proved that
@@ -9705,6 +9852,7 @@ bool blockProofObligations(const KInductionProblem& problem,
                            BoolExpr* initFormula,
                            BoolExpr* frameInvariant,
                            std::vector<FrameClauses>& frames,
+                           const InitFactIndex& initFacts,
                            const StateCube& rootCube,
                            size_t rootLevel,
                            size_t& badFrame,
@@ -9759,7 +9907,6 @@ bool blockProofObligations(const KInductionProblem& problem,
       }  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
-  const InitFactIndex initFacts = buildInitFactIndex(problem);
   auto learnBlockedObligation = [&](const ProofObligation& blockedObligation,
                                     bool exactClausesForGeneralization) {
     const StateCube generalizedCube = generalizeBlockedCube(
@@ -9847,9 +9994,13 @@ bool blockProofObligations(const KInductionProblem& problem,
   const bool useSingleOutputValidatedBadFormulaRepair =
       learnValidatedBadFormulaClausesOnReject &&
       problem.observedOutputExprs0.size() == 1;
+  // A dual-rail batch ORs many rail-expanded output predicates together.  Keep
+  // the exact bad-formula repair local to small per-output groups; large
+  // multi-output rail batches must split instead of running one broad BMC.
   const bool useWholeBatchValidatedBadFormulaRepair =
       learnValidatedBadFormulaClausesOnReject &&
       exactFrameClauses &&
+      !problem.usesDualRailStateEncoding &&
       problem.observedOutputExprs0.size() > 1;  // LCOV_EXCL_LINE
   const bool usePerOutputValidatedBadFormulaRepair =
       learnValidatedBadFormulaClausesOnReject &&
@@ -10325,7 +10476,8 @@ bool blockProofObligations(const KInductionProblem& problem,
   return true;
 }
 
-std::vector<StateClause> buildSeedClauses(const KInductionProblem& problem) {
+std::vector<StateClause> buildSeedClauses(const KInductionProblem& problem,
+                                          const InitFactIndex& initFacts) {
   std::vector<StateClause> seedClauses;
   // Seed the first learned frame with state equalities that are already
   // guaranteed by Init/bootstrap, so PDR starts from facts that are known
@@ -10335,7 +10487,6 @@ std::vector<StateClause> buildSeedClauses(const KInductionProblem& problem) {
   // exact SAT init-intersection query for every possible equality seed is too
   // expensive on ASIC regressions and is not needed for soundness: if a seed is
   // not cheaply known to hold on the startup frontier, we simply do not seed it.
-  const InitFactIndex initFacts = buildInitFactIndex(problem);
   for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
     StateClause clause0 = {{lhsSymbol, false}, {rhsSymbol, true}};
     StateClause clause1 = {{lhsSymbol, true}, {rhsSymbol, false}};
@@ -10791,6 +10942,21 @@ std::optional<PDRResult> checkResetBootstrapFrameZero(
   if (problem.resetBootstrapCycles == 0 || resetBootstrapFrameCheckedSafe) {
     return std::nullopt;
   }
+  const size_t transitionSources = pdrTransitionSourceCount(problem);
+  if (problem.usesDualRailStateEncoding &&
+      transitionSources > kMaxDualRailResetBootstrapBmcTransitionSources) {
+    // This precheck is an accelerator that lets PDR add the property as an F0
+    // fact after reset.  On large dual-rail cones it can become the whole run;
+    // skipping it is conservative because PDR then works from the weaker
+    // bootstrap summary and may split/skip instead of proving this slice.
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: skipped dual-rail reset-bootstrap BMC precheck ",
+          "transition_sources=", transitionSources,
+          " limit=", kMaxDualRailResetBootstrapBmcTransitionSources);
+    }  // LCOV_EXCL_LINE
+    return std::nullopt;
+  }
 
   // A reset-bootstrap frontier may be summarized by only the state facts the
   // extractor could prove cheaply. Before PDR treats that summary as F[0], run
@@ -10952,7 +11118,11 @@ PDRResult PDREngine::run(size_t maxFrames,
     return {PDRStatus::Inconclusive, 0};
   }
 
-  const auto seedClauses = buildSeedClauses(problem_);
+  // Init/bootstrap facts are static for a PDR run. Wide dual-rail SEC problems
+  // can carry tens of thousands of boot assignments, so build the lookup index
+  // once instead of rebuilding it for every blocked obligation.
+  const InitFactIndex initFacts = buildInitFactIndex(problem_);
+  const auto seedClauses = buildSeedClauses(problem_, initFacts);
   frames.emplace_back(FrameClauses{seedClauses});
   emitPdrTraceFrames("seeded_frames", frames);
   for (size_t level = 1; level <= maxFrames; ++level) {
@@ -10985,6 +11155,7 @@ PDRResult PDREngine::run(size_t maxFrames,
               initFormula,
               frameInvariant,
               frames,
+              initFacts,
               *badCube,
               level,
               badFrame,

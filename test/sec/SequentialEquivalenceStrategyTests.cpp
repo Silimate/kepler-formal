@@ -6650,6 +6650,71 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSkipsPredecessorCoresForBroadDualRailBlockedCubes) {
+  KInductionProblem problem;
+  constexpr size_t kTargetStateCount = 12;
+  constexpr size_t kSupportStateCount = 40;
+  constexpr size_t firstStateSymbol = 2;
+  constexpr size_t firstSupportSymbol = firstStateSymbol + kTargetStateCount;
+
+  BoolExpr* init = BoolExpr::createTrue();
+  BoolExpr* bad = BoolExpr::createTrue();
+  BoolExpr* wideSupport = BoolExpr::createTrue();
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols.reserve(kTargetStateCount + kSupportStateCount);
+  problem.allSymbols.reserve(kTargetStateCount + kSupportStateCount);
+  for (size_t index = 0; index < kSupportStateCount; ++index) {
+    const size_t symbol = firstSupportSymbol + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    problem.initialStateAssignments.push_back({symbol, false});
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+    wideSupport = BoolExpr::And(wideSupport, BoolExpr::Var(symbol));
+  }
+  for (size_t index = 0; index < kTargetStateCount; ++index) {
+    const size_t symbol = firstStateSymbol + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    bad = BoolExpr::And(bad, BoolExpr::Var(symbol));
+    problem.initialStateAssignments.push_back({symbol, false});
+    problem.transitions0.emplace_back(
+        symbol,
+        index < 4
+            ? BoolExpr::createTrue()
+            : BoolExpr::And(BoolExpr::Var(symbol), wideSupport));
+  }
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = kTargetStateCount + kSupportStateCount;
+  problem.totalStateCount = kTargetStateCount + kSupportStateCount;
+  problem.bad = BoolExpr::simplify(bad);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/kTargetStateCount + kSupportStateCount,
+      /*preciseBadCubeStateLimit=*/kTargetStateCount,
+      /*useExactFrameClauses=*/false);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("skipped dual-rail predecessor core"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("predecessor core target="), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineFindsReachableBadState) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -8144,6 +8209,40 @@ TEST_F(SequentialEquivalenceStrategyTests,
     EXPECT_EQ(pdrResult.coveredOutputs, 3u);
     EXPECT_EQ(pdrResult.totalOutputs, 3u);
     EXPECT_TRUE(pdrResult.skippedObservedOutputs.empty());
+
+    {
+      const ScopedEnvVar pdrQueryBudget(
+          "KEPLER_SEC_PDR_DUAL_RAIL_PROJECTED_QUERY_BUDGET", "1");
+      const ScopedEnvVar pdrClosureLimit(
+          "KEPLER_SEC_PDR_DUAL_RAIL_BATCH_CLOSURE_LIMIT", "1");
+      const ScopedEnvVar predecessorDecisionLimit(
+          "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
+      const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+      testing::internal::CaptureStderr();
+      SequentialEquivalenceStrategy budgetedPdrStrategy(
+          nullptr,
+          nullptr,
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          SecEngine::Pdr,
+          SecXMode::DualRailSteady);
+      const auto budgetedPdrResult =
+          budgetedPdrStrategy.runExtractedModels(model0, model1, 1);
+      const std::string stderrOutput =
+          testing::internal::GetCapturedStderr();
+
+      // A hard dual-rail PDR residual must not block the workflow after the
+      // local projected query budget is exhausted. Already-certified outputs
+      // stay covered, while the unproved residuals are reported as skipped.
+      EXPECT_EQ(
+          budgetedPdrResult.status, SequentialEquivalenceStatus::Equivalent);
+      EXPECT_EQ(budgetedPdrResult.coveredOutputs, 1u);
+      EXPECT_EQ(budgetedPdrResult.totalOutputs, 3u);
+      ASSERT_EQ(budgetedPdrResult.skippedObservedOutputs.size(), 2u);
+      EXPECT_NE(
+          budgetedPdrResult.skippedObservedOutputs[0].find("dual-rail PDR"),
+          std::string::npos);
+      EXPECT_NE(stderrOutput.find("closure_limit=1"), std::string::npos);
+    }
 
     SequentialEquivalenceStrategy imcStrategy(
         nullptr,
@@ -12423,6 +12522,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar smallDualRailQueryLimit(
       "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_LOCAL_SOLVER_SYMBOLS", "1");
+  const ScopedEnvVar proofConflictLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_CONFLICT_LIMIT", "5000");
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
@@ -12474,6 +12575,87 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailPredecessorBudgetReturnsInconclusive) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB};
+  problem.allSymbols = {targetState, stateA, stateB};
+  problem.totalStateCount = 3;
+
+  problem.transitions0 = {
+      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)}};
+  // Init excludes the target bad state, while F1 can still propose it as a PDR
+  // obligation. With a zero-decision cap, the otherwise SAT predecessor query
+  // must report UNKNOWN and leave the local proof slice inconclusive.
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar decisionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor query budget exhausted"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailPredecessorEncodingBudgetReturnsInconclusive) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  std::vector<size_t> sourceStates;
+  sourceStates.reserve(12);
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols.push_back(targetState);
+  problem.allSymbols.push_back(targetState);
+  for (size_t offset = 0; offset < 12; ++offset) {
+    const size_t symbol = 3 + offset;
+    sourceStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.transitions0.emplace_back(targetState, makeOrChain(sourceStates));
+  // This proof would normally build the target transition cone before solving
+  // the predecessor query. Keep the artificial encoding limit tiny so the test
+  // verifies the local inconclusive exit before expensive clause generation.
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar nodeLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_ENCODING_NODE_LIMIT", "4");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor encoding budget exhausted"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDualRailLearnsPerOutputBadFormulaPastBinaryClauseLimit) {
   KInductionProblem problem;
   BoolExpr* init = BoolExpr::createTrue();
@@ -12521,6 +12703,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
           .has_value());
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar proofConflictLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_CONFLICT_LIMIT", "5000");
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
@@ -12590,6 +12774,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = problem.bad;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar proofConflictLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_CONFLICT_LIMIT", "5000");
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
@@ -12795,6 +12981,301 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find(
           "per-output validated bad-formula clauses bad_frame=1 output=0 "
           "outputs=1 clauses=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailExactMultiOutputAvoidsWholeBatchBadFormulaRepair) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  std::vector<BoolExpr*> outputs;
+  size_t nextSymbol = 2;
+
+  for (size_t output = 0; output < 17; ++output) {
+    const size_t base = nextSymbol;
+    nextSymbol += 2;
+    problem.state0Symbols.push_back(base);
+    problem.state0Symbols.push_back(base + 1);
+    problem.allSymbols.push_back(base);
+    problem.allSymbols.push_back(base + 1);
+    problem.initialStateAssignments.push_back({base, false});
+    problem.initialStateAssignments.push_back({base + 1, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(base)));
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(base + 1)));
+    problem.transitions0.emplace_back(base, BoolExpr::createTrue());
+    problem.transitions0.emplace_back(base + 1, BoolExpr::createFalse());
+    outputs.push_back(BoolExpr::And(BoolExpr::Var(base), BoolExpr::Var(base + 1)));
+    problem.observedOutputNames.push_back("rail_batch_" + std::to_string(output));
+  }
+
+  // Keep the state surface above the multi-output defer threshold. The test is
+  // about policy selection, so these filler states are intentionally outside
+  // the output cones.
+  while (problem.state0Symbols.size() < 520) {
+    const size_t symbol = nextSymbol++;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.push_back({symbol, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+
+  problem.usesDualRailStateEncoding = true;
+  problem.observedOutputExprs0 = outputs;
+  problem.observedOutputExprs1.assign(outputs.size(), BoolExpr::createFalse());
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = BoolExpr::createFalse();
+  for (auto* outputExpr : outputs) {
+    problem.bad = BoolExpr::Or(problem.bad, outputExpr);
+  }
+  problem.bad = BoolExpr::simplify(problem.bad);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("skipped broad bad-formula validation"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("batched reset-cube validated bad-formula clauses"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("trying deep whole bad-formula validation"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("refined projected counterexample with validated "
+                        "bad-formula clauses"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailLargeFrontierSkipsResetCubeBadFormulaRepair) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  std::vector<size_t> outputSymbols;
+  outputSymbols.reserve(8);
+
+  for (size_t symbol = 2; symbol < 10; ++symbol) {
+    outputSymbols.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.push_back({symbol, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+  for (size_t index = 0; index < 2050; ++index) {
+    problem.dualRailStatePairs.push_back(
+        DualRailSymbolPair{10000 + index * 2, 10001 + index * 2});
+  }
+
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.observedOutputExprs0 = {BoolExpr::simplify(makeOrChain(outputSymbols))};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"wide_rail_leaf"};
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = problem.observedOutputExprs0.front();
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("skipped deep bad-formula base validation"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("validated bad-formula clauses with reset cubes"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-frontier bad-formula proof"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailLargeTransitionSurfaceSkipsResetCubeRepair) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  std::vector<size_t> outputSymbols;
+  outputSymbols.reserve(8);
+
+  for (size_t symbol = 2; symbol < 10; ++symbol) {
+    outputSymbols.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.push_back({symbol, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+  problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  for (size_t index = 0; index < 4097; ++index) {
+    problem.lazyTransitions->sourceByStateSymbol.emplace(
+        20000 + index,
+        LazyTransitionSource{0, BoolExpr::createFalse(), LazyTransitionRail::Binary});
+  }
+
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.observedOutputExprs0 = {BoolExpr::simplify(makeOrChain(outputSymbols))};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"wide_lazy_surface_leaf"};
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = problem.observedOutputExprs0.front();
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(2, /*resetBootstrapFrameCheckedSafe=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("skipped deep bad-formula base validation"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("validated bad-formula clauses with reset cubes"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailSkipsResetCubeBadFormulaRepair) {
+  KInductionProblem problem;
+  BoolExpr* init = BoolExpr::createTrue();
+  std::vector<size_t> outputSymbols;
+  outputSymbols.reserve(8);
+
+  for (size_t symbol = 2; symbol < 10; ++symbol) {
+    outputSymbols.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.push_back({symbol, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.observedOutputExprs0 = {BoolExpr::simplify(makeOrChain(outputSymbols))};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"small_rail_leaf"};
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = problem.observedOutputExprs0.front();
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(2, /*resetBootstrapFrameCheckedSafe=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("validated bad-formula clauses with reset cubes"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset-frontier bad-formula proof"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailLargeResetBootstrapSkipsBmcPrecheck) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.initialCondition = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+  problem.property = BoolExpr::createTrue();
+  problem.inductionBad = BoolExpr::createFalse();
+  problem.inductionProperty = BoolExpr::createTrue();
+  problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  for (size_t index = 0; index < 4097; ++index) {
+    problem.lazyTransitions->sourceByStateSymbol.emplace(
+        20000 + index,
+        LazyTransitionSource{0, BoolExpr::createFalse(), LazyTransitionRail::Binary});
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("skipped dual-rail reset-bootstrap BMC precheck"),
       std::string::npos)
       << stderrOutput;
 }

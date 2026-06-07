@@ -1232,6 +1232,15 @@ bool pdrStrategyStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
 }
 
+size_t secStrategySizeLimitFromEnv(const char* name, size_t defaultValue) {
+  const char* valueText = std::getenv(name);
+  if (valueText == nullptr || *valueText == '\0') {
+    return defaultValue;
+  }
+  const auto value = std::strtoull(valueText, nullptr, 10);
+  return value == 0 ? defaultValue : static_cast<size_t>(value);
+}
+
 bool secSummaryStatsEnabled() {
   return std::getenv("KEPLER_SEC_SUMMARY_STATS") != nullptr ||
          pdrStrategyStatsEnabled();
@@ -2987,6 +2996,20 @@ SequentialEquivalenceResult runPdrSecEngine(
                                         : kPdrOutputBatchingLimits;
   constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
+  constexpr size_t kDualRailPdrBatchTransitionClosureLimit = 2048;
+  constexpr size_t kDualRailRefinedPdrBatchTransitionClosureLimit = 8192;
+  const size_t pdrBatchTransitionClosureLimit =
+      problem.usesDualRailStateEncoding
+          ? secStrategySizeLimitFromEnv(
+                "KEPLER_SEC_PDR_DUAL_RAIL_BATCH_CLOSURE_LIMIT",
+                kDualRailPdrBatchTransitionClosureLimit)
+          : kPdrBatchTransitionClosureLimit;
+  const size_t refinedPdrBatchTransitionClosureLimit =
+      problem.usesDualRailStateEncoding
+          ? secStrategySizeLimitFromEnv(
+                "KEPLER_SEC_PDR_DUAL_RAIL_REFINED_CLOSURE_LIMIT",
+                kDualRailRefinedPdrBatchTransitionClosureLimit)
+          : kRefinedPdrBatchTransitionClosureLimit;
   constexpr size_t kMaxSmallDesignCertificateStateBits = 4096;
   constexpr size_t kMaxDualRailLeafCertificateStateBits = 8192;
   const size_t certificateStateSymbols =
@@ -3080,14 +3103,14 @@ SequentialEquivalenceResult runPdrSecEngine(
     constexpr size_t kFinalExactPdrBadCubeStateLimit = 32;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrRootGeneralizationAttempts = 0;  // LCOV_EXCL_LINE
     // Dual-rail final PDR validates projected roots exactly.  Give that exact
-    // CEGAR repair a tiny budget so Ibex-size rail roots do not learn one full
-    // unreachable cube per sibling assignment. Multi-output slices split after
-    // a couple of failed repairs; isolated leaves get a little more effort
-    // before the existing uncovered-output path takes over.
+    // CEGAR repair a tiny budget so Ibex/Swerv-size rail roots do not learn one
+    // full unreachable cube per sibling assignment. Multi-output slices split
+    // after a couple of failed repairs; isolated leaves are skipped as uncovered
+    // after the same local effort instead of consuming the whole workflow.
     constexpr size_t kDualRailFinalExactPdrRootGeneralizationAttempts = 4;  // LCOV_EXCL_LINE
-    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 5000;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 512;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
-    constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 8;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     if (endOutput - firstOutput > kMaxFinalExactPdrOutputBatchSize) {  // LCOV_EXCL_LINE
       if (emitPdrStageStats) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
@@ -3113,13 +3136,23 @@ SequentialEquivalenceResult runPdrSecEngine(
     // useful for broad proofs, yet they can dominate SAT encoding once this
     // last retry is focused on a bounded slice.
     prunePdrBatchStrengthening(  // LCOV_EXCL_LINE
-        fullExactBatchProblem, kRefinedPdrBatchTransitionClosureLimit);
+        fullExactBatchProblem, refinedPdrBatchTransitionClosureLimit);
+    // Dual-rail PDR proves the property over the rail-encoded transition
+    // system.  Re-running a full bounded SEC check after an Equivalent leaf is
+    // only a sanity check, and Swerv-size cones materialize gigabytes of BMC
+    // clauses there.  Keep concrete validation for binary PDR; dual-rail
+    // abstract differences still split/skip unless PDR repairs them internally.
     const bool finalBatchCanValidateConcrete =  // LCOV_EXCL_LINE
+        !problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
         endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs;  // LCOV_EXCL_LINE
     const bool finalBatchCanRefineProjectedCounterexamples = true;  // LCOV_EXCL_LINE
+    // The bad-formula repair opens exact reset-frontier queries. Keep it out of
+    // final dual-rail SEC slices; hard leaves can split/skip without proving a
+    // broad reset-cube BMC side problem.
     const bool finalSliceUsesBadFormulaValidation =  // LCOV_EXCL_LINE
+        !problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
         endOutput - firstOutput <=  // LCOV_EXCL_LINE
-        pdrOutputBatchingLimits.maxOutputBatchSize;
+            pdrOutputBatchingLimits.maxOutputBatchSize;
     // Exact reset-frontier checks can repair small final slices, but Ibex-size
     // dual-rail cones rebuild thousands of transition targets per cube.  For
     // those large rail problems, stay on the abstract frontier: proving an
@@ -3138,7 +3171,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         firstOutput,  // LCOV_EXCL_LINE
         endOutput,  // LCOV_EXCL_LINE
         "full_exact_strengthening_pruned",
-        kRefinedPdrBatchTransitionClosureLimit,
+        refinedPdrBatchTransitionClosureLimit,
         finalPdrPredecessorProjectionLimit,
         finalPdrBadCubeStateLimit,
         fullExactBatchProblem);
@@ -3290,13 +3323,20 @@ SequentialEquivalenceResult runPdrSecEngine(
       continue;  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     configureOutputBatchProblem(batchProblem, problem, firstOutput, endOutput);
-    prunePdrBatchRelations(batchProblem, kPdrBatchTransitionClosureLimit);
+    prunePdrBatchRelations(batchProblem, pdrBatchTransitionClosureLimit);
     // ASIC SEC runs need smaller carried predecessor obligations than the
     // standalone PDR engine default.  This does not change the PDR proof rule:
     // every learned clause is still justified by an UNSAT predecessor query,
     // and every reported counterexample is still checked by concrete BMC.
     constexpr size_t kSecPdrPredecessorProjectionLimit = 4;
     constexpr size_t kProjectedPdrPredecessorQueryBudget = 5000;
+    constexpr size_t kDualRailProjectedPdrPredecessorQueryBudget = 256;
+    const size_t projectedPdrPredecessorQueryBudget =
+        problem.usesDualRailStateEncoding
+            ? secStrategySizeLimitFromEnv(
+                  "KEPLER_SEC_PDR_DUAL_RAIL_PROJECTED_QUERY_BUDGET",
+                  kDualRailProjectedPdrPredecessorQueryBudget)
+            : kProjectedPdrPredecessorQueryBudget;
     constexpr bool kValidateProjectedPdrCandidatesBeforeFinal = false;
     emitPdrStrategyStageStats(
         emitPdrStageStats,
@@ -3304,7 +3344,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         firstOutput,
         endOutput,
         "initial",
-        kPdrBatchTransitionClosureLimit,
+        pdrBatchTransitionClosureLimit,
         kSecPdrPredecessorProjectionLimit,
         kSecPdrPredecessorProjectionLimit,
         batchProblem);
@@ -3314,7 +3354,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         kSecPdrPredecessorProjectionLimit,
         kSecPdrPredecessorProjectionLimit,
         /*useExactFrameClauses=*/false,
-        kProjectedPdrPredecessorQueryBudget,
+        projectedPdrPredecessorQueryBudget,
         /*refineProjectedCounterexamples=*/false,
         PDREngine::kDefaultBoundedRootGeneralizationAttempts,
         /*learnValidatedBadFormulaClauses=*/false,
@@ -3367,7 +3407,7 @@ SequentialEquivalenceResult runPdrSecEngine(
           configureOutputBatchProblem(  // LCOV_EXCL_LINE
               refinedBatchProblem, problem, firstOutput, endOutput);  // LCOV_EXCL_LINE
           prunePdrBatchRelations(  // LCOV_EXCL_LINE
-              refinedBatchProblem, kRefinedPdrBatchTransitionClosureLimit);
+              refinedBatchProblem, refinedPdrBatchTransitionClosureLimit);
 
           // If concrete BMC rejects the first projected trace, first widen the
           // relation slice while keeping predecessor cubes small. Sampling on
@@ -3382,7 +3422,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               firstOutput,  // LCOV_EXCL_LINE
               endOutput,  // LCOV_EXCL_LINE
               "widened_relation",
-              kRefinedPdrBatchTransitionClosureLimit,
+              refinedPdrBatchTransitionClosureLimit,
               kSecPdrPredecessorProjectionLimit,
               kSecPdrPredecessorProjectionLimit,
               refinedBatchProblem);
@@ -3392,7 +3432,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               kSecPdrPredecessorProjectionLimit,
               kSecPdrPredecessorProjectionLimit,
               /*useExactFrameClauses=*/false,
-              kProjectedPdrPredecessorQueryBudget,
+              projectedPdrPredecessorQueryBudget,
               /*refineProjectedCounterexamples=*/false,
               PDREngine::kDefaultBoundedRootGeneralizationAttempts,
               /*learnValidatedBadFormulaClauses=*/false,
@@ -3435,7 +3475,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               firstOutput,  // LCOV_EXCL_LINE
               endOutput,  // LCOV_EXCL_LINE
               "widened_relation_moderate_projection",
-              kRefinedPdrBatchTransitionClosureLimit,
+              refinedPdrBatchTransitionClosureLimit,
               kModeratePdrPredecessorProjectionLimit,
               kModeratePdrPredecessorProjectionLimit,
               widenedBatchProblem);
@@ -3445,7 +3485,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               kModeratePdrPredecessorProjectionLimit,
               kModeratePdrPredecessorProjectionLimit,
               /*useExactFrameClauses=*/false,
-              kProjectedPdrPredecessorQueryBudget,
+              projectedPdrPredecessorQueryBudget,
               /*refineProjectedCounterexamples=*/false,
               PDREngine::kDefaultBoundedRootGeneralizationAttempts,
               /*learnValidatedBadFormulaClauses=*/false,
@@ -3478,10 +3518,10 @@ SequentialEquivalenceResult runPdrSecEngine(
             }  // LCOV_EXCL_LINE
           }  // LCOV_EXCL_LINE
           if (problem.usesDualRailStateEncoding) {  // LCOV_EXCL_LINE
-            // Dual-rail PDR needs the final validated bad-formula repair for
-            // local rail assignment sets. The intermediate exact-frame stage
-            // has that repair disabled and can enumerate thousands of sibling
-            // predecessors before reaching the same final proof/split logic.
+            // Dual-rail PDR keeps hard rail predicates local by going directly
+            // to the final isolated retry. The intermediate exact-frame stage
+            // can enumerate thousands of sibling predecessors before reaching
+            // the same proof/split/skip decision.
             const FinalPdrStageOutcome finalOutcome =
                 runFinalExactPdrStage(batchIndex, firstOutput, endOutput);  // LCOV_EXCL_LINE
             if (finalOutcome.terminalResult.has_value()) {  // LCOV_EXCL_LINE
@@ -3522,7 +3562,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               firstOutput,  // LCOV_EXCL_LINE
               endOutput,  // LCOV_EXCL_LINE
               "widened_relation_exact",
-              kRefinedPdrBatchTransitionClosureLimit,
+              refinedPdrBatchTransitionClosureLimit,
               kExactFramePdrPredecessorProjectionLimit,
               kExactFramePdrPredecessorProjectionLimit,
               widenedBatchProblem);
