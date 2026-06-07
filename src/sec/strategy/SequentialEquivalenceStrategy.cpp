@@ -989,6 +989,43 @@ OutputCoverageSelection buildCoverageSkippingOutputIndices(
       baseCoverage, problem, coveredOutputs, skipReasons);
 }
 
+std::string skippedObservedOutputName(const std::string& skippedOutput) {
+  const size_t separator = skippedOutput.find(':');
+  return separator == std::string::npos
+             ? skippedOutput
+             : skippedOutput.substr(0, separator);
+}
+
+OutputCoverageSelection buildCoverageFromResidualResultSkips(
+    const OutputCoverageSelection& baseCoverage,
+    const KInductionProblem& problem,
+    const std::vector<size_t>& residualOutputIndices,
+    const SequentialEquivalenceResult& residualResult,
+    const std::string& fallbackReason) {
+  std::unordered_set<std::string> skippedResidualNames;
+  for (const auto& skippedOutput : residualResult.skippedObservedOutputs) {
+    skippedResidualNames.insert(skippedObservedOutputName(skippedOutput));
+  }
+
+  std::vector<size_t> skippedOutputIndices;
+  if (skippedResidualNames.empty() &&
+      residualResult.coveredOutputs != residualOutputIndices.size()) {
+    // If the residual engine did not tell us which outputs survived, preserve
+    // the old conservative behavior and drop the whole residual slice.
+    skippedOutputIndices = residualOutputIndices;  // LCOV_EXCL_LINE
+  } else {
+    for (const size_t outputIndex : residualOutputIndices) {
+      if (skippedResidualNames.find(outputNameForProblemIndex(problem, outputIndex)) !=
+          skippedResidualNames.end()) {
+        skippedOutputIndices.push_back(outputIndex);
+      }
+    }
+  }
+
+  return buildCoverageSkippingOutputIndices(
+      baseCoverage, problem, skippedOutputIndices, fallbackReason);
+}
+
 std::unordered_map<size_t, SignalKey> buildStateKeyByLocalVar(
     const SequentialDesignModel& model) {
   std::unordered_map<size_t, SignalKey> stateKeyByVar;
@@ -1585,6 +1622,28 @@ unsigned dualRailLocalImplicationConflictLimit() {
   return static_cast<unsigned>(parsed);
 }
 
+size_t directObservedOutputSupportSize(const KInductionProblem& problem) {
+  std::unordered_set<size_t> support;
+  for (const auto* expr : problem.observedOutputExprs0) {
+    const auto exprSupport = expr->getSupportVars();
+    support.insert(exprSupport.begin(), exprSupport.end());
+  }
+  for (const auto* expr : problem.observedOutputExprs1) {
+    const auto exprSupport = expr->getSupportVars();
+    support.insert(exprSupport.begin(), exprSupport.end());
+  }
+  return support.size();
+}
+
+size_t pdrCertificateStateSymbolCount(const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding) {
+    return problem.totalStateCount;
+  }
+  // Dual-rail PDR reasons about both value and known rails.  Runtime guards
+  // must count the actual rail symbols, not only the original flop count.
+  return problem.dualRailStatePairs.size() * 2;
+}
+
 void emitPdrStrategyStageStats(
     bool enabled,
     size_t batchIndex,
@@ -1615,7 +1674,11 @@ void emitPdrStrategyStageStats(
       " init_equalities=", batch.initialStateEqualityPairs.size(),  // LCOV_EXCL_LINE
       " bootstrap_equalities=", batch.bootstrapStateEqualityPairs.size(),  // LCOV_EXCL_LINE
       " inductive_equalities=", batch.inductiveStateEqualityPairs.size(),  // LCOV_EXCL_LINE
-      " observed_outputs=", batch.observedOutputExprs0.size());  // LCOV_EXCL_LINE
+      " observed_outputs=", batch.observedOutputExprs0.size(),
+      " direct_support=", directObservedOutputSupportSize(batch),
+      " output_names=[",
+      formatStringList(batch.observedOutputNames, 8),
+      "]");  // LCOV_EXCL_LINE
 }
 
 void appendAbstractedSequentialBoundaries(
@@ -2688,6 +2751,22 @@ SequentialEquivalenceResult runPdrSecEngine(
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
     }
+    if (residualResult.status == SequentialEquivalenceStatus::Equivalent) {
+      const OutputCoverageSelection partialCoverage =
+          buildCoverageFromResidualResultSkips(
+              outputCoverage,
+              problem,
+              dualRailEngineOutputIndices,
+              residualResult,
+              "dual-rail PDR proof was inconclusive for this non-implied output");
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          residualResult.bound,
+          "",
+          partialCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
 
     // The implication core already certified the other dual-rail outputs.  If the
     // residual PDR subset remains hard, preserve that certified coverage and mark
@@ -2908,10 +2987,11 @@ SequentialEquivalenceResult runPdrSecEngine(
   // avoid broad concrete-BMC validation until the final exact retry.
   constexpr size_t kMinOutputsForBatchedPdrProof = 129;
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
-  // Dual-rail final repair now drains all output-local bad-formula clauses in
-  // one PDR invocation. Keep larger rail slices together so BlackParrot-scale
-  // runs do not pay the reset-frontier setup once per small bus chunk.
-  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{64, 4096};
+  // Dual-rail residuals are already filtered to the outputs that the cheap
+  // implication core could not prove.  Even a sub-129 residual set can contain
+  // Ibex-size bus cones, so start localized and keep coverage by proving every
+  // support-bounded slice.
+  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{4, 512};
   const OutputBatchingLimits pdrOutputBatchingLimits =
       problem.usesDualRailStateEncoding ? kDualRailPdrOutputBatchingLimits
                                         : kPdrOutputBatchingLimits;
@@ -2919,12 +2999,14 @@ SequentialEquivalenceResult runPdrSecEngine(
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
   constexpr size_t kMaxSmallDesignCertificateStateBits = 4096;
   constexpr size_t kMaxDualRailLeafCertificateStateBits = 8192;
+  const size_t certificateStateSymbols =
+      pdrCertificateStateSymbolCount(problem);
   const bool smallCertificateProblem =
-      problem.totalStateCount <= kMaxSmallDesignCertificateStateBits;
+      certificateStateSymbols <= kMaxSmallDesignCertificateStateBits;
   const bool dualRailLeafCertificateProblem =
       problem.usesDualRailStateEncoding &&
       problem.observedOutputExprs0.size() == 1 &&
-      problem.totalStateCount <= kMaxDualRailLeafCertificateStateBits;
+      certificateStateSymbols <= kMaxDualRailLeafCertificateStateBits;
   if (problem.observedOutputExprs0.size() < kMinOutputsForBatchedPdrProof &&
       (smallCertificateProblem || dualRailLeafCertificateProblem)) {
     // On small regressions, a direct KI certificate is often the fastest sound
@@ -2967,7 +3049,10 @@ SequentialEquivalenceResult runPdrSecEngine(
     bool startAtFinalExact = false;
   };
   std::vector<PdrOutputBatch> outputBatches;
-  if (problem.observedOutputExprs0.size() < kMinOutputsForBatchedPdrProof) {
+  const bool useSupportBoundedPdrBatches =
+      problem.usesDualRailStateEncoding ||
+      problem.observedOutputExprs0.size() >= kMinOutputsForBatchedPdrProof;
+  if (!useSupportBoundedPdrBatches) {
     // Batching protects very wide SEC/PDR properties from broad bad-state
     // queries.  On medium designs, each tiny batch repeats the same
     // reset/bootstrap invariant validation, so prove one conjunction slice and
@@ -3004,6 +3089,12 @@ SequentialEquivalenceResult runPdrSecEngine(
     constexpr size_t kFinalExactPdrPredecessorProjectionLimit = 16;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrBadCubeStateLimit = 32;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrRootGeneralizationAttempts = 0;  // LCOV_EXCL_LINE
+    // Dual-rail final PDR validates projected roots exactly.  Give that exact
+    // CEGAR repair a tiny literal-drop budget so Ibex-size rail roots do not
+    // learn one full 32-literal unreachable cube per sibling assignment.
+    constexpr size_t kDualRailFinalExactPdrRootGeneralizationAttempts = 4;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 5000;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     if (endOutput - firstOutput > kMaxFinalExactPdrOutputBatchSize) {  // LCOV_EXCL_LINE
       if (emitPdrStageStats) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
@@ -3036,13 +3127,14 @@ SequentialEquivalenceResult runPdrSecEngine(
     const bool finalSliceUsesBadFormulaValidation =  // LCOV_EXCL_LINE
         endOutput - firstOutput <=  // LCOV_EXCL_LINE
         pdrOutputBatchingLimits.maxOutputBatchSize;
-    // Glucose-backed assumption checks were previously too expensive for the
-    // BlackParrot final repair, so this stage stayed on the abstract reset
-    // frontier and then enumerated many neighboring bad assignments. CaDiCaL
-    // supports assumptions efficiently enough to use the exact reset-frontier
-    // core cache here: concrete F[0] blockers cut off those abstract roots
-    // before the exact-frame PDR loop walks thousands of SAT predecessors.
-    const bool finalSliceUsesResetFrontier = true;  // LCOV_EXCL_LINE
+    // Exact reset-frontier checks can repair small final slices, but Ibex-size
+    // dual-rail cones rebuild thousands of transition targets per cube.  For
+    // those large rail problems, stay on the abstract frontier: proving an
+    // over-approximation is still sound, while any reported difference below is
+    // accepted only after concrete BMC validation.
+    const bool finalSliceUsesResetFrontier =  // LCOV_EXCL_LINE
+        !problem.usesDualRailStateEncoding ||
+        certificateStateSymbols <= kMaxSmallDesignCertificateStateBits;
     const size_t finalPdrPredecessorProjectionLimit =  // LCOV_EXCL_LINE
         kFinalExactPdrPredecessorProjectionLimit;
     const size_t finalPdrBadCubeStateLimit =  // LCOV_EXCL_LINE
@@ -3063,13 +3155,22 @@ SequentialEquivalenceResult runPdrSecEngine(
         finalPdrPredecessorProjectionLimit,
         finalPdrBadCubeStateLimit,
         /*useExactFrameClauses=*/true,
-        /*maxPredecessorQueries=*/0,
+        /*maxPredecessorQueries=*/
+            problem.usesDualRailStateEncoding
+                ? kDualRailFinalExactPdrPredecessorQueryBudget
+                : 0,
         /*refineProjectedCounterexamples=*/
             finalBatchCanRefineProjectedCounterexamples,
         /*maxBoundedRootGeneralizationAttempts=*/
-            kFinalExactPdrRootGeneralizationAttempts,
+            problem.usesDualRailStateEncoding
+                ? kDualRailFinalExactPdrRootGeneralizationAttempts
+                : kFinalExactPdrRootGeneralizationAttempts,
         /*learnValidatedBadFormulaClauses=*/finalSliceUsesBadFormulaValidation,  // LCOV_EXCL_LINE
-        /*useExactResetFrontierChecks=*/finalSliceUsesResetFrontier);
+        /*useExactResetFrontierChecks=*/finalSliceUsesResetFrontier,
+        /*maxProjectedCounterexampleRefinements=*/
+            problem.usesDualRailStateEncoding && endOutput - firstOutput > 1
+                ? kDualRailFinalExactPdrMultiOutputRepairBudget
+                : 0);
     // Dual-rail properties are intentionally batched before the reset
     // bootstrap proof, otherwise the frame-0 precheck materializes the entire
     // wide rail-encoded SEC property. Binary SEC kept the historical broad

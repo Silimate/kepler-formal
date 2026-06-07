@@ -40,7 +40,8 @@ class PDREngine {
             size_t maxBoundedRootGeneralizationAttempts =
                 kDefaultBoundedRootGeneralizationAttempts,
             bool learnValidatedBadFormulaClauses = false,
-            bool useExactResetFrontierChecks = true);
+            bool useExactResetFrontierChecks = true,
+            size_t maxProjectedCounterexampleRefinements = 0);
 
   PDRResult run(size_t maxFrames, bool resetBootstrapFrameCheckedSafe = false) const;
 
@@ -81,6 +82,10 @@ class PDREngine {
   // strategy. They can skip expensive exact reset-frontier SAT prechecks and
   // escalate on an abstract trace, while final self-refining PDR keeps them.
   bool useExactResetFrontierChecks_ = true;
+  // Zero is unlimited.  SEC uses a finite budget only for multi-output
+  // dual-rail final batches so an abstract-only root loop can be split into
+  // narrower output proofs instead of monopolizing the run.
+  size_t maxProjectedCounterexampleRefinements_ = 0;
 };
 
 }  // namespace KEPLER_FORMAL::SEC

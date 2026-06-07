@@ -11,6 +11,7 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr size_t kMaxSolverTseitinReserveHint = 65536;
+constexpr size_t kLargeFormulaReserveLeafMultiplier = 64;
 
 int newSolverLiteral(SATSolverWrapper& solver) {
   // BoolExpr reserves 0/1 for false/true, so fresh SAT literals start above
@@ -238,10 +239,13 @@ size_t FrameFormulaEncoder::mappedSymbol(size_t symbol) const {
 
 void FrameFormulaEncoder::reserveNodeCache() {
   // The support leaf count is a useful lower bound for the number of formula
-  // DAG nodes this encoder will touch. Reserving a few times that amount avoids
-  // repeated hash-table growth and Kissat variable-vector growth on large
-  // transition cones while keeping small unit-test encoders compact.
-  size_t expectedNodes = leafLits_.size() < 80 ? 256 : leafLits_.size() * 3;
+  // DAG nodes this encoder will touch. Wide reset-prefix and dual-rail
+  // transition encodings share many leaves but still create much larger DAGs,
+  // so reserve generously up front and keep small unit-test encoders compact.
+  size_t expectedNodes =
+      leafLits_.size() < 80
+          ? 256
+          : leafLits_.size() * kLargeFormulaReserveLeafMultiplier;
   if (expectedNodeHint_ != 0) {
     // PDR often encodes deep transition cones with a relatively small leaf
     // support.  When the caller already knows the DAG size, reserve for that

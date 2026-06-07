@@ -7238,6 +7238,70 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailKInductionUsesBatchedLazyTransitionSupport) {
+  KInductionProblem problem;
+  constexpr size_t localState = 2;
+  constexpr size_t railOne = 10;
+  constexpr size_t railZero = 11;
+  constexpr size_t targetBase = 100;
+  constexpr size_t targetPairs = 12;
+  BoolExpr* localNext = BoolExpr::Var(localState);
+
+  auto lazyTransitions = std::make_shared<LazyTransitionStore>();
+  lazyTransitions->dualRailStateByLocalSymbolByDesign[0].emplace(
+      localState, DualRailSymbolPair{railOne, railZero});
+  lazyTransitions->sourceByStateSymbol.emplace(
+      railOne, LazyTransitionSource{0, localNext, LazyTransitionRail::DualRailOne});
+  lazyTransitions->sourceByStateSymbol.emplace(
+      railZero, LazyTransitionSource{0, localNext, LazyTransitionRail::DualRailZero});
+
+  problem.usesDualRailStateEncoding = true;
+  problem.lazyTransitions = lazyTransitions;
+  problem.state0Symbols = {railOne, railZero};
+  problem.dualRailStatePairs.push_back(DualRailSymbolPair{railOne, railZero});
+  problem.initialCondition =
+      BoolExpr::And(BoolExpr::Var(railOne), BoolExpr::Not(BoolExpr::Var(railZero)));
+  problem.property =
+      BoolExpr::And(BoolExpr::Var(railOne), BoolExpr::Not(BoolExpr::Var(railZero)));
+  for (size_t index = 0; index < targetPairs; ++index) {
+    const size_t targetOne = targetBase + index * 2;
+    const size_t targetZero = targetOne + 1;
+    problem.state0Symbols.push_back(targetOne);
+    problem.state0Symbols.push_back(targetZero);
+    problem.dualRailStatePairs.push_back(DualRailSymbolPair{targetOne, targetZero});
+    lazyTransitions->sourceByStateSymbol.emplace(
+        targetOne,
+        LazyTransitionSource{0, localNext, LazyTransitionRail::DualRailOne});
+    lazyTransitions->sourceByStateSymbol.emplace(
+        targetZero,
+        LazyTransitionSource{0, localNext, LazyTransitionRail::DualRailZero});
+    problem.initialCondition = BoolExpr::And(
+        problem.initialCondition,
+        BoolExpr::And(BoolExpr::Var(targetOne),
+                      BoolExpr::Not(BoolExpr::Var(targetZero))));
+    problem.property = BoolExpr::And(
+        problem.property,
+        BoolExpr::And(BoolExpr::Var(targetOne),
+                      BoolExpr::Not(BoolExpr::Var(targetZero))));
+  }
+  problem.allSymbols = problem.state0Symbols;
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  // KI/IMC COI construction should use the resolver's frame-wide support
+  // collector.  The old per-target path filled this lazy cache once for every
+  // rail target, which dominated Ibex dual-rail IMC before SAT solving.
+  EXPECT_TRUE(lazyTransitions->supportByStateSymbol.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        DualRailBatchedKInductionReturnsInconclusiveOnDecisionBudget) {
   KInductionProblem problem;
   constexpr size_t state0 = 2;
@@ -7736,6 +7800,123 @@ TEST_F(SequentialEquivalenceStrategyTests,
             std::string::npos);
   EXPECT_NE(stdoutOutput.find("sat_implied_outputs=1"), std::string::npos);
   EXPECT_NE(stderrOutput.find("PDR dual-rail proof restricted to 1 non-implied outputs"),
+            std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailExactResetFrontierGuardCountsRailSymbols) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.totalStateCount = 2049;
+  problem.dualRailStatePairs.reserve(problem.totalStateCount);
+  for (size_t index = 0; index < problem.totalStateCount; ++index) {
+    problem.dualRailStatePairs.push_back(
+        DualRailSymbolPair{index * 2, index * 2 + 1});
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/1,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The original flop count is below the small-design threshold, but the PDR
+  // reset-frontier repair pays for both rails.  Guard on rail symbols so large
+  // dual-rail SEC runs do not re-enter the exact reset-prefix validation wall.
+  EXPECT_NE(
+      stderrOutput.find(
+          "exact reset-frontier checks disabled for large dual-rail problem"),
+      std::string::npos);
+  EXPECT_NE(stderrOutput.find("rail_state_symbols=4098"),
+            std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailBatchesResidualsBelowBroadThreshold) {
+  constexpr size_t kResidualOutputs = 17;
+  const SignalKey implied = makeSignalKey("pdrDualRailBatchedImpliedOut");
+
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model0.allObservedOutputs.push_back(implied);
+  model0.observedOutputs.push_back(implied);
+  model1.allObservedOutputs.push_back(implied);
+  model1.observedOutputs.push_back(implied);
+  model0.displayNameByKey.emplace(implied, "implied_out[0]");
+  model1.displayNameByKey.emplace(implied, "implied_out[0]");
+  model0.observedOutputExprByKey.emplace(implied, BoolExpr::createTrue());
+  model1.observedOutputExprByKey.emplace(implied, BoolExpr::createTrue());
+
+  for (size_t i = 0; i < kResidualOutputs; ++i) {
+    const SignalKey out =
+        makeSignalKey("pdrDualRailBatchedResidualOut" + std::to_string(i));
+    const SignalKey state0 =
+        makeSignalKey("pdrDualRailBatchedState0" + std::to_string(i));
+    const SignalKey state1 =
+        makeSignalKey("pdrDualRailBatchedState1" + std::to_string(i));
+    const size_t state0Var = 10 + i;
+    const size_t state1Var = 100 + i;
+    const std::string outputName =
+        "residual_out[" + std::to_string(i) + "]";
+
+    model0.allObservedOutputs.push_back(out);
+    model0.observedOutputs.push_back(out);
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model0.displayNameByKey.emplace(out, outputName);
+    model1.displayNameByKey.emplace(out, outputName);
+    addStateBitForTest(
+        model0,
+        state0,
+        state0Var,
+        "left_state_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(state0Var));
+    addStateBitForTest(
+        model1,
+        state1,
+        state1Var,
+        "right_state_q[" + std::to_string(i) + "]",
+        BoolExpr::Not(BoolExpr::Var(state1Var)));
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(state0Var));
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(state1Var));
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecXMode::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The residual set is below the historical broad-PDR threshold.  Dual-rail
+  // residuals must still enter PDR as support-bounded slices so one Ibex-like
+  // residual bus cannot force a monolithic bad-state query before localization.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
+  EXPECT_NE(
+      stderrOutput.find("PDR dual-rail proof restricted to 17 non-implied outputs"),
+      std::string::npos);
+  EXPECT_NE(stderrOutput.find("outputs=[0,4) stage=initial"),
+            std::string::npos);
+  EXPECT_NE(stderrOutput.find("observed_outputs=4"),
+            std::string::npos);
+  EXPECT_NE(stderrOutput.find("output_names=[residual_out[0]"),
+            std::string::npos);
+  EXPECT_EQ(stderrOutput.find("outputs=[0,17) stage=initial"),
             std::string::npos);
 }
 
@@ -11743,6 +11924,122 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       stderrOutput.find("refined projected counterexample bad_frame=2 root_cube=2->1"),
       std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailGeneralizesUnreachableProjectedCounterexampleRoot) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {2, 3, 4, 5};
+  problem.allSymbols = {2, 3, 4, 5};
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(2)),
+                    BoolExpr::Not(BoolExpr::Var(3))),
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(4)),
+                    BoolExpr::Not(BoolExpr::Var(5))));
+  problem.initialStateAssignments = {
+      {2, false}, {3, false}, {4, false}, {5, false}};
+  problem.initializedStateCount = 4;
+  problem.totalStateCount = 4;
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(4, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(
+      5,
+      BoolExpr::And(
+          BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3)),
+          BoolExpr::Var(4)));
+  problem.bad = BoolExpr::And(BoolExpr::Var(5), BoolExpr::Var(4));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 3)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/4,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Dual-rail final SEC/PDR validates projected roots exactly.  Keep bounded
+  // root generalization available so the repair learns a useful exact clause
+  // instead of enumerating every sibling full-cube root one by one.
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("refined projected counterexample bad_frame=2 root_cube=2->1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("refined projected counterexample bad_frame=2 root_cube=2->2 checks=0"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineBudgetsDualRailProjectedCounterexampleRepairs) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {2, 3, 4, 5};
+  problem.allSymbols = {2, 3, 4, 5};
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(2)),
+                    BoolExpr::Not(BoolExpr::Var(3))),
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(4)),
+                    BoolExpr::Not(BoolExpr::Var(5))));
+  problem.initialStateAssignments = {
+      {2, false}, {3, false}, {4, false}, {5, false}};
+  problem.initializedStateCount = 4;
+  problem.totalStateCount = 4;
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(4, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(
+      5,
+      BoolExpr::And(
+          BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3)),
+          BoolExpr::Var(4)));
+  problem.bad = BoolExpr::And(BoolExpr::Var(5), BoolExpr::Var(4));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/4,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false,
+      /*maxProjectedCounterexampleRefinements=*/1);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive);
+  EXPECT_NE(
+      stderrOutput.find(
+          "projected counterexample repair budget exhausted refinement_limit=1"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

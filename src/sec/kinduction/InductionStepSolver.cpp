@@ -113,27 +113,6 @@ void addFormulaStateSupport(BoolExpr* formula,
   }
 }
 
-void addTransitionStateSupport(const TransitionExprResolver& transitionByState,
-                               size_t target,
-                               const std::unordered_set<size_t>& stateSymbols,
-                               std::unordered_set<size_t>& output) {
-  for (const auto symbol : transitionByState.support(target)) {
-    if (stateSymbols.find(symbol) != stateSymbols.end()) {
-      output.insert(symbol);
-    }
-  }
-}
-
-void addTransitionSupport(const TransitionExprResolver& transitionByState,
-                          size_t target,
-                          std::unordered_set<size_t>& output) {
-  for (const auto symbol : transitionByState.support(target)) {
-    if (symbol >= 2) {
-      output.insert(symbol);
-    }
-  }
-}
-
 void addFormulaSupport(BoolExpr* formula, std::unordered_set<size_t>& output) {
   if (formula == nullptr) {
     return;  // LCOV_EXCL_LINE
@@ -258,6 +237,8 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   const auto primaryByComplement = buildPrimaryByComplementSymbol(problem);
 
   std::vector<std::unordered_set<size_t>> requiredStates(k + 1);
+  std::unordered_set<size_t> transitionSupportSymbols;
+  transitionSupportSymbols.reserve(1024);
   for (size_t frame = 0; frame < k; ++frame) {
     addFormulaStateSupport(inductionProperty, stateSymbols, requiredStates[frame]);
     if (addExtraInductiveEqualities) {
@@ -276,10 +257,14 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
         transitionByState,
         primaryByComplement);
     transitionTargetsByFrame[frame - 1] = targets;
-    for (const auto target : targets) {
-      addTransitionStateSupport(
-          transitionByState, target, stateSymbols, requiredStates[frame - 1]);
-    }
+    // Wide dual-rail buses share large transition cones.  Ask the resolver for
+    // the whole frame target set at once so KI/IMC reuse the same DAG walk
+    // while still collecting exactly the symbols needed by the proof.
+    transitionByState.collectSupportForTargets(
+        targets,
+        stateSymbols,
+        requiredStates[frame - 1],
+        transitionSupportSymbols);
   }
 
   std::unordered_set<size_t> solverSymbols;
@@ -302,9 +287,10 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
     for (const auto target : targets) {
       relevantStateSymbols.insert(target);
       solverSymbols.insert(target);
-      addTransitionSupport(transitionByState, target, solverSymbols);
     }
   }
+  solverSymbols.insert(
+      transitionSupportSymbols.begin(), transitionSupportSymbols.end());
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);

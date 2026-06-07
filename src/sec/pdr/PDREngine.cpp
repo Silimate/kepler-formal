@@ -216,6 +216,12 @@ constexpr size_t kMaxSingleOutputExactValidatedBadFormulaClauses = 64;
 // the wider assignment set only when the problem explicitly uses rail state.
 constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
     kMaxValidatedBadFormulaClauses;
+// Exact reset-frontier checks are a concrete-reachability repair path.  They
+// are useful on small designs, but large dual-rail problems rebuild the reset
+// prefix over both value/known rails for many neighboring PDR cubes.  PDR
+// remains sound without this repair because it then proves the property over a
+// larger abstract frontier; concrete validation still guards any Difference.
+constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 4096;
 // Exact reset-frontier validation can batch a small state-only bad CNF into
 // one prefix query. This replaces many neighboring per-assignment frontier
 // solves with a single real bounded proof, and stays limited to local
@@ -844,6 +850,14 @@ class PdrQueryBudgetExceeded : public std::runtime_error {
       : std::runtime_error("PDR local query budget exceeded") {}  // LCOV_EXCL_LINE
 };
 
+class PdrProjectedCounterexampleRefinementBudgetExceeded
+    : public std::runtime_error {
+ public:
+  PdrProjectedCounterexampleRefinementBudgetExceeded()  // LCOV_EXCL_LINE
+      : std::runtime_error(
+            "PDR projected counterexample refinement budget exceeded") {}  // LCOV_EXCL_LINE
+};
+
 void consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
   if (remainingQueries == nullptr) {
     return;
@@ -854,8 +868,35 @@ void consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
   --(*remainingQueries);
 }
 
+void consumeProjectedCounterexampleRefinementBudget(
+    size_t* remainingRefinements) {
+  if (remainingRefinements == nullptr) {
+    return;
+  }
+  if (*remainingRefinements == 0) {
+    throw PdrProjectedCounterexampleRefinementBudgetExceeded();  // LCOV_EXCL_LINE
+  }
+  --(*remainingRefinements);
+  if (*remainingRefinements == 0) {
+    throw PdrProjectedCounterexampleRefinementBudgetExceeded();  // LCOV_EXCL_LINE
+  }
+}
+
 bool pdrStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
+}
+
+size_t pdrDualRailStateSymbolCount(const KInductionProblem& problem) {
+  return problem.dualRailStatePairs.size() * 2;
+}
+
+bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
+                                       bool requested) {
+  if (!requested || !problem.usesDualRailStateEncoding) {
+    return requested;
+  }
+  return pdrDualRailStateSymbolCount(problem) <=
+         kMaxExactResetFrontierDualRailStateSymbols;
 }
 
 KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
@@ -9675,7 +9716,8 @@ bool blockProofObligations(const KInductionProblem& problem,
                            size_t maxBoundedRootGeneralizationAttempts,
                            bool learnValidatedBadFormulaClausesOnReject,
                            bool useExactResetFrontierChecks,
-                           size_t* predecessorQueryBudget) {
+                           size_t* predecessorQueryBudget,
+                           size_t* projectedCounterexampleRefinementBudget) {
   // This is the paper's recursive blocking idea expressed as an explicit queue
   // so we do not depend on deep recursion for large obligation stacks.
   std::vector<ProofObligation> queue;
@@ -10066,6 +10108,8 @@ bool blockProofObligations(const KInductionProblem& problem,
               "->", generalizedTarget.size(),
               " checks=", generalizationAttempts);
         }
+        consumeProjectedCounterexampleRefinementBudget(
+            projectedCounterexampleRefinementBudget);
         if (learnValidatedBadFormulaClausesOnReject &&
             useSingleOutputValidatedBadFormulaRepair) {  // LCOV_EXCL_LINE
           // The concrete root check records reset-unreachable cores for every
@@ -10798,7 +10842,8 @@ PDREngine::PDREngine(const KInductionProblem& problem,
                      bool refineProjectedCounterexamples,
                      size_t maxBoundedRootGeneralizationAttempts,
                      bool learnValidatedBadFormulaClauses,
-                     bool useExactResetFrontierChecks)
+                     bool useExactResetFrontierChecks,
+                     size_t maxProjectedCounterexampleRefinements)
     : problem_(problem),
       solverType_(solverType),
       predecessorProjectionLimit_(predecessorProjectionLimit),
@@ -10810,7 +10855,19 @@ PDREngine::PDREngine(const KInductionProblem& problem,
       maxBoundedRootGeneralizationAttempts_(
           maxBoundedRootGeneralizationAttempts),
       learnValidatedBadFormulaClauses_(learnValidatedBadFormulaClauses),
-      useExactResetFrontierChecks_(useExactResetFrontierChecks) {}
+      useExactResetFrontierChecks_(shouldUseExactResetFrontierChecks(
+          problem, useExactResetFrontierChecks)),
+      maxProjectedCounterexampleRefinements_(
+          maxProjectedCounterexampleRefinements) {
+  if (pdrStatsEnabled() && useExactResetFrontierChecks &&
+      !useExactResetFrontierChecks_) {
+    emitSecDiag(
+        "SEC PDR stats: exact reset-frontier checks disabled for large ",
+        "dual-rail problem rail_state_symbols=",
+        pdrDualRailStateSymbolCount(problem),
+        " limit=", kMaxExactResetFrontierDualRailStateSymbols);
+  }
+}
 
 PDRResult PDREngine::run(size_t maxFrames,
                          bool resetBootstrapFrameCheckedSafe) const {
@@ -10860,6 +10917,12 @@ PDRResult PDREngine::run(size_t maxFrames,
   size_t remainingPredecessorQueries = maxPredecessorQueries_;
   size_t* predecessorQueryBudget =
       maxPredecessorQueries_ == 0 ? nullptr : &remainingPredecessorQueries;
+  size_t remainingProjectedCounterexampleRefinements =
+      maxProjectedCounterexampleRefinements_;
+  size_t* projectedCounterexampleRefinementBudget =
+      maxProjectedCounterexampleRefinements_ == 0
+          ? nullptr
+          : &remainingProjectedCounterexampleRefinements;
   std::vector<FrameClauses> frames(1);
   emitPdrTraceFrames("initial_frames", frames);
 
@@ -10933,7 +10996,8 @@ PDRResult PDREngine::run(size_t maxFrames,
               maxBoundedRootGeneralizationAttempts_,
               learnValidatedBadFormulaClauses_,
               useExactResetFrontierChecks_,
-              predecessorQueryBudget)) {
+              predecessorQueryBudget,
+              projectedCounterexampleRefinementBudget)) {
         emitPdrTraceFrames("frames_before_counterexample", frames);
         return {PDRStatus::Different, badFrame};
       }
@@ -10976,6 +11040,14 @@ PDRResult PDREngine::run(size_t maxFrames,
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: local query budget exhausted predecessor_limit=",
           maxPredecessorQueries_);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
+  } catch (const PdrProjectedCounterexampleRefinementBudgetExceeded&) {  // LCOV_EXCL_LINE
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: projected counterexample repair budget exhausted ",
+          "refinement_limit=",
+          maxProjectedCounterexampleRefinements_);  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
