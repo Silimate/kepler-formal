@@ -69,6 +69,10 @@ constexpr size_t kMaxSparseResetFrontierPerStepChecks = 2;
 // hard UNSAT cone cannot consume the whole workflow budget before easier
 // mismatching outputs are tried.
 constexpr int64_t kFastCounterexampleSearchConflictLimit = 5000;
+// Some dual-rail frontier checks spend their budget in propagation-heavy
+// decision search before conflicts accumulate.  Bound decisions too so a hard
+// residual can be reported Unknown and skipped by localized recovery.
+constexpr int64_t kFastCounterexampleSearchDecisionLimit = 20000;
 // Transition node counts are only reserve hints for FrameFormulaEncoder.
 // BlackParrot reset-frontier sampling showed exact counting across ~86k
 // transition targets dominating the whole query before any CNF was emitted.
@@ -1289,7 +1293,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
     size_t k,
     std::optional<size_t> exactPublicBadFrame,
     bool localizeMultiOutputFrontier = true,
-    BaseCaseSolverProfile solverProfile = BaseCaseSolverProfile::SecConeProof);
+    BaseCaseSolverProfile solverProfile = BaseCaseSolverProfile::SecConeProof,
+    SATSolverWrapper::SolveStatus* solveStatusOut = nullptr);
 
 KInductionProblem makeSingleObservedOutputProblem(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
@@ -1385,7 +1390,11 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
     size_t k,
     std::optional<size_t> exactPublicBadFrame,
     bool localizeMultiOutputFrontier,
-    BaseCaseSolverProfile solverProfile) {
+    BaseCaseSolverProfile solverProfile,
+    SATSolverWrapper::SolveStatus* solveStatusOut) {
+  if (solveStatusOut != nullptr) {
+    *solveStatusOut = SATSolverWrapper::SolveStatus::Unsat;
+  }
   if (localizeMultiOutputFrontier &&
       exactPublicBadFrame.has_value() &&
       problem.observedOutputExprs0.size() > 1 &&
@@ -1517,7 +1526,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
   if (solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch) {
     if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
       status = solver.solveWithKissatResourceLimits(
-          static_cast<unsigned>(kFastCounterexampleSearchConflictLimit));
+          static_cast<unsigned>(kFastCounterexampleSearchConflictLimit),
+          static_cast<unsigned>(kFastCounterexampleSearchDecisionLimit));
     } else {
       status = solver.solveWithAssumptionsStatus(
           {},
@@ -1526,6 +1536,9 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
     }
   } else {
     status = solver.solveStatus();
+  }
+  if (solveStatusOut != nullptr) {
+    *solveStatusOut = status;
   }
   if (status != SATSolverWrapper::SolveStatus::Sat) {
     if (status == SATSolverWrapper::SolveStatus::Unknown &&
@@ -1591,6 +1604,31 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
   // nangate45_dynamic_node.
   return findBaseCounterexampleImpl(
       problem, baseCaseValidationSolverType(problem, solverType), k, std::nullopt);
+}
+
+BaseCounterexampleCheckResult checkBaseCounterexampleWithFastValidation(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  SATSolverWrapper::SolveStatus solveStatus =
+      SATSolverWrapper::SolveStatus::Unknown;
+  BaseCounterexampleCheckResult result;
+  result.witness = findBaseCounterexampleImpl(
+      problem,
+      baseCaseValidationSolverType(problem, solverType),
+      k,
+      std::nullopt,
+      /*localizeMultiOutputFrontier=*/false,
+      BaseCaseSolverProfile::FastCounterexampleSearch,
+      &solveStatus);
+  if (solveStatus == SATSolverWrapper::SolveStatus::Unsat) {
+    result.status = BaseCounterexampleCheckStatus::NoCounterexample;
+  } else if (solveStatus == SATSolverWrapper::SolveStatus::Sat) {
+    result.status = BaseCounterexampleCheckStatus::Counterexample;
+  } else {
+    result.status = BaseCounterexampleCheckStatus::Unknown;
+  }
+  return result;
 }
 
 std::optional<KInductionResult::CounterexampleWitness>

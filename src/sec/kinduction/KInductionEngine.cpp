@@ -364,7 +364,11 @@ KInductionResult runOutputBatchedKInduction(
   KInductionProblem batchProblem = problem;
   const bool useSharedBaseCase =
       problem.usesDualRailStateEncoding && shouldCheckLocalBaseCase(problem);
-  batchProblem.deferBaseCaseChecks = useSharedBaseCase;
+  // Preserve explicit caller deferral for localized residual proofs.  The
+  // shared-base optimization below is only for normal batched proofs that still
+  // own their base obligation inside this engine.
+  batchProblem.deferBaseCaseChecks =
+      problem.deferBaseCaseChecks || useSharedBaseCase;
   for (const auto& [firstOutput, endOutput] :
        buildSupportBoundedOutputBatches(problem, batchingLimits)) {
     const KInductionResult result = runOutputRangeKInduction(

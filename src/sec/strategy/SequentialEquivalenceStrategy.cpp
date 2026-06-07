@@ -848,7 +848,7 @@ bool markDualRailPdrOutputSkipped(
   return true;
 }
 
-OutputCoverageSelection buildCoverageWithDualRailPdrSkips(
+OutputCoverageSelection buildCoverageWithDualRailOutputSkips(
     const OutputCoverageSelection& baseCoverage,
     const KInductionProblem& problem,
     const std::vector<bool>& coveredOutputs,
@@ -875,7 +875,7 @@ OutputCoverageSelection buildCoverageWithDualRailPdrSkips(
     const auto reasonIt = skipReasons.find(i);
     const std::string reason =
         reasonIt == skipReasons.end()
-            ? "dual-rail PDR repair was inconclusive"  // LCOV_EXCL_LINE
+            ? "dual-rail proof was inconclusive"  // LCOV_EXCL_LINE
             : reasonIt->second;
     coverage.skippedOutputs.push_back(
         outputNameForProblemIndex(problem, i) + ": " + reason);
@@ -985,7 +985,7 @@ OutputCoverageSelection buildCoverageSkippingOutputIndices(
       skipReasons.emplace(outputIndex, reason);
     }
   }
-  return buildCoverageWithDualRailPdrSkips(
+  return buildCoverageWithDualRailOutputSkips(
       baseCoverage, problem, coveredOutputs, skipReasons);
 }
 
@@ -1201,85 +1201,8 @@ bool secSummaryStatsEnabled() {
 }
 
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
-constexpr size_t kDefaultDualRailPdrRepairOutputLimit = 16;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
-
-size_t dualRailPdrRepairOutputLimit() {
-  const char* value = std::getenv("KEPLER_SEC_DUAL_RAIL_PDR_REPAIR_OUTPUT_LIMIT");
-  if (value == nullptr || *value == '\0') {
-    return kDefaultDualRailPdrRepairOutputLimit;
-  }
-  char* end = nullptr;
-  const unsigned long long parsed = std::strtoull(value, &end, 10);
-  if (end == value || *end != '\0' ||
-      parsed > std::numeric_limits<size_t>::max()) {
-    return kDefaultDualRailPdrRepairOutputLimit;
-  }
-  return static_cast<size_t>(parsed);
-}
-
-std::optional<SequentialEquivalenceResult> buildDualRailResidualCapResult(
-    const KInductionProblem& problem,
-    const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries,
-    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
-    const char* sourceEngine,
-    size_t bound,
-    std::optional<size_t> residualOutputLimitOverride = std::nullopt) {
-  if (!problem.usesDualRailStateEncoding ||
-      problem.outputImpliedByInductionCore.size() !=
-          problem.observedOutputExprs0.size() ||
-      problem.outputImpliedByInductionCore.empty()) {
-    return std::nullopt;
-  }
-
-  const std::vector<size_t> engineOutputIndices =
-      collectOutputsRequiringDualRailEngineProof(problem);
-  if (engineOutputIndices.empty()) {
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        bound,
-        "",
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-  if (engineOutputIndices.size() == problem.observedOutputExprs0.size()) {
-    return std::nullopt;
-  }
-
-  const size_t residualOutputLimit =
-      residualOutputLimitOverride.value_or(dualRailPdrRepairOutputLimit());
-  if (engineOutputIndices.size() <= residualOutputLimit) {
-    return std::nullopt;
-  }
-
-  emitSecDiag(
-      "SEC diag: ", sourceEngine,
-      " dual-rail proof skipped because residual outputs exceed limit ",
-      residualOutputLimit);
-  const std::string reason = residualOutputLimit == 0
-      ? std::string("dual-rail ") + sourceEngine +
-            " left this non-implied output uncovered; rerun with sec_engine=pdr "
-            "to try proving residual dual-rail outputs"
-      : std::string("dual-rail ") + sourceEngine +
-            " skipped for this non-implied output because the residual output "
-            "set exceeded the configured limit";
-  const OutputCoverageSelection partialCoverage =
-      buildCoverageSkippingOutputIndices(
-          outputCoverage, problem, engineOutputIndices, reason);
-  // The dual-rail core already proved the covered outputs.  Residual outputs
-  // are deliberately reported as uncovered here; this is a runtime guard, not a
-  // proof of the skipped outputs.
-  return makeSecResult(
-      SequentialEquivalenceStatus::Equivalent,
-      bound,
-      "",
-      partialCoverage,
-      abstractedSequentialBoundaries,
-      extractedBoundaryReports);
-}
 
 SequentialEquivalenceResult keepDualRailImpliedCoverageOnEngineInconclusive(
     const KInductionProblem& problem,
@@ -1319,6 +1242,330 @@ SequentialEquivalenceResult keepDualRailImpliedCoverageOnEngineInconclusive(
       originalResult.bound,
       "",
       partialCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+}
+
+enum class DualRailResidualEngine {
+  KInduction,
+  Imc,
+};
+
+struct DualRailResidualProofState {
+  std::vector<bool> coveredOutputs;
+  std::unordered_map<size_t, std::string> skipReasons;
+  std::optional<SequentialEquivalenceResult> terminalResult;
+  size_t provedBound = 0;
+};
+
+const char* dualRailResidualEngineName(DualRailResidualEngine engine) {
+  switch (engine) {
+    case DualRailResidualEngine::KInduction:
+      return "k-induction";
+    case DualRailResidualEngine::Imc:
+      return "imc";
+  }
+  return "selected engine";  // LCOV_EXCL_LINE
+}
+
+OutputBatchingLimits dualRailResidualBatchingLimits(
+    const KInductionProblem& problem,
+    DualRailResidualEngine engine) {
+  if (problem.usesDualRailStateEncoding && engine == DualRailResidualEngine::Imc) {
+    // IMC runs exact frontier/base checks before it can grow an interpolant.
+    // Keeping dual-rail residuals local from the first query avoids spending
+    // minutes materializing one wide residual bad-state cone.
+    return OutputBatchingLimits{1, 128};
+  }
+  return defaultOutputBatchingLimitsForProblem(problem);
+}
+
+bool shouldUseDeferredDualRailImcResidualProof(
+    const KInductionProblem& problem) {
+  // IMC's exact frontier machinery is intentionally reserved for tiny explicit
+  // state spaces.  Large dual-rail residuals use the same induction fallback
+  // IMC already relies on after exact frontier construction becomes too large.
+  return problem.usesDualRailStateEncoding && problem.totalStateCount > 12;
+}
+
+void markDualRailResidualOutputsCovered(
+    const std::vector<size_t>& outputIndices,
+    DualRailResidualProofState& proofState) {
+  for (const size_t outputIndex : outputIndices) {
+    if (outputIndex < proofState.coveredOutputs.size()) {
+      proofState.coveredOutputs[outputIndex] = true;
+      proofState.skipReasons.erase(outputIndex);
+    }
+  }
+}
+
+void markDualRailResidualOutputSkipped(
+    size_t outputIndex,
+    const KInductionProblem& problem,
+    DualRailResidualEngine engine,
+    DualRailResidualProofState& proofState,
+    const std::string& reason) {
+  if (outputIndex >= proofState.coveredOutputs.size()) {
+    return;  // LCOV_EXCL_LINE
+  }
+  proofState.coveredOutputs[outputIndex] = false;
+  proofState.skipReasons[outputIndex] = reason.empty()
+                                            ? std::string("dual-rail ") +
+                                                  dualRailResidualEngineName(engine) +
+                                                  " proof was inconclusive for this non-implied output"
+                                            : reason;
+  if (isSecDiagEnabled() || secSummaryStatsEnabled()) {
+    emitSecDiag(
+        "SEC diag: dual-rail ", dualRailResidualEngineName(engine),
+        " leaves residual output uncovered: ",
+        outputNameForProblemIndex(problem, outputIndex));
+  }
+}
+
+void proveDualRailResidualOutputSet(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    DualRailResidualEngine engine,
+    DualRailResidualProofState& proofState) {
+  if (outputIndices.empty() || proofState.terminalResult.has_value()) {
+    return;
+  }
+
+  KInductionProblem subsetProblem =
+      makeOutputSubsetProblem(problem, outputIndices);
+  const bool useDeferredInductionResidualProof =
+      subsetProblem.usesDualRailStateEncoding &&
+      (engine == DualRailResidualEngine::KInduction ||
+       (engine == DualRailResidualEngine::Imc &&
+        shouldUseDeferredDualRailImcResidualProof(subsetProblem)));
+  if (useDeferredInductionResidualProof) {
+    // Localized residual proofs should not spend max_k frontier checks on a
+    // single hard rail output.  First ask whether the induction step closes; if
+    // it does, validate the required concrete base prefix once below.  IMC uses
+    // this same induction rule as its large-problem fallback, so this keeps the
+    // selected engine sound without invoking PDR.
+    subsetProblem.deferBaseCaseChecks = true;
+  }
+  if (isSecDiagEnabled() || secSummaryStatsEnabled()) {
+    emitSecDiag(
+        "SEC diag: dual-rail ", dualRailResidualEngineName(engine),
+        " proving residual output batch size=", outputIndices.size());
+  }
+
+  if (useDeferredInductionResidualProof) {
+    KInductionEngine residualEngine(subsetProblem, solverType);
+    KInductionResult result = residualEngine.run(maxK);
+    proofState.provedBound = std::max(proofState.provedBound, result.bound);
+    if (result.status == KInductionStatus::Equivalent) {
+      const size_t baseHorizon = result.bound == 0 ? 0 : result.bound - 1;
+      const SEC::BaseCounterexampleCheckResult baseCheck =
+          SEC::checkBaseCounterexampleWithFastValidation(
+              subsetProblem, solverType, baseHorizon);
+      if (baseCheck.status == SEC::BaseCounterexampleCheckStatus::Counterexample) {
+        KInductionResult witnessResult{
+            KInductionStatus::Different,
+            baseCheck.witness.has_value() ? baseCheck.witness->badFrame : baseHorizon,
+            baseCheck.witness};
+        proofState.terminalResult = makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            witnessResult.bound,
+            formatCounterexampleWitness(
+                witnessResult, model0, model1, top0, top1),
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+        return;
+      }
+      if (baseCheck.status == SEC::BaseCounterexampleCheckStatus::NoCounterexample) {
+        markDualRailResidualOutputsCovered(outputIndices, proofState);
+        return;
+      }
+      if (outputIndices.size() == 1) {
+        markDualRailResidualOutputSkipped(
+            outputIndices.front(),
+            problem,
+            engine,
+            proofState,
+            std::string("dual-rail ") + dualRailResidualEngineName(engine) +
+                " base validation was inconclusive for this non-implied output");
+        return;
+      }
+    }
+    if (result.status == KInductionStatus::Different) {
+      proofState.terminalResult = makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          result.bound,
+          result.witness.has_value()
+              ? formatCounterexampleWitness(result, model0, model1, top0, top1)
+              : "Classic k-induction found a counterexample at k = " +  // LCOV_EXCL_LINE
+                    std::to_string(result.bound),  // LCOV_EXCL_LINE
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+      return;
+    }
+  } else {
+    IMCEngine residualEngine(subsetProblem, solverType);
+    IMCResult result = residualEngine.run(maxK);
+    proofState.provedBound = std::max(proofState.provedBound, result.bound);
+    if (result.status == IMCStatus::Equivalent) {
+      markDualRailResidualOutputsCovered(outputIndices, proofState);
+      return;
+    }
+    if (result.status == IMCStatus::Different) {
+      KInductionResult witnessResult{
+          KInductionStatus::Different, result.bound, result.witness};
+      proofState.terminalResult = makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          result.bound,
+          result.witness.has_value()
+              ? formatCounterexampleWitness(
+                    witnessResult, model0, model1, top0, top1)
+              : "IMC found a counterexample at k = " +  // LCOV_EXCL_LINE
+                    std::to_string(result.bound),  // LCOV_EXCL_LINE
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+      return;
+    }
+  }
+
+  if (outputIndices.size() > 1) {
+    const size_t mid = outputIndices.size() / 2;
+    std::vector<size_t> left(outputIndices.begin(), outputIndices.begin() + mid);
+    std::vector<size_t> right(outputIndices.begin() + mid, outputIndices.end());
+    proveDualRailResidualOutputSet(
+        problem,
+        left,
+        maxK,
+        solverType,
+        model0,
+        model1,
+        top0,
+        top1,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports,
+        engine,
+        proofState);
+    proveDualRailResidualOutputSet(
+        problem,
+        right,
+        maxK,
+        solverType,
+        model0,
+        model1,
+        top0,
+        top1,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports,
+        engine,
+        proofState);
+    return;
+  }
+
+  markDualRailResidualOutputSkipped(
+      outputIndices.front(), problem, engine, proofState, "");
+}
+
+std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEngine(
+    const KInductionProblem& problem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    DualRailResidualEngine engine) {
+  if (!problem.usesDualRailStateEncoding ||
+      problem.outputImpliedByInductionCore.size() !=
+          problem.observedOutputExprs0.size()) {
+    return std::nullopt;
+  }
+
+  const std::vector<size_t> residualOutputIndices =
+      collectOutputsRequiringDualRailEngineProof(problem);
+  if (residualOutputIndices.empty()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        0,
+        "",
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  DualRailResidualProofState proofState;
+  proofState.coveredOutputs.assign(problem.observedOutputExprs0.size(), false);
+  for (size_t i = 0; i < problem.outputImpliedByInductionCore.size(); ++i) {
+    proofState.coveredOutputs[i] = problem.outputImpliedByInductionCore[i];
+  }
+
+  const KInductionProblem residualProblem =
+      makeOutputSubsetProblem(problem, residualOutputIndices);
+  for (const auto& [firstOutput, endOutput] :
+       buildSupportBoundedOutputBatches(
+           residualProblem,
+           dualRailResidualBatchingLimits(residualProblem, engine))) {
+    std::vector<size_t> batchOutputIndices;
+    batchOutputIndices.reserve(endOutput - firstOutput);
+    for (size_t i = firstOutput; i < endOutput; ++i) {
+      batchOutputIndices.push_back(residualOutputIndices[i]);
+    }
+    proveDualRailResidualOutputSet(
+        problem,
+        batchOutputIndices,
+        maxK,
+        solverType,
+        model0,
+        model1,
+        top0,
+        top1,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports,
+        engine,
+        proofState);
+    if (proofState.terminalResult.has_value()) {
+      return proofState.terminalResult;
+    }
+  }
+
+  const size_t coveredCount = static_cast<size_t>(std::count(
+      proofState.coveredOutputs.begin(), proofState.coveredOutputs.end(), true));
+  if (coveredCount == 0) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Inconclusive,
+        proofState.provedBound,
+        std::string("Dual-rail ") + dualRailResidualEngineName(engine) +
+            " did not prove any output",
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  const OutputCoverageSelection finalCoverage =
+      buildCoverageWithDualRailOutputSkips(
+          outputCoverage, problem, proofState.coveredOutputs,
+          proofState.skipReasons);
+  return makeSecResult(
+      SequentialEquivalenceStatus::Equivalent,
+      proofState.provedBound,
+      "",
+      finalCoverage,
       abstractedSequentialBoundaries,
       extractedBoundaryReports);
 }
@@ -2404,17 +2651,6 @@ SequentialEquivalenceResult runPdrSecEngine(
         extractedBoundaryReports);
   }
 
-  if (auto cappedResult = buildDualRailResidualCapResult(
-          problem,
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports,
-          "PDR",
-          0);
-      cappedResult.has_value()) {
-    return *cappedResult;
-  }
-
   const std::vector<size_t> dualRailEngineOutputIndices =
       collectOutputsRequiringDualRailEngineProof(problem);
   if (problem.usesDualRailStateEncoding &&
@@ -3303,7 +3539,7 @@ SequentialEquivalenceResult runPdrSecEngine(
   }
 
   const OutputCoverageSelection finalCoverage =
-      buildCoverageWithDualRailPdrSkips(
+      buildCoverageWithDualRailOutputSkips(
           outputCoverage, problem, pdrCoveredOutputs, pdrSkippedOutputReasons);
   return makeSecResult(
       SequentialEquivalenceStatus::Equivalent,
@@ -3325,16 +3561,20 @@ SequentialEquivalenceResult runKInductionSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
-  if (auto cappedResult = buildDualRailResidualCapResult(
+  if (auto dualRailResult = proveDualRailResidualsWithSelectedEngine(
           problem,
+          maxK,
+          solverType,
+          model0,
+          model1,
+          top0,
+          top1,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports,
-          "k-induction",
-          0,
-          0);
-      cappedResult.has_value()) {
-    return *cappedResult;
+          DualRailResidualEngine::KInduction);
+      dualRailResult.has_value()) {
+    return *dualRailResult;
   }
 
   KInductionEngine engine(problem, solverType);
@@ -3390,16 +3630,20 @@ SequentialEquivalenceResult runImcSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
-  if (auto cappedResult = buildDualRailResidualCapResult(
+  if (auto dualRailResult = proveDualRailResidualsWithSelectedEngine(
           problem,
+          maxK,
+          solverType,
+          model0,
+          model1,
+          top0,
+          top1,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports,
-          "imc",
-          0,
-          0);
-      cappedResult.has_value()) {
-    return *cappedResult;
+          DualRailResidualEngine::Imc);
+      dualRailResult.has_value()) {
+    return *dualRailResult;
   }
 
   IMCEngine engine(problem, solverType);

@@ -33,9 +33,29 @@ KEPLER_FORMAL::Config::SolverType baseCaseValidationSolverType(
 bool baseCaseValidationUsesLocalQueryProfile(
     KEPLER_FORMAL::Config::SolverType solverType);
 
+enum class BaseCounterexampleCheckStatus {
+  NoCounterexample,
+  Counterexample,
+  Unknown,
+};
+
+struct BaseCounterexampleCheckResult {
+  BaseCounterexampleCheckStatus status =
+      BaseCounterexampleCheckStatus::Unknown;
+  std::optional<KInductionResult::CounterexampleWitness> witness;
+};
+
 // Solves the bounded SEC base case for a single horizon k and reconstructs the
 // first concrete counterexample if the property can fail within that prefix.
 std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k);
+
+// Resource-bounded base proof for localized recovery paths.  A true UNSAT
+// answer is required before an output may be covered; timeout stays Unknown so
+// callers can conservatively split or skip the hard residual.
+BaseCounterexampleCheckResult checkBaseCounterexampleWithFastValidation(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k);
