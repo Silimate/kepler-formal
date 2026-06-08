@@ -7872,7 +7872,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
        PdrDualRailExactResetFrontierGuardCountsRailSymbols) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
-  problem.totalStateCount = 2049;
+  problem.totalStateCount = 4097;
   problem.dualRailStatePairs.reserve(problem.totalStateCount);
   for (size_t index = 0; index < problem.totalStateCount; ++index) {
     problem.dualRailStatePairs.push_back(
@@ -7901,12 +7901,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find(
           "exact reset-frontier checks disabled for large dual-rail problem"),
       std::string::npos);
-  EXPECT_NE(stderrOutput.find("rail_state_symbols=4098"),
+  EXPECT_NE(stderrOutput.find("rail_state_symbols=8194"),
             std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailBatchesResidualsBelowBroadThreshold) {
+       RunExtractedModelsPdrDualRailStartsBroadForIbexSizedResiduals) {
   constexpr size_t kResidualOutputs = 17;
   const SignalKey implied = makeSignalKey("pdrDualRailBatchedImpliedOut");
 
@@ -7966,23 +7966,27 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.runExtractedModels(model0, model1, 0);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The residual set is below the historical broad-PDR threshold.  Dual-rail
-  // residuals must still enter PDR as support-bounded slices so one Ibex-like
-  // residual bus cannot force a monolithic bad-state query before localization.
+  // Ibex-like residual buses need the shared all-output rail property as a
+  // reset-frontier strengthening fact.  Start broad, then let PDR split later
+  // only if the shared proof cannot close.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
   EXPECT_NE(
       stderrOutput.find("PDR dual-rail proof restricted to 17 non-implied outputs"),
       std::string::npos);
-  EXPECT_NE(stderrOutput.find("outputs=[0,4) stage=initial"),
-            std::string::npos);
-  EXPECT_NE(stderrOutput.find("observed_outputs=4"),
+  const size_t broadBatchPosition =
+      stderrOutput.find("outputs=[0,17) stage=initial");
+  ASSERT_NE(broadBatchPosition, std::string::npos);
+  EXPECT_NE(stderrOutput.find("observed_outputs=17"),
             std::string::npos);
   EXPECT_NE(stderrOutput.find("output_names=[residual_out[0]"),
             std::string::npos);
-  EXPECT_EQ(stderrOutput.find("outputs=[0,17) stage=initial"),
-            std::string::npos);
+  const size_t splitBatchPosition =
+      stderrOutput.find("outputs=[0,4) stage=initial");
+  EXPECT_TRUE(
+      splitBatchPosition == std::string::npos ||
+      broadBatchPosition < splitBatchPosition);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13086,7 +13090,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
     init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
     problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
   }
-  for (size_t index = 0; index < 2050; ++index) {
+  // Keep this above the production dual-rail reset-frontier cap.  The default
+  // was raised for Ibex-sized proofs, so this regression must scale with it
+  // instead of forcing the real flow back to the smaller historical limit.
+  for (size_t index = 0; index < 4097; ++index) {
     problem.dualRailStatePairs.push_back(
         DualRailSymbolPair{10000 + index * 2, 10001 + index * 2});
   }
@@ -13150,7 +13157,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
     problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
   }
   problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
-  for (size_t index = 0; index < 4097; ++index) {
+  for (size_t index = 0; index < 8193; ++index) {
     problem.lazyTransitions->sourceByStateSymbol.emplace(
         20000 + index,
         LazyTransitionSource{0, BoolExpr::createFalse(), LazyTransitionRail::Binary});
@@ -13239,7 +13246,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(2, /*resetBootstrapFrameCheckedSafe=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "refined projected counterexample with validated bad-formula clauses"),
+      std::string::npos)
+      << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("validated bad-formula clauses with reset cubes"),
       std::string::npos)
@@ -13261,7 +13273,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = BoolExpr::createFalse();
   problem.inductionProperty = BoolExpr::createTrue();
   problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
-  for (size_t index = 0; index < 4097; ++index) {
+  for (size_t index = 0; index < 8193; ++index) {
     problem.lazyTransitions->sourceByStateSymbol.emplace(
         20000 + index,
         LazyTransitionSource{0, BoolExpr::createFalse(), LazyTransitionRail::Binary});
@@ -13276,6 +13288,76 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
   EXPECT_NE(
       stderrOutput.find("skipped dual-rail reset-bootstrap BMC precheck"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailResetBootstrapPrecheckHonorsTransitionLimitOverride) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.initialCondition = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+  problem.property = BoolExpr::createTrue();
+  problem.inductionBad = BoolExpr::createFalse();
+  problem.inductionProperty = BoolExpr::createTrue();
+  problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  for (size_t index = 0; index < 4097; ++index) {
+    problem.lazyTransitions->sourceByStateSymbol.emplace(
+        20000 + index,
+        LazyTransitionSource{
+            0, BoolExpr::createFalse(), LazyTransitionRail::Binary});
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar transitionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_BMC_TRANSITION_SOURCE_LIMIT", "8193");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("skipped dual-rail reset-bootstrap BMC precheck"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailResetFrontierHonorsStateSymbolLimitOverride) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.initialCondition = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+  problem.property = BoolExpr::createTrue();
+  problem.inductionBad = BoolExpr::createFalse();
+  problem.inductionProperty = BoolExpr::createTrue();
+  for (size_t index = 0; index < 4097; ++index) {
+    problem.dualRailStatePairs.push_back(
+        DualRailSymbolPair{20000 + index * 2, 20001 + index * 2});
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine defaultEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
+      stderrOutput.find("exact reset-frontier checks disabled"),
+      std::string::npos)
+      << stderrOutput;
+
+  const ScopedEnvVar stateLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_FRONTIER_STATE_SYMBOL_LIMIT", "8194");
+  testing::internal::CaptureStderr();
+  PDREngine overriddenEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(
+      stderrOutput.find("exact reset-frontier checks disabled"),
       std::string::npos)
       << stderrOutput;
 }

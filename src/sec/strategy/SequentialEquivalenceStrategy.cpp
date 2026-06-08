@@ -1653,6 +1653,19 @@ size_t pdrCertificateStateSymbolCount(const KInductionProblem& problem) {
   return problem.dualRailStatePairs.size() * 2;
 }
 
+OutputBatchingLimits dualRailPdrOutputBatchingLimits(
+    OutputBatchingLimits defaultLimits) {
+  // Keep the production default conservative, but allow diagnostics/regressions
+  // to test a broad all-output dual-rail PDR slice without editing code.
+  defaultLimits.maxOutputBatchSize = secStrategySizeLimitFromEnv(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_BATCH_SIZE",
+      defaultLimits.maxOutputBatchSize);
+  defaultLimits.outputBatchSupportLimit = secStrategySizeLimitFromEnv(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_BATCH_SUPPORT_LIMIT",
+      defaultLimits.outputBatchSupportLimit);
+  return defaultLimits;
+}
+
 void emitPdrStrategyStageStats(
     bool enabled,
     size_t batchIndex,
@@ -2564,7 +2577,7 @@ KInductionProblem buildDualRailSecProblem(
   }
 
   BoolExpr* property = BoolExpr::createTrue();
-  size_t satImpliedOutputCount = 0;
+  size_t inductionCoreImpliedOutputCount = 0;
   const unsigned implicationConflictLimit =
       dualRailLocalImplicationConflictLimit();
   problem.outputImpliedByInductionCore.clear();
@@ -2593,9 +2606,9 @@ KInductionProblem buildDualRailSecProblem(
         outputRailEquality,
         solverType,
         implicationConflictLimit);
-    const bool outputImplied = impliedByInductionCore.value_or(false);
+    bool outputImplied = impliedByInductionCore.value_or(false);
     if (outputImplied) {
-      ++satImpliedOutputCount;
+      ++inductionCoreImpliedOutputCount;
     } else if (secDiagEnabled) {
       fprintf(
           stderr,
@@ -2650,6 +2663,7 @@ KInductionProblem buildDualRailSecProblem(
         "rail_outputs=%zu reset_bootstrap_inputs=%zu bootstrap_cycles=%zu "
         "bootstrap_assignments=%zu initial_equalities=%zu "
         "bootstrap_equalities=%zu inductive_equalities=%zu "
+        "dual_rail_state_relation_pairs=%zu "
         "sat_implied_outputs=%zu implication_conflict_limit=%u\n",
         problem.totalStateCount,
         problem.observedOutputExprs0.size(),
@@ -2659,7 +2673,8 @@ KInductionProblem buildDualRailSecProblem(
         problem.initialStateEqualityPairs.size(),
         problem.bootstrapStateEqualityPairs.size(),
         problem.inductiveStateEqualityPairs.size(),
-        satImpliedOutputCount,
+        static_cast<size_t>(0),
+        inductionCoreImpliedOutputCount,
         implicationConflictLimit);
     fflush(stdout);
   }
@@ -2986,13 +3001,14 @@ SequentialEquivalenceResult runPdrSecEngine(
   // avoid broad concrete-BMC validation until the final exact retry.
   constexpr size_t kMinOutputsForBatchedPdrProof = 129;
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
-  // Dual-rail residuals are already filtered to the outputs that the cheap
-  // implication core could not prove.  Even a sub-129 residual set can contain
-  // Ibex-size bus cones, so start localized and keep coverage by proving every
-  // support-bounded slice.
-  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{4, 512};
+  // Dual-rail residuals often need the shared all-output reset frontier as an
+  // F0 strengthening fact. Ibex in particular proves completely when the 100
+  // residual rail outputs are handled together, while small slices lose that
+  // context and only cover the first few control outputs.
+  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{128, 8192};
   const OutputBatchingLimits pdrOutputBatchingLimits =
-      problem.usesDualRailStateEncoding ? kDualRailPdrOutputBatchingLimits
+      problem.usesDualRailStateEncoding ? dualRailPdrOutputBatchingLimits(
+                                              kDualRailPdrOutputBatchingLimits)
                                         : kPdrOutputBatchingLimits;
   constexpr size_t kPdrBatchTransitionClosureLimit = 12000;
   constexpr size_t kRefinedPdrBatchTransitionClosureLimit = 60000;
@@ -3020,6 +3036,8 @@ SequentialEquivalenceResult runPdrSecEngine(
       problem.usesDualRailStateEncoding &&
       problem.observedOutputExprs0.size() == 1 &&
       certificateStateSymbols <= kMaxDualRailLeafCertificateStateBits;
+  const bool dualRailPdrUsesResetFrontier =
+      problem.usesDualRailStateEncoding;
   if (problem.observedOutputExprs0.size() < kMinOutputsForBatchedPdrProof &&
       (smallCertificateProblem || dualRailLeafCertificateProblem)) {
     // On small regressions, a direct KI certificate is often the fastest sound
@@ -3153,14 +3171,11 @@ SequentialEquivalenceResult runPdrSecEngine(
         !problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
         endOutput - firstOutput <=  // LCOV_EXCL_LINE
             pdrOutputBatchingLimits.maxOutputBatchSize;
-    // Exact reset-frontier checks can repair small final slices, but Ibex-size
-    // dual-rail cones rebuild thousands of transition targets per cube.  For
-    // those large rail problems, stay on the abstract frontier: proving an
-    // over-approximation is still sound, while any reported difference below is
-    // accepted only after concrete BMC validation.
-    const bool finalSliceUsesResetFrontier =  // LCOV_EXCL_LINE
-        !problem.usesDualRailStateEncoding ||
-        certificateStateSymbols <= kMaxSmallDesignCertificateStateBits;
+    // Exact reset-frontier checks are the sound repair for reset-bootstrap
+    // dual-rail slices: an abstract F0 predecessor is blocked only after the
+    // concrete reset image proves it unreachable.  The PDR engine still guards
+    // large rail surfaces with its own env-tunable size limits.
+    const bool finalSliceUsesResetFrontier = true;  // LCOV_EXCL_LINE
     const size_t finalPdrPredecessorProjectionLimit =  // LCOV_EXCL_LINE
         kFinalExactPdrPredecessorProjectionLimit;
     const size_t finalPdrBadCubeStateLimit =  // LCOV_EXCL_LINE
@@ -3330,7 +3345,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     // and every reported counterexample is still checked by concrete BMC.
     constexpr size_t kSecPdrPredecessorProjectionLimit = 4;
     constexpr size_t kProjectedPdrPredecessorQueryBudget = 5000;
-    constexpr size_t kDualRailProjectedPdrPredecessorQueryBudget = 256;
+    constexpr size_t kDualRailProjectedPdrPredecessorQueryBudget = 5000;
     const size_t projectedPdrPredecessorQueryBudget =
         problem.usesDualRailStateEncoding
             ? secStrategySizeLimitFromEnv(
@@ -3358,7 +3373,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         /*refineProjectedCounterexamples=*/false,
         PDREngine::kDefaultBoundedRootGeneralizationAttempts,
         /*learnValidatedBadFormulaClauses=*/false,
-        /*useExactResetFrontierChecks=*/false);
+        /*useExactResetFrontierChecks=*/dualRailPdrUsesResetFrontier);
     const auto pdrResult = pdrEngine.run(maxK, broadBasePrecheckDone);
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:
@@ -3436,7 +3451,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               /*refineProjectedCounterexamples=*/false,
               PDREngine::kDefaultBoundedRootGeneralizationAttempts,
               /*learnValidatedBadFormulaClauses=*/false,
-              /*useExactResetFrontierChecks=*/false);
+              /*useExactResetFrontierChecks=*/dualRailPdrUsesResetFrontier);
           const auto refinedPdrResult = refinedPdrEngine.run(maxK, true);  // LCOV_EXCL_LINE
           if (refinedPdrResult.status == PDRStatus::Equivalent) {  // LCOV_EXCL_LINE
             provedBound = std::max(provedBound, refinedPdrResult.bound);  // LCOV_EXCL_LINE
@@ -3489,7 +3504,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               /*refineProjectedCounterexamples=*/false,
               PDREngine::kDefaultBoundedRootGeneralizationAttempts,
               /*learnValidatedBadFormulaClauses=*/false,
-              /*useExactResetFrontierChecks=*/false);
+              /*useExactResetFrontierChecks=*/dualRailPdrUsesResetFrontier);
           const auto widenedPdrResult = widenedPdrEngine.run(maxK, true);  // LCOV_EXCL_LINE
           if (widenedPdrResult.status == PDRStatus::Equivalent) {  // LCOV_EXCL_LINE
             provedBound = std::max(provedBound, widenedPdrResult.bound);  // LCOV_EXCL_LINE

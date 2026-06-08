@@ -221,10 +221,12 @@ constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
 // prefix over both value/known rails for many neighboring PDR cubes.  PDR
 // remains sound without this repair because it then proves the property over a
 // larger abstract frontier; concrete validation still guards any Difference.
-constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 4096;
-constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 4096;
-constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 10000;
-constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 1024;
+constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 8192;
+constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 8192;
+constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
+constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
+constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
+constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 8192;
 // Exact reset-frontier validation can batch a small state-only bad CNF into
 // one prefix query. This replaces many neighboring per-assignment frontier
 // solves with a single real bounded proof, and stays limited to local
@@ -901,15 +903,18 @@ size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
   return count;
 }
 
+size_t dualRailResetBootstrapBmcTransitionSourceLimit();
+size_t dualRailResetFrontierStateSymbolLimit();
+
 bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
                                        bool requested) {
   if (!requested || !problem.usesDualRailStateEncoding) {
     return requested;
   }
   return pdrDualRailStateSymbolCount(problem) <=
-             kMaxExactResetFrontierDualRailStateSymbols &&
+             dualRailResetFrontierStateSymbolLimit() &&
          pdrTransitionSourceCount(problem) <=
-             kMaxDualRailResetBootstrapBmcTransitionSources;
+             dualRailResetBootstrapBmcTransitionSourceLimit();
 }
 
 KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
@@ -1005,13 +1010,13 @@ unsigned resetExpressionProofConflictLimit() {
 unsigned dualRailBadCubeConflictLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
       "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_CONFLICT_LIMIT",
-      100);
+      kDefaultDualRailBadCubeConflictLimit);
 }
 
 unsigned dualRailPredecessorConflictLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
       "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT",
-      500);
+      kDefaultDualRailPredecessorConflictLimit);
 }
 
 unsigned dualRailPredecessorDecisionLimit(unsigned defaultValue) {
@@ -1030,6 +1035,18 @@ size_t dualRailPredecessorEncodingSupportLimit() {
   return envSizeLimitOrDefault(
       "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_ENCODING_SUPPORT_LIMIT",
       kDefaultDualRailPredecessorEncodingSupportLimit);
+}
+
+size_t dualRailResetBootstrapBmcTransitionSourceLimit() {
+  return envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_BMC_TRANSITION_SOURCE_LIMIT",
+      kMaxDualRailResetBootstrapBmcTransitionSources);
+}
+
+size_t dualRailResetFrontierStateSymbolLimit() {
+  return envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_FRONTIER_STATE_SYMBOL_LIMIT",
+      kMaxExactResetFrontierDualRailStateSymbols);
 }
 
 size_t maxProjectedFrameClausesPerQuery() {
@@ -5574,9 +5591,9 @@ size_t exactResetCubeBadFormulaClauseLimit(const KInductionProblem& problem) {
 bool hasLargeDualRailResetFrontierSurface(const KInductionProblem& problem) {
   return problem.usesDualRailStateEncoding &&
          (pdrDualRailStateSymbolCount(problem) >
-              kMaxExactResetFrontierDualRailStateSymbols ||
+              dualRailResetFrontierStateSymbolLimit() ||
           pdrTransitionSourceCount(problem) >
-              kMaxDualRailResetBootstrapBmcTransitionSources);
+              dualRailResetBootstrapBmcTransitionSourceLimit());
 }
 
 bool canExactlyValidateBadFormulaGroup(const KInductionProblem& problem,
@@ -10943,8 +10960,10 @@ std::optional<PDRResult> checkResetBootstrapFrameZero(
     return std::nullopt;
   }
   const size_t transitionSources = pdrTransitionSourceCount(problem);
+  const size_t transitionSourceLimit =
+      dualRailResetBootstrapBmcTransitionSourceLimit();
   if (problem.usesDualRailStateEncoding &&
-      transitionSources > kMaxDualRailResetBootstrapBmcTransitionSources) {
+      transitionSources > transitionSourceLimit) {
     // This precheck is an accelerator that lets PDR add the property as an F0
     // fact after reset.  On large dual-rail cones it can become the whole run;
     // skipping it is conservative because PDR then works from the weaker
@@ -10953,7 +10972,7 @@ std::optional<PDRResult> checkResetBootstrapFrameZero(
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: skipped dual-rail reset-bootstrap BMC precheck ",
           "transition_sources=", transitionSources,
-          " limit=", kMaxDualRailResetBootstrapBmcTransitionSources);
+          " limit=", transitionSourceLimit);
     }  // LCOV_EXCL_LINE
     return std::nullopt;
   }
@@ -11031,7 +11050,7 @@ PDREngine::PDREngine(const KInductionProblem& problem,
         "SEC PDR stats: exact reset-frontier checks disabled for large ",
         "dual-rail problem rail_state_symbols=",
         pdrDualRailStateSymbolCount(problem),
-        " limit=", kMaxExactResetFrontierDualRailStateSymbols);
+        " limit=", dualRailResetFrontierStateSymbolLimit());
   }
 }
 
