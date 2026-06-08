@@ -148,6 +148,12 @@ constexpr size_t kMaxPerFrameConcreteValidationCubeLiterals = 8;
 // path covered by focused unit tests.
 constexpr size_t kCachedConcreteValidationMinDepth = 2;
 constexpr size_t kCachedConcreteValidationMinCubeLiterals = 3;
+// Large dual-rail final PDR slices can reach abstract reset-frontier roots
+// whose concrete validation needs a huge reset-prefix solver.  Once exact
+// reset-frontier repair is already disabled by the global rail-size guard, do
+// not let a wide projected root rebuild that solver anyway; split/skip through
+// the caller's existing inconclusive path instead.
+constexpr size_t kMinLargeDualRailRootForConcreteValidationSkip = 16;
 // If cheap reset facts already prove all but a couple of concrete root
 // validation frames, do not open the broad shared-prefix assumption solver.
 // Sampled BlackParrot leaves got stuck in assumption solving on that shape; exact
@@ -415,6 +421,10 @@ constexpr size_t kMinMediumCubePredecessorCoreTargetSize = 8;
 // steady state.
 constexpr size_t kDefaultMaxProjectedFrameClausesPerQuery = 1024;
 constexpr size_t kDefaultMaxProjectedFrameLiteralsPerQuery = 8192;
+// If a projected-frame bad query keeps rediscovering the exact same bad cube,
+// the learned blocker is outside the projected clause view.  Treat that as a
+// local proof budget miss so the SEC strategy can split or skip the hard slice.
+constexpr size_t kDefaultMaxRepeatedProjectedBadCubeHits = 64;
 // Projected-frame CEGAR is useful for a few missing learned clauses, but
 // BlackParrot sampling showed it can otherwise spend thousands of SAT queries
 // adding local blockers for the same obligation before falling back to exact
@@ -863,6 +873,12 @@ class PdrProjectedCounterexampleRefinementBudgetExceeded
             "PDR projected counterexample refinement budget exceeded") {}  // LCOV_EXCL_LINE
 };
 
+class PdrRepeatedProjectedBadCubeBudgetExceeded : public std::runtime_error {
+ public:
+  PdrRepeatedProjectedBadCubeBudgetExceeded()  // LCOV_EXCL_LINE
+      : std::runtime_error("PDR repeated projected bad cube budget exceeded") {}  // LCOV_EXCL_LINE
+};
+
 void consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
   if (remainingQueries == nullptr) {
     return;
@@ -1065,6 +1081,12 @@ size_t maxProjectedFrameRefinementsBeforeExactRetry() {
   return envSizeLimitOrDefault(
       "KEPLER_SEC_PDR_PROJECTED_FRAME_REFINEMENT_LIMIT",
       kDefaultMaxProjectedFrameRefinementsBeforeExactRetry);
+}
+
+size_t maxRepeatedProjectedBadCubeHits() {
+  return envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_REPEATED_PROJECTED_BAD_CUBE_LIMIT",
+      kDefaultMaxRepeatedProjectedBadCubeHits);
 }
 
 size_t maxExactResetPrecheckTransitionSupport(
@@ -9487,6 +9509,9 @@ bool cubeReachableWithinConcreteFrames(
     if (remainingExactSteps.size() <=
         kMaxSparseConcreteReachabilityPerFrameChecks) {
       for (const auto step : remainingExactSteps) {
+        // Preserve the caller-selected validation mode.  Large dual-rail roots
+        // need cached assumptions so neighboring cubes reuse the reset-prefix
+        // solver instead of rebuilding it once per sparse frame.
         const bool reachable = cubeReachableAtConcreteFrame(
             problem,
             solverType,
@@ -9494,15 +9519,14 @@ bool cubeReachableWithinConcreteFrames(
             cube,
             step,
             cache,
-            ConcreteCubeReachabilityMode::OneShotUnitClauses,
+            mode,
             frameInvariant);
         if (pdrStatsEnabled()) {
           emitSecDiag(
               "SEC PDR stats: concrete cube reachability sparse step ",
               "step=", step,
               " result=", reachable ? "sat" : "unsat",
-              " mode=", concreteCubeReachabilityModeName(
-                  ConcreteCubeReachabilityMode::OneShotUnitClauses));
+              " mode=", concreteCubeReachabilityModeName(mode));
         }
         if (reachable) {
           return true;
@@ -10226,14 +10250,34 @@ bool blockProofObligations(const KInductionProblem& problem,
       }  // LCOV_EXCL_LINE
       const StateCube& concreteTarget =
           obligation.rootCube.empty() ? obligation.cube : obligation.rootCube;
+      const bool largeDualRailResetFrontier =
+          problem.usesDualRailStateEncoding &&
+          pdrDualRailStateSymbolCount(problem) >
+              dualRailResetFrontierStateSymbolLimit();
+      if (largeDualRailResetFrontier &&
+          !useExactResetFrontierChecks &&
+          projectedCounterexampleRefinementBudget != nullptr &&
+          concreteTarget.size() >=
+              kMinLargeDualRailRootForConcreteValidationSkip) {
+        if (pdrStatsEnabled()) {
+          emitSecDiag(
+              "SEC PDR stats: skipped large dual-rail concrete root ",
+              "validation root_cube=", concreteTarget.size(),
+              " rail_state_symbols=", pdrDualRailStateSymbolCount(problem));
+        }
+        throw PdrProjectedCounterexampleRefinementBudgetExceeded();
+      }
       const bool preferShallowPerFrameValidation =
+          !largeDualRailResetFrontier &&
           obligation.badFrame <= kMaxPerFrameConcreteValidationDepth &&
           concreteTarget.size() <= kMaxPerFrameConcreteValidationCubeLiterals;
-      const ConcreteCubeReachabilityMode concreteValidationMode =
+      const bool preferCachedConcreteValidation =
           !preferShallowPerFrameValidation &&
-                  obligation.badFrame >= kCachedConcreteValidationMinDepth &&
-                  concreteTarget.size() >=
-                      kCachedConcreteValidationMinCubeLiterals
+          concreteTarget.size() >= kCachedConcreteValidationMinCubeLiterals &&
+          (obligation.badFrame >= kCachedConcreteValidationMinDepth ||
+           largeDualRailResetFrontier);
+      const ConcreteCubeReachabilityMode concreteValidationMode =
+          preferCachedConcreteValidation
               ? ConcreteCubeReachabilityMode::CachedAssumptions
               : ConcreteCubeReachabilityMode::OneShotUnitClauses;
       if (!cubeReachableWithinConcreteFrames(
@@ -11087,6 +11131,13 @@ PDRResult PDREngine::run(size_t maxFrames,
       exactFrameClauses || learnValidatedBadFormulaClauses_;
   const bool exactPropagationFrameClauses =
       exactFrameClauses || learnValidatedBadFormulaClauses_;
+  const bool guardRepeatedProjectedBadCubes =
+      problem_.usesDualRailStateEncoding && !exactBadQueryFrameClauses;
+  const size_t repeatedProjectedBadCubeLimit =
+      maxRepeatedProjectedBadCubeHits();
+  std::optional<StateCube> previousProjectedBadCube;
+  size_t previousProjectedBadCubeLevel = 0;
+  size_t repeatedProjectedBadCubeHits = 0;
 
   TransitionExprResolver transitionByState(problem_);
   ComplementPartnerIndex complementPartners(problem_);
@@ -11164,6 +11215,28 @@ PDRResult PDREngine::run(size_t maxFrames,
       if (!badCube.has_value()) {
         break;
       }
+      if (guardRepeatedProjectedBadCubes) {
+        if (previousProjectedBadCube.has_value() &&
+            previousProjectedBadCubeLevel == level &&
+            *previousProjectedBadCube == *badCube) {
+          ++repeatedProjectedBadCubeHits;
+        } else {
+          previousProjectedBadCube = *badCube;
+          previousProjectedBadCubeLevel = level;
+          repeatedProjectedBadCubeHits = 1;
+        }
+        if (repeatedProjectedBadCubeHits > repeatedProjectedBadCubeLimit) {
+          if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+            emitSecDiag(  // LCOV_EXCL_LINE
+                "SEC PDR stats: repeated projected bad cube exhausted ",
+                "limit=", repeatedProjectedBadCubeLimit,
+                " level=", level,
+                " cube=", badCube->size(),
+                " hash=", cubeFingerprint(*badCube));
+          }  // LCOV_EXCL_LINE
+          throw PdrRepeatedProjectedBadCubeBudgetExceeded();  // LCOV_EXCL_LINE
+        }
+      }
       emitPdrTrace(("bad_cube@F" + std::to_string(level)).c_str(),
                    formatCubeForPdrTrace(*badCube));
       size_t badFrame = level;
@@ -11238,6 +11311,13 @@ PDRResult PDREngine::run(size_t maxFrames,
           "SEC PDR stats: projected counterexample repair budget exhausted ",
           "refinement_limit=",
           maxProjectedCounterexampleRefinements_);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
+  } catch (const PdrRepeatedProjectedBadCubeBudgetExceeded&) {  // LCOV_EXCL_LINE
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: repeated projected bad cube budget exhausted ",
+          "limit=", maxRepeatedProjectedBadCubeHits());  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE

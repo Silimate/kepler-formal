@@ -9871,6 +9871,104 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesCachedResetValidationForWideDualRailRootCegar) {
+  KInductionProblem problem =
+      makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/900);
+  problem.bad = BoolExpr::And(
+      BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3)),
+      BoolExpr::Var(4));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  constexpr size_t railPairCount = 4097;
+  problem.usesDualRailStateEncoding = true;
+  for (size_t index = 0; index < railPairCount; ++index) {
+    problem.dualRailStatePairs.push_back({1000 + index * 2, 1001 + index * 2});
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  (void)engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
+      stderrOutput.find(
+          "concrete cube reachability begin cube=3 max_step=1 "
+          "mode=cached_assumptions"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          "concrete cube reachability begin cube=3 max_step=1 "
+          "mode=one_shot_unit_clauses"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineBudgetsWideDualRailConcreteRootValidation) {
+  KInductionProblem problem =
+      makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/900);
+  constexpr size_t firstWideLeaf = 7;
+  constexpr size_t wideBadLeafCount = 29;
+  BoolExpr* bad = BoolExpr::And(
+      BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3)),
+      BoolExpr::Var(4));
+  for (size_t index = 0; index < wideBadLeafCount; ++index) {
+    bad = BoolExpr::And(bad, BoolExpr::Var(firstWideLeaf + index));
+  }
+  problem.bad = bad;
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.usesDualRailStateEncoding = true;
+  for (size_t index = 0; index < 4097; ++index) {
+    problem.dualRailStatePairs.push_back({1000 + index * 2, 1001 + index * 2});
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true,
+      /*maxProjectedCounterexampleRefinements=*/2);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("skipped large dual-rail concrete root validation"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("concrete cube reachability begin cube=32"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineSkipsVeryWideResetExpressionSatShortcut) {
   KInductionProblem problem =
       makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/1032);
@@ -11925,6 +12023,56 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       stderrOutput.find("projected-frame refinement cap reached"),
       std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineBudgetsRepeatedDualRailProjectedBadCube) {
+  KInductionProblem problem;
+  constexpr size_t a = 2;
+  constexpr size_t b = 3;
+  constexpr size_t input = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {a, b};
+  problem.inputSymbols = {input};
+  problem.allSymbols = {a, b, input};
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(a)),
+      BoolExpr::Not(BoolExpr::Var(b)));
+  problem.initialStateAssignments = {{a, false}, {b, false}};
+  problem.initializedStateCount = 2;
+  problem.totalStateCount = 2;
+  problem.transitions0.emplace_back(a, BoolExpr::Var(input));
+  problem.transitions0.emplace_back(b, BoolExpr::Not(BoolExpr::Var(input)));
+  problem.bad = BoolExpr::And(BoolExpr::Var(a), BoolExpr::Var(b));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  // The bad cube (a=1,b=1) is unreachable because one input drives opposite
+  // next-state values.  Each single literal is reachable, so PDR must learn the
+  // two-literal blocker.  With a one-literal projected frame view, the bad
+  // query cannot see that blocker and would rediscover the same cube forever.
+  const ScopedEnvVar literalLimit(
+      "KEPLER_SEC_PDR_PROJECTED_FRAME_LITERAL_LIMIT", "1");
+  const ScopedEnvVar repeatedBadCubeLimit(
+      "KEPLER_SEC_PDR_REPEATED_PROJECTED_BAD_CUBE_LIMIT", "2");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
+      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("repeated projected bad cube exhausted"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

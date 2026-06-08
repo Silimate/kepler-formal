@@ -3126,7 +3126,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     // after a couple of failed repairs; isolated leaves are skipped as uncovered
     // after the same local effort instead of consuming the whole workflow.
     constexpr size_t kDualRailFinalExactPdrRootGeneralizationAttempts = 4;  // LCOV_EXCL_LINE
-    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 512;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 16;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     if (endOutput - firstOutput > kMaxFinalExactPdrOutputBatchSize) {  // LCOV_EXCL_LINE
@@ -3180,6 +3180,14 @@ SequentialEquivalenceResult runPdrSecEngine(
         kFinalExactPdrPredecessorProjectionLimit;
     const size_t finalPdrBadCubeStateLimit =  // LCOV_EXCL_LINE
         kFinalExactPdrBadCubeStateLimit;
+    // This is a per-leaf repair budget.  Swerv can leave many final
+    // single-output dual-rail slices, so a large value multiplies into
+    // thousands of transition-cone predecessor encodings before the workflow
+    // can split or skip the hard leaf.
+    const size_t finalDualRailPredecessorQueryBudget =  // LCOV_EXCL_LINE
+        secStrategySizeLimitFromEnv(  // LCOV_EXCL_LINE
+            "KEPLER_SEC_PDR_DUAL_RAIL_FINAL_QUERY_BUDGET",
+            kDualRailFinalExactPdrPredecessorQueryBudget);
     emitPdrStrategyStageStats(  // LCOV_EXCL_LINE
         emitPdrStageStats,  // LCOV_EXCL_LINE
         batchIndex,  // LCOV_EXCL_LINE
@@ -3198,7 +3206,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         /*useExactFrameClauses=*/true,
         /*maxPredecessorQueries=*/
             problem.usesDualRailStateEncoding
-                ? kDualRailFinalExactPdrPredecessorQueryBudget
+                ? finalDualRailPredecessorQueryBudget
                 : 0,
         /*refineProjectedCounterexamples=*/
             finalBatchCanRefineProjectedCounterexamples,
