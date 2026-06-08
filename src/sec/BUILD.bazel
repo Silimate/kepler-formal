@@ -2,6 +2,22 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//bazel:naja_includes.bzl", "NAJA_HEADER_COPTS")
 
 cc_library(
+    name = "sec_common_headers",
+    hdrs = [
+        "common/AlignedSignals.h",
+        "common/PrivateProofSymbol.h",
+        "common/SignalKey.h",
+    ],
+    includes = [
+        ".",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/strategies:formal_strategies",
+    ],
+)
+
+cc_library(
     name = "kepler_sec",
     srcs = [
         "common/BoolExprUtils.cpp",
@@ -58,6 +74,7 @@ cc_library(
         "//src/clocks:kepler_clocks",
         "//src/formal:formal_structures",
         "//src/sat:sat_solver_wrapper",
+        ":sec_common_headers",
         "//src/strategies:formal_strategies",
         "@naja",
         "@naja//:naja_extra_headers",
