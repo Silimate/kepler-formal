@@ -2431,6 +2431,39 @@ TEST(KeplerFormalCliTests, WriteResetUnanchoredSkippedOutputsReportSkipsEmptyEnt
   std::filesystem::remove_all(tempDir);
 }
 
+TEST(KeplerFormalCliTests, WriteMultiClockDomainSkippedOutputsReportFormatsEntries) {
+  const auto tempDir =
+      makeUniqueTempDir("kepler_formal_cli_multi_clock_domain_report");
+  const auto reportPath = tempDir / "skipped_multi_clock_domain_pos.txt";
+
+  writeMultiClockDomainSkippedOutputsReport(
+      reportPath,
+      {"bad[0]: design0 multi-clock-domain connectivity: "
+       "Observed output cone spans clock domains: a_clk[0], b_clk[0]"});
+
+  const auto content = readFileContents(reportPath);
+  EXPECT_NE(
+      content.find("# SEC multi-clock-domain skipped observed outputs"),
+      std::string::npos);
+  EXPECT_NE(content.find("CDC"), std::string::npos);
+  EXPECT_NE(content.find("- bad[0]: design0 multi-clock-domain connectivity"),
+            std::string::npos);
+  EXPECT_NE(content.find("a_clk[0], b_clk[0]"), std::string::npos);
+
+  std::filesystem::remove_all(tempDir);
+}
+
+TEST(KeplerFormalCliTests, WriteMultiClockDomainSkippedOutputsReportSkipsEmptyEntries) {
+  const auto tempDir =
+      makeUniqueTempDir("kepler_formal_cli_empty_multi_clock_domain_report");
+  const auto reportPath = tempDir / "skipped_multi_clock_domain_pos.txt";
+
+  writeMultiClockDomainSkippedOutputsReport(reportPath, {});
+
+  EXPECT_FALSE(std::filesystem::exists(reportPath));
+  std::filesystem::remove_all(tempDir);
+}
+
 TEST(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",

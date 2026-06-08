@@ -1159,7 +1159,26 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
   return {};
 }
 
-std::unordered_map<size_t, size_t> buildInputClassMap(
+struct ClockInputClassKey {
+  SignalKey domain;
+  ClockPhase phase = ClockPhase::Pos;
+};
+
+struct ClockInputClassKeyLess {
+  bool operator()(const ClockInputClassKey& lhs,
+                  const ClockInputClassKey& rhs) const {
+    SignalKeyLess keyLess;
+    if (keyLess(lhs.domain, rhs.domain)) {
+      return true;
+    }
+    if (keyLess(rhs.domain, lhs.domain)) {
+      return false;
+    }
+    return static_cast<int>(lhs.phase) < static_cast<int>(rhs.phase);
+  }
+};
+
+std::unordered_map<size_t, size_t> buildLegacyClockInputClassMap(
     const SequentialDesignModel& model,
     const std::vector<SignalKey>& alignedInputKeys) {
   std::unordered_map<size_t, size_t> classes;
@@ -1186,6 +1205,35 @@ std::unordered_map<size_t, size_t> buildInputClassMap(
     for (const auto varID : model.clockCarrierVarIDs) {
       classes.emplace(varID, clockClass);
     }
+  }
+  return classes;
+}
+
+std::unordered_map<size_t, size_t> buildInputClassMap(
+    const SequentialDesignModel& model,
+    const std::vector<SignalKey>& alignedInputKeys) {
+  if (model.clockCarrierClasses.empty()) {
+    return buildLegacyClockInputClassMap(model, alignedInputKeys);
+  }
+
+  std::unordered_map<size_t, size_t> classes;
+  classes.reserve(alignedInputKeys.size() + model.clockCarrierClasses.size());
+  std::map<ClockInputClassKey, size_t, ClockInputClassKeyLess> clockClassByEvent;
+  for (size_t i = 0; i < alignedInputKeys.size(); ++i) {
+    const size_t varID = model.inputVarByKey.at(alignedInputKeys[i]);
+    classes.emplace(varID, i);
+    clockClassByEvent.emplace(
+        ClockInputClassKey{alignedInputKeys[i], ClockPhase::Pos}, i);
+  }
+
+  size_t nextClockClass = alignedInputKeys.size();
+  for (const auto& carrierClass : model.clockCarrierClasses) {
+    const ClockInputClassKey key{carrierClass.domain, carrierClass.phase};
+    auto classIt = clockClassByEvent.find(key);
+    if (classIt == clockClassByEvent.end()) {
+      classIt = clockClassByEvent.emplace(key, nextClockClass++).first;
+    }
+    classes.emplace(carrierClass.varID, classIt->second);
   }
   return classes;
 }

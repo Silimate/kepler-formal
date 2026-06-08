@@ -25,6 +25,7 @@ target_include_directories(kepler_sec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(kepler_sec
     PUBLIC
       formal_strategies
+      kepler_clocks
       kepler_config
       formal_structures
       naja_dnl

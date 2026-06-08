@@ -55,6 +55,7 @@ cc_library(
     deps = [
         "//src/clauses:kepler_clauses",
         "//src/config:kepler_config",
+        "//src/clocks:kepler_clocks",
         "//src/formal:formal_structures",
         "//src/sat:sat_solver_wrapper",
         "//src/strategies:formal_strategies",

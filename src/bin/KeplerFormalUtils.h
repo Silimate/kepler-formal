@@ -19,3 +19,7 @@ void writeBoundaryTermsReport(
 void writeResetUnanchoredSkippedOutputsReport(
     const std::filesystem::path& reportPath,
     const std::vector<std::string>& skippedOutputs);
+
+void writeMultiClockDomainSkippedOutputsReport(
+    const std::filesystem::path& reportPath,
+    const std::vector<std::string>& skippedOutputs);

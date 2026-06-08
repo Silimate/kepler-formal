@@ -217,6 +217,8 @@ std::string describeConnectivitySkipOrigin(ConnectivitySkipOrigin origin) {
       return "multi-driver";
     case ConnectivitySkipOrigin::LogicalLoop:
       return "logical-loop";
+    case ConnectivitySkipOrigin::MultiClockDomain:
+      return "multi-clock-domain";
   }
   return "connectivity";  // LCOV_EXCL_LINE
 }
@@ -247,6 +249,7 @@ struct OutputCoverageSelection {
   AlignedSignals checkedOutputs;
   std::vector<std::string> skippedOutputs;
   std::vector<std::string> resetUnanchoredSkippedOutputs;
+  std::vector<std::string> multiClockDomainSkippedOutputs;
   size_t totalOutputs = 0;
 };
 
@@ -771,8 +774,16 @@ OutputCoverageSelection selectCoveredObservedOutputs(
         reasons.push_back(
             "design1 " + describeConnectivitySkipInfo(skip1->second));
       }
-      selection.skippedOutputs.push_back(
-          name + ": " + joinReasons(reasons));
+      const std::string skippedOutput = name + ": " + joinReasons(reasons);
+      selection.skippedOutputs.push_back(skippedOutput);
+      const bool skippedByMultiClockDomain =
+          (skip0 != model0.connectivitySkipInfoByKey.end() &&
+           skip0->second.origin == ConnectivitySkipOrigin::MultiClockDomain) ||
+          (skip1 != model1.connectivitySkipInfoByKey.end() &&
+           skip1->second.origin == ConnectivitySkipOrigin::MultiClockDomain);
+      if (skippedByMultiClockDomain) {
+        selection.multiClockDomainSkippedOutputs.push_back(skippedOutput);
+      }
       continue;
     }
 
@@ -809,6 +820,8 @@ SequentialEquivalenceResult makeSecResult(
   result.skippedObservedOutputs = coverage.skippedOutputs;
   result.resetUnanchoredSkippedOutputs =
       coverage.resetUnanchoredSkippedOutputs;
+  result.multiClockDomainSkippedOutputs =
+      coverage.multiClockDomainSkippedOutputs;
   result.abstractedSequentialBoundaries =
       std::move(abstractedSequentialBoundaries);
   result.extractedBoundaryReports = std::move(extractedBoundaryReports);

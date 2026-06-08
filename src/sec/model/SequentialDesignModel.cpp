@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <deque>
 #include <limits>
+#include <map>
 #include <memory_resource>
 #include <memory>
 #include <optional>
@@ -51,6 +52,7 @@ struct StateOutputTerm {
   naja::DNL::DNLID termID = naja::DNL::DNLID_MAX;
   std::string pinName;
   naja::NL::NLID::Bit bit = 0;
+  bool intrinsicClockIsInverted = false;
   std::vector<PendingPinTerm> clockTermIDs;
 };
 
@@ -65,6 +67,7 @@ struct PendingTransition {
   std::vector<SignalKey> complementedStateKeys;
   PendingPinMap pinTermIDs;
   std::vector<PendingPinTerm> clockTermIDs;
+  bool intrinsicClockIsInverted = false;
 };
 
 struct PendingMemoryReadPort {
@@ -261,6 +264,8 @@ std::string describeConnectivitySkipOrigin(ConnectivitySkipOrigin origin) {
       return "multi-driver";
     case ConnectivitySkipOrigin::LogicalLoop:
       return "logical-loop";
+    case ConnectivitySkipOrigin::MultiClockDomain:
+      return "multi-clock-domain";
   }
   return "connectivity";  // LCOV_EXCL_LINE
 }
@@ -1211,6 +1216,27 @@ bool isSequentialNextStateInput(const naja::DNL::DNLTerminalFull& term) {
               .empty();
 }
 
+bool isNegativeClockPinName(const std::string& pinName) {
+  const std::string normalized = normalizePinName(pinName);
+  return normalized == "CKN" || normalized == "CLKN" ||
+         normalized == "CLK_N" || normalized == "CLK_B" ||
+         normalized == "CK_N" || normalized == "CK_B" ||
+         normalized == "CLOCK_N" || normalized == "CLOCK_B";
+}
+
+bool isIntrinsicNegativeEdgeClock(
+    const naja::DNL::DNLInstanceFull& instance,
+    const naja::NL::SNLBitTerm* clockBitTerm) {
+  const auto* model = instance.getSNLModel();
+  if (naja::NL::NLDB0::isDFFN(model)) {
+    return true;
+  }
+  if (clockBitTerm == nullptr) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  return isNegativeClockPinName(clockBitTerm->getName().getString());
+}
+
 bool isConstantInternalOutputTerm(const naja::DNL::DNLTerminalFull& term) {
   if (term.isNull() || term.isTopPort() ||
       term.getSnlBitTerm()->getDirection() !=
@@ -1497,6 +1523,7 @@ BoolExpr* getLocalClockEnableExpr(
     const PendingTransition& pending,
     const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs,
     const std::unordered_set<size_t>& topClockCarrierVarIDs,
+    const std::unordered_map<size_t, ClockEvent>& clockEventByCarrierVarID,
     const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     std::unordered_map<BoolExpr*, BoolExpr*>& clockCarrierStripMemo) {
@@ -1529,16 +1556,18 @@ BoolExpr* getLocalClockEnableExpr(
     clockExpr = BoolExpr::And(clockExpr, clockExprs[index]);  // LCOV_EXCL_LINE
   }
 
+  if (!clockGateLatchDataExprByVarID.empty()) {
+    clockExpr = substituteClockGateLatchVarsInExpr(
+        clockExpr, clockGateLatchDataExprByVarID);
+  }
+  if (const auto event =
+          classifyClockEventExpression(clockExpr, clockEventByCarrierVarID)) {
+    return clockEventIsUngated(*event) ? nullptr : event->enable;
+  }
+
   BoolExpr* enable = simplifyWhenClockCarriersChanged(
       clockExpr, stripClockCarrierFromClockEnable(
                      clockExpr, topClockCarrierVarIDs, clockCarrierStripMemo));
-  if (!clockGateLatchDataExprByVarID.empty()) {
-    enable = substituteClockGateLatchVarsInExpr(
-        enable, clockGateLatchDataExprByVarID);
-    enable = simplifyWhenClockCarriersChanged(
-        enable, stripClockCarrierFromClockEnable(
-                    enable, topClockCarrierVarIDs, clockCarrierStripMemo));
-  }
   if (enable == BoolExpr::createTrue()) {
     return nullptr;
   }
@@ -1567,6 +1596,7 @@ BoolExpr* buildNextStateExpr(
     const std::vector<size_t>& termDNLID2varID,
     const std::unordered_set<naja::DNL::DNLID>& pureClockCarrierTermIDs,
     const std::unordered_set<size_t>& topClockCarrierVarIDs,
+    const std::unordered_map<size_t, ClockEvent>& clockEventByCarrierVarID,
     const std::unordered_map<size_t, BoolExpr*>& clockGateLatchDataExprByVarID,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
     std::unordered_map<BoolExpr*, BoolExpr*>& clockCarrierStripMemo) {
@@ -1602,6 +1632,7 @@ BoolExpr* buildNextStateExpr(
               pending,
               pureClockCarrierTermIDs,
               topClockCarrierVarIDs,
+              clockEventByCarrierVarID,
               clockGateLatchDataExprByVarID,
               outputExprByTerm,
               clockCarrierStripMemo)) {
@@ -1853,7 +1884,6 @@ bool isClockTreeCarrierBoundaryName(const std::string& displayName) {
     return false;
   }
   return normalized.find("CLKBUF") != std::string::npos ||
-         normalized.find("CLKINV") != std::string::npos ||
          normalized.find("CLKLOAD") != std::string::npos ||
          normalized.find("CLKNET") != std::string::npos ||
          normalized.find("_CLK.") != std::string::npos ||
@@ -1893,7 +1923,6 @@ bool isClockTreeBufferCellName(const std::string& name) {
     return false;
   }
   return normalized.find("CLKBUF") != std::string::npos ||
-         normalized.find("CLKINV") != std::string::npos ||
          normalized.find("CLKLOAD") != std::string::npos;
 }
 
@@ -2008,6 +2037,97 @@ std::unordered_set<size_t> collectTopClockCarrierVarIDs(
   return varIDs;
 }
 
+void seedTopClockCarrierEvents(
+    const SequentialDesignModel& model,
+    const std::unordered_set<size_t>& clockCarrierVarIDs,
+    std::unordered_map<size_t, ClockEvent>& clockEventByCarrierVarID) {
+  for (const auto& key : model.topInputKeys) {
+    const auto displayIt = model.displayNameByKey.find(key);
+    const auto varIt = model.inputVarByKey.find(key);
+    if (displayIt == model.displayNameByKey.end() ||
+        varIt == model.inputVarByKey.end()) {
+      continue;
+    }
+    if (!isTopClockCarrierName(displayIt->second) ||
+        clockCarrierVarIDs.find(varIt->second) == clockCarrierVarIDs.end()) {
+      continue;
+    }
+
+    ClockEvent event;
+    event.domain = key;
+    event.phase = ClockPhase::Pos;
+    event.enable = nullptr;
+    clockEventByCarrierVarID.emplace(varIt->second, event);
+  }
+}
+
+ClockEvent applyIntrinsicClockPolarity(ClockEvent event, bool inverted) {
+  if (inverted) {
+    event.phase = invertClockPhase(event.phase);
+  }
+  return event;
+}
+
+BoolExpr* buildPendingClockExpr(
+    const PendingTransition& pending,
+    const std::vector<size_t>& termDNLID2varID,
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm) {
+  if (pending.clockTermIDs.empty()) {
+    return nullptr;
+  }
+
+  BoolExpr* clockExpr = nullptr;
+  for (const auto& clockTerm : pending.clockTermIDs) {
+    BoolExpr* termExpr = nullptr;
+    const auto exprIt = outputExprByTerm.find(clockTerm.termID);
+    if (exprIt != outputExprByTerm.end()) {
+      termExpr = exprIt->second;
+    } else if (clockTerm.termID < termDNLID2varID.size() &&
+               termDNLID2varID[clockTerm.termID] >= 2) {
+      termExpr = BoolExpr::Var(termDNLID2varID[clockTerm.termID]);
+    }
+    if (termExpr == nullptr) {
+      continue;
+    }
+    clockExpr = clockExpr == nullptr ? termExpr : BoolExpr::And(clockExpr, termExpr);
+  }
+  return clockExpr;
+}
+
+std::optional<ClockEvent> classifyPendingClockEvent(
+    const PendingTransition& pending,
+    const std::vector<size_t>& termDNLID2varID,
+    const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
+    const std::unordered_map<size_t, ClockEvent>& clockEventByCarrierVarID) {
+  BoolExpr* clockExpr =
+      buildPendingClockExpr(pending, termDNLID2varID, outputExprByTerm);
+  if (clockExpr == nullptr) {
+    return std::nullopt;
+  }
+  auto event =
+      classifyClockEventExpression(clockExpr, clockEventByCarrierVarID);
+  if (!event.has_value()) {
+    return std::nullopt;
+  }
+  return applyIntrinsicClockPolarity(*event, pending.intrinsicClockIsInverted);
+}
+
+std::vector<ClockCarrierClass> buildClockCarrierClasses(
+    const std::vector<size_t>& clockCarrierVarIDs,
+    const std::unordered_map<size_t, ClockEvent>& clockEventByCarrierVarID) {
+  std::vector<ClockCarrierClass> classes;
+  classes.reserve(clockEventByCarrierVarID.size());
+  for (const auto varID : clockCarrierVarIDs) {
+    const auto eventIt = clockEventByCarrierVarID.find(varID);
+    if (eventIt == clockEventByCarrierVarID.end()) {
+      continue;
+    }
+    classes.push_back(
+        ClockCarrierClass{varID, eventIt->second.domain, eventIt->second.phase});
+  }
+  return classes;
+}
+
 size_t expandClockCarrierVarIDsFromBoundaryNames(
     const SequentialDesignModel& model,
     std::unordered_set<size_t>& clockCarrierVarIDs) {
@@ -2072,10 +2192,10 @@ size_t expandClockCarrierVarIDsFromTermNames(
 size_t expandClockCarrierVarIDsFromMaterializedTerms(
     const std::vector<size_t>& termDNLID2varID,
     const std::unordered_map<naja::DNL::DNLID, BoolExpr*>& outputExprByTerm,
-    std::unordered_set<size_t>& clockCarrierVarIDs) {
+    std::unordered_set<size_t>& clockCarrierVarIDs,
+    std::unordered_map<size_t, ClockEvent>& clockEventByCarrierVarID) {
   size_t added = 0;
   bool changed = true;
-  std::unordered_map<BoolExpr*, BoolExpr*> clockStripMemo;
   while (changed) {
     changed = false;
     for (const auto& [termID, expr] : outputExprByTerm) {
@@ -2083,24 +2203,24 @@ size_t expandClockCarrierVarIDsFromMaterializedTerms(
         continue;
       }
       const size_t varID = termDNLID2varID[termID];
-      if (varID < 2 ||
-          clockCarrierVarIDs.find(varID) != clockCarrierVarIDs.end()) {
+      if (varID < 2 || clockEventByCarrierVarID.find(varID) !=
+                          clockEventByCarrierVarID.end()) {
         continue;
       }
 
-      BoolExpr* stripped = simplifyWhenClockCarriersChanged(
-          expr, stripClockCarrierFromClockEnable(
-                    expr, clockCarrierVarIDs, clockStripMemo));
-      if (stripped != BoolExpr::createTrue()) {
+      const auto event =
+          classifyClockEventExpression(expr, clockEventByCarrierVarID);
+      if (!event.has_value() || !clockEventIsUngated(*event)) {
         continue;
       }
 
-      // This is a clock-tree buffer/inverter inside one extracted design. Keep
-      // real gates intact, but do not let routed clock buffers model a SEC hold.
-      clockCarrierVarIDs.insert(varID);
-      ++added;
+      // This is a phase-preserving clock-tree buffer/inverter inside one
+      // extracted design. Gated clocks remain local enable logic, not carriers.
+      if (clockCarrierVarIDs.insert(varID).second) {
+        ++added;
+      }
+      clockEventByCarrierVarID.emplace(varID, *event);
       changed = true;
-      clockStripMemo.clear();
     }
   }
   return added;
@@ -2896,6 +3016,7 @@ std::optional<SequentialInstanceScan> scanSequentialInstance(
         term.getSnlBitTerm()->getDirection() !=
             naja::NL::SNLBitTerm::Direction::Input) {
       std::vector<PendingPinTerm> clockTermIDs;
+      bool intrinsicClockIsInverted = false;
       for (auto* clockBitTerm :
            naja::NL::SNLDesignModeling::getOutputRelatedClocks(
                term.getSnlBitTerm())) {
@@ -2908,6 +3029,9 @@ std::optional<SequentialInstanceScan> scanSequentialInstance(
                 naja::NL::SNLBitTerm::Direction::Output) {
           continue;  // LCOV_EXCL_LINE
         }
+        intrinsicClockIsInverted =
+            intrinsicClockIsInverted ||
+            isIntrinsicNegativeEdgeClock(instance, clockBitTerm);
         clockTermIDs.push_back(
             {clockTerm.getID(), clockTerm.getSnlBitTerm()->getBit()});
       }
@@ -2915,6 +3039,7 @@ std::optional<SequentialInstanceScan> scanSequentialInstance(
           {termID,
            normalizedPinName,
            term.getSnlBitTerm()->getBit(),
+           intrinsicClockIsInverted,
            std::move(clockTermIDs)});
     }
     // Some Liberty readers expose async set/reset pins as control timing arcs
@@ -3289,6 +3414,7 @@ void appendPendingTransitionsForInstance(
     pending.boundaryInfoIndex = boundaryInfoIndex;
     pending.pinTermIDs = scan.pinTermIDs;
     pending.clockTermIDs = stateOutput.clockTermIDs;
+    pending.intrinsicClockIsInverted = stateOutput.intrinsicClockIsInverted;
 
     std::vector<ComplementedStateRelation> complementedRelations;
     for (const auto& candidate : scan.stateOutputs) {
@@ -4160,6 +4286,7 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
   std::unordered_set<naja::DNL::DNLID> materializedOutputTerms;
   std::unordered_set<size_t> topClockCarrierVarIDs;
   std::unordered_set<naja::DNL::DNLID> pureClockCarrierTermIDs;
+  std::unordered_map<size_t, ClockEvent> clockEventByCarrierVarID;
   std::unordered_map<BoolExpr*, BoolExpr*> transitionClockStripMemo;
   materializedOutputTerms.reserve(outputExprByTerm.size());
   for (const auto& [termID, _] : outputExprByTerm) {
@@ -4184,8 +4311,12 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
         &pureClockCarrierTermIDs);
     const size_t addedPureExprs = expandClockCarrierVarIDsFromPureClockTermExprs(
         pureClockCarrierTermIDs, outputExprByTerm, topClockCarrierVarIDs);
+    seedTopClockCarrierEvents(model, topClockCarrierVarIDs, clockEventByCarrierVarID);
     const size_t addedMaterialized = expandClockCarrierVarIDsFromMaterializedTerms(
-        termDNLID2varID, outputExprByTerm, topClockCarrierVarIDs);
+        termDNLID2varID,
+        outputExprByTerm,
+        topClockCarrierVarIDs,
+        clockEventByCarrierVarID);
     const size_t added = addedTop + addedBoundary + addedTermNames +
                          addedStructure + addedPureExprs + addedMaterialized;
     if (added != 0) {
@@ -4493,9 +4624,15 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
                 termDNLID2varID,
                 pureClockCarrierTermIDs,
                 topClockCarrierVarIDs,
+                clockEventByCarrierVarID,
                 clockGateLatchDataExprByVarID,
                 outputExprByTerm,
                 transitionClockStripMemo);
+        const auto clockEvent = classifyPendingClockEvent(
+            pending,
+            termDNLID2varID,
+            outputExprByTerm,
+            clockEventByCarrierVarID);
         // This diagnostic is intentionally after clock-carrier stripping: any
         // remaining unpublished support would become a private proof input and
         // can hide the real reason state matching stopped converging.
@@ -4508,11 +4645,17 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
             topClockCarrierVarIDs,
             pureClockCarrierTermIDs);
         model.nextStateExprByStateKey.emplace(pending.stateKey, nextStateExpr);
+        if (clockEvent.has_value()) {
+          model.clockEventByStateKey.emplace(pending.stateKey, *clockEvent);
+        }
         // Liberty flops such as DFF_X1 expose both Q and QN. They share one
         // storage element, so complementary outputs inherit the same next-state
         // function with a logical inversion.
         for (const auto& complementedKey : pending.complementedStateKeys) {
           model.nextStateExprByStateKey.emplace(complementedKey, BoolExpr::Not(nextStateExpr));
+          if (clockEvent.has_value()) {
+            model.clockEventByStateKey.emplace(complementedKey, *clockEvent);
+          }
           if (artifacts.requiredStateKeys.find(complementedKey) !=
               artifacts.requiredStateKeys.end()) {
             stateDependencyWorkQueue.push_back(complementedKey);
@@ -4549,6 +4692,8 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
   model.clockCarrierVarIDs.assign(
       topClockCarrierVarIDs.begin(), topClockCarrierVarIDs.end());
   std::sort(model.clockCarrierVarIDs.begin(), model.clockCarrierVarIDs.end());
+  model.clockCarrierClasses = buildClockCarrierClasses(
+      model.clockCarrierVarIDs, clockEventByCarrierVarID);
   substituteFoldedClockGateLatchVarsInModel(model, clockGateLatchDataExprByVarID);
   removeDeadFoldedClockGateLatchInputs(model, clockGateLatchDataExprByVarID);
 
@@ -4614,6 +4759,189 @@ void removeDeadFoldedClockGateLatchInputs(
   }
 }
 
+struct ClockDomainIndex {
+  std::unordered_map<size_t, SignalKey> domainByStateVarID;
+  std::vector<uint8_t> isClockedStateVar;
+};
+
+ClockDomainIndex buildClockDomainIndex(const SequentialDesignModel& model) {
+  ClockDomainIndex index;
+  size_t maxStateVarID = 0;
+  for (const auto& key : model.stateBits) {
+    const auto varIt = model.inputVarByKey.find(key);
+    const auto eventIt = model.clockEventByStateKey.find(key);
+    if (varIt == model.inputVarByKey.end() ||
+        eventIt == model.clockEventByStateKey.end()) {
+      continue;
+    }
+    index.domainByStateVarID.emplace(varIt->second, eventIt->second.domain);
+    maxStateVarID = std::max(maxStateVarID, varIt->second);
+  }
+
+  index.isClockedStateVar.assign(maxStateVarID + 1, 0);
+  for (const auto& [varID, _] : index.domainByStateVarID) {
+    index.isClockedStateVar[varID] = 1;
+  }
+  return index;
+}
+
+std::string formatClockDomainName(
+    const SequentialDesignModel& model,
+    const SignalKey& domain) {
+  const auto displayIt = model.displayNameByKey.find(domain);
+  return displayIt == model.displayNameByKey.end()
+             ? signalKeyToString(domain)
+             : displayIt->second;
+}
+
+std::string formatClockDomains(
+    const SequentialDesignModel& model,
+    const std::set<SignalKey, SignalKeyLess>& domains) {
+  std::ostringstream oss;
+  bool first = true;
+  for (const auto& domain : domains) {
+    if (!first) {
+      oss << ", ";
+    }
+    first = false;
+    oss << formatClockDomainName(model, domain);
+  }
+  return oss.str();
+}
+
+std::set<SignalKey, SignalKeyLess> collectClockDomainsFromExpr(
+    BoolExpr* expr,
+    const ClockDomainIndex& index,
+    CandidateDependencyScratch& scratch) {
+  std::set<SignalKey, SignalKeyLess> domains;
+  if (index.isClockedStateVar.empty()) {
+    return domains;
+  }
+  for (const auto stateVarID :
+       collectCandidateStateDependenciesFromExpr(
+           expr, index.isClockedStateVar, scratch)) {
+    const auto domainIt = index.domainByStateVarID.find(stateVarID);
+    if (domainIt != index.domainByStateVarID.end()) {
+      domains.insert(domainIt->second);
+    }
+  }
+  return domains;
+}
+
+bool containsClockDomainOtherThan(
+    const std::set<SignalKey, SignalKeyLess>& domains,
+    const SignalKey& expectedDomain) {
+  for (const auto& domain : domains) {
+    if (domain != expectedDomain) {
+      return true;
+    }
+  }
+  return false;
+}
+
+ConnectivitySkipInfo makeMultiClockDomainSkip(const std::string& detail) {
+  return ConnectivitySkipInfo{ConnectivitySkipOrigin::MultiClockDomain, detail};
+}
+
+void composeSameDomainPhaseTransitions(SequentialDesignModel& model) {
+  std::map<SignalKey, std::vector<SignalKey>, SignalKeyLess> posedgeStatesByDomain;
+  std::map<SignalKey, std::vector<SignalKey>, SignalKeyLess> negedgeStatesByDomain;
+  for (const auto& key : model.stateBits) {
+    const auto eventIt = model.clockEventByStateKey.find(key);
+    if (eventIt == model.clockEventByStateKey.end()) {
+      continue;
+    }
+    if (eventIt->second.phase == ClockPhase::Pos) {
+      posedgeStatesByDomain[eventIt->second.domain].push_back(key);
+    } else {
+      negedgeStatesByDomain[eventIt->second.domain].push_back(key);
+    }
+  }
+
+  for (const auto& [domain, posedgeStates] : posedgeStatesByDomain) {
+    const auto negedgeIt = negedgeStatesByDomain.find(domain);
+    if (negedgeIt == negedgeStatesByDomain.end()) {
+      continue;
+    }
+
+    std::unordered_map<size_t, BoolExpr*> posedgeNextByVarID;
+    posedgeNextByVarID.reserve(posedgeStates.size());
+    for (const auto& key : posedgeStates) {
+      const auto varIt = model.inputVarByKey.find(key);
+      const auto nextIt = model.nextStateExprByStateKey.find(key);
+      if (varIt != model.inputVarByKey.end() &&
+          nextIt != model.nextStateExprByStateKey.end()) {
+        posedgeNextByVarID.emplace(varIt->second, nextIt->second);
+      }
+    }
+
+    // SEC macro-cycles are sampled just before the positive edge.  For a
+    // positive/negative phase pair in one domain, negedge flops therefore see
+    // the just-computed posedge state, while posedge flops still see old
+    // negedge state from the previous macro-cycle.
+    for (const auto& key : negedgeIt->second) {
+      const auto nextIt = model.nextStateExprByStateKey.find(key);
+      if (nextIt == model.nextStateExprByStateKey.end()) {
+        continue;  // LCOV_EXCL_LINE
+      }
+      nextIt->second = substituteBoolExprVariableExpressions(
+          nextIt->second, posedgeNextByVarID);
+    }
+  }
+}
+
+void markMultiClockDomainConesAsSkipped(SequentialDesignModel& model) {
+  const ClockDomainIndex index = buildClockDomainIndex(model);
+  if (index.domainByStateVarID.empty()) {
+    return;
+  }
+
+  CandidateDependencyScratch scratch;
+  for (const auto& key : model.stateBits) {
+    if (model.connectivitySkipInfoByKey.find(key) !=
+        model.connectivitySkipInfoByKey.end()) {
+      continue;
+    }
+    const auto eventIt = model.clockEventByStateKey.find(key);
+    const auto nextIt = model.nextStateExprByStateKey.find(key);
+    if (eventIt == model.clockEventByStateKey.end() ||
+        nextIt == model.nextStateExprByStateKey.end()) {
+      continue;
+    }
+    const auto domains =
+        collectClockDomainsFromExpr(nextIt->second, index, scratch);
+    if (!containsClockDomainOtherThan(domains, eventIt->second.domain)) {
+      continue;
+    }
+    model.connectivitySkipInfoByKey.emplace(
+        key,
+        makeMultiClockDomainSkip(
+            "State next-state cone crosses clock domains: " +
+            formatClockDomains(model, domains)));
+  }
+
+  for (const auto& key : model.allObservedOutputs) {
+    if (model.connectivitySkipInfoByKey.find(key) !=
+        model.connectivitySkipInfoByKey.end()) {
+      continue;
+    }
+    const auto exprIt = model.observedOutputExprByKey.find(key);
+    if (exprIt == model.observedOutputExprByKey.end()) {
+      continue;
+    }
+    const auto domains =
+        collectClockDomainsFromExpr(exprIt->second, index, scratch);
+    if (domains.size() <= 1) {
+      continue;
+    }
+    model.connectivitySkipInfoByKey.emplace(
+        key,
+        makeMultiClockDomainSkip(
+            "Observed output cone spans clock domains: " +
+            formatClockDomains(model, domains)));
+  }
+}
+
 void applyRebuiltTransitionArtifacts(
     const ExtractContext& ctx,
     const RebuiltTransitionArtifacts& artifacts,
@@ -4644,6 +4972,7 @@ void applyRebuiltTransitionArtifacts(
   for (const auto& key : prunedStateKeys) {
     model.nextStateExprByStateKey.erase(key);
     model.initialStateValueByKey.erase(key);
+    model.clockEventByStateKey.erase(key);
     model.inputVarByKey.erase(key);
   }
   model.complementedStateRelations.erase(
@@ -4661,6 +4990,7 @@ void applyRebuiltTransitionArtifacts(
   for (const auto& key : artifacts.lateAbstractedBoundaryStateKeys) {
     model.nextStateExprByStateKey.erase(key);  // LCOV_EXCL_LINE
     model.initialStateValueByKey.erase(key);  // LCOV_EXCL_LINE
+    model.clockEventByStateKey.erase(key);  // LCOV_EXCL_LINE
     if (std::find(model.environmentInputs.begin(), model.environmentInputs.end(), key) ==  // LCOV_EXCL_LINE
         model.environmentInputs.end()) {  // LCOV_EXCL_LINE
       model.environmentInputs.push_back(key);  // LCOV_EXCL_LINE
@@ -4754,6 +5084,7 @@ void filterUnsupportedAndUnmappedBoundary(ExtractContext& ctx, SequentialDesignM
               }
               model.nextStateExprByStateKey.erase(key);  // LCOV_EXCL_LINE
               model.initialStateValueByKey.erase(key);  // LCOV_EXCL_LINE
+              model.clockEventByStateKey.erase(key);  // LCOV_EXCL_LINE
               model.inputVarByKey.erase(key);  // LCOV_EXCL_LINE
               return true;  // LCOV_EXCL_LINE
             }),  // LCOV_EXCL_LINE
@@ -5044,6 +5375,7 @@ void partitionCoveredSignals(SequentialDesignModel& model) {
       model.skippedStateBits.push_back(key);
       model.nextStateExprByStateKey.erase(key);
       model.initialStateValueByKey.erase(key);
+      model.clockEventByStateKey.erase(key);
       model.inputVarByKey.erase(key);
       continue;
     }
@@ -5313,6 +5645,8 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
       outputExprByTerm,
       skippedOutputsByTerm);
   filterUnsupportedAndUnmappedBoundary(ctx, model);
+  composeSameDomainPhaseTransitions(model);
+  markMultiClockDomainConesAsSkipped(model);
 
   // Phase 5: propagate connectivity skips through dependent state/output cones,
   // then partition the final interface into covered vs skipped signals.  The

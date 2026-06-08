@@ -3910,6 +3910,124 @@ SNLDesign* createClockTreeBufferedDffTop(
   return top;
 }
 
+SNLDesign* createInvertedClockDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* invModel,
+    const std::string& invInstanceName = "inv0") {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* inv = SNLInstance::create(top, invModel, NLName(invInstanceName));
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netClockN = SNLScalarNet::create(top, NLName("net_clk_n"));
+  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
+
+  topIn->setNet(netIn);
+  topClock->setNet(netClock);
+  topOut->setNet(netQ);
+
+  inv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netClock);
+  inv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netClockN);
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netIn);
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClockN);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
+
+  return top;
+}
+
+SNLDesign* createPosToNegSameDomainTop(
+    NLLibrary* library,
+    const std::string& name) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* posFf = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff_pos"));
+  auto* negFf = SNLInstance::create(top, NLDB0::getDFFN(), NLName("ff_neg"));
+
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netPosQ = SNLScalarNet::create(top, NLName("net_pos_q"));
+  auto* netNegQ = SNLScalarNet::create(top, NLName("net_neg_q"));
+
+  topIn->setNet(netIn);
+  topClock->setNet(netClock);
+  topOut->setNet(netNegQ);
+
+  posFf->getInstTerm(NLDB0::getDFFData())->setNet(netIn);
+  posFf->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
+  posFf->getInstTerm(NLDB0::getDFFOutput())->setNet(netPosQ);
+
+  negFf->getInstTerm(NLDB0::getDFFNData())->setNet(netPosQ);
+  negFf->getInstTerm(NLDB0::getDFFNClock())->setNet(netClock);
+  negFf->getInstTerm(NLDB0::getDFFNOutput())->setNet(netNegQ);
+
+  return top;
+}
+
+SNLDesign* createMultiClockDomainOutputTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* andModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topInA =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in_a"));
+  auto* topInB =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in_b"));
+  auto* topClockA =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a_clk"));
+  auto* topClockB =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("b_clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* ffA = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff_a"));
+  auto* ffB = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff_b"));
+  auto* andInst = SNLInstance::create(top, andModel, NLName("and_domains"));
+
+  auto* netInA = SNLScalarNet::create(top, NLName("net_in_a"));
+  auto* netInB = SNLScalarNet::create(top, NLName("net_in_b"));
+  auto* netClockA = SNLScalarNet::create(top, NLName("net_a_clk"));
+  auto* netClockB = SNLScalarNet::create(top, NLName("net_b_clk"));
+  auto* netQa = SNLScalarNet::create(top, NLName("net_qa"));
+  auto* netQb = SNLScalarNet::create(top, NLName("net_qb"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topInA->setNet(netInA);
+  topInB->setNet(netInB);
+  topClockA->setNet(netClockA);
+  topClockB->setNet(netClockB);
+  topOut->setNet(netOut);
+
+  ffA->getInstTerm(NLDB0::getDFFData())->setNet(netInA);
+  ffA->getInstTerm(NLDB0::getDFFClock())->setNet(netClockA);
+  ffA->getInstTerm(NLDB0::getDFFOutput())->setNet(netQa);
+  ffB->getInstTerm(NLDB0::getDFFData())->setNet(netInB);
+  ffB->getInstTerm(NLDB0::getDFFClock())->setNet(netClockB);
+  ffB->getInstTerm(NLDB0::getDFFOutput())->setNet(netQb);
+  andInst->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netQa);
+  andInst->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(netQb);
+  andInst->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netOut);
+
+  return top;
+}
+
 SNLDesign* createClockGateLatchDataDffTop(
     NLLibrary* library,
     const std::string& name,
@@ -8605,10 +8723,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsReportsAllConnectivitySkippedOutputs) {
   SequentialDesignModel model0;
   SequentialDesignModel model1;
-  std::array<ConnectivitySkipOrigin, 3> origins = {
+  std::array<ConnectivitySkipOrigin, 4> origins = {
       ConnectivitySkipOrigin::NoDriver,
       ConnectivitySkipOrigin::MultiDriver,
-      ConnectivitySkipOrigin::LogicalLoop};
+      ConnectivitySkipOrigin::LogicalLoop,
+      ConnectivitySkipOrigin::MultiClockDomain};
   for (size_t i = 0; i < origins.size(); ++i) {
     const SignalKey key = makeSignalKey("skipped_out_" + std::to_string(i));
     const std::string name = "out" + std::to_string(i) + "[0]";
@@ -8641,6 +8760,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(hasSkipText("no-driver connectivity"));
   EXPECT_TRUE(hasSkipText("multi-driver connectivity"));
   EXPECT_TRUE(hasSkipText("logical-loop connectivity"));
+  EXPECT_TRUE(hasSkipText("multi-clock-domain connectivity"));
+  ASSERT_EQ(result.multiClockDomainSkippedOutputs.size(), 1u);
+  EXPECT_NE(
+      result.multiClockDomainSkippedOutputs.front().find("multi-clock-domain"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13781,6 +13905,127 @@ TEST_F(SequentialEquivalenceStrategyTests,
                                  {extracted.inputVarByKey.at(in1Key), true}}));
   EXPECT_TRUE(q1Expr->evaluate({{extracted.inputVarByKey.at(in0Key), false},
                                 {extracted.inputVarByKey.at(in1Key), true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractClassifiesNegativeEdgePrimitiveClock) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = createPosToNegSameDomainTop(library, "top");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  const auto posKey = findKeyByDisplayName(extracted, "ff_pos.Q[0]");
+  const auto negKey = findKeyByDisplayName(extracted, "ff_neg.Q[0]");
+  ASSERT_NE(
+      extracted.clockEventByStateKey.find(posKey),
+      extracted.clockEventByStateKey.end());
+  ASSERT_NE(
+      extracted.clockEventByStateKey.find(negKey),
+      extracted.clockEventByStateKey.end());
+  EXPECT_EQ(extracted.clockEventByStateKey.at(posKey).phase, ClockPhase::Pos);
+  EXPECT_EQ(extracted.clockEventByStateKey.at(negKey).phase, ClockPhase::Neg);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractComposesPosedgeBeforeNegedgeSameDomain) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* top = createPosToNegSameDomainTop(library, "top");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  const auto inKey = findKeyByDisplayName(extracted, "in[0]");
+  const auto posKey = findKeyByDisplayName(extracted, "ff_pos.Q[0]");
+  const auto negKey = findKeyByDisplayName(extracted, "ff_neg.Q[0]");
+  auto* negNext = extracted.nextStateExprByStateKey.at(negKey);
+
+  EXPECT_TRUE(negNext->evaluate(
+      {{extracted.inputVarByKey.at(inKey), true},
+       {extracted.inputVarByKey.at(posKey), false},
+       {extracted.inputVarByKey.at(negKey), false}}));
+  EXPECT_FALSE(negNext->evaluate(
+      {{extracted.inputVarByKey.at(inKey), false},
+       {extracted.inputVarByKey.at(posKey), true},
+       {extracted.inputVarByKey.at(negKey), true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractClassifiesInvertedClockTreePhase) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top = createInvertedClockDffTop(library, "top", invModel);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  ASSERT_NE(
+      extracted.clockEventByStateKey.find(stateKey),
+      extracted.clockEventByStateKey.end());
+  EXPECT_EQ(extracted.clockEventByStateKey.at(stateKey).phase, ClockPhase::Neg);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractClassifiesNamedClockTreeInverterPhase) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* invModel = createInvModel(primitives);
+  auto* top = createInvertedClockDffTop(
+      library, "top", invModel, "clkinv_leaf_0");
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  ASSERT_NE(
+      extracted.clockEventByStateKey.find(stateKey),
+      extracted.clockEventByStateKey.end());
+  EXPECT_EQ(extracted.clockEventByStateKey.at(stateKey).phase, ClockPhase::Neg);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractSkipsOutputConeSpanningClockDomains) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* andModel = createAnd2Model(primitives);
+  auto* top = createMultiClockDomainOutputTop(library, "top", andModel);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_EQ(extracted.totalObservedOutputCount(), 1u);
+  EXPECT_EQ(extracted.coveredObservedOutputCount(), 0u);
+  ASSERT_EQ(extracted.skippedObservedOutputs.size(), 1u);
+  const auto outputKey = findKeyByDisplayName(extracted, "out[0]");
+  const auto skipIt = extracted.connectivitySkipInfoByKey.find(outputKey);
+  ASSERT_NE(skipIt, extracted.connectivitySkipInfoByKey.end());
+  EXPECT_EQ(skipIt->second.origin, ConnectivitySkipOrigin::MultiClockDomain);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = strategy.runExtractedModels(extracted, extracted, 1);
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  ASSERT_EQ(result.multiClockDomainSkippedOutputs.size(), 1u);
+  EXPECT_NE(
+      result.multiClockDomainSkippedOutputs.front().find("multi-clock-domain"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

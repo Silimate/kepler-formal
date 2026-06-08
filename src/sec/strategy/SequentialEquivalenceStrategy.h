@@ -49,6 +49,7 @@ struct SequentialEquivalenceResult {
   size_t totalOutputs = 0;
   std::vector<std::string> skippedObservedOutputs;
   std::vector<std::string> resetUnanchoredSkippedOutputs;
+  std::vector<std::string> multiClockDomainSkippedOutputs;
   std::vector<std::string> abstractedSequentialBoundaries;
   std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports;
 
