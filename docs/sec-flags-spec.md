@@ -11,6 +11,8 @@ This page covers the flags, YAML keys, reports, and debug environment variables
 that affect Sequential Equivalence Checking (SEC). General input-format,
 library, logging, solver, CNF export, and LEC flags remain documented in
 [flags-spec.md](flags-spec.md).
+SEC clock extraction and multi-clock-domain coverage handling are documented in
+[sec-clock-handling.md](sec-clock-handling.md).
 
 ## CLI Shape
 

@@ -16,6 +16,7 @@
 #include "SNLTruthTable.h"
 #include "SNLUtils.h"
 #include "SNLVRLConstructor.h"
+#include "BoolExprCache.h"
 #include "MiterStrategy.h"
 
 using namespace naja::NL;
@@ -34,6 +35,7 @@ class UnitDesignCompare: public ::testing::Test {
     }
     void TearDown() override {
       NLUniverse::get()->destroy();
+      KEPLER_FORMAL::BoolExprCache::destroy();
     }
   protected:
     NLLibrary*  library0_;
