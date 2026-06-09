@@ -156,6 +156,7 @@ class ScopedEnvVar {
 class MiterStrategyStandaloneTests : public ::testing::Test {
  protected:
   void TearDown() override {
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
     KEPLER_FORMAL::BoolExprCache::destroy();
   }
 };
@@ -338,6 +339,7 @@ class MiterTests : public ::testing::Test {
     // Destroy the SNL
     naja::DNL::destroy();
     NLUniverse::get()->destroy();
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
     KEPLER_FORMAL::BoolExprCache::destroy();
     if (!tempDir_.empty()) {
       std::error_code ec;

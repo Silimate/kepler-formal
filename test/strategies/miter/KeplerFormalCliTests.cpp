@@ -16,6 +16,7 @@
 #include "DNL.h"
 #include "BoolExprCache.h"
 #include "Config.h"
+#include "Tree2BoolExpr.h"
 #include "KeplerFormalUtils.h"
 #include "NLDB0.h"
 #include "NLUniverse.h"
@@ -67,6 +68,7 @@ int runWithConfigFile(const std::filesystem::path& cfgPath) {
   const int rc = KeplerFormalMain(argc, argv);
   // CLI tests invoke the tool in-process, so clear the production BoolExpr
   // cache explicitly instead of relying on OS cleanup at process exit.
+  KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
   KEPLER_FORMAL::BoolExprCache::destroy();
   return rc;
 }
@@ -78,6 +80,7 @@ int runWithArgs(std::vector<std::string> args) {
     argv.push_back(arg.data());
   }
   const int rc = KeplerFormalMain(static_cast<int>(argv.size()), argv.data());
+  KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
   KEPLER_FORMAL::BoolExprCache::destroy();
   return rc;
 }
@@ -751,6 +754,7 @@ SequentialNajaIfFixture createUncomputableSequentialNajaIfFixture() {
 class KeplerFormalCliTests : public ::testing::Test {
  protected:
   void TearDown() override {
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
     KEPLER_FORMAL::BoolExprCache::destroy();
   }
 };
@@ -2983,13 +2987,23 @@ TEST_F(KeplerFormalCliTests, CliPositionalLibertyPathsWithoutStandardSuffixAccep
 TEST_F(KeplerFormalCliTests, PythonLibraryFilesAreLoadedFromDedicatedYamlKey) {
   const auto fixture = createEquivalentDesignFixture(
       "v",
-      "module top(output y);\n"
-      "  wire z;\n"
-      "  LOGIC1 c0(.Z(z));\n"
-      "  BUF c1(.A(z), .Z(y));\n"
+      "module top(input a, output y);\n"
+      "  BUF c0(.A(a), .Z(y));\n"
       "endmodule\n");
-  const auto pyPrimitives =
-      repoRoot() / "thirdparty/naja/test/nl/python/pyloader/scripts/primitives1.py";
+  const auto pyPrimitives = fixture.tmpDir / "kepler_test_primitives.py";
+  {
+    std::ofstream py(pyPrimitives);
+    py << "import naja\n"
+          "\n"
+          "def constructBUF(lib):\n"
+          "  cell = naja.SNLDesign.createPrimitive(lib, 'BUF')\n"
+          "  a = naja.SNLScalarTerm.create(cell, naja.SNLTerm.Direction.Input, 'A')\n"
+          "  z = naja.SNLScalarTerm.create(cell, naja.SNLTerm.Direction.Output, 'Z')\n"
+          "  naja.SNLDesign.addCombinatorialArcs([a], [z])\n"
+          "\n"
+          "def constructPrimitives(lib):\n"
+          "  constructBUF(lib)\n";
+  }
   const auto pyModuleDir = findBuiltNajaModuleDir();
   ASSERT_TRUE(std::filesystem::exists(pyPrimitives));
   ASSERT_FALSE(pyModuleDir.empty());

@@ -51,6 +51,8 @@
 #include "model/SequentialDesignModel.h"
 #include "proof/TransitionExprResolver.h"
 #include "BuildPrimaryOutputClauses.h"
+#include "Tree2BoolExpr.h"
+#include "clocks/SecClockModel.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 #include "strategy/StructuralStateInvariant.h"
@@ -1509,6 +1511,7 @@ class SequentialEquivalenceStrategyTests : public ::testing::Test {
     if (auto* universe = NLUniverse::get()) {
       universe->destroy();
     }
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
     KEPLER_FORMAL::BoolExprCache::destroy();
   }
 };
@@ -16497,4 +16500,182 @@ TEST_F(SequentialEquivalenceStrategyTests,
   SignalKey missingKey = outKey;
   ++missingKey.first.front();
   EXPECT_FALSE(detail::findTermByKeyForTest(dnl, missingKey).has_value());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecClockModelHelpersCoverPhaseAndUngatedEventPaths) {
+  ClockEvent defaultEvent;
+  EXPECT_EQ(defaultEvent.phase, ClockPhase::Pos);
+  EXPECT_EQ(defaultEvent.enable, nullptr);
+
+  const auto domain = makeSignalKey("clk");
+  ClockEvent ungated{domain, ClockPhase::Pos, nullptr};
+  EXPECT_EQ(invertClockPhase(ClockPhase::Pos), ClockPhase::Neg);
+  EXPECT_EQ(invertClockPhase(ClockPhase::Neg), ClockPhase::Pos);
+  EXPECT_STREQ(clockPhaseName(ClockPhase::Pos), "posedge");
+  EXPECT_STREQ(clockPhaseName(ClockPhase::Neg), "negedge");
+  EXPECT_TRUE(clockEventIsUngated(ungated));
+  EXPECT_EQ(clockEventEnableOrTrue(ungated), BoolExpr::createTrue());
+
+  ClockEvent explicitTrue{domain, ClockPhase::Pos, BoolExpr::createTrue()};
+  EXPECT_TRUE(clockEventIsUngated(explicitTrue));
+  EXPECT_EQ(clockEventEnableOrTrue(explicitTrue), BoolExpr::createTrue());
+
+  ClockEvent gated{domain, ClockPhase::Neg, BoolExpr::Var(42)};
+  EXPECT_FALSE(clockEventIsUngated(gated));
+  EXPECT_EQ(clockEventEnableOrTrue(gated), BoolExpr::Var(42));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecClockModelClassifiesCarrierEdgesAndGates) {
+  const auto domain = makeSignalKey("clk");
+  const std::unordered_map<size_t, ClockEvent> carrierEvents = {
+      {10, ClockEvent{domain, ClockPhase::Pos, nullptr}},
+  };
+
+  const auto posEdge = classifyClockEventExpression(BoolExpr::Var(10), carrierEvents);
+  ASSERT_TRUE(posEdge.has_value());
+  EXPECT_EQ(posEdge->domain, domain);
+  EXPECT_EQ(posEdge->phase, ClockPhase::Pos);
+  EXPECT_EQ(posEdge->enable, nullptr);
+
+  const auto negEdge =
+      classifyClockEventExpression(BoolExpr::Not(BoolExpr::Var(10)), carrierEvents);
+  ASSERT_TRUE(negEdge.has_value());
+  EXPECT_EQ(negEdge->domain, domain);
+  EXPECT_EQ(negEdge->phase, ClockPhase::Neg);
+  EXPECT_EQ(negEdge->enable, nullptr);
+
+  const auto andGated = classifyClockEventExpression(
+      BoolExpr::And(BoolExpr::Var(10), BoolExpr::Var(20)), carrierEvents);
+  ASSERT_TRUE(andGated.has_value());
+  EXPECT_EQ(andGated->phase, ClockPhase::Pos);
+  ASSERT_NE(andGated->enable, nullptr);
+  EXPECT_FALSE(andGated->enable->evaluate({{20, false}}));
+  EXPECT_TRUE(andGated->enable->evaluate({{20, true}}));
+
+  const auto orGated = classifyClockEventExpression(
+      BoolExpr::Or(BoolExpr::Var(10), BoolExpr::Var(21)), carrierEvents);
+  ASSERT_TRUE(orGated.has_value());
+  EXPECT_EQ(orGated->phase, ClockPhase::Pos);
+  ASSERT_NE(orGated->enable, nullptr);
+  EXPECT_TRUE(orGated->enable->evaluate({{21, false}}));
+  EXPECT_FALSE(orGated->enable->evaluate({{21, true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecClockModelRejectsAmbiguousAndMissingCarrierExpressions) {
+  const auto domain = makeSignalKey("clk");
+  const std::unordered_map<size_t, ClockEvent> carrierEvents = {
+      {10, ClockEvent{domain, ClockPhase::Pos, nullptr}},
+      {11, ClockEvent{makeSignalKey("clk2"), ClockPhase::Pos, nullptr}},
+  };
+
+  EXPECT_FALSE(classifyClockEventExpression(nullptr, carrierEvents).has_value());
+  EXPECT_FALSE(classifyClockEventExpression(BoolExpr::Var(10), {}).has_value());
+  EXPECT_FALSE(
+      classifyClockEventExpression(
+          BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::Var(11)),
+          carrierEvents)
+          .has_value());
+  EXPECT_FALSE(
+      classifyClockEventExpression(
+          BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::Var(20)),
+          carrierEvents)
+          .has_value());
+  EXPECT_FALSE(
+      classifyClockEventExpression(BoolExpr::Var(99), carrierEvents).has_value());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecClockModelCoversRawDagCarrierSpecializationEdges) {
+  const auto domain = makeSignalKey("clk");
+  const std::unordered_map<size_t, ClockEvent> carrierEvents = {
+      {10, ClockEvent{domain, ClockPhase::Pos, nullptr}},
+  };
+
+  const auto makeRaw = [](KEPLER_FORMAL::Op op,
+                          BoolExpr* left,
+                          BoolExpr* right) {
+    return KEPLER_FORMAL::BoolExprCache::getExpression({op, 0, left, right});
+  };
+  auto* clock = BoolExpr::Var(10);
+  auto* gateA = BoolExpr::Var(20);
+  auto* gateB = BoolExpr::Var(21);
+  auto* gatedAnd = makeRaw(KEPLER_FORMAL::Op::AND, gateA, gateB);
+  auto* gatedOr = makeRaw(KEPLER_FORMAL::Op::OR, gateA, gateB);
+  auto* gatedXor = makeRaw(KEPLER_FORMAL::Op::XOR, gateA, gateB);
+
+  for (auto* gateExpr : {gatedAnd, gatedOr, gatedXor}) {
+    const auto edge =
+        classifyClockEventExpression(BoolExpr::And(clock, gateExpr), carrierEvents);
+    ASSERT_TRUE(edge.has_value());
+    EXPECT_EQ(edge->phase, ClockPhase::Pos);
+    EXPECT_EQ(edge->enable, gateExpr);
+  }
+
+  auto* rawClockAndTrue =
+      makeRaw(KEPLER_FORMAL::Op::AND, clock, BoolExpr::createTrue());
+  auto* shared = makeRaw(KEPLER_FORMAL::Op::AND, rawClockAndTrue, gateA);
+  auto* repeated = makeRaw(KEPLER_FORMAL::Op::OR, shared, shared);
+  const auto repeatedEdge =
+      classifyClockEventExpression(repeated, carrierEvents);
+  ASSERT_TRUE(repeatedEdge.has_value());
+  EXPECT_EQ(repeatedEdge->phase, ClockPhase::Pos);
+  ASSERT_NE(repeatedEdge->enable, nullptr);
+  EXPECT_FALSE(repeatedEdge->enable->evaluate({{20, false}}));
+  EXPECT_TRUE(repeatedEdge->enable->evaluate({{20, true}}));
+
+  auto* invalid =
+      makeRaw(KEPLER_FORMAL::Op::NONE, BoolExpr::Var(10), nullptr);
+  EXPECT_THROW(classifyClockEventExpression(invalid, carrierEvents),
+               std::runtime_error);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecClockModelSubstitutesVariableExpressionsAcrossSharedDag) {
+  BoolExpr* shared = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+  BoolExpr* root = BoolExpr::Xor(
+      BoolExpr::Or(BoolExpr::Not(shared), BoolExpr::Var(4)),
+      BoolExpr::And(shared, BoolExpr::Var(5)));
+
+  const auto unchanged = substituteBoolExprVariableExpressions(root, {});
+  EXPECT_EQ(unchanged, root);
+  EXPECT_EQ(substituteBoolExprVariableExpressions(nullptr, {{2, BoolExpr::Var(9)}}),
+            nullptr);
+
+  BoolExpr* replacement = BoolExpr::Or(BoolExpr::Var(8), BoolExpr::Var(9));
+  BoolExpr* substituted = substituteBoolExprVariableExpressions(
+      root, {{2, replacement}, {5, BoolExpr::createTrue()}});
+  ASSERT_NE(substituted, nullptr);
+  EXPECT_NE(substituted, root);
+  EXPECT_EQ(
+      substituted->evaluate({{3, true}, {4, false}, {8, false}, {9, false}}),
+      root->evaluate({{2, false}, {3, true}, {4, false}, {5, true}}));
+  EXPECT_EQ(
+      substituted->evaluate({{3, true}, {4, true}, {8, true}, {9, false}}),
+      root->evaluate({{2, true}, {3, true}, {4, true}, {5, true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecClockModelKeepsUnchangedCompositeSubstitutionNodes) {
+  const std::unordered_map<size_t, BoolExpr*> replacements = {
+      {2, BoolExpr::Var(9)},
+  };
+
+  auto* andExpr = BoolExpr::And(BoolExpr::Var(20), BoolExpr::Var(21));
+  auto* orExpr = BoolExpr::Or(BoolExpr::Var(20), BoolExpr::Var(21));
+  auto* xorExpr = BoolExpr::Xor(BoolExpr::Var(20), BoolExpr::Var(21));
+
+  EXPECT_EQ(substituteBoolExprVariableExpressions(andExpr, replacements), andExpr);
+  EXPECT_EQ(substituteBoolExprVariableExpressions(orExpr, replacements), orExpr);
+  EXPECT_EQ(substituteBoolExprVariableExpressions(xorExpr, replacements), xorExpr);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecClockModelRejectsInvalidBoolExprOperators) {
+  BoolExpr invalid;
+  EXPECT_THROW(
+      substituteBoolExprVariableExpressions(&invalid, {{2, BoolExpr::Var(9)}}),
+      std::runtime_error);
 }
