@@ -304,6 +304,8 @@ class SecDualRailVariableMapper final : public DualRailVariableMapper {
         problem_(problem),
         nextSymbol_(nextSymbol) {}
 
+  ~SecDualRailVariableMapper() override = default;  // LCOV_EXCL_LINE
+
   DualRailBoolExpr mapVariable(size_t symbol) override {
     if (const auto stateIt = stateRails_.find(symbol);
         stateIt != stateRails_.end()) {

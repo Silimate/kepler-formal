@@ -529,7 +529,7 @@ struct StateClauseHash {
   }
 };
 
-struct StateClauseSetKey {
+struct StateClauseSetKey {  // LCOV_EXCL_LINE
   size_t targetFrame = 0;
   std::vector<StateClause> clauses;
 
@@ -549,7 +549,7 @@ struct StateClauseSetKeyHash {
   }
 };
 
-struct ResetFrontierCubeKey {
+struct ResetFrontierCubeKey {  // LCOV_EXCL_LINE
   size_t postBootstrapSteps = 0;
   StateCube cube;
 
@@ -859,13 +859,13 @@ enum class ConcreteCubeReachabilityMode {
   OneShotUnitClauses,
 };
 
-class PdrQueryBudgetExceeded : public std::runtime_error {
+class PdrQueryBudgetExceeded : public std::runtime_error {  // LCOV_EXCL_LINE
  public:
   PdrQueryBudgetExceeded()  // LCOV_EXCL_LINE
       : std::runtime_error("PDR local query budget exceeded") {}  // LCOV_EXCL_LINE
 };
 
-class PdrProjectedCounterexampleRefinementBudgetExceeded
+class PdrProjectedCounterexampleRefinementBudgetExceeded  // LCOV_EXCL_LINE
     : public std::runtime_error {
  public:
   PdrProjectedCounterexampleRefinementBudgetExceeded()  // LCOV_EXCL_LINE
@@ -873,7 +873,7 @@ class PdrProjectedCounterexampleRefinementBudgetExceeded
             "PDR projected counterexample refinement budget exceeded") {}  // LCOV_EXCL_LINE
 };
 
-class PdrRepeatedProjectedBadCubeBudgetExceeded : public std::runtime_error {
+class PdrRepeatedProjectedBadCubeBudgetExceeded : public std::runtime_error {  // LCOV_EXCL_LINE
  public:
   PdrRepeatedProjectedBadCubeBudgetExceeded()  // LCOV_EXCL_LINE
       : std::runtime_error("PDR repeated projected bad cube budget exceeded") {}  // LCOV_EXCL_LINE

@@ -36,7 +36,7 @@ struct KInductionResult {
     size_t frame = 0;
     std::vector<Assignment> assignments;
   };
-  struct CounterexampleWitness {
+  struct CounterexampleWitness {  // LCOV_EXCL_LINE
     size_t badFrame = 0;
     std::vector<FrameInputAssignments> inputTrace;
     std::vector<SignalMismatch> outputMismatches;

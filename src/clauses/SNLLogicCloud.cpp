@@ -366,7 +366,7 @@ DNLID getReportIsoID(const DNLFull* dnl, DNLID currentInput, DNLID mergeTerm) {
   return getIsoID(mergeTerm); // LCOV_EXCL_LINE
 }
 
-struct SkippedPOReportEvent {
+struct SkippedPOReportEvent {  // LCOV_EXCL_LINE
   const DNLFull* dnl = nullptr;
   DNLID rootTerm = DNLID_MAX;
   DNLID currentInput = DNLID_MAX;

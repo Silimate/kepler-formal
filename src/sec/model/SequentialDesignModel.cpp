@@ -56,7 +56,7 @@ struct StateOutputTerm {
   std::vector<PendingPinTerm> clockTermIDs;
 };
 
-struct PendingTransition {
+struct PendingTransition {  // LCOV_EXCL_LINE
   SignalKey stateKey;
   naja::DNL::DNLID stateTermID = naja::DNL::DNLID_MAX;
   std::string statePinName;

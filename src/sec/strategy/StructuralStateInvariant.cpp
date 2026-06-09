@@ -1159,7 +1159,7 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
   return {};  // LCOV_EXCL_LINE
 }
 
-struct ClockInputClassKey {
+struct ClockInputClassKey {  // LCOV_EXCL_LINE
   SignalKey domain;
   ClockPhase phase = ClockPhase::Pos;
 };

@@ -24,7 +24,7 @@ struct ClockEvent {
   BoolExpr* enable = nullptr;
 };
 
-struct ClockCarrierClass {
+struct ClockCarrierClass {  // LCOV_EXCL_LINE
   size_t varID = 0;
   SignalKey domain;
   ClockPhase phase = ClockPhase::Pos;

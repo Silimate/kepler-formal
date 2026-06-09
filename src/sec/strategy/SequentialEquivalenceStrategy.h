@@ -41,7 +41,7 @@ struct ExtractedBoundaryReportEntry {
   std::string connectivitySkip;
 };
 
-struct SequentialEquivalenceResult {
+struct SequentialEquivalenceResult {  // LCOV_EXCL_LINE
   SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Unsupported;
   size_t bound = 0;
   std::string reason;

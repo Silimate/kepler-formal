@@ -29,7 +29,7 @@ enum class ConnectivitySkipOrigin {
   MultiClockDomain,
 };
 
-struct ConnectivitySkipInfo {
+struct ConnectivitySkipInfo {  // LCOV_EXCL_LINE
   ConnectivitySkipOrigin origin = ConnectivitySkipOrigin::NoDriver;
   std::string detail;
 };

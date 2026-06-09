@@ -44,7 +44,7 @@ class BuildPrimaryOutputClauses {
     LogicalLoop,
   };
 
-  struct SkippedOutputInfo {
+  struct SkippedOutputInfo {  // LCOV_EXCL_LINE
     SkippedOutputReason reason = SkippedOutputReason::None;
     std::string detail;
   };

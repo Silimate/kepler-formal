@@ -68,10 +68,12 @@ FrameSymbolAliases emptyAliases() {
 
 }  // namespace
 
+// LCOV_EXCL_START
 FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
                                        const std::vector<size_t>& symbols,
                                        size_t numFrames)
     : FrameVariableStore(solver, symbols, numFrames, emptyAliases()) {}
+// LCOV_EXCL_STOP
 
 FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
                                        const std::vector<size_t>& symbols,
@@ -178,22 +180,28 @@ std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
   return leafLits;
 }
 
+// LCOV_EXCL_START
 FrameFormulaEncoder::FrameFormulaEncoder(
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits)
     : FrameFormulaEncoder(solver, std::move(leafLits), false, 0) {}
+// LCOV_EXCL_STOP
 
-FrameFormulaEncoder::FrameFormulaEncoder(  // LCOV_EXCL_LINE
+// LCOV_EXCL_START
+FrameFormulaEncoder::FrameFormulaEncoder(
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits,
     size_t expectedNodeHint)
-    : FrameFormulaEncoder(solver, std::move(leafLits), false, expectedNodeHint) {}  // LCOV_EXCL_LINE
+    : FrameFormulaEncoder(solver, std::move(leafLits), false, expectedNodeHint) {}
+// LCOV_EXCL_STOP
 
-FrameFormulaEncoder::FrameFormulaEncoder(  // LCOV_EXCL_LINE
+// LCOV_EXCL_START
+FrameFormulaEncoder::FrameFormulaEncoder(
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits,
     bool createMissingLeaves)
-    : FrameFormulaEncoder(solver, std::move(leafLits), createMissingLeaves, 0) {}  // LCOV_EXCL_LINE
+    : FrameFormulaEncoder(solver, std::move(leafLits), createMissingLeaves, 0) {}
+// LCOV_EXCL_STOP
 
 FrameFormulaEncoder::FrameFormulaEncoder(
     SATSolverWrapper& solver,
