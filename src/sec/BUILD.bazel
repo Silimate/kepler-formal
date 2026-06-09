@@ -1,4 +1,21 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//bazel:naja_includes.bzl", "NAJA_HEADER_COPTS")
+
+cc_library(
+    name = "sec_common_headers",
+    hdrs = [
+        "common/AlignedSignals.h",
+        "common/PrivateProofSymbol.h",
+        "common/SignalKey.h",
+    ],
+    includes = [
+        ".",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/strategies:formal_strategies",
+    ],
+)
 
 cc_library(
     name = "kepler_sec",
@@ -10,10 +27,13 @@ cc_library(
         "kinduction/BaseCaseSolver.cpp",
         "kinduction/InductionStepSolver.cpp",
         "kinduction/KInductionEngine.cpp",
+        "kinduction/OutputBatching.cpp",
         "kinduction/SatEncoding.cpp",
         "model/SequentialDesignModel.cpp",
         "pdr/PDREngine.cpp",
+        "proof/DualRailEncoding.cpp",
         "proof/ProofEngineShared.cpp",
+        "proof/TransitionExprResolver.cpp",
         "strategy/ReachableStateInvariant.cpp",
         "strategy/SequentialEquivalenceStrategy.cpp",
         "strategy/StructuralStateInvariant.cpp",
@@ -21,6 +41,7 @@ cc_library(
     hdrs = [
         "common/AlignedSignals.h",
         "common/BoolExprUtils.h",
+        "common/PrivateProofSymbol.h",
         "common/ProofProblemDebug.h",
         "common/SecDiag.h",
         "common/SignalKey.h",
@@ -30,10 +51,13 @@ cc_library(
         "kinduction/InductionStepSolver.h",
         "kinduction/KInductionEngine.h",
         "kinduction/KInductionProblem.h",
+        "kinduction/OutputBatching.h",
         "kinduction/SatEncoding.h",
         "model/SequentialDesignModel.h",
         "pdr/PDREngine.h",
+        "proof/DualRailEncoding.h",
         "proof/ProofEngineShared.h",
+        "proof/TransitionExprResolver.h",
         "strategy/ReachableStateInvariant.h",
         "strategy/StructuralStateInvariant.h",
         "strategy/SequentialEquivalenceStrategy.h",
@@ -42,12 +66,15 @@ cc_library(
         ".",
         "..",
     ],
+    copts = NAJA_HEADER_COPTS,
     visibility = ["//visibility:public"],
     deps = [
         "//src/clauses:kepler_clauses",
         "//src/config:kepler_config",
+        "//src/clocks:kepler_clocks",
         "//src/formal:formal_structures",
         "//src/sat:sat_solver_wrapper",
+        ":sec_common_headers",
         "//src/strategies:formal_strategies",
         "@naja",
         "@naja//:naja_extra_headers",

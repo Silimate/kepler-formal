@@ -70,6 +70,22 @@ TEST_F(BoolExprCnfWriterTests, EncodeConstantTrue) {
   EXPECT_EQ(cnf.rootLit, 1);
 }
 
+TEST_F(BoolExprCnfWriterTests, BoolExprCacheDestroyKeepsCacheReusable) {
+  BoolExpr* beforeDestroy = BoolExpr::And(BoolExpr::Var(55), BoolExpr::Var(56));
+  ASSERT_NE(beforeDestroy, nullptr);
+  EXPECT_EQ(beforeDestroy->getOp(), Op::AND);
+
+  BoolExprCache::destroy();
+
+  // The production cache intentionally lives until process exit to avoid a
+  // large shutdown-time destructor, but explicit cleanup must still support the
+  // unit-test and embedded re-use paths.
+  BoolExpr* afterDestroy = BoolExpr::And(BoolExpr::Var(55), BoolExpr::Var(56));
+  ASSERT_NE(afterDestroy, nullptr);
+  EXPECT_EQ(afterDestroy->getOp(), Op::AND);
+  EXPECT_EQ(afterDestroy, BoolExpr::And(BoolExpr::Var(55), BoolExpr::Var(56)));
+}
+
 TEST_F(BoolExprCnfWriterTests, DumpToFileAndInvalidPath) {
   BoolExpr* expr = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
 

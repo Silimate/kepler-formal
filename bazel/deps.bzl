@@ -10,6 +10,38 @@ replace the corresponding http_archive with a bazel_dep in MODULE.bazel.
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
+def _homebrew_tbb_repo_impl(repo_ctx):
+    """Expose Homebrew TBB headers to Bazel on macOS.
+
+    Linux builds keep using the compiler's system include/link paths.  On macOS,
+    Homebrew installs TBB outside Clang's default include search path, so a small
+    local repository is enough to make the headers visible without vendoring TBB.
+    """
+    for prefix in ["/opt/homebrew", "/usr/local"]:
+        if repo_ctx.path(prefix + "/include/tbb").exists:
+            repo_ctx.symlink(prefix + "/include", "include")
+            repo_ctx.file("BUILD.bazel", repo_ctx.read(repo_ctx.attr.build_file))
+            return
+
+    repo_ctx.file(
+        "BUILD.bazel",
+        """
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "tbb",
+    visibility = ["//visibility:public"],
+)
+""",
+    )
+
+homebrew_tbb_repo = repository_rule(
+    implementation = _homebrew_tbb_repo_impl,
+    attrs = {
+        "build_file": attr.label(mandatory = True),
+    },
+)
+
 def _naja_repo_impl(repo_ctx):
     """Repository rule that assembles naja from multiple archives.
 
@@ -103,8 +135,9 @@ naja_repo = repository_rule(
 )
 
 # Pinned dependency versions (commit SHAs from thirdparty/ submodules).
-# To update: change the commit, run `bazel fetch @glucose @kissat @naja`
+# To update: change the commit, run `bazel fetch @cadical @glucose @kissat @naja`
 # to verify, then update the sha256 hashes.
+_CADICAL_COMMIT = "7b99c07f0bcab5824a5a3ce62c7066554017f641"
 _GLUCOSE_COMMIT = "7f887abba7cf13636a5ac2d28653668a20a91b25"
 _KISSAT_COMMIT = "8af8e56f174b778aef3aa45af9f739b2a5f492c2"
 _NAJA_COMMIT = "cb35df2298b61325ce5c16552f94d6e02a2ae7c8"
@@ -115,6 +148,19 @@ _SLANG_COMMIT = "aedd7bc0394e5621340be94ed58def33d74ac677"
 _GOOGLETEST_COMMIT = "52eb8108c5bdec04579160ae17225d66034bd723"
 
 def _deps_impl(_module_ctx):
+    homebrew_tbb_repo(
+        name = "homebrew_tbb",
+        build_file = Label("//bazel:homebrew_tbb.BUILD.bazel"),
+    )
+
+    http_archive(
+        name = "cadical",
+        url = "https://github.com/arminbiere/cadical/archive/{}.tar.gz".format(_CADICAL_COMMIT),
+        sha256 = "d89bad4091f2203980ab30fdac14be874a4aca9b716cbcc132f5c7283b6fd987",
+        strip_prefix = "cadical-{}".format(_CADICAL_COMMIT),
+        build_file = Label("//bazel:cadical.BUILD.bazel"),
+    )
+
     http_archive(
         name = "glucose",
         url = "https://github.com/audemard/glucose/archive/{}.tar.gz".format(_GLUCOSE_COMMIT),

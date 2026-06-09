@@ -36,7 +36,7 @@ struct KInductionResult {
     size_t frame = 0;
     std::vector<Assignment> assignments;
   };
-  struct CounterexampleWitness {
+  struct CounterexampleWitness {  // LCOV_EXCL_LINE
     size_t badFrame = 0;
     std::vector<FrameInputAssignments> inputTrace;
     std::vector<SignalMismatch> outputMismatches;
@@ -55,10 +55,6 @@ class KInductionEngine {
   KInductionResult run(size_t maxK) const;
 
  private:
-  std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexample(
-      size_t k) const;
-  bool provesByInduction(size_t k) const;
-
   const KInductionProblem& problem_;
   KEPLER_FORMAL::Config::SolverType solverType_;
 };

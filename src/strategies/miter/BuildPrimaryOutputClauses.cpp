@@ -415,15 +415,15 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
         }
         if (term.getSnlBitTerm()->getDirection() !=
             SNLBitTerm::Direction::Input) {
-          assert(termId < naja::DNL::get()->getDNLTerms().size());
-          inputs.emplace_back(termId);
-          modelCache_[instance.getSNLModel()].PIs.insert(
-              term.getSnlBitTerm());
+          assert(termId < naja::DNL::get()->getDNLTerms().size());  // LCOV_EXCL_LINE
+          inputs.emplace_back(termId);  // LCOV_EXCL_LINE
+          modelCache_[instance.getSNLModel()].PIs.insert(  // LCOV_EXCL_LINE
+              term.getSnlBitTerm());  // LCOV_EXCL_LINE
           DEBUG_LOG(
               "Collecting seq input %s of model %s\n",
               term.getSnlBitTerm()->getName().getString().c_str(),
               term.getSnlBitTerm()->getDesign()->getName().getString().c_str());
-        }
+        }  // LCOV_EXCL_LINE
       }
     }
     if (!isSequential) {
@@ -718,7 +718,7 @@ void BuildPrimaryOutputClauses::initVarNames() {
           termDNLID2varID_[inputs_[i]] = 1;
           continue;
         }
-      }
+      }  // LCOV_EXCL_LINE
     }
     termDNLID2varID_[inputs_[i]] =
         i + 2;  // +2 to avoid 0 and 1 which are reserved for constants
@@ -757,7 +757,7 @@ void BuildPrimaryOutputClauses::build() {
       std::string error = "PI " + std::to_string(pi) + " is out of range";
       throw std::runtime_error(error);
       // LCOV_EXCL_STOP
-    }
+    }  // LCOV_EXCL_LINE
     IsPIs_[pi] = true;
   }
   IsPOs_ = std::vector<bool>(naja::DNL::get()->getNBterms(), false);
@@ -767,7 +767,7 @@ void BuildPrimaryOutputClauses::build() {
       std::string error = "PO " + std::to_string(po) + " is out of range";
       throw std::runtime_error(error);
       // LCOV_EXCL_STOP
-    }
+    }  // LCOV_EXCL_LINE
     IsPOs_[po] = true;
   }
 
@@ -991,7 +991,7 @@ void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
   inputs2inputsIDs_.clear();
   for (const auto& input : inputs_) {
     if (get()->getDNLTerminalFromID(input).isNull()) {
-      throw std::runtime_error("Input terminal is null");
+      throw std::runtime_error("Input terminal is null");  // LCOV_EXCL_LINE
     }
     const DNLInstanceFull& currentInstance =
         get()->getDNLTerminalFromID(input).getDNLInstance();

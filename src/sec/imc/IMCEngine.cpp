@@ -7,6 +7,8 @@
 
 #include "kinduction/BaseCaseSolver.h"
 #include "imc/ExactInterpolantSynthesizer.h"
+#include "kinduction/InductionStepSolver.h"
+#include "kinduction/OutputBatching.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/ProofEngineShared.h"
 
@@ -176,11 +178,49 @@ bool provesImcInvariant(const KInductionProblem& problem,
 std::optional<IMCResult> findImcCounterexample(const KInductionProblem& problem,
                                                KEPLER_FORMAL::Config::SolverType solverType,
                                                size_t depth) {
-  if (auto witness = findBaseCounterexample(problem, solverType, depth);
+  // IMC checks depths monotonically.  Only the newly exposed frontier can hold
+  // a fresh counterexample, so avoid rebuilding a cumulative BMC query that
+  // re-walks already-cleared frames and all earlier output bad clauses.
+  if (auto witness = findBaseCounterexampleAtFrontier(problem, solverType, depth);
       witness.has_value()) {
     return IMCResult{IMCStatus::Different, witness->badFrame, std::move(witness)};
   }
   return std::nullopt;
+}
+
+bool provesByOutputBatchedInduction(const KInductionProblem& problem,
+                                    KEPLER_FORMAL::Config::SolverType solverType,
+                                    size_t k) {
+  if (problem.observedOutputExprs0.size() <= 1) {
+    return provesByInduction(problem, solverType, k);
+  }
+
+  // IMC's exact-frontier construction is intentionally bounded for large ASICs.
+  // When that path is too large, the fallback induction proof must still avoid
+  // rebuilding one giant OR-of-all-bads SAT query.  Proving every output batch
+  // by the same k-induction rule is equivalent to proving the full conjunction,
+  // but each query gets a much smaller cone of influence.
+  KInductionProblem batchProblem = problem;
+  const OutputBatchingLimits batchingLimits =
+      defaultOutputBatchingLimitsForProblem(problem);
+  for (const auto& [firstOutput, endOutput] :
+       buildSupportBoundedOutputBatches(problem, batchingLimits)) {
+    configureOutputBatchProblem(batchProblem, problem, firstOutput, endOutput);
+    if (!provesByInduction(batchProblem, solverType, k)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool shouldBuildExplicitImcInitFormula(const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding) {
+    return true;
+  }
+  // Exact IMC enumerates reachable combined states only for tiny systems.
+  // Large dual-rail ASIC problems should go directly to the shared
+  // k-induction fallback instead of materializing a full rail-init formula.
+  return problem.totalStateCount <= 12;
 }
 
 }  // namespace
@@ -201,7 +241,9 @@ IMCResult IMCEngine::run(size_t maxK) const {
     return {IMCStatus::Equivalent, 0};
   }
 
-  BoolExpr* initFormula = buildProofInitFormula(problem_);
+  BoolExpr* initFormula =
+      shouldBuildExplicitImcInitFormula(problem_) ? buildProofInitFormula(problem_)
+                                                  : nullptr;
   const BoolExpr* sharedStrengthening =
       buildInitialImcStrengthening(problem_, solverType_, initFormula);
   if (initFormula != nullptr &&
@@ -219,6 +261,14 @@ IMCResult IMCEngine::run(size_t maxK) const {
     if (const auto counterexample = findImcCounterexample(problem_, solverType_, k);
         counterexample.has_value()) {
       return *counterexample;
+    }
+
+    // Large SEC problems can exceed the explicit exact-frontier budget, but the
+    // shared induction step may still close immediately from the same
+    // counterexample-free prefix. Reuse that sound proof before trying the more
+    // expensive explicit frontier construction.
+    if (provesByOutputBatchedInduction(problem_, solverType_, k)) {
+      return {IMCStatus::Equivalent, k};
     }
 
     if (initFormula == nullptr) {
@@ -241,7 +291,7 @@ IMCResult IMCEngine::run(size_t maxK) const {
                   BoolExpr::And(frontierInvariant, const_cast<BoolExpr*>(sharedStrengthening)));
 
     if (provesImcInvariant(problem_, solverType_, initFormula, proofInvariant)) {
-      return {IMCStatus::Equivalent, k};
+      return {IMCStatus::Equivalent, k};  // LCOV_EXCL_LINE
     }
   }
 

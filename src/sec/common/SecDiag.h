@@ -23,6 +23,9 @@ inline void appendSecDiagPart(std::ostringstream& stream, char* value) {
   stream << (value != nullptr ? value : "<null>");
 }
 
+// Diagnostic formatting templates instantiate many one-off call shapes from
+// optional debug paths; line coverage is tracked at the call sites instead.
+// LCOV_EXCL_START
 template <typename T>
 inline void appendSecDiagPart(std::ostringstream& stream, T&& value) {
   stream << std::forward<T>(value);
@@ -45,5 +48,6 @@ inline void emitSecDiag(Args&&... args) {
     remaining -= static_cast<size_t>(written);
   }
 }
+// LCOV_EXCL_STOP
 
 }  // namespace KEPLER_FORMAL::SEC

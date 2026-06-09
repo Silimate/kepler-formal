@@ -10,3 +10,6 @@
 [submodule "thirdparty/kissat"]
 	path = thirdparty/kissat
 	url = https://github.com/arminbiere/kissat
+[submodule "thirdparty/cadical"]
+	path = thirdparty/cadical
+	url = https://github.com/arminbiere/cadical

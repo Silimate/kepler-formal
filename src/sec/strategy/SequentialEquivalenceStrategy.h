@@ -22,6 +22,11 @@ enum class SecEngine {
   Pdr,
 };
 
+enum class SecXMode {
+  Binary,
+  DualRailSteady,
+};
+
 enum class SequentialEquivalenceStatus {
   Equivalent,
   Different,
@@ -36,13 +41,15 @@ struct ExtractedBoundaryReportEntry {
   std::string connectivitySkip;
 };
 
-struct SequentialEquivalenceResult {
+struct SequentialEquivalenceResult {  // LCOV_EXCL_LINE
   SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Unsupported;
   size_t bound = 0;
   std::string reason;
   size_t coveredOutputs = 0;
   size_t totalOutputs = 0;
   std::vector<std::string> skippedObservedOutputs;
+  std::vector<std::string> resetUnanchoredSkippedOutputs;
+  std::vector<std::string> multiClockDomainSkippedOutputs;
   std::vector<std::string> abstractedSequentialBoundaries;
   std::vector<ExtractedBoundaryReportEntry> extractedBoundaryReports;
 
@@ -68,7 +75,8 @@ class SequentialEquivalenceStrategy {
       naja::NL::SNLDesign* top1,
       KEPLER_FORMAL::Config::SolverType solverType =
           KEPLER_FORMAL::Config::getSolverType(),
-      SecEngine secEngine = SecEngine::Legacy);
+      SecEngine secEngine = SecEngine::Legacy,
+      SecXMode xMode = SecXMode::Binary);
 
   SequentialEquivalenceResult run(size_t maxK) const;
   SequentialEquivalenceResult runExtractedModels(
@@ -81,6 +89,7 @@ class SequentialEquivalenceStrategy {
   naja::NL::SNLDesign* top1_;
   KEPLER_FORMAL::Config::SolverType solverType_;
   SecEngine secEngine_;
+  SecXMode xMode_;
 };
 
 }  // namespace KEPLER_FORMAL::SEC

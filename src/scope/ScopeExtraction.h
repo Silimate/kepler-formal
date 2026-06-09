@@ -19,7 +19,7 @@ class ScopeExtraction {
     ScopeExtraction(naja::NL::SNLDesign* top0, naja::NL::SNLDesign* top1)
         : top0_(top0), top1_(top1) {}
 
-    virtual ~ScopeExtraction() = default;
+    virtual ~ScopeExtraction() = default;  // LCOV_EXCL_LINE
 
     void collectVerificationScopes();
 

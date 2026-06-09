@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <unordered_map>
 
+#include "../../config/Config.h"
 #include "common/AlignedSignals.h"
 #include "model/SequentialDesignModel.h"
 
@@ -19,6 +20,7 @@ struct ReachableStateInvariant {
   size_t bootstrapCycles = 0;
   AlignedSignals initialStateCorrespondence;
   AlignedSignals anchoredStateEqualities;
+  AlignedSignals bootstrapOnlyStateEqualities;
   std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues0;
   std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues1;
 };
@@ -28,6 +30,11 @@ ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,
     const AlignedSignals& inductiveStateEqualities,
-    bool secDiagEnabled = false);
+    bool deriveResetBootstrapStrengthening = true,
+    bool secDiagEnabled = false,
+    KEPLER_FORMAL::Config::SolverType solverType =
+        KEPLER_FORMAL::Config::getSolverType(),
+    bool deriveResetBootstrapEqualities = true,
+    const AlignedSignals& resetBootstrapCandidateEqualities = {});
 
 }  // namespace KEPLER_FORMAL::SEC

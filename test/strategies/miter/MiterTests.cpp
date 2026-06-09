@@ -15,6 +15,7 @@
 #include "gtest/gtest.h"
 
 #include "BuildPrimaryOutputClauses.h"
+#include "BoolExprCache.h"
 #include "ConstantPropagation.h"
 #include "MiterStrategy.h"
 #include "SNLLogicCloud.h"
@@ -150,6 +151,14 @@ class ScopedEnvVar {
   std::string name_;
   bool hadOriginal_ = false;
   std::string original_;
+};
+
+class MiterStrategyStandaloneTests : public ::testing::Test {
+ protected:
+  void TearDown() override {
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
+    KEPLER_FORMAL::BoolExprCache::destroy();
+  }
 };
 
 std::vector<uint64_t> getInputFlatDependencies(const SNLDesign* design) {
@@ -330,6 +339,7 @@ class MiterTests : public ::testing::Test {
     // Destroy the SNL
     naja::DNL::destroy();
     NLUniverse::get()->destroy();
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
     KEPLER_FORMAL::BoolExprCache::destroy();
     if (!tempDir_.empty()) {
       std::error_code ec;
@@ -616,6 +626,41 @@ TEST_F(MiterTests, BuildPrimaryOutputClausesConstantTrueOutput) {
   ASSERT_EQ(builder.getPOs().size(), 1u);
   ASSERT_NE(builder.getPOs()[0], nullptr);
   EXPECT_EQ(builder.getPOs()[0]->toString(), "1");
+}
+
+TEST_F(MiterTests, BuildPrimaryOutputClausesConstantFalseOutput) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+  SNLDesign* top =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesign* logic0 =
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("LOGIC0"));
+  auto logic0Out =
+      SNLScalarTerm::create(logic0, SNLTerm::Direction::Output, NLName("out"));
+  SNLDesignModeling::setTruthTable(
+      logic0,
+      SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+  NLLibraryTruthTables::construct(library);
+
+  SNLInstance* inst = SNLInstance::create(top, logic0, NLName("const0"));
+  SNLNet* net = SNLScalarNet::create(top, NLName("const0_net"));
+  inst->getInstTerm(logic0Out)->setNet(net);
+  topOut->setNet(net);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+  builder.build();
+
+  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  EXPECT_EQ(builder.getPOs()[0]->toString(), "0");
 }
 
 TEST_F(MiterTests, BuildPrimaryOutputClausesUsesFlatDependencyCoordinatesForPOs) {
@@ -1054,6 +1099,59 @@ TEST_F(
             BuildPrimaryOutputClauses::SkippedOutputReason::LogicalLoop);
 }
 
+TEST_F(
+    MiterTests,
+    BuildPrimaryOutputClausesSkipsTopOutputMuxSelfFeedback) {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* libraryDesigns =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto* muxModel = NLDB0::getMux2();
+  ASSERT_NE(muxModel, nullptr);
+
+  auto* top = SNLDesign::create(
+      libraryDesigns, SNLDesign::Type::Standard, NLName("top"));
+  univ->setTopDesign(top);
+
+  auto* topA = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("a"));
+  auto* topS = SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("s"));
+  auto* topY =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("y"));
+  auto* muxInst = SNLInstance::create(top, muxModel, NLName("mux_loop"));
+
+  auto* netA = SNLScalarNet::create(top, NLName("net_a"));
+  auto* netS = SNLScalarNet::create(top, NLName("net_s"));
+  auto* netY = SNLScalarNet::create(top, NLName("net_y"));
+
+  topA->setNet(netA);
+  topS->setNet(netS);
+  topY->setNet(netY);
+  muxInst->getInstTerm(NLDB0::getMux2InputA()->getBit(0))->setNet(netA);
+  muxInst->getInstTerm(NLDB0::getMux2InputB()->getBit(0))->setNet(netY);
+  muxInst->getInstTerm(NLDB0::getMux2Select())->setNet(netS);
+  muxInst->getInstTerm(NLDB0::getMux2Output()->getBit(0))->setNet(netY);
+
+  naja::DNL::get();
+  BuildPrimaryOutputClauses builder;
+  builder.collect();
+
+  ASSERT_EQ(builder.getOutputs().size(), 1u);
+  const auto topOutputID = builder.getOutputs()[0];
+  const auto inputCountBeforeBuild = builder.getInputs().size();
+  builder.setOutputs({topOutputID});
+  builder.build();
+
+  ASSERT_EQ(builder.getPOs().size(), 1u);
+  ASSERT_NE(builder.getPOs()[0], nullptr);
+  EXPECT_FALSE(builder.getPOs()[0]->isValid());
+  EXPECT_EQ(builder.getInputs().size(), inputCountBeforeBuild);
+  ASSERT_NE(builder.getSkippedOutputs().find(topOutputID),
+            builder.getSkippedOutputs().end());
+  EXPECT_EQ(builder.getSkippedOutputs().at(topOutputID).reason,
+            BuildPrimaryOutputClauses::SkippedOutputReason::LogicalLoop);
+}
+
 TEST_F(MiterTests, CachedIsoShortcutDoesNotCreateNewMiterInput) {
   NLUniverse* univ = NLUniverse::create();
   NLDB* db = NLDB::create(univ);
@@ -1314,7 +1412,7 @@ TEST(MiterStandaloneTests, KissatClauseAutoExpandsTrackedVariableCount) {
   EXPECT_EQ(solver.newVar(), 4);
 }
 
-TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSecondNetlist) {
+TEST_F(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSecondNetlist) {
   MiterStrategy strategy(nullptr, nullptr, "normalizeOutputs");
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   using OutputMap = std::unordered_map<PathKey, naja::DNL::DNLID,
@@ -1338,10 +1436,10 @@ TEST(MiterStrategyStandaloneTests, NormalizeOutputsIgnoresOutputsOnlyPresentInSe
   EXPECT_EQ(outputs1, std::vector<naja::DNL::DNLID>({200}));
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWritesCnf) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWritesCnf) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 
@@ -1393,10 +1491,10 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsAlignsInputsOutputsAndWrit
   std::filesystem::remove_all(tmpDir);
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWriteFailure) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWriteFailure) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 
@@ -1434,10 +1532,10 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesInvalidAndWrit
   std::filesystem::remove_all(tmpDir);
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreationFailure) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreationFailure) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 
@@ -1472,10 +1570,10 @@ TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsPoCnfHandlesDirectoryCreat
   std::filesystem::remove_all(tmpDir);
 }
 
-TEST(MiterStrategyStandaloneTests, RunCompactSnapshotsWithNoCommonOutputsIsVacuouslyEquivalent) {
+TEST_F(MiterStrategyStandaloneTests, RunCompactSnapshotsWithNoCommonOutputsIsVacuouslyEquivalent) {
   using PathKey = BuildPrimaryOutputClauses::PathKey;
   auto makePathKey = [](int nameID, int objectID) -> PathKey {
-    return {{static_cast<NLName::ID>(nameID)},
+    return {{static_cast<BuildPrimaryOutputClauses::PathComponentID>(nameID)},
             {static_cast<NLID::DesignObjectID>(objectID)}};
   };
 

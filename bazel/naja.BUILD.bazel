@@ -1,6 +1,33 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
 
+NAJA_CMAKE_CACHE_ENTRIES = {
+    "CMAKE_CXX_STANDARD": "20",
+    "BUILD_NAJA_PYTHON": "OFF",
+    "BUILD_ONLY_DOC": "OFF",
+    "BUILD_BENCHMARKS": "OFF",
+    "CODE_COVERAGE": "OFF",
+    "ENABLE_SANITIZERS": "OFF",
+    # rules_foreign_cc sandbox doesn't propagate implicit libs for executables.
+    "CMAKE_EXE_LINKER_FLAGS": "-lstdc++ -lm",
+}
+
+NAJA_MACOS_CMAKE_CACHE_ENTRIES = dict(
+    NAJA_CMAKE_CACHE_ENTRIES,
+    BISON_EXECUTABLE = "/opt/homebrew/opt/bison/bin/bison",
+    FLEX_EXECUTABLE = "/opt/homebrew/opt/flex/bin/flex",
+)
+
+NAJA_SHARED_LIB_NAMES = [
+    "naja_nl",
+    "naja_dnl",
+    "naja_bne",
+    "naja_opt",
+    "naja_metrics",
+    "naja_python",
+    "naja_snl_pyloader",
+]
+
 filegroup(
     name = "all_srcs",
     srcs = glob(["src/**"]),
@@ -12,15 +39,16 @@ cmake(
     lib_source = ":all_srcs",
     # Naja builds these 5 as explicitly SHARED — cannot be made static.
     # The release tarball bundles them alongside the binary with RPATH.
-    out_shared_libs = [
-        "libnaja_nl.so",
-        "libnaja_dnl.so",
-        "libnaja_bne.so",
-        "libnaja_opt.so",
-        "libnaja_metrics.so",
-        "libnaja_python.so",
-        "libnaja_snl_pyloader.so",
-    ],
+    out_shared_libs = select({
+        "@platforms//os:macos": [
+            "lib{}.dylib".format(name)
+            for name in NAJA_SHARED_LIB_NAMES
+        ],
+        "//conditions:default": [
+            "lib{}.so".format(name)
+            for name in NAJA_SHARED_LIB_NAMES
+        ],
+    }),
     # Output static libraries
     out_static_libs = [
         "libnaja_core.a",
@@ -35,16 +63,10 @@ cmake(
         "libyosys_liberty.a",
     ],
     build_args = ["-j2"],
-    cache_entries = {
-        "CMAKE_CXX_STANDARD": "20",
-        "BUILD_NAJA_PYTHON": "OFF",
-        "BUILD_ONLY_DOC": "OFF",
-        "BUILD_BENCHMARKS": "OFF",
-        "CODE_COVERAGE": "OFF",
-        "ENABLE_SANITIZERS": "OFF",
-        # rules_foreign_cc sandbox doesn't propagate implicit libs for executables
-        "CMAKE_EXE_LINKER_FLAGS": "-lstdc++ -lm",
-    },
+    cache_entries = select({
+        "@platforms//os:macos": NAJA_MACOS_CMAKE_CACHE_ENTRIES,
+        "//conditions:default": NAJA_CMAKE_CACHE_ENTRIES,
+    }),
     # Copy static libs that cmake builds but doesn't install
     # (naja_nl_dump has no install() command; naja_verilog's is guarded by PROJECT_IS_TOP_LEVEL)
     postfix_script = " && ".join([
@@ -62,6 +84,30 @@ cmake(
 # Headers that naja's cmake doesn't install but kepler-formal needs.
 # Naja's cmake only installs "public API" headers; many internal headers
 # (used transitively) are missing. Expose all source headers directly.
+cc_library(
+    name = "cpptrace",
+    srcs = glob([
+        "src/thirdparty/cpptrace/src/**/*.cpp",
+    ]),
+    hdrs = glob([
+        "src/thirdparty/cpptrace/include/**/*.h",
+        "src/thirdparty/cpptrace/include/**/*.hpp",
+        "src/thirdparty/cpptrace/src/**/*.hpp",
+    ]),
+    copts = [
+        "-DCPPTRACE_STATIC_DEFINE",
+        "-DCPPTRACE_GET_SYMBOLS_WITH_NOTHING",
+        "-DCPPTRACE_UNWIND_WITH_NOTHING",
+        "-DCPPTRACE_DEMANGLE_WITH_CXXABI",
+        "-DCPPTRACE_NO_STD_FORMAT",
+    ],
+    includes = [
+        "src/thirdparty/cpptrace/include",
+        "src/thirdparty/cpptrace/src",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "naja_extra_headers",
     hdrs = glob([
@@ -95,5 +141,8 @@ cc_library(
         "src/thirdparty/lefdef/src/def/def",
     ],
     visibility = ["//visibility:public"],
-    deps = [":naja"],
+    deps = [
+        ":cpptrace",
+        ":naja",
+    ],
 )

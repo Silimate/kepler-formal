@@ -3,6 +3,16 @@
 
 #include "SNLTruthTableTree.h"
 #include "SNLTruthTable.h"
+#include "DNL.h"
+#include "NLDB.h"
+#include "NLLibrary.h"
+#include "NLName.h"
+#include "NLUniverse.h"
+#include "SNLDesign.h"
+#include "SNLDesignModeling.h"
+#include "SNLInstance.h"
+#include "SNLScalarNet.h"
+#include "SNLScalarTerm.h"
 
 #include <gtest/gtest.h>
 #include <bitset>
@@ -28,6 +38,26 @@ static SNLTruthTable makeMaskTable(uint32_t size, uint64_t mask) {
 // helper to evaluate a mask at index
 static bool maskEval(uint64_t mask, uint32_t idx) {
   return ((mask >> idx) & 1u) != 0;
+}
+
+static naja::DNL::DNLID findDNLTermIDByInstanceAndTerm(const char* instanceName,
+                                                       const char* termName) {
+  auto* dnl = naja::DNL::get();
+  for (naja::DNL::DNLID id = 0; id <= dnl->getNBterms(); ++id) {
+    const auto& term = dnl->getDNLTerminalFromID(id);
+    if (term.isNull()) {
+      continue;
+    }
+    auto* instance = term.getDNLInstance().getSNLInstance();
+    if (instance == nullptr) {
+      continue;
+    }
+    if (instance->getName().getString() == instanceName &&
+        term.getSnlBitTerm()->getName().getString() == termName) {
+      return id;
+    }
+  }
+  return naja::DNL::DNLID_MAX;
 }
 
 //------------------------------------------------------------------------------
@@ -218,6 +248,49 @@ TEST(SNLTruthTableTreeApiTest, AllocateNodeAndEvalInput) {
   tree.allocateNode(node);
 
   EXPECT_THROW(node->eval({true}), std::logic_error);
+}
+
+TEST(SNLTruthTableTreeApiTest, ConstantRootHasNoBorderLeavesAndEvaluates) {
+  auto* universe = NLUniverse::create();
+  auto* db = NLDB::create(universe);
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* constantModel =
+      SNLDesign::create(primitives, SNLDesign::Type::Primitive, NLName("CONB"));
+  auto* constantOutput =
+      SNLScalarTerm::create(constantModel, SNLTerm::Direction::Output, NLName("LO"));
+  SNLDesignModeling::setTruthTable(
+      constantModel, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName("top"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  auto* tie0 = SNLInstance::create(top, constantModel, NLName("tie0"));
+  auto* net = SNLScalarNet::create(top, NLName("net_const"));
+  tie0->getInstTerm(constantOutput)->setNet(net);
+  topOut->setNet(net);
+
+  universe->setTopDesign(top);
+  naja::DNL::destroy();
+  auto* dnl = naja::DNL::get();
+  ASSERT_NE(dnl, nullptr);
+  const auto termID = findDNLTermIDByInstanceAndTerm("tie0", "LO");
+  ASSERT_NE(termID, naja::DNL::DNLID_MAX);
+  const auto& term = dnl->getDNLTerminalFromID(termID);
+
+  // A constant cell has a zero-arity table; it should not synthesize a fake
+  // external leaf just to keep tree bookkeeping happy.
+  SNLTruthTableTree tree(term.getDNLInstance().getID(), termID);
+  EXPECT_EQ(tree.size(), 0u);
+  EXPECT_EQ(tree.getBorderLeavesSize(), 0u);
+  EXPECT_FALSE(tree.eval({}));
+  EXPECT_THROW(tree.eval({true}), std::invalid_argument);
+
+  naja::DNL::destroy();
+  universe->destroy();
 }
 
 TEST(SNLTruthTableTreeApiTest, FinalizeSimplifyAndDestroyNoThrow) {

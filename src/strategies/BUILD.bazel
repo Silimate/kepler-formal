@@ -1,4 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//bazel:naja_includes.bzl", "NAJA_HEADER_COPTS")
 
 cc_library(
     name = "formal_strategies",
@@ -14,6 +15,7 @@ cc_library(
         "miter",
         "..",  # for ../sat/SATSolverWrapper.h relative includes
     ],
+    copts = NAJA_HEADER_COPTS,
     visibility = ["//visibility:public"],
     deps = [
         "//src/clauses:kepler_clauses",
@@ -24,6 +26,7 @@ cc_library(
         "@glucose",
         "@kissat",
         "@naja",
+        "@naja//:naja_extra_headers",
         "@spdlog",
     ],
 )

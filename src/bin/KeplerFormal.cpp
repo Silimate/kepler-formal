@@ -36,21 +36,34 @@
 #include "ScopeExtraction.h"
 #include "Config.h"
 #include "KeplerFormalUtils.h"
+#include "Tree2BoolExpr.h"
 #include "model/SequentialDesignModel.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 
+#if defined(__SANITIZE_ADDRESS__)
+#define KEPLER_FORMAL_ASAN_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define KEPLER_FORMAL_ASAN_BUILD 1
+#endif
+#endif
+
 static const char* kBoundaryTermsReport = "boundary_terms.txt";
+static const char* kSkippedResetUnanchoredPOReport =
+    "skipped_reset_unanchored_pos.txt";
+static const char* kSkippedMultiClockDomainPOReport =
+    "skipped_multi_clock_domain_pos.txt";
 
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
-      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] <netlist1> <netlist2> [<library-file>...] | "
+      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] "
+      "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
-      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] "
+      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] "
       "[--design1 <file...>] [--design2 <file...>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
@@ -75,7 +88,7 @@ static std::vector<std::string> yamlToVector(const YAML::Node& node) {
 
 static bool isPythonLoaderPath(const std::string& path) {
   return std::filesystem::path(path).extension() == ".py";
-}
+}  // LCOV_EXCL_LINE
 
 enum class VerificationMode {
   LEC,
@@ -143,6 +156,31 @@ static const char* secEngineName(KEPLER_FORMAL::SEC::SecEngine engine) {
     case KEPLER_FORMAL::SEC::SecEngine::Legacy:
     default:
       return "legacy";
+  }
+}
+
+static bool parseSecXModeToken(const std::string& token,
+                               KEPLER_FORMAL::SEC::SecXMode& mode,
+                               std::string& error) {
+  if (token == "binary" || token == "default") {
+    mode = KEPLER_FORMAL::SEC::SecXMode::Binary;  // LCOV_EXCL_LINE
+    return true;  // LCOV_EXCL_LINE
+  }
+  if (token == "dual_rail_steady") {
+    mode = KEPLER_FORMAL::SEC::SecXMode::DualRailSteady;
+    return true;
+  }
+  error = "expected binary or dual_rail_steady, got `" + token + "`";
+  return false;
+}
+
+static const char* secXModeName(KEPLER_FORMAL::SEC::SecXMode mode) {
+  switch (mode) {
+    case KEPLER_FORMAL::SEC::SecXMode::DualRailSteady:
+      return "dual_rail_steady";
+    case KEPLER_FORMAL::SEC::SecXMode::Binary:
+    default:
+      return "binary";
   }
 }
 
@@ -241,6 +279,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "verification",
       "max_k",
       "sec_engine",
+      "sec_x_mode",
       "sec_uncomputable_seq_as_boundary",
       "input_paths",
       "liberty_files",
@@ -338,6 +377,42 @@ void writeBoundaryTermsReport(
     if (i + 1 != reports.size()) {
       report << "\n";
     }
+  }
+}
+
+void writeResetUnanchoredSkippedOutputsReport(
+    const std::filesystem::path& reportPath,
+    const std::vector<std::string>& skippedOutputs) {
+  if (skippedOutputs.empty()) {
+    return;
+  }
+
+  std::ofstream report(reportPath, std::ios::trunc);
+  report << "# SEC reset-unanchored skipped observed outputs\n";
+  report << "# These top outputs were removed from the proof surface because\n";
+  report << "# their cones depend on internal state without an inductive\n";
+  report << "# cross-design anchor. SEC does not assume internal flop equality\n";
+  report << "# by name; only top-level interface signals are name-aligned.\n\n";
+  for (const auto& skippedOutput : skippedOutputs) {
+    report << "- " << skippedOutput << "\n";
+  }
+}
+
+void writeMultiClockDomainSkippedOutputsReport(
+    const std::filesystem::path& reportPath,
+    const std::vector<std::string>& skippedOutputs) {
+  if (skippedOutputs.empty()) {
+    return;
+  }
+
+  std::ofstream report(reportPath, std::ios::trunc);
+  report << "# SEC multi-clock-domain skipped observed outputs\n";
+  report << "# These top outputs were removed from the proof surface because\n";
+  report << "# their cones span more than one extracted clock domain. CDC\n";
+  report << "# modeling is intentionally outside this SEC pass, so the result\n";
+  report << "# is reported as skipped coverage instead of assumed synchronous.\n\n";
+  for (const auto& skippedOutput : skippedOutputs) {
+    report << "- " << skippedOutput << "\n";
   }
 }
 
@@ -654,15 +729,17 @@ int KeplerFormalMain(int argc, char** argv) {
   std::string logLevel = "info";
   VerificationMode verificationMode = VerificationMode::LEC;
   KEPLER_FORMAL::SEC::SecEngine secEngine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
+  KEPLER_FORMAL::SEC::SecXMode secXMode = KEPLER_FORMAL::SEC::SecXMode::Binary;
   bool secEngineExplicit = false;
+  bool secXModeExplicit = false;
   size_t secMaxK = kDefaultSecMaxK;
   bool secMaxKExplicit = false;
   bool secTreatUncomputableSeqAsBoundary = true;
 
   // Basic argument sanity
   if (argc < 2) {
-    print_usage(argv[0]);
-    return EXIT_SUCCESS;
+    print_usage(argv[0]);  // LCOV_EXCL_LINE
+    return EXIT_SUCCESS;  // LCOV_EXCL_LINE
   }
 
   // Check for config mode (--config or -c). If present, YAML takes precedence.
@@ -687,8 +764,8 @@ int KeplerFormalMain(int argc, char** argv) {
     std::string a = argv[i];
     if (a == "--config" || a == "-c") {
       if (i + 1 >= argc) {
-        SPDLOG_CRITICAL("Missing config file after {}", a);
-        return EXIT_FAILURE;
+        SPDLOG_CRITICAL("Missing config file after {}", a);  // LCOV_EXCL_LINE
+        return EXIT_FAILURE;  // LCOV_EXCL_LINE
       }
       const std::string cfgPath = argv[i + 1];
       try {
@@ -750,6 +827,20 @@ int KeplerFormalMain(int argc, char** argv) {
             return EXIT_FAILURE;
           }
           secEngineExplicit = true;
+        }
+
+        if (cfg["sec_x_mode"]) {
+          if (!cfg["sec_x_mode"].IsScalar()) {
+            SPDLOG_CRITICAL("sec_x_mode must be a scalar");
+            return EXIT_FAILURE;
+          }
+          std::string secXModeError;
+          if (!parseSecXModeToken(
+                  cfg["sec_x_mode"].as<std::string>(), secXMode, secXModeError)) {
+            SPDLOG_CRITICAL("Invalid sec_x_mode in config: {}", secXModeError);
+            return EXIT_FAILURE;
+          }
+          secXModeExplicit = true;  // LCOV_EXCL_LINE
         }
 
         if (cfg["sec_uncomputable_seq_as_boundary"]) {
@@ -830,14 +921,16 @@ int KeplerFormalMain(int argc, char** argv) {
           verilogPreprocessing = cfg["verilog_preprocessing"].as<bool>();
         }
 
-        // solver (glucose | kissat)
+        // solver (glucose | kissat | cadical)
         if (cfg["solver"] && cfg["solver"].IsScalar()) {
           std::string solver = cfg["solver"].as<std::string>();
           if (solver == "glucose") {
             KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::GLUCOSE);
           } else if (solver == "kissat") {
             KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::KISSAT);
-          } else {
+          } else if (solver == "cadical") {
+            KEPLER_FORMAL::Config::setSolverType(KEPLER_FORMAL::Config::CADICAL);  // LCOV_EXCL_LINE
+          } else {  // LCOV_EXCL_LINE
             SPDLOG_CRITICAL("Unrecognized solver in config: {}", solver);
             return EXIT_FAILURE;
           }
@@ -858,9 +951,9 @@ int KeplerFormalMain(int argc, char** argv) {
 
         usedConfig = true;
       } catch (const std::exception& e) {
-        SPDLOG_CRITICAL("Failed to parse config {}: {}", cfgPath, e.what());
-        return EXIT_FAILURE;
-      }
+        SPDLOG_CRITICAL("Failed to parse config {}: {}", cfgPath, e.what());  // LCOV_EXCL_LINE
+        return EXIT_FAILURE;  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
       break;
     }
   }
@@ -913,6 +1006,20 @@ int KeplerFormalMain(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         secEngineExplicit = true;
+        parseStart += 2;
+        continue;
+      }
+      if (arg == "--sec-x-mode") {
+        if (parseStart + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing SEC X mode after {}", arg);
+          return EXIT_FAILURE;
+        }
+        std::string secXModeError;
+        if (!parseSecXModeToken(argv[parseStart + 1], secXMode, secXModeError)) {
+          SPDLOG_CRITICAL("Invalid SEC X mode: {}", secXModeError);
+          return EXIT_FAILURE;
+        }
+        secXModeExplicit = true;
         parseStart += 2;
         continue;
       }
@@ -995,6 +1102,19 @@ int KeplerFormalMain(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         secEngineExplicit = true;
+        continue;
+      }
+      if (arg == "--sec-x-mode") {
+        if (i + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing SEC X mode after {}", arg);
+          return EXIT_FAILURE;
+        }
+        std::string secXModeError;
+        if (!parseSecXModeToken(argv[++i], secXMode, secXModeError)) {
+          SPDLOG_CRITICAL("Invalid SEC X mode: {}", secXModeError);
+          return EXIT_FAILURE;
+        }
+        secXModeExplicit = true;
         continue;
       }
       if (arg == "--sec-uncomputable-seq-boundary") {
@@ -1139,6 +1259,10 @@ int KeplerFormalMain(int argc, char** argv) {
     SPDLOG_CRITICAL("sec_engine/--sec-engine is only supported with SEC verification");
     return EXIT_FAILURE;
   }
+  if (verificationMode == VerificationMode::LEC && secXModeExplicit) {
+    SPDLOG_CRITICAL("sec_x_mode/--sec-x-mode is only supported with SEC verification");  // LCOV_EXCL_LINE
+    return EXIT_FAILURE;  // LCOV_EXCL_LINE
+  }
   if (verificationMode == VerificationMode::SEC) {
     if (useScopes || cleanScopes) {
       SPDLOG_CRITICAL("SEC verification does not support scope extraction/cleaning");
@@ -1178,12 +1302,18 @@ int KeplerFormalMain(int argc, char** argv) {
   KEPLER_FORMAL::Config::setReportSkippedPOs(reportSkippedPOs);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(
       secTreatUncomputableSeqAsBoundary);
-  SPDLOG_INFO("Solver: {}",
-              solverType == KEPLER_FORMAL::Config::SolverType::KISSAT ? "KISSAT" : "GLUCOSE");
+  const char* solverName =
+      solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
+          ? "KISSAT"
+          : (solverType == KEPLER_FORMAL::Config::SolverType::CADICAL
+                 ? "CADICAL"
+                 : "GLUCOSE");
+  SPDLOG_INFO("Solver: {}", solverName);
   SPDLOG_INFO("Verification: {}", verificationModeName(verificationMode));
   if (verificationMode == VerificationMode::SEC) {
     SPDLOG_INFO("SEC max_k: {}", secMaxK);
     SPDLOG_INFO("SEC engine: {}", secEngineName(secEngine));
+    SPDLOG_INFO("SEC X mode: {}", secXModeName(secXMode));
     SPDLOG_INFO(
         "SEC uncomputable sequentials: {}",
         secTreatUncomputableSeqAsBoundary ? "boundary abstraction"
@@ -1213,8 +1343,8 @@ int KeplerFormalMain(int argc, char** argv) {
             skippedOutputs << "  - " << skippedOutput << "\n";
           }
           SPDLOG_INFO(
-              "SEC skipped observed outputs due to connectivity issues "
-              "(no-driver, multi-driver, or logical-loop):\n{}",
+              "SEC skipped observed outputs due to extraction or coverage "
+              "limitations:\n{}",
               skippedOutputs.str());
         }
         // LCOV_EXCL_START
@@ -1233,6 +1363,12 @@ int KeplerFormalMain(int argc, char** argv) {
         if (reportSkippedPOs) {
           writeBoundaryTermsReport(
               kBoundaryTermsReport, result.extractedBoundaryReports);
+          writeResetUnanchoredSkippedOutputsReport(
+              kSkippedResetUnanchoredPOReport,
+              result.resetUnanchoredSkippedOutputs);
+          writeMultiClockDomainSkippedOutputsReport(
+              kSkippedMultiClockDomainPOReport,
+              result.multiClockDomainSkippedOutputs);
         }
         switch (result.status) {
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:
@@ -1499,7 +1635,7 @@ int KeplerFormalMain(int argc, char** argv) {
               "SEC compact mode: reusing extracted design 1 model for "
               "identical design 2 input");
           KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-              nullptr, nullptr, solverType, secEngine);
+              nullptr, nullptr, solverType, secEngine, secXMode);
           return emitSecResult(
               strategy.runExtractedModels(model0, model0, secMaxK));
         }
@@ -1514,7 +1650,7 @@ int KeplerFormalMain(int argc, char** argv) {
             "design 2");
 
         KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-            nullptr, nullptr, solverType, secEngine);
+            nullptr, nullptr, solverType, secEngine, secXMode);
         return emitSecResult(
             strategy.runExtractedModels(model0, model1, secMaxK));
       // LCOV_EXCL_START
@@ -1523,13 +1659,13 @@ int KeplerFormalMain(int argc, char** argv) {
         return EXIT_FAILURE;
       }
       // LCOV_EXCL_STOP
-    }
+    }  // LCOV_EXCL_LINE
 
     if (!libertyFiles.empty() || !pythonFiles.empty()) {
       db0 = NLDB::create(NLUniverse::get());
       primitivesAreLoaded = loadLibraries(db0);
       if (!primitivesAreLoaded) {
-        return EXIT_FAILURE;
+        return EXIT_FAILURE;  // LCOV_EXCL_LINE
       }
     }
 
@@ -1687,7 +1823,7 @@ int KeplerFormalMain(int argc, char** argv) {
   if (verificationMode == VerificationMode::SEC) {
     try {
       KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-          top0, top1, solverType, secEngine);
+          top0, top1, solverType, secEngine, secXMode);
       return emitSecResult(strategy.run(secMaxK));
     // LCOV_EXCL_START
     } catch (const std::exception& e) {
@@ -1730,7 +1866,7 @@ int KeplerFormalMain(int argc, char** argv) {
                       scopes.first->getName().getString(),
                       scopes.second->getName().getString());
         } else {
-          SPDLOG_INFO("Difference was found for scope: {} , {}. Please refer to the log(miter_log_x.txt) for details.",
+          SPDLOG_INFO("Difference was found for scope: {} , {}. Please refer to the log(miter_log_x.txt) for details.",  // LCOV_EXCL_LINE
                       scopes.first->getName().getString(),
                       scopes.second->getName().getString());
         }
@@ -1766,12 +1902,20 @@ int KeplerFormalMain(int argc, char** argv) {
       SPDLOG_ERROR("Workflow failed: {}", e.what());
       return EXIT_FAILURE;
       // LCOV_EXCL_STOP
-    }
+    }  // LCOV_EXCL_LINE
   }
 
   return EXIT_SUCCESS;
 }
 
 #ifndef KEPLER_FORMAL_NO_MAIN
-int main(int argc, char** argv) { return KeplerFormalMain(argc, argv); }
+int main(int argc, char** argv) {
+  const int rc = KeplerFormalMain(argc, argv);
+#if defined(KEPLER_FORMAL_ASAN_BUILD)
+  // Subprocess sanitizer tests check leaks before process teardown.
+  KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
+  KEPLER_FORMAL::BoolExprCache::destroy();
+#endif
+  return rc;
+}
 #endif

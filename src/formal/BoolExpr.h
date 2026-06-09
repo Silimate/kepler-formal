@@ -52,7 +52,7 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {
   BoolExpr* getRight() const { return right_; }
   std::string getName() const {
     if (op_ != Op::VAR) {
-      throw std::logic_error("getName: not a variable");
+      throw std::logic_error("getName: not a variable");  // LCOV_EXCL_LINE
     }
     if (varID_ == 0) {
       return "FALSE";

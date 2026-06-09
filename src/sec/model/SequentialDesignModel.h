@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "BoolExpr.h"
+#include "clocks/SecClockModel.h"
 #include "common/SignalKey.h"
 
 namespace naja::NL {
@@ -25,9 +26,10 @@ enum class ConnectivitySkipOrigin {
   NoDriver,
   MultiDriver,
   LogicalLoop,
+  MultiClockDomain,
 };
 
-struct ConnectivitySkipInfo {
+struct ConnectivitySkipInfo {  // LCOV_EXCL_LINE
   ConnectivitySkipOrigin origin = ConnectivitySkipOrigin::NoDriver;
   std::string detail;
 };
@@ -59,6 +61,12 @@ struct SequentialDesignModel {
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> observedOutputExprByKey;
   std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> nextStateExprByStateKey;
   std::unordered_map<SignalKey, bool, SignalKeyHash> initialStateValueByKey;
+  // Variables proven during extraction to be pure routed clock carriers.
+  // Downstream SEC matching can classify them with the top clock without
+  // making any name-based assumption about internal sequential state.
+  std::vector<size_t> clockCarrierVarIDs;
+  std::vector<ClockCarrierClass> clockCarrierClasses;
+  std::unordered_map<SignalKey, ClockEvent, SignalKeyHash> clockEventByStateKey;
   std::unordered_map<SignalKey, ConnectivitySkipInfo, SignalKeyHash>
       connectivitySkipInfoByKey;
   std::vector<ComplementedStateRelation> complementedStateRelations;

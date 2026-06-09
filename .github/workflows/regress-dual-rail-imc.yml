@@ -1,0 +1,15 @@
+# GitHub Actions workflow to run SEC dual-rail IMC regressions.
+name: regress-dual-rail-imc
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    uses: ./.github/workflows/regress-imc.yml
+    with:
+      sec_x_mode: dual_rail_steady
