@@ -143,6 +143,18 @@ jobs:
           expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }}
+        bp_sec_final_expectation="expect-unsupported"
+        if [[ "${SEC_X_MODE}" == "dual_rail_steady" ]]; then
+          bp_sec_final_expectation="expect-full-coverage"
+        fi
+        bash regress/run_sec_strategies_regress.sh \
+          nangate45_black_parrot_sec_final \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          "${bp_sec_final_expectation}" \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}

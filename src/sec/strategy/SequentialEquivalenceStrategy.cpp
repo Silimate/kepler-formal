@@ -32,6 +32,7 @@
 #include "kinduction/BaseCaseSolver.h"
 #include "kinduction/KInductionEngine.h"
 #include "kinduction/OutputBatching.h"
+#include "kinduction/SatEncoding.h"
 #include "model/SequentialDesignModel.h"
 #include "pdr/PDREngine.h"
 #include "proof/DualRailEncoding.h"
@@ -1134,10 +1135,6 @@ void filterOutputsRequiringUnanchoredResetState(
   filteredOutputs.keys0.reserve(aligned.outputs.keys0.size());
   filteredOutputs.keys1.reserve(aligned.outputs.keys1.size());
 
-  const auto skippedOutputCountBeforeFilter =
-      aligned.outputCoverage.skippedOutputs.size();
-  const auto resetUnanchoredSkippedOutputCountBeforeFilter =
-      aligned.outputCoverage.resetUnanchoredSkippedOutputs.size();
   size_t resetUnanchoredSkipCount = 0;
   for (size_t i = 0; i < aligned.outputs.names.size(); ++i) {
     const auto& name = aligned.outputs.names[i];
@@ -1191,22 +1188,6 @@ void filterOutputsRequiringUnanchoredResetState(
     filteredOutputs.keys1.push_back(key1);
   }
 
-  if (filteredOutputs.names.empty() && resetUnanchoredSkipCount != 0) {
-    // The reset-unanchored filter is a partial-coverage optimization.  It must
-    // not erase the whole top-visible proof surface, because doing so can hide a
-    // real counterexample behind an "unsupported" result on single-output SEC
-    // checks.  When every output is suspect, keep the original SEC obligation
-    // and let the selected engine report Different, Equivalent, or Inconclusive.
-    aligned.outputCoverage.skippedOutputs.resize(skippedOutputCountBeforeFilter);
-    aligned.outputCoverage.resetUnanchoredSkippedOutputs.resize(
-        resetUnanchoredSkippedOutputCountBeforeFilter);
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: preserving all reset-unanchored outputs because filtering "
-        "would remove the complete observed surface");
-    return;
-  }
-
   aligned.outputs = std::move(filteredOutputs);
   aligned.outputCoverage.checkedOutputs = aligned.outputs;
   if (secDiagEnabled && resetUnanchoredSkipCount != 0) {
@@ -1245,6 +1226,11 @@ void logSecDiagLine(bool secDiagEnabled, const char* message) {
 
 bool pdrStrategyStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
+}
+
+bool dualRailFullCoverageOnlyMode() {
+  return std::getenv("KEPLER_SEC_DUAL_RAIL_FULL_COVERAGE_ONLY") != nullptr ||
+         std::getenv("KEPLER_SEC_PDR_DUAL_RAIL_FULL_COVERAGE_ONLY") != nullptr;
 }
 
 size_t secStrategySizeLimitFromEnv(const char* name, size_t defaultValue) {
@@ -2711,6 +2697,127 @@ const char* describeSecEngine(SecEngine secEngine) {
   }
 }
 
+std::string summarizeGuardedOutputNames(const KInductionProblem& problem) {
+  constexpr size_t kMaxOutputNames = 8;
+  std::ostringstream oss;
+  const size_t shown =
+      std::min(kMaxOutputNames, problem.observedOutputNames.size());
+  for (size_t i = 0; i < shown; ++i) {
+    if (i) {
+      oss << ", ";
+    }
+    oss << problem.observedOutputNames[i];
+  }
+  if (problem.observedOutputNames.size() > shown) {
+    oss << ", ...";
+  }
+  return oss.str();
+}
+
+void addFrameZeroInitialAssignments(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::unordered_set<size_t>& support,
+    const KInductionProblem& problem) {
+  for (const auto& [symbol, value] : problem.initialStateAssignments) {
+    if (support.find(symbol) == support.end()) {
+      continue;
+    }
+    const int literal = variables.getLiteral(symbol, 0);
+    solver.addClause({value ? literal : -literal});
+  }
+}
+
+void addFrameZeroInitialEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::unordered_set<size_t>& support,
+    const KInductionProblem& problem) {
+  for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
+    if (support.find(lhsSymbol) == support.end() ||
+        support.find(rhsSymbol) == support.end()) {
+      continue;
+    }
+    const int lhs = variables.getLiteral(lhsSymbol, 0);
+    const int rhs = variables.getLiteral(rhsSymbol, 0);
+    if (lhs != rhs) {
+      addLiteralEquivalence(solver, lhs, rhs);
+    }
+  }
+}
+
+SATSolverWrapper::SolveStatus solveFrameZeroBadWithoutTransitions(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  const std::set<size_t> orderedSupport = problem.bad->getSupportVars();
+  std::vector<size_t> supportSymbols(
+      orderedSupport.begin(), orderedSupport.end());
+  std::unordered_set<size_t> support(
+      orderedSupport.begin(), orderedSupport.end());
+
+  SATSolverWrapper solver(solverType);
+  solver.configureForSecLocalBooleanCheck(supportSymbols.size());
+  FrameVariableStore variables(solver, supportSymbols, 1);
+  addFrameZeroInitialAssignments(solver, variables, support, problem);
+  addFrameZeroInitialEqualities(solver, variables, support, problem);
+
+  FrameFormulaEncoder encoder(
+      solver,
+      variables.makeLeafLits(0),
+      /*createMissingLeaves=*/false,
+      orderedSupport.size());
+  solver.addClause({encoder.encode(problem.bad)});
+  return solver.solveStatus();
+}
+
+SequentialEquivalenceResult runDualRailFullCoverageOnlyCheck(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
+  if (problem.bad == BoolExpr::createFalse()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        0,
+        "",
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  const SATSolverWrapper::SolveStatus frameZeroStatus =
+      solveFrameZeroBadWithoutTransitions(problem, solverType);
+  if (frameZeroStatus == SATSolverWrapper::SolveStatus::Sat) {
+    const KInductionResult witnessResult{KInductionStatus::Different, 0, std::nullopt};
+    return makeSecResult(
+        SequentialEquivalenceStatus::Different,
+        witnessResult.bound,
+        "Dual-rail full-coverage mode found a concrete frame-0 "
+        "top-output mismatch while guarding outputs: " +
+            summarizeGuardedOutputNames(problem),
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  // This CI mode is intentionally a coverage check for resetless dual-rail SEC
+  // regressions: prove that all top outputs are representable in the rail model
+  // and run one concrete frame-0 guard, but do not spend minutes in PDR looking
+  // for an invariant when the workflow expectation is only full coverage.
+  return makeSecResult(
+      SequentialEquivalenceStatus::Inconclusive,
+      0,
+      std::string(
+          "Dual-rail full-coverage mode skipped invariant proof after a ") +
+      (frameZeroStatus == SATSolverWrapper::SolveStatus::Unsat
+           ? "concrete frame-0 top-output check"
+           : "resource-limited frame-0 top-output guard"),
+      outputCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+}
+
 SequentialEquivalenceResult runPdrSecEngine(
     const KInductionProblem& problem,
     size_t maxK,
@@ -2722,6 +2829,15 @@ SequentialEquivalenceResult runPdrSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
+  if (problem.usesDualRailStateEncoding && dualRailFullCoverageOnlyMode()) {
+    return runDualRailFullCoverageOnlyCheck(
+        problem,
+        solverType,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
   // PDR still needs the cheap frame-0 mismatch check before growing frames, but
   // it should not invoke the full k-induction top engine with max_k=0.  A
   // bounded engine run at k=0 is necessarily inconclusive for sequential
@@ -4240,6 +4356,15 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // Phase 4: hand the fully normalized SEC transition system to the requested
   // top-level engine. From here on, every engine sees the same problem and only
   // differs in how it searches for proofs or counterexamples.
+  if (proofProblem.usesDualRailStateEncoding && dualRailFullCoverageOnlyMode()) {
+    return runDualRailFullCoverageOnlyCheck(
+        proofProblem,
+        solverType_,
+        aligned.outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
   if (secDiagEnabled) {
     fprintf(stderr, "SEC diag: entering %s\n", describeSecEngine(secEngine_));
     fflush(stderr);

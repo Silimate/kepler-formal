@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different] [max-k=<n>] [compact] [engine=<name>] [sec-x-mode=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-x-mode=<name>]" >&2
   exit 2
 fi
 
@@ -23,7 +23,7 @@ engines=(k_induction imc pdr)
 
 for option in "${@:5}"; do
   case "${option}" in
-    expect-equivalent|expect-different)
+    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage)
       expectation="${option}"
       ;;
     compact)
@@ -125,8 +125,19 @@ run_engine() {
     # completion.  Large SEC/PDR cases can run for minutes between solver
     # decisions, so emit a lightweight heartbeat to keep GitHub logs obviously
     # alive and to make a true hang easier to distinguish from solver work.
+    local kepler_env=()
     if [[ "${expectation}" == "expect-different" ]]; then
-      KEPLER_SEC_KI_FRONTIER_FIRST=1 \
+      kepler_env+=(KEPLER_SEC_KI_FRONTIER_FIRST=1)
+    fi
+    if [[ "${expectation}" == "expect-full-coverage" &&
+          "${sec_x_mode}" == "dual_rail_steady" ]]; then
+      # Full-coverage regressions check that every top output is modeled and
+      # that no concrete counterexample is found.  They do not require the
+      # selected engine to spend minutes completing an optional invariant proof.
+      kepler_env+=(KEPLER_SEC_DUAL_RAIL_FULL_COVERAGE_ONLY=1)
+    fi
+    if [[ "${#kepler_env[@]}" -ne 0 ]]; then
+      env "${kepler_env[@]}" \
         "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
     else
       "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
@@ -150,14 +161,35 @@ run_engine() {
     sleep 1
     kill "${tail_pid}" 2>/dev/null || true
     wait "${tail_pid}" 2>/dev/null || true
+    if [[ "${expectation}" == "expect-different" ]]; then
+      grep "SEC found a counterexample" "${stdout_log}"
+      return 0
+    fi
+
+    # Treat any discovered counterexample as a hard failure unless the caller
+    # explicitly asked for one.  This keeps coverage-only checks from masking a
+    # real SEC mismatch.
+    if grep -q "SEC found a counterexample" "${stdout_log}"; then
+      echo "Unexpected SEC counterexample for ${test_name} (${engine})" >&2
+      return 1
+    fi
+
+    if [[ "${expectation}" == "expect-unsupported" ]]; then
+      grep "SEC cannot run on this design pair" "${stdout_log}"
+      return 0
+    fi
+
+    if [[ "${expectation}" == "expect-full-coverage" ]]; then
+      grep "SEC output coverage: 100.00%" "${stdout_log}"
+      return 0
+    fi
+
     if [[ "${kepler_status}" -ne 0 ]]; then
       return "${kepler_status}"
     fi
 
     if [[ "${expectation}" == "expect-equivalent" ]]; then
       grep "SEC proved equivalence" "${stdout_log}"
-    elif [[ "${expectation}" == "expect-different" ]]; then
-      grep "SEC found a counterexample" "${stdout_log}"
     else
       grep -E "SEC proved equivalence|SEC found a counterexample" "${stdout_log}"
     fi

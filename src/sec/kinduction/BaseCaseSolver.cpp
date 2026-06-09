@@ -525,6 +525,7 @@ void addRelevantDualRailPartners(
 BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
                              InitialConstraintMode initialMode,
                              size_t bootstrapFrames,
+                             bool resetBootstrapObservationFrontier,
                              size_t firstBadFrame,
                              size_t internalK,
                              bool constrainPreviouslySafeFrames,
@@ -577,6 +578,13 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
       addFormulaSupport(problem.property, solverSymbols);
       addFormulaStateSupport(problem.property, stateSymbols, requiredStates[0]);
     }
+  } else if (resetBootstrapObservationFrontier) {
+    // Reset/bootstrap can leave internal memories or FIFOs arbitrary.  The
+    // user-visible SEC frontier in that case is the top observation, not a
+    // cross-design equality on those internal state bits.
+    addFormulaSupport(problem.property, solverSymbols);
+    addFormulaStateSupport(
+        problem.property, stateSymbols, requiredStates[bootstrapFrames]);
   }
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(internalK);
@@ -961,6 +969,17 @@ void addInitialConstraints(SATSolverWrapper& solver,
             0, formulaSupportOrThrow(problem.property, "observation property")));
     solver.addClause({encoder.encode(problem.property)});
   }
+}
+
+void addObservationPropertyConstraint(SATSolverWrapper& solver,
+                                      const FrameVariableStore& variables,
+                                      const KInductionProblem& problem,
+                                      size_t frame) {
+  FrameFormulaEncoder encoder(
+      solver,
+      variables.makeLeafLits(
+          frame, formulaSupportOrThrow(problem.property, "observation property")));
+  solver.addClause({encoder.encode(problem.property)});
 }
 
 void addResetFrontierFrameInvariantConstraints(
@@ -1404,6 +1423,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
   }
 
   const size_t bootstrapFrames = resetBootstrapFrames(problem);
+  const bool resetBootstrapObservationFrontier =
+      bootstrapFrames != 0 && problem.usesResetBootstrapObservationFrontier();
   const size_t internalK = k + bootstrapFrames;
   const bool constrainPreviouslySafeFrames =
       exactPublicBadFrame.has_value() &&
@@ -1416,7 +1437,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
 
   size_t firstBadFrame = 0;
   if (bootstrapFrames != 0) {
-    firstBadFrame = bootstrapFrames;
+    firstBadFrame =
+        bootstrapFrames + (resetBootstrapObservationFrontier ? 1u : 0u);
   } else if (initialMode == InitialConstraintMode::ObservationOnly ||
              initialMode == InitialConstraintMode::PartialInit) {
     firstBadFrame = 1;
@@ -1440,6 +1462,7 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
       problem,
       initialMode,
       bootstrapFrames,
+      resetBootstrapObservationFrontier,
       firstBadFrame,
       internalK,
       constrainPreviouslySafeFrames,
@@ -1476,6 +1499,10 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
       solver, coi.solverSymbols, internalK + 1, aliasesByFrame);
   addResetBootstrapConstraints(solver, variables, problem, internalK + 1);
   addInitialConstraints(solver, variables, problem, coi.solverSymbolSet, initialMode);
+  if (resetBootstrapObservationFrontier) {
+    addObservationPropertyConstraint(
+        solver, variables, problem, bootstrapFrames);
+  }
 
   addComplementedStateRelations(
       solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet,

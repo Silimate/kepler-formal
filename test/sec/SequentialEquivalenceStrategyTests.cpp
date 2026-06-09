@@ -6323,6 +6323,44 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverIncompleteResetBootstrapUsesObservationFrontier) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"rst"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {2};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{2, true}};
+  problem.bootstrapStateAssignments = {{3, false}};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.totalStateCount = 2;
+  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::createFalse()}};
+  problem.transitions1 = {{4, BoolExpr::createFalse()}};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  // The reset summary leaves state1 arbitrary, so frame 0 is the top-level
+  // observation frontier.  A mismatching internal value there is not a concrete
+  // SEC counterexample unless it survives into a later visible cycle.
+  EXPECT_FALSE(findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0).has_value());
+  EXPECT_FALSE(findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1).has_value());
+
+  KInductionProblem completeMismatch = problem;
+  completeMismatch.bootstrapStateAssignments = {{3, false}, {4, true}};
+  completeMismatch.transitions1 = {{4, BoolExpr::createTrue()}};
+  const auto completeWitness = findBaseCounterexample(
+      completeMismatch, KEPLER_FORMAL::Config::SolverType::KISSAT, 0);
+  ASSERT_TRUE(completeWitness.has_value());
+  EXPECT_EQ(completeWitness->badFrame, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverHandlesActiveLowResetBootstrapInputs) {
   KInductionProblem problem;
   problem.environmentInputNames = {"rst_n", "in"};
@@ -6913,6 +6951,47 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesBadFormulaRepairOnResetObservationFrontier) {
+  KInductionProblem problem;
+  problem.inputSymbols = {2};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{2, true}};
+  problem.state0Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.totalStateCount = 1;
+  problem.transitions0.emplace_back(3, BoolExpr::Var(3));
+  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"reset_observation_out"};
+  problem.bad = BoolExpr::Var(3);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionBad = problem.bad;
+  problem.inductionProperty = problem.property;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/2,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/true);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("refined projected counterexample with validated "
+                        "bad-formula clauses"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -7990,6 +8069,112 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailFullCoverageModeSkipsInvariantProofOnly) {
+  const SignalKey resetlessOut =
+      makeSignalKey("pdrDualRailFullCoverageResetlessOut");
+  const SignalKey state0 =
+      makeSignalKey("pdrDualRailFullCoverageState0");
+  const SignalKey state1 =
+      makeSignalKey("pdrDualRailFullCoverageState1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {state0};
+  model0.allObservedOutputs = {resetlessOut};
+  model0.observedOutputs = {resetlessOut};
+  model0.inputVarByKey.emplace(state0, 2);
+  model0.displayNameByKey.emplace(resetlessOut, "resetless_out[0]");
+  model0.displayNameByKey.emplace(state0, "left_resetless_state[0]");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+  model0.observedOutputExprByKey.emplace(resetlessOut, BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.stateBits = {state1};
+  model1.allObservedOutputs = {resetlessOut};
+  model1.observedOutputs = {resetlessOut};
+  model1.inputVarByKey.emplace(state1, 3);
+  model1.displayNameByKey.emplace(resetlessOut, "resetless_out[0]");
+  model1.displayNameByKey.emplace(state1, "right_resetless_state[0]");
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(3));
+  model1.observedOutputExprByKey.emplace(resetlessOut, BoolExpr::Var(3));
+
+  const ScopedEnvVar fullCoverageMode(
+      "KEPLER_SEC_DUAL_RAIL_FULL_COVERAGE_ONLY", "1");
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecXMode::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 8);
+
+  // The workflow-only full-coverage mode is not a proof shortcut. It still
+  // checks the concrete top-output base frame, then reports that every output
+  // is representable in the dual-rail model without entering expensive PDR.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_NE(
+      result.reason.find("full-coverage mode skipped invariant proof"),
+      std::string::npos);
+
+  SequentialEquivalenceStrategy kiStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecXMode::DualRailSteady);
+  const auto kiResult = kiStrategy.runExtractedModels(model0, model1, 8);
+  EXPECT_EQ(kiResult.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(kiResult.coveredOutputs, 1u);
+  EXPECT_EQ(kiResult.totalOutputs, 1u);
+  EXPECT_TRUE(kiResult.skippedObservedOutputs.empty());
+
+  SequentialEquivalenceStrategy imcStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecXMode::DualRailSteady);
+  const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 8);
+  EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(imcResult.coveredOutputs, 1u);
+  EXPECT_EQ(imcResult.totalOutputs, 1u);
+  EXPECT_TRUE(imcResult.skippedObservedOutputs.empty());
+
+  const SignalKey mismatchOut =
+      makeSignalKey("pdrDualRailFullCoverageMismatchOut");
+  SequentialDesignModel mismatch0;
+  mismatch0.allObservedOutputs = {mismatchOut};
+  mismatch0.observedOutputs = {mismatchOut};
+  mismatch0.displayNameByKey.emplace(mismatchOut, "mismatch_out[0]");
+  mismatch0.observedOutputExprByKey.emplace(mismatchOut, BoolExpr::createTrue());
+
+  SequentialDesignModel mismatch1;
+  mismatch1.allObservedOutputs = {mismatchOut};
+  mismatch1.observedOutputs = {mismatchOut};
+  mismatch1.displayNameByKey.emplace(mismatchOut, "mismatch_out[0]");
+  mismatch1.observedOutputExprByKey.emplace(mismatchOut, BoolExpr::createFalse());
+
+  SequentialEquivalenceStrategy mismatchStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecXMode::DualRailSteady);
+  const auto mismatchResult =
+      mismatchStrategy.runExtractedModels(mismatch0, mismatch1, 8);
+
+  EXPECT_EQ(mismatchResult.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(mismatchResult.coveredOutputs, 1u);
+  EXPECT_EQ(mismatchResult.totalOutputs, 1u);
+  EXPECT_NE(
+      mismatchResult.reason.find("mismatch_out[0]"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PdrDualRailExactResetFrontierGuardCountsRailSymbols) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
@@ -8466,7 +8651,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsKeepsOnlyResetUnanchoredOutputForCounterexamples) {
+       RunExtractedModelsSkipsOnlyResetUnanchoredOutputInsteadOfComparingState) {
   const SignalKey rst = makeSignalKey("keepOnlyResetUnanchoredRst");
   const SignalKey out = makeSignalKey("keepOnlyResetUnanchoredOut");
   const SignalKey state0 = makeSignalKey("keepOnlyResetUnanchoredState0");
@@ -8505,14 +8690,22 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::KInduction);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
-  // If every output depends on reset-unanchored state, keep the top-level SEC
-  // obligation instead of converting a possible counterexample into zero
-  // coverage.  This mirrors compact CSRFile regressions that intentionally
-  // expect a difference on a single observed output.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.coveredOutputs, 1u);
+  // Binary SEC may only compare top outputs.  If a top output's first
+  // post-reset value is still an arbitrary internal flop value in each design,
+  // do not restore the output just to avoid zero coverage: that would compare an
+  // internal design0 state bit with an internal design1 state bit by implication.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
+  EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(result.skippedObservedOutputs.front().find("only_out[0]"), std::string::npos);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("reset-unanchored"),
+      std::string::npos);
+  ASSERT_EQ(result.resetUnanchoredSkippedOutputs.size(), 1u);
+  EXPECT_EQ(
+      result.resetUnanchoredSkippedOutputs.front(),
+      result.skippedObservedOutputs.front());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -8615,7 +8808,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsKeepsResetCombinationalMismatchesCovered) {
+       RunExtractedModelsKeepsResetCombinationalOutputsCovered) {
   const SignalKey rst = makeSignalKey("keepResetCombRst");
   const SignalKey data = makeSignalKey("keepResetCombData");
   const SignalKey out = makeSignalKey("keepResetCombOut");
@@ -8648,16 +8841,19 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.displayNameByKey.emplace(data, "data[0]");
   model1.displayNameByKey.emplace(out, "out[0]");
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(7)));
-  model1.observedOutputExprByKey.emplace(out, BoolExpr::Not(BoolExpr::Var(5)));
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(5));
 
   SequentialEquivalenceStrategy strategy(
       nullptr,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction);
-  const auto result = strategy.runExtractedModels(model0, model1, 0);
+      SecEngine::Pdr);
+  // This output is purely combinational even though unrelated state nearby is
+  // reset-unanchored.  The conservative state-dependent coverage filter must not
+  // drop such top outputs.
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_TRUE(result.skippedObservedOutputs.empty());
 }
@@ -9956,7 +10152,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesOneShotResetValidationForFinalRootCegar) {
+       PDREngineSkipsOneShotResetValidationForWideFinalRootCegar) {
   KInductionProblem problem =
       makeWideResetExpressionSatShortcutProblem(/*wideLeafCount=*/900);
 
@@ -9979,19 +10175,24 @@ TEST_F(SequentialEquivalenceStrategyTests,
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Final projected-counterexample repair asks small root-cube reachability
-  // questions. Sampled AES runs showed the cached Glucose assumption path
-  // spending the wall time before learning any reset-frontier fact, so this
-  // path uses the one-shot unit-clause validator instead.
+  // Final projected-counterexample repair can encounter a small root cube whose
+  // reset image has a huge support.  Keep that shape behind the reset-expression
+  // support cap instead of opening either the one-shot or cached exact reset
+  // validator; BlackParrot/AES sampling showed those broad exact queries are the
+  // runtime wall.
   EXPECT_NE(
-      stderrOutput.find("mode=one_shot_unit_clauses"),
+      stderrOutput.find("miss reason=full_sat_support_cap"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("mode=cached_assumptions"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
+  EXPECT_EQ(
+      stderrOutput.find("mode=one_shot_unit_clauses"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
       stderrOutput.find("reset-specialized concrete-frame conflict"),
       std::string::npos)
       << stderrOutput;
@@ -12516,7 +12717,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesResetSpecializedConcreteFrameConflictBeforeBmcUnroll) {
+       PDREngineAvoidsOneShotConcreteFrameBmcAfterResetShortcutSat) {
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -12567,7 +12768,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find(
-          "concrete cube reachability step step=1 result=unsat"),
+          "reset-specialized expression miss reason=sat"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(
