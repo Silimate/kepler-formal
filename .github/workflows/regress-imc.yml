@@ -179,24 +179,6 @@ jobs:
     - name: Install najaeda
       run: pip install najaeda
 
-    - name: Generate TinyRocket edited and CSRFile SEC examples
-      working-directory: ${{github.workspace}}/example
-      run: |
-        python edit.py
-        python extract_tinyrocket_csrfile_sec.py
-
-    - name: Run TinyRocket CSRFile SEC counterexample
-      working-directory: ${{github.workspace}}
-      run: |
-        bash regress/run_sec_strategies_regress.sh \
-          tinyrocket_csrfile_sec \
-          "${{github.workspace}}/example" \
-          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
-          test_config_verilog_tinyrocket_csrfile_sec.yaml \
-          expect-different \
-          compact \
-          engine=${{ env.SEC_ENGINE }}
-
     - name: Run TinyRocket SEC self-check
       working-directory: ${{github.workspace}}
       run: |

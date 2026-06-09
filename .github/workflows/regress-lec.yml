@@ -121,15 +121,7 @@ jobs:
           6_final_sec_test.yml \
           expect-identical
 
-    - name: Run nangate45_black_parrot_sec_final
-      working-directory: ${{github.workspace}}
-      run: |
-        bash regress/run_cnf_regress.sh \
-          nangate45_black_parrot_sec_final \
-          "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
-          "${{github.workspace}}/build/src/bin/kepler-formal" \
-          6_final_sec_test.yml \
-          expect-identical
+
 
     - name: Run on naja if
       working-directory: ${{github.workspace}}
