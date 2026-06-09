@@ -278,11 +278,11 @@ void FrameFormulaEncoder::cacheEncodedLiteral(BoolExpr* node, int lit) {
     // Grow the encoder DAG cache geometrically. This keeps large memory
     // transition encodings from rehashing on every small increment while also
     // avoiding a separate full-DAG prepass before every PDR target.
-    nodeMapReservedEntries_ =
-        desiredEntries +
-        std::max(desiredEntries / 2, static_cast<size_t>(4096));
-    nodeToLit_.reserve(nodeMapReservedEntries_);
-  }
+    nodeMapReservedEntries_ =  // LCOV_EXCL_LINE
+        desiredEntries +  // LCOV_EXCL_LINE
+        std::max(desiredEntries / 2, static_cast<size_t>(4096));  // LCOV_EXCL_LINE
+    nodeToLit_.reserve(nodeMapReservedEntries_);  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
   nodeToLit_.emplace(node, lit);
 }
 

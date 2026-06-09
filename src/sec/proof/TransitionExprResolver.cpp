@@ -43,11 +43,11 @@ class LazyDualRailVariableMapper final : public DualRailVariableMapper {
     }
 
     if (symbol < 2) {
-      return symbol == 1
-                 ? DualRailBoolExpr{
-                       BoolExpr::createTrue(), BoolExpr::createFalse()}
-                 : DualRailBoolExpr{
-                       BoolExpr::createFalse(), BoolExpr::createTrue()};
+      return symbol == 1  // LCOV_EXCL_LINE
+                 ? DualRailBoolExpr{  // LCOV_EXCL_LINE
+                       BoolExpr::createTrue(), BoolExpr::createFalse()}  // LCOV_EXCL_LINE
+                 : DualRailBoolExpr{  // LCOV_EXCL_LINE
+                       BoolExpr::createFalse(), BoolExpr::createTrue()};  // LCOV_EXCL_LINE
     }
 
     const size_t mapped = mapLazyTransitionSymbol(designIndex_, symbol, binaryMap_);

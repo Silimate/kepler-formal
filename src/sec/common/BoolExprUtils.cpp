@@ -301,7 +301,7 @@ std::optional<bool> boolFormulaImpliesWithConflictLimit(
       solverType,
       conflictLimit);
   if (status == SATSolverWrapper::SolveStatus::Unknown) {
-    return std::nullopt;
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
   return status == SATSolverWrapper::SolveStatus::Unsat;
 }

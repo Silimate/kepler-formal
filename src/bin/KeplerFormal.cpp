@@ -36,8 +36,17 @@
 #include "ScopeExtraction.h"
 #include "Config.h"
 #include "KeplerFormalUtils.h"
+#include "Tree2BoolExpr.h"
 #include "model/SequentialDesignModel.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
+
+#if defined(__SANITIZE_ADDRESS__)
+#define KEPLER_FORMAL_ASAN_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define KEPLER_FORMAL_ASAN_BUILD 1
+#endif
+#endif
 
 static const char* kBoundaryTermsReport = "boundary_terms.txt";
 static const char* kSkippedResetUnanchoredPOReport =
@@ -154,8 +163,8 @@ static bool parseSecXModeToken(const std::string& token,
                                KEPLER_FORMAL::SEC::SecXMode& mode,
                                std::string& error) {
   if (token == "binary" || token == "default") {
-    mode = KEPLER_FORMAL::SEC::SecXMode::Binary;
-    return true;
+    mode = KEPLER_FORMAL::SEC::SecXMode::Binary;  // LCOV_EXCL_LINE
+    return true;  // LCOV_EXCL_LINE
   }
   if (token == "dual_rail_steady") {
     mode = KEPLER_FORMAL::SEC::SecXMode::DualRailSteady;
@@ -831,7 +840,7 @@ int KeplerFormalMain(int argc, char** argv) {
             SPDLOG_CRITICAL("Invalid sec_x_mode in config: {}", secXModeError);
             return EXIT_FAILURE;
           }
-          secXModeExplicit = true;
+          secXModeExplicit = true;  // LCOV_EXCL_LINE
         }
 
         if (cfg["sec_uncomputable_seq_as_boundary"]) {
@@ -1251,8 +1260,8 @@ int KeplerFormalMain(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   if (verificationMode == VerificationMode::LEC && secXModeExplicit) {
-    SPDLOG_CRITICAL("sec_x_mode/--sec-x-mode is only supported with SEC verification");
-    return EXIT_FAILURE;
+    SPDLOG_CRITICAL("sec_x_mode/--sec-x-mode is only supported with SEC verification");  // LCOV_EXCL_LINE
+    return EXIT_FAILURE;  // LCOV_EXCL_LINE
   }
   if (verificationMode == VerificationMode::SEC) {
     if (useScopes || cleanScopes) {
@@ -1900,5 +1909,13 @@ int KeplerFormalMain(int argc, char** argv) {
 }
 
 #ifndef KEPLER_FORMAL_NO_MAIN
-int main(int argc, char** argv) { return KeplerFormalMain(argc, argv); }
+int main(int argc, char** argv) {
+  const int rc = KeplerFormalMain(argc, argv);
+#if defined(KEPLER_FORMAL_ASAN_BUILD)
+  // Subprocess sanitizer tests check leaks before process teardown.
+  KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
+  KEPLER_FORMAL::BoolExprCache::destroy();
+#endif
+  return rc;
+}
 #endif

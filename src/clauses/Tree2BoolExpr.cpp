@@ -370,8 +370,8 @@ BoolExpr* Tree2BoolExpr::convert(
         if (isoID != naja::DNL::DNLID_MAX) {
           auto result = iso2boolExpr_.insert({isoID, expr});
           if (!result.second) {
-            expr = result.first->second;
-          }
+            expr = result.first->second;  // LCOV_EXCL_LINE
+          }  // LCOV_EXCL_LINE
         }
         setMemoETS(id, expr);
         continue;

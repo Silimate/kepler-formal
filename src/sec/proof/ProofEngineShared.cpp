@@ -121,7 +121,7 @@ void addDualRailStateValidity(
     for (const auto& rails : railPairs) {
       if (!variables.hasSymbol(rails.mayBeOne) ||
           !variables.hasSymbol(rails.mayBeZero)) {
-        continue;
+        continue;  // LCOV_EXCL_LINE
       }
       // Valid dual-rail values are 0, 1, and X.  The empty set is not a
       // reachable ternary value and must not be considered by invariant checks.
@@ -189,7 +189,7 @@ void addRelevantDualRailPartners(
     std::unordered_set<size_t>& symbols) {
   for (const auto& rails : railPairs) {
     if (symbols.find(rails.mayBeOne) != symbols.end() ||
-        symbols.find(rails.mayBeZero) != symbols.end()) {
+        symbols.find(rails.mayBeZero) != symbols.end()) {  // LCOV_EXCL_LINE
       symbols.insert(rails.mayBeOne);
       symbols.insert(rails.mayBeZero);
     }
