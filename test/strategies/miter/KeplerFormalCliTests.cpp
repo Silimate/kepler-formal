@@ -1853,11 +1853,35 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAccepted) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, ConfigSecDefaultsToDualRailXMode) {
+  SecBoundaryAbstractionGuard boundaryGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto logPath = fixture.tmpDir / "default_sec_x_mode.log";
+  // Intentionally omit sec_x_mode here: this is the regression that guards the
+  // user-visible SEC default. Other SEC tests spell out the mode they need.
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: sec\n"
+      "max_k: 4\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto contents = readFileContents(logPath);
+  EXPECT_NE(contents.find("SEC X mode: dual_rail_steady"), std::string::npos);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -1868,6 +1892,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithPdrEngine) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "sec_engine: pdr\n"
       "max_k: 4\n"
       "input_paths:\n"
@@ -1884,6 +1909,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithLegacyEngine) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "sec_engine: legacy\n"
       "max_k: 4\n"
       "input_paths:\n"
@@ -1900,6 +1926,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithKInductionEngine) 
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "sec_engine: k_induction\n"
       "max_k: 4\n"
       "input_paths:\n"
@@ -1916,6 +1943,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithImcEngine) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "sec_engine: imc\n"
       "max_k: 4\n"
       "input_paths:\n"
@@ -1933,6 +1961,7 @@ TEST_F(KeplerFormalCliTests,
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1952,6 +1981,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecUnsupportedMismatchLogUsesUnsupportedResul
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -1976,6 +2006,7 @@ TEST_F(KeplerFormalCliTests,
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 2\n"
       "sec_uncomputable_seq_as_boundary: false\n"
       "input_paths:\n"
@@ -1994,6 +2025,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecIgnoresRenamedInternalState) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2022,6 +2054,7 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecVerificationAccepted) {
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2051,6 +2084,7 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesMo
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "compact_mode: true\n"
       "max_k: 4\n"
       "sv_design1_top: top\n"
@@ -2078,6 +2112,7 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesMo
   const auto flistCfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "compact_mode: true\n"
       "max_k: 4\n"
       "sv_design1_flist: " + flistPath.string() + "\n"
@@ -2142,6 +2177,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationWritesDefaultLog) {
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2190,6 +2226,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2220,6 +2257,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecDifferenceLogIncludesWitnessDetails) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2263,6 +2301,7 @@ TEST_F(KeplerFormalCliTests, ConfigTinyRocketSecVerificationAccepted) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 1\n"
       "input_paths:\n"
       "  - " + design.string() + "\n"
@@ -2282,6 +2321,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecCompactModeAccepted) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "compact_mode: true\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2297,6 +2337,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecCompactIdenticalInputReusesExtractedModel)
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "compact_mode: true\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2320,6 +2361,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecRejectsScopeExtraction) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "use_scopes: true\n"
       "input_paths:\n"
@@ -2335,6 +2377,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecRejectsCnfExport) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "cnf_export: true\n"
       "input_paths:\n"
@@ -2351,6 +2394,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecAcceptsSkippedPoReporting) {
   const auto cfgPath = writeTempConfig(
       "format: naja_if\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "report_skipped_pos: true\n"
       "input_paths:\n"
@@ -2499,6 +2543,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "log_file: " + (blockedParent / "sec.log").string() + "\n"
       "input_paths:\n"
@@ -2529,6 +2574,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecContinuesWhenLogFilePathIsDirectory) {
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 4\n"
       "log_file: " + fixture.tmpDir.string() + "\n"
       "input_paths:\n"
@@ -2548,12 +2594,15 @@ TEST_F(KeplerFormalCliTests, CliSecVerificationAcceptedBeforeFormat) {
   std::string argv2 = "sec";
   std::string argv3 = "-k";
   std::string argv4 = "4";
-  std::string argv5 = "-naja_if";
-  std::string argv6 = fixture.design0IfPath.string();
-  std::string argv7 = fixture.design1IfPath.string();
+  std::string argv5 = "--sec-x-mode";
+  std::string argv6 = "binary";
+  std::string argv7 = "-naja_if";
+  std::string argv8 = fixture.design0IfPath.string();
+  std::string argv9 = fixture.design1IfPath.string();
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
-                  argv4.data(), argv5.data(), argv6.data(), argv7.data()};
-  int argc = 8;
+                  argv4.data(), argv5.data(), argv6.data(), argv7.data(),
+                  argv8.data(), argv9.data()};
+  int argc = 10;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -2568,6 +2617,8 @@ TEST_F(KeplerFormalCliTests, CliSecEngineAcceptedBeforeFormat) {
                    "sec",
                    "-k",
                    "4",
+                   "--sec-x-mode",
+                   "binary",
                    "--sec-engine",
                    "pdr",
                    "-naja_if",
@@ -2586,6 +2637,8 @@ TEST_F(KeplerFormalCliTests, CliKInductionSecEngineAcceptedBeforeFormat) {
                    "sec",
                    "-k",
                    "4",
+                   "--sec-x-mode",
+                   "binary",
                    "--sec-engine",
                    "k_induction",
                    "-naja_if",
@@ -2604,6 +2657,8 @@ TEST_F(KeplerFormalCliTests, CliImcSecEngineAcceptedBeforeFormat) {
                    "sec",
                    "-k",
                    "4",
+                   "--sec-x-mode",
+                   "binary",
                    "--sec-engine",
                    "imc",
                    "-naja_if",
@@ -2728,6 +2783,8 @@ TEST_F(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedBeforeFormat) {
                    "sec",
                    "-k",
                    "4",
+                   "--sec-x-mode",
+                   "binary",
                    "--sec-uncomputable-seq-boundary",
                    "-naja_if",
                    fixture.design0IfPath.string(),
@@ -2747,6 +2804,8 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedBeforeFormat) {
                    "sec",
                    "-k",
                    "4",
+                   "--sec-x-mode",
+                   "binary",
                    "--no-sec-uncomputable-seq-boundary",
                    "-naja_if",
                    fixture.design0IfPath.string(),
@@ -2828,6 +2887,8 @@ TEST_F(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedAfterFormat) {
                    "sec",
                    "-k",
                    "4",
+                   "--sec-x-mode",
+                   "binary",
                    "--sec-uncomputable-seq-boundary",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -2847,6 +2908,8 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedAfterFormat) {
                    "sec",
                    "-k",
                    "4",
+                   "--sec-x-mode",
+                   "binary",
                    "--no-sec-uncomputable-seq-boundary",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -2874,6 +2937,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 0\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2900,6 +2964,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecUnsupportedMismatchFails) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
       "verification: sec\n"
+      "sec_x_mode: binary\n"
       "max_k: 1\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"

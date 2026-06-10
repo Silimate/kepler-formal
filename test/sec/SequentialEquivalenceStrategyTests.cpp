@@ -1516,6 +1516,23 @@ class SequentialEquivalenceStrategyTests : public ::testing::Test {
   }
 };
 
+SequentialEquivalenceStrategy makeBinarySecStrategy(
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    SecEngine engine = SecEngine::Legacy) {
+  return SequentialEquivalenceStrategy(
+      top0,
+      top1,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      engine,
+      SecXMode::Binary);
+}
+
+SequentialEquivalenceStrategy makeBinaryExtractedSecStrategy(
+    SecEngine engine = SecEngine::Legacy) {
+  return makeBinarySecStrategy(nullptr, nullptr, engine);
+}
+
 class ScopedEnvVar {
  public:
   ScopedEnvVar(const char* name, const char* value)
@@ -4259,7 +4276,7 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalent) {
   auto* top0 = createDffTop(library, "top0", invModel, false, false);
   auto* top1 = createDffTop(library, "top1", invModel, false, false);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4278,11 +4295,7 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithP
   auto* top1 =
       createDffTop(library, "top1", invModel, false, false, "in", "out", "ff1");
 
-  SequentialEquivalenceStrategy strategy(
-      top0,
-      top1,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr);
+  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::Pdr);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4302,11 +4315,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 =
       createDffTop(library, "top1", invModel, false, false, "in", "out", "ff1");
 
-  SequentialEquivalenceStrategy strategy(
-      top0,
-      top1,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction);
+  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4325,11 +4334,7 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithI
   auto* top1 =
       createDffTop(library, "top1", invModel, false, false, "in", "out", "ff1");
 
-  SequentialEquivalenceStrategy strategy(
-      top0,
-      top1,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Imc);
+  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::Imc);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4347,7 +4352,7 @@ TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObserv
   auto* top0 = createDffTop(library, "top0", invModel, false, false);
   auto* top1 = createDffTop(library, "top1", invModel, false, true);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
@@ -4365,7 +4370,7 @@ TEST_F(SequentialEquivalenceStrategyTests, NextStateMismatchFailsAtOneStep) {
   auto* top0 = createDffTop(library, "top0", invModel, false, false);
   auto* top1 = createDffTop(library, "top1", invModel, true, false);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
@@ -4380,7 +4385,7 @@ TEST_F(SequentialEquivalenceStrategyTests, DffeHoldSemanticsAreProved) {
   auto* top0 = createDffeTop(library, "top0");
   auto* top1 = createDffeTop(library, "top1");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4401,7 +4406,7 @@ TEST_F(SequentialEquivalenceStrategyTests, ComplementedStateOutputsRemainConsist
   auto* top1 =
       createComplementedOutputTop(library, "top1", dffQnModel, invModel, true);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4419,7 +4424,7 @@ TEST_F(SequentialEquivalenceStrategyTests, EquivalentDesignsWithRenamedStateAreA
   auto* top0 = createDffTop(library, "top0", invModel, false, false, "state_a");
   auto* top1 = createDffTop(library, "top1", invModel, false, false, "state_b");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4437,7 +4442,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createResetInitializedPipelineTop(
       library, "top1", false, {"right0", "right1", "right2"});
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4453,7 +4458,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
   auto* top1 = createResetInitializedPipelineTop(library, "top1", true);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(4);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
@@ -4469,7 +4474,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
   auto* top1 = createResetInitializedPipelineTop(library, "top1", false);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4487,7 +4492,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createResetInitializedPipelineTop(
       library, "top1", false, {"state_a", "state_b", "state_c"});
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(4);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4509,7 +4514,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 =
       createBootstrapPipelineTop(library, "top1", invModel, andModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4532,7 +4537,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 =
       createResetLoadsInputTop(library, "top1", invModel, andModel, orModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4555,7 +4560,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createResetLoadsInputTwoStageTop(
       library, "top1", invModel, andModel, orModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4597,7 +4602,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createResetLoadsInputShiftPipelineTopWithStages(
       library, "top1", invModel, andModel, orModel, 20);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4619,7 +4624,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 =
       createBootstrapPipelineTopWithStages(library, "top1", invModel, andModel, 12);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -4637,7 +4642,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createResetInitializedShiftPipelineTopWithStages(
       library, "top1", 1);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(6);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
@@ -7999,11 +8004,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   testing::internal::CaptureStdout();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction);
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::KInduction);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
   const std::string stdoutOutput = testing::internal::GetCapturedStdout();
 
@@ -8456,11 +8457,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.observedOutputExprByKey.emplace(good, BoolExpr::Var(5));
   model1.observedOutputExprByKey.emplace(bad, BoolExpr::Var(7));
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction);
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::KInduction);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   // The bad output is top-visible and both state bits have concrete reset
@@ -8526,11 +8523,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.observedOutputExprByKey.emplace(good, BoolExpr::Var(7));
   model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(3));
 
-  SequentialEquivalenceStrategy binaryStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction);
+  auto binaryStrategy = makeBinaryExtractedSecStrategy(SecEngine::KInduction);
   const auto binaryResult = binaryStrategy.runExtractedModels(model0, model1, 1);
   EXPECT_EQ(binaryResult.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(binaryResult.coveredOutputs, 1u);
@@ -8801,11 +8794,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::createFalse());
   model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(5));
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction);
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::KInduction);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   // Binary SEC may only compare top outputs.  If a top output's first
@@ -8880,11 +8869,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
     model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(5));
   }
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr);
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::Pdr);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   // Wide ASIC-style reset proofs use one validated startup certificate instead
@@ -8961,11 +8946,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(7)));
   model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(5));
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr);
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::Pdr);
   // This output is purely combinational even though unrelated state nearby is
   // reset-unanchored.  The conservative state-dependent coverage filter must not
   // drop such top outputs.
@@ -8993,8 +8974,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model0.abstractedSequentialBoundaryDetails.push_back(
       {"u_ff", {stateKey}, model0.allObservedOutputs});
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto strategy = makeBinaryExtractedSecStrategy();
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -9025,8 +9005,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model0.abstractedSequentialBoundaries = {"kept first-side boundary"};
   model1.unsupportedReasons = {"unsupported second side"};
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto strategy = makeBinaryExtractedSecStrategy();
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -9058,8 +9037,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
         key, ConnectivitySkipInfo{origins[i], "right side"});
   }
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto strategy = makeBinaryExtractedSecStrategy();
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -9090,8 +9068,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
   model1.observedOutputExprByKey.clear();
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto strategy = makeBinaryExtractedSecStrategy();
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -9110,8 +9087,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model0.displayNameByKey.emplace(extraKey, "extra[0]");
   model1.displayNameByKey.emplace(extraKey, "extra[0]");
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto strategy = makeBinaryExtractedSecStrategy();
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -9123,8 +9099,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsAcceptsSameValueModelWithoutBuildingSatProblem) {
   const auto model = makeCombinationalExtractedModel(BoolExpr::Var(2));
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto strategy = makeBinaryExtractedSecStrategy();
   const auto result = strategy.runExtractedModels(model, model, 9);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -9148,8 +9123,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   for (const auto& [engine, label] : expected) {
     testing::internal::CaptureStderr();
-    SequentialEquivalenceStrategy strategy(
-        nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT, engine);
+    auto strategy = makeBinaryExtractedSecStrategy(engine);
     const auto result = strategy.runExtractedModels(model0, model1, 1);
     const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -9163,11 +9137,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
   const auto model1 = makeCombinationalExtractedModel(BoolExpr::createTrue());
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction);
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::KInduction);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
@@ -14339,8 +14309,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ASSERT_NE(skipIt, extracted.connectivitySkipInfoByKey.end());
   EXPECT_EQ(skipIt->second.origin, ConnectivitySkipOrigin::MultiClockDomain);
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr, nullptr, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto strategy = makeBinaryExtractedSecStrategy();
   const auto result = strategy.runExtractedModels(extracted, extracted, 1);
   EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
@@ -15760,7 +15729,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createNamedOutputDffTop(library, "top0", invModel, "out0");
   auto* top1 = createNamedOutputDffTop(library, "top1", invModel, "out1");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -15779,7 +15748,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createNamedOutputDffTop(library, "top0", invModel, "out");
   auto* top1 = createExtraOutputDffTop(library, "top1", invModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -15798,7 +15767,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createNamedInputDffTop(library, "top0", invModel, "in0");
   auto* top1 = createNamedInputDffTop(library, "top1", invModel, "in1");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -15819,7 +15788,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createNamedInputDffTop(library, "top0", invModel, "in");
   auto* top1 = createExtraInputDffTop(library, "top1");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -15837,7 +15806,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
   auto* top1 = createResetInitializedPipelineTop(library, "top1", true);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
@@ -15856,7 +15825,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createDffTop(library, "top0", invModel, false, false);
   auto* top1 = createDffTop(library, "top1", invModel, false, false);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(0);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
@@ -15875,7 +15844,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createDffTop(library, "top0", invModel, false, false);
   auto* top1 = createDffTop(library, "top1", invModel, true, false);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
@@ -15908,7 +15877,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createSequentialOutputPairTop(
       library, "top1", unsupportedModel, "STATE", "ALT");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -15933,7 +15902,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15952,7 +15921,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createPartialCoverageNoDriverTop(library, "top0");
   auto* top1 = createPartialCoverageNoDriverTop(library, "top1");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -15973,7 +15942,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createPartialCoverageNoDriverTop(library, "top0");
   auto* top1 = createPartialCoverageDrivenTop(library, "top1");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -15997,7 +15966,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createPartialCoverageMultiDriverTop(library, "top0", invModel);
   auto* top1 = createPartialCoverageMultiDriverTop(library, "top1", invModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -16017,7 +15986,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createPartialCoverageLogicalLoopTop(library, "top0");
   auto* top1 = createPartialCoverageLogicalLoopTop(library, "top1");
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
@@ -16042,7 +16011,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createDffTop(library, "top0", invModel, false, false);
   auto* top1 = createDffTop(library, "top1", invModel, false, false);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   auto hasRole = [&](const char* design, const char* signal, const char* role) {
@@ -16077,7 +16046,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createOpaqueBoundaryTop(library, "top0", opaqueModel);
   auto* top1 = createOpaqueBoundaryTop(library, "top1", opaqueModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   auto hasRole = [&](const char* design, const char* signal, const char* role) {
@@ -16115,7 +16084,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 =
       createUnsupportedPrimitiveCoverageTop(library, "top1", unsupportedModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   auto hasRole = [&](const char* design, const char* signal, const char* role) {
@@ -16160,7 +16129,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 =
       createUnsupportedPrimitiveCoverageTop(library, "top1", unsupportedModel);
 
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
@@ -16183,7 +16152,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
   const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
@@ -16335,11 +16304,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.displayNameByKey.emplace(out1, "out[0]");
   model1.observedOutputExprByKey.emplace(out1, BoolExpr::Var(42));
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Imc);
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::Imc);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
   // Same local variable ID, different extracted designs: this support is not a

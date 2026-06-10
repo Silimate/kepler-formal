@@ -16,7 +16,10 @@ config_path="$4"
 expectation=""
 max_k_override=""
 compact_mode=""
-sec_x_mode="${SEC_X_MODE:-}"
+# The CLI default is dual-rail SEC.  This regression helper keeps the
+# historical binary workflow behavior unless a caller explicitly opts into
+# dual_rail_steady, which prevents old regressions from silently changing mode.
+sec_x_mode="${SEC_X_MODE:-binary}"
 # By default the helper is useful for local all-engine smoke checks.  CI passes
 # engine=<name> from the split regress workflows so each job owns one strategy.
 engines=(k_induction imc pdr)

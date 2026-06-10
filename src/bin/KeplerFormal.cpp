@@ -57,13 +57,13 @@ static const char* kSkippedMultiClockDomainPOReport =
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
-      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
+      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|default|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] "
+      "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|default|dual_rail_steady>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
-      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] "
+      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|default|dual_rail_steady>] "
       "[--design1 <file...>] [--design2 <file...>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
@@ -162,15 +162,19 @@ static const char* secEngineName(KEPLER_FORMAL::SEC::SecEngine engine) {
 static bool parseSecXModeToken(const std::string& token,
                                KEPLER_FORMAL::SEC::SecXMode& mode,
                                std::string& error) {
-  if (token == "binary" || token == "default") {
+  if (token == "binary") {
     mode = KEPLER_FORMAL::SEC::SecXMode::Binary;  // LCOV_EXCL_LINE
+    return true;  // LCOV_EXCL_LINE
+  }
+  if (token == "default") {
+    mode = KEPLER_FORMAL::SEC::SecXMode::DualRailSteady;  // LCOV_EXCL_LINE
     return true;  // LCOV_EXCL_LINE
   }
   if (token == "dual_rail_steady") {
     mode = KEPLER_FORMAL::SEC::SecXMode::DualRailSteady;
     return true;
   }
-  error = "expected binary or dual_rail_steady, got `" + token + "`";
+  error = "expected binary, default, or dual_rail_steady, got `" + token + "`";
   return false;
 }
 
@@ -729,7 +733,8 @@ int KeplerFormalMain(int argc, char** argv) {
   std::string logLevel = "info";
   VerificationMode verificationMode = VerificationMode::LEC;
   KEPLER_FORMAL::SEC::SecEngine secEngine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
-  KEPLER_FORMAL::SEC::SecXMode secXMode = KEPLER_FORMAL::SEC::SecXMode::Binary;
+  KEPLER_FORMAL::SEC::SecXMode secXMode =
+      KEPLER_FORMAL::SEC::SecXMode::DualRailSteady;
   bool secEngineExplicit = false;
   bool secXModeExplicit = false;
   size_t secMaxK = kDefaultSecMaxK;

@@ -12,7 +12,7 @@ on:
       sec_x_mode:
         required: false
         type: string
-        default: ""
+        default: "binary"
 
 env:
   SEC_ENGINE: pdr

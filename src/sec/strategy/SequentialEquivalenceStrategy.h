@@ -76,7 +76,7 @@ class SequentialEquivalenceStrategy {
       KEPLER_FORMAL::Config::SolverType solverType =
           KEPLER_FORMAL::Config::getSolverType(),
       SecEngine secEngine = SecEngine::Legacy,
-      SecXMode xMode = SecXMode::Binary);
+      SecXMode xMode = SecXMode::DualRailSteady);
 
   SequentialEquivalenceResult run(size_t maxK) const;
   SequentialEquivalenceResult runExtractedModels(
