@@ -62,7 +62,7 @@ for option in "${@:5}"; do
 done
 
 case "${sec_x_mode}" in
-  ""|binary|default|dual_rail_steady)
+  ""|binary|dual_rail_steady)
     ;;
   *)
     echo "Invalid SEC X mode override: ${sec_x_mode}" >&2
