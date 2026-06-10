@@ -143,6 +143,18 @@ jobs:
           expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }}
+        mock_alu_expectation="expect-unsupported"
+        if [[ "${SEC_ENCODING}" == "dual_rail_steady" ]]; then
+          mock_alu_expectation="expect-equivalent"
+        fi
+        bash regress/run_sec_strategies_regress.sh \
+          asap7_mock_alu \
+          "${{github.workspace}}/kepler-formal-examples/asap7_mock-alu" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          "${mock_alu_expectation}" \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
         bp_sec_final_expectation="expect-unsupported"
         if [[ "${SEC_ENCODING}" == "dual_rail_steady" ]]; then
           bp_sec_final_expectation="expect-full-coverage"

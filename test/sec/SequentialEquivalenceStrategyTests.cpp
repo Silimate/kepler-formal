@@ -8468,6 +8468,181 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailFallsBackWhenNoOutputIsCovered) {
+  constexpr size_t kStatePairs = 5;
+  constexpr size_t kOutputs = kStatePairs * 2;
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+
+  for (size_t i = 0; i < kStatePairs; ++i) {
+    const SignalKey out = makeSignalKey(
+        "pdrDualRailZeroCoveredOutQ" + std::to_string(i));
+    const SignalKey outN = makeSignalKey(
+        "pdrDualRailZeroCoveredOutQN" + std::to_string(i));
+    const SignalKey state0 = makeSignalKey(
+        "pdrDualRailZeroCoveredState0" + std::to_string(i));
+    const SignalKey state1 = makeSignalKey(
+        "pdrDualRailZeroCoveredState1" + std::to_string(i));
+    const size_t state0Var = 200 + i;
+    const size_t state1Var = 300 + i;
+    const std::string outputName =
+        "zero_covered_out[" + std::to_string(i) + "]";
+    const std::string outputNName =
+        "zero_covered_out_n[" + std::to_string(i) + "]";
+
+    model0.allObservedOutputs.push_back(out);
+    model0.allObservedOutputs.push_back(outN);
+    model0.observedOutputs.push_back(out);
+    model0.observedOutputs.push_back(outN);
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model1.allObservedOutputs.push_back(outN);
+    model1.observedOutputs.push_back(outN);
+    model0.displayNameByKey.emplace(out, outputName);
+    model0.displayNameByKey.emplace(outN, outputNName);
+    model1.displayNameByKey.emplace(out, outputName);
+    model1.displayNameByKey.emplace(outN, outputNName);
+    addStateBitForTest(
+        model0,
+        state0,
+        state0Var,
+        "left_zero_covered_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(state0Var));
+    addStateBitForTest(
+        model1,
+        state1,
+        state1Var,
+        "right_zero_covered_q[" + std::to_string(i) + "]",
+        BoolExpr::Not(BoolExpr::Var(state1Var)));
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(state0Var));
+    model0.observedOutputExprByKey.emplace(
+        outN, BoolExpr::Not(BoolExpr::Var(state0Var)));
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(state1Var));
+    model1.observedOutputExprByKey.emplace(
+        outN, BoolExpr::Not(BoolExpr::Var(state1Var)));
+  }
+
+  const ScopedEnvVar pdrQueryBudget(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PROJECTED_QUERY_BUDGET", "1");
+  const ScopedEnvVar pdrFinalBudget(
+      "KEPLER_SEC_PDR_DUAL_RAIL_FINAL_QUERY_BUDGET", "1");
+  const ScopedEnvVar pdrClosureLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_BATCH_CLOSURE_LIMIT", "1");
+  const ScopedEnvVar predecessorDecisionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // PDR can be resource-limited on every resetless rail output.  When neither
+  // PDR nor the residual certificate proves a top output, SEC must stay
+  // inconclusive instead of reporting a vacuous zero-output equivalence.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, kOutputs);
+  EXPECT_NE(
+      result.reason.find("Dual-rail PDR did not prove any observed output"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find(
+          "dual-rail PDR proved no observed outputs; trying k-induction"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailResidualFallbackCoversTopOutputs) {
+  constexpr size_t kDummyStatesPerDesign = 1024;
+  const SignalKey out0 = makeSignalKey("pdrDualRailFallbackOut0");
+  const SignalKey out1 = makeSignalKey("pdrDualRailFallbackOut1");
+  const SignalKey state0 = makeSignalKey("pdrDualRailFallbackState0");
+  const SignalKey state1 = makeSignalKey("pdrDualRailFallbackState1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {state0};
+  model0.allObservedOutputs = {out0, out1};
+  model0.observedOutputs = {out0, out1};
+  model0.inputVarByKey.emplace(state0, 2);
+  model0.displayNameByKey.emplace(out0, "fallback_out[0]");
+  model0.displayNameByKey.emplace(out1, "fallback_out[1]");
+  model0.displayNameByKey.emplace(state0, "left_fallback_q[0]");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+  model0.observedOutputExprByKey.emplace(out0, BoolExpr::Var(2));
+  model0.observedOutputExprByKey.emplace(out1, BoolExpr::Not(BoolExpr::Var(2)));
+
+  SequentialDesignModel model1;
+  model1.stateBits = {state1};
+  model1.allObservedOutputs = {out0, out1};
+  model1.observedOutputs = {out0, out1};
+  model1.inputVarByKey.emplace(state1, 3);
+  model1.displayNameByKey.emplace(out0, "fallback_out[0]");
+  model1.displayNameByKey.emplace(out1, "fallback_out[1]");
+  model1.displayNameByKey.emplace(state1, "right_fallback_q[0]");
+  model1.nextStateExprByStateKey.emplace(
+      state1, BoolExpr::Not(BoolExpr::Var(3)));
+  model1.observedOutputExprByKey.emplace(out0, BoolExpr::Var(3));
+  model1.observedOutputExprByKey.emplace(out1, BoolExpr::Not(BoolExpr::Var(3)));
+
+  for (size_t i = 0; i < kDummyStatesPerDesign; ++i) {
+    const SignalKey dummy0 =
+        makeSignalKey("pdrDualRailFallbackDummy0" + std::to_string(i));
+    const SignalKey dummy1 =
+        makeSignalKey("pdrDualRailFallbackDummy1" + std::to_string(i));
+    const size_t dummy0Var = 10 + i;
+    const size_t dummy1Var = 2000 + i;
+    // The dummies bypass the small-design PDR precheck while staying outside
+    // the top-output COI, matching the MockAlu resetless-output failure mode.
+    addStateBitForTest(
+        model0,
+        dummy0,
+        dummy0Var,
+        "left_fallback_dummy_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(dummy0Var));
+    addStateBitForTest(
+        model1,
+        dummy1,
+        dummy1Var,
+        "right_fallback_dummy_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(dummy1Var));
+  }
+
+  const ScopedEnvVar pdrQueryBudget(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PROJECTED_QUERY_BUDGET", "1");
+  const ScopedEnvVar pdrFinalBudget(
+      "KEPLER_SEC_PDR_DUAL_RAIL_FINAL_QUERY_BUDGET", "1");
+  const ScopedEnvVar pdrClosureLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_BATCH_CLOSURE_LIMIT", "1");
+  const ScopedEnvVar predecessorDecisionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 2u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  EXPECT_NE(
+      stderrOutput.find(
+          "dual-rail PDR proved no observed outputs; trying k-induction"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsSkipsResetUnanchoredStateDependentOutputs) {
   const SignalKey rst = makeSignalKey("skipResetUnanchoredRst");
   const SignalKey data = makeSignalKey("skipResetUnanchoredData");

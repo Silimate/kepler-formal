@@ -121,6 +121,16 @@ jobs:
           6_final_sec_test.yml \
           expect-identical
 
+    - name: Run asap7_mock_alu
+      working-directory: ${{github.workspace}}
+      run: |
+        bash regress/run_cnf_regress.sh \
+          asap7_mock_alu \
+          "${{github.workspace}}/kepler-formal-examples/asap7_mock-alu" \
+          "${{github.workspace}}/build/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-identical
+
 
 
     - name: Run on naja if
