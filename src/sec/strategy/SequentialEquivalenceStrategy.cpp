@@ -2829,15 +2829,6 @@ SequentialEquivalenceResult runPdrSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
-  if (problem.usesDualRailStateEncoding && dualRailFullCoverageOnlyMode()) {
-    return runDualRailFullCoverageOnlyCheck(
-        problem,
-        solverType,
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-
   // PDR still needs the cheap frame-0 mismatch check before growing frames, but
   // it should not invoke the full k-induction top engine with max_k=0.  A
   // bounded engine run at k=0 is necessarily inconclusive for sequential

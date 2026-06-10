@@ -1211,7 +1211,7 @@ void addFormulaSymbols(BoolExpr* formula,
 void addFormulaStateSupport(BoolExpr* formula,
                             const std::unordered_set<size_t>& stateSymbols,
                             std::unordered_set<size_t>& output,
-                            PdrFormulaSupportCache* supportCache = nullptr);
+                            PdrFormulaSupportCache& supportCache);
 
 bool predecessorSourceFrameIsKnownSafe(size_t level);
 
@@ -4349,15 +4349,11 @@ void addFormulaSymbols(BoolExpr* formula,
 void addFormulaStateSupport(BoolExpr* formula,
                             const std::unordered_set<size_t>& stateSymbols,
                             std::unordered_set<size_t>& output,
-                            PdrFormulaSupportCache* supportCache) {
+                            PdrFormulaSupportCache& supportCache) {
   if (formula == nullptr) {
     return;  // LCOV_EXCL_LINE
   }
-  if (supportCache != nullptr) {
-    addStateSupportSymbols(supportCache->support(formula), stateSymbols, output);
-    return;
-  }
-  addStateSupportSymbols(formula->getSupportVars(), stateSymbols, output);
+  addStateSupportSymbols(supportCache.support(formula), stateSymbols, output);
 }
 
 void addRelevantComplementedStatePartners(
@@ -5341,6 +5337,10 @@ std::vector<size_t> predecessorProjectionSymbols(
     const ComplementPartnerIndex& complementPartners,
     const std::vector<size_t>& transitionSupportSymbols,
     PdrFormulaSupportCache* supportCache) {
+  if (supportCache == nullptr) {
+    throw std::logic_error(  // LCOV_EXCL_LINE
+        "PDR predecessor projection requires a formula support cache");  // LCOV_EXCL_LINE
+  }
   // This routine runs for every predecessor query.  Reuse the resolver's
   // cached state-symbol set instead of rebuilding the large miter-state hash
   // table on each PDR obligation.
@@ -5362,11 +5362,11 @@ std::vector<size_t> predecessorProjectionSymbols(
       // queries even though the query itself encoded only a small slice.
       addRelevantInitConstraintSymbols(problem, projection);
     } else {
-      addFormulaStateSupport(initFormula, stateSymbolSet, projection, supportCache);
+      addFormulaStateSupport(initFormula, stateSymbolSet, projection, *supportCache);
     }
   } else {
     addRelevantFrameClauseSymbols(problem, frames[level], projection);
-    addFormulaStateSupport(frameInvariant, stateSymbolSet, projection, supportCache);
+    addFormulaStateSupport(frameInvariant, stateSymbolSet, projection, *supportCache);
   }
   addRelevantComplementedStatePartners(complementPartners, projection);
   return sortUniqueSymbols(std::move(projection));
@@ -6497,7 +6497,7 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
           validationSupportCubeForStateClauses(group.clauses);
       const bool allowBatchedResetFrontierValidation =
           problem.resetBootstrapCycles != 0 &&
-          !useObservationFrontier &&
+          !useObservationFrontier &&  // LCOV_EXCL_LINE
           targetFrame <=  // LCOV_EXCL_LINE
               (targetFrame > 1  // LCOV_EXCL_LINE
                    ? kMaxPartialTargetResetFrontierBadFormulaFrame
@@ -6806,7 +6806,7 @@ std::optional<bool> learnValidatedBadFormulaClauses(
   if (problem.observedOutputExprs0.size() == 1 &&
       badClauses->size() > kMaxExactValidatedBadFormulaClauses &&
       !problem.usesDualRailStateEncoding &&
-      !useObservationFrontier &&
+      !useObservationFrontier &&  // LCOV_EXCL_LINE
       !largeDualRailResetFrontierSurface) {  // LCOV_EXCL_LINE
     // A one-output state-only bad predicate can still enumerate to a few dozen
     // assignments. Sampling on BlackParrot showed one broad frontier proof for

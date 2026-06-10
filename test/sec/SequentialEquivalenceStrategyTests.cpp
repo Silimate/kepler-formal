@@ -8076,25 +8076,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
       makeSignalKey("pdrDualRailFullCoverageState0");
   const SignalKey state1 =
       makeSignalKey("pdrDualRailFullCoverageState1");
+  const SignalKey irrelevantState0 =
+      makeSignalKey("pdrDualRailFullCoverageIrrelevantState0");
+  const SignalKey irrelevantState1 =
+      makeSignalKey("pdrDualRailFullCoverageIrrelevantState1");
 
   SequentialDesignModel model0;
-  model0.stateBits = {state0};
+  model0.stateBits = {state0, irrelevantState0};
   model0.allObservedOutputs = {resetlessOut};
   model0.observedOutputs = {resetlessOut};
   model0.inputVarByKey.emplace(state0, 2);
+  model0.inputVarByKey.emplace(irrelevantState0, 4);
   model0.displayNameByKey.emplace(resetlessOut, "resetless_out[0]");
   model0.displayNameByKey.emplace(state0, "left_resetless_state[0]");
+  model0.displayNameByKey.emplace(
+      irrelevantState0, "left_irrelevant_initialized_state[0]");
+  model0.initialStateValueByKey.emplace(irrelevantState0, false);
   model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+  model0.nextStateExprByStateKey.emplace(irrelevantState0, BoolExpr::Var(4));
   model0.observedOutputExprByKey.emplace(resetlessOut, BoolExpr::Var(2));
 
   SequentialDesignModel model1;
-  model1.stateBits = {state1};
+  model1.stateBits = {state1, irrelevantState1};
   model1.allObservedOutputs = {resetlessOut};
   model1.observedOutputs = {resetlessOut};
   model1.inputVarByKey.emplace(state1, 3);
+  model1.inputVarByKey.emplace(irrelevantState1, 5);
   model1.displayNameByKey.emplace(resetlessOut, "resetless_out[0]");
   model1.displayNameByKey.emplace(state1, "right_resetless_state[0]");
+  model1.displayNameByKey.emplace(
+      irrelevantState1, "right_irrelevant_initialized_state[0]");
+  model1.initialStateValueByKey.emplace(irrelevantState1, true);
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(3));
+  model1.nextStateExprByStateKey.emplace(irrelevantState1, BoolExpr::Var(5));
   model1.observedOutputExprByKey.emplace(resetlessOut, BoolExpr::Var(3));
 
   const ScopedEnvVar fullCoverageMode(
@@ -8143,6 +8157,33 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(imcResult.totalOutputs, 1u);
   EXPECT_TRUE(imcResult.skippedObservedOutputs.empty());
 
+  const SignalKey equalOut =
+      makeSignalKey("pdrDualRailFullCoverageEqualOut");
+  SequentialDesignModel equal0;
+  equal0.allObservedOutputs = {equalOut};
+  equal0.observedOutputs = {equalOut};
+  equal0.displayNameByKey.emplace(equalOut, "equal_out[0]");
+  equal0.observedOutputExprByKey.emplace(equalOut, BoolExpr::createTrue());
+
+  SequentialDesignModel equal1;
+  equal1.allObservedOutputs = {equalOut};
+  equal1.observedOutputs = {equalOut};
+  equal1.displayNameByKey.emplace(equalOut, "equal_out[0]");
+  equal1.observedOutputExprByKey.emplace(equalOut, BoolExpr::createTrue());
+
+  SequentialEquivalenceStrategy equalStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecXMode::DualRailSteady);
+  const auto equalResult = equalStrategy.runExtractedModels(equal0, equal1, 8);
+
+  EXPECT_EQ(equalResult.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(equalResult.coveredOutputs, 1u);
+  EXPECT_EQ(equalResult.totalOutputs, 1u);
+  EXPECT_TRUE(equalResult.skippedObservedOutputs.empty());
+
   const SignalKey mismatchOut =
       makeSignalKey("pdrDualRailFullCoverageMismatchOut");
   SequentialDesignModel mismatch0;
@@ -8172,6 +8213,83 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       mismatchResult.reason.find("mismatch_out[0]"),
       std::string::npos);
+
+  const SignalKey wideState0 =
+      makeSignalKey("pdrDualRailFullCoverageWideState0");
+  const SignalKey wideState1 =
+      makeSignalKey("pdrDualRailFullCoverageWideState1");
+  const SignalKey wideStateOutput =
+      makeSignalKey("pdrDualRailFullCoverageWideStateOutput");
+  std::vector<SignalKey> wideMismatchOutputs;
+  for (size_t i = 0; i < 10; ++i) {
+    wideMismatchOutputs.push_back(
+        makeSignalKey("pdrDualRailFullCoverageWideMismatchOut" +
+                      std::to_string(i)));
+  }
+
+  SequentialDesignModel wideMismatch0;
+  wideMismatch0.stateBits = {wideState0};
+  wideMismatch0.allObservedOutputs = wideMismatchOutputs;
+  wideMismatch0.allObservedOutputs.push_back(wideStateOutput);
+  wideMismatch0.observedOutputs = wideMismatchOutputs;
+  wideMismatch0.observedOutputs.push_back(wideStateOutput);
+  wideMismatch0.inputVarByKey.emplace(wideState0, 6);
+  wideMismatch0.displayNameByKey.emplace(
+      wideState0, "left_wide_structural_state[0]");
+  wideMismatch0.initialStateValueByKey.emplace(wideState0, false);
+  wideMismatch0.nextStateExprByStateKey.emplace(wideState0, BoolExpr::Var(6));
+  for (size_t i = 0; i < wideMismatchOutputs.size(); ++i) {
+    const SignalKey& output = wideMismatchOutputs[i];
+    wideMismatch0.displayNameByKey.emplace(
+        output, "wide_mismatch_out[" + std::to_string(i) + "]");
+    wideMismatch0.observedOutputExprByKey.emplace(
+        output, BoolExpr::createTrue());
+  }
+  wideMismatch0.displayNameByKey.emplace(
+      wideStateOutput, "z_equal_state_out[0]");
+  wideMismatch0.observedOutputExprByKey.emplace(
+      wideStateOutput, BoolExpr::Var(6));
+
+  SequentialDesignModel wideMismatch1;
+  wideMismatch1.stateBits = {wideState1};
+  wideMismatch1.allObservedOutputs = wideMismatchOutputs;
+  wideMismatch1.allObservedOutputs.push_back(wideStateOutput);
+  wideMismatch1.observedOutputs = wideMismatchOutputs;
+  wideMismatch1.observedOutputs.push_back(wideStateOutput);
+  wideMismatch1.inputVarByKey.emplace(wideState1, 7);
+  wideMismatch1.displayNameByKey.emplace(
+      wideState1, "right_wide_structural_state[0]");
+  wideMismatch1.initialStateValueByKey.emplace(wideState1, false);
+  wideMismatch1.nextStateExprByStateKey.emplace(wideState1, BoolExpr::Var(7));
+  for (size_t i = 0; i < wideMismatchOutputs.size(); ++i) {
+    const SignalKey& output = wideMismatchOutputs[i];
+    wideMismatch1.displayNameByKey.emplace(
+        output, "wide_mismatch_out[" + std::to_string(i) + "]");
+    wideMismatch1.observedOutputExprByKey.emplace(
+        output, BoolExpr::createFalse());
+  }
+  wideMismatch1.displayNameByKey.emplace(
+      wideStateOutput, "z_equal_state_out[0]");
+  wideMismatch1.observedOutputExprByKey.emplace(
+      wideStateOutput, BoolExpr::Var(7));
+
+  SequentialEquivalenceStrategy wideMismatchStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecXMode::DualRailSteady);
+  const auto wideMismatchResult =
+      wideMismatchStrategy.runExtractedModels(wideMismatch0, wideMismatch1, 8);
+
+  EXPECT_EQ(wideMismatchResult.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(wideMismatchResult.coveredOutputs, 11u);
+  EXPECT_EQ(wideMismatchResult.totalOutputs, 11u);
+  EXPECT_NE(
+      wideMismatchResult.reason.find(
+          "wide_mismatch_out[0], wide_mismatch_out[1]"),
+      std::string::npos);
+  EXPECT_NE(wideMismatchResult.reason.find(", ..."), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
