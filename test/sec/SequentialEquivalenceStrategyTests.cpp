@@ -40,6 +40,7 @@
 #include "common/BoolExprUtils.h"
 #include "common/PrivateProofSymbol.h"
 #include "common/ProofProblemDebug.h"
+#include "common/SecDiag.h"
 #include "imc/ExactInterpolantSynthesizer.h"
 #include "imc/IMCEngine.h"
 #include "kinduction/KInductionEngine.h"
@@ -1544,6 +1545,29 @@ class ScopedEnvVar {
   }
 
   ~ScopedEnvVar() {
+    if (previousValue_.has_value()) {
+      setenv(name_, previousValue_->c_str(), 1);
+    } else {
+      unsetenv(name_);
+    }
+  }
+
+ private:
+  const char* name_;
+  std::optional<std::string> previousValue_;
+};
+
+class ScopedUnsetEnvVar {
+ public:
+  explicit ScopedUnsetEnvVar(const char* name)
+      : name_(name) {
+    if (const char* current = std::getenv(name_); current != nullptr) {
+      previousValue_ = current;
+    }
+    unsetenv(name_);
+  }
+
+  ~ScopedUnsetEnvVar() {
     if (previousValue_.has_value()) {
       setenv(name_, previousValue_->c_str(), 1);
     } else {
@@ -4264,6 +4288,35 @@ void expectAllExpressionSupportIsPublished(const SequentialDesignModel& model) {
 }
 
 }  // namespace
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       EmitSecDiagIsQuietWithoutDiagnosticEnvironment) {
+  const ScopedUnsetEnvVar secDiag("KEPLER_SEC_DIAG");
+  const ScopedUnsetEnvVar kiDiag("KEPLER_SEC_KI_DIAG");
+  const ScopedUnsetEnvVar resetShortcutDiag(
+      "KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG");
+  const ScopedUnsetEnvVar pdrStats("KEPLER_SEC_PDR_STATS");
+  const ScopedUnsetEnvVar pdrTrace("KEPLER_SEC_PDR_TRACE");
+  const ScopedUnsetEnvVar summaryStats("KEPLER_SEC_SUMMARY_STATS");
+
+  testing::internal::CaptureStderr();
+  emitSecDiag("SEC diag: should stay quiet");
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_TRUE(stderrOutput.empty()) << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       EmitSecDiagWritesWithDiagnosticEnvironment) {
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  emitSecDiag("SEC diag: visible ", 42);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(stderrOutput.find("SEC diag: visible 42"), std::string::npos)
+      << stderrOutput;
+}
 
 TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalent) {
   NLUniverse::create();
