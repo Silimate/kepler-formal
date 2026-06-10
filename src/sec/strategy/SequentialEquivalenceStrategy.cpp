@@ -2660,7 +2660,7 @@ KInductionProblem buildDualRailSecProblem(
 
   if (secDiagEnabled || secSummaryStatsEnabled()) {
     printf(
-        "SEC summary: x_mode=dual_rail_steady rail_state_bits=%zu "
+        "SEC summary: encoding=dual_rail_steady rail_state_bits=%zu "
         "rail_outputs=%zu reset_bootstrap_inputs=%zu bootstrap_cycles=%zu "
         "bootstrap_assignments=%zu initial_equalities=%zu "
         "bootstrap_equalities=%zu inductive_equalities=%zu "
@@ -4062,12 +4062,12 @@ SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
     naja::NL::SNLDesign* top1,
     KEPLER_FORMAL::Config::SolverType solverType,
     SecEngine secEngine,
-    SecXMode xMode)
+    SecEncoding encoding)
     : top0_(top0),
       top1_(top1),
       solverType_(solverType),
       secEngine_(secEngine),
-      xMode_(xMode) {}
+      encoding_(encoding) {}
 
 SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) const {
   const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
@@ -4215,7 +4215,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   }  // LCOV_EXCL_LINE
   const AlignedSignals emptyResetBootstrapCandidateStateEqualities;
   const bool skipDualRailResetBootstrapCandidates =
-      xMode_ == SecXMode::DualRailSteady && secEngine_ == SecEngine::Pdr;
+      encoding_ == SecEncoding::DualRailSteady && secEngine_ == SecEngine::Pdr;
   const AlignedSignals& resetBootstrapCandidatesForInvariant =
       skipDualRailResetBootstrapCandidates
           ? emptyResetBootstrapCandidateStateEqualities
@@ -4264,7 +4264,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       abstractedSequentialBoundaries,
       extractedBoundaryReports);
   }
-  if (xMode_ == SecXMode::Binary) {
+  if (encoding_ == SecEncoding::Binary) {
     filterOutputsRequiringUnanchoredResetState(
         model0,
         model1,
@@ -4299,7 +4299,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   const bool useLazyTransitionRemapping =
       secEngine_ == SecEngine::KInduction || secEngine_ == SecEngine::Pdr;
   KInductionProblem proofProblem;
-  if (xMode_ == SecXMode::DualRailSteady) {
+  if (encoding_ == SecEncoding::DualRailSteady) {
     proofProblem = buildDualRailSecProblem(
         model0,
         model1,

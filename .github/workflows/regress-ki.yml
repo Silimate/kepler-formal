@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
-      sec_x_mode:
+      sec_encoding:
         required: false
         type: string
         default: "binary"
 
 env:
   SEC_ENGINE: k_induction
-  SEC_X_MODE: ${{ inputs.sec_x_mode }}
+  SEC_ENCODING: ${{ inputs.sec_encoding }}
 
 jobs:
   build:
@@ -144,7 +144,7 @@ jobs:
           compact \
           engine=${{ env.SEC_ENGINE }}
         bp_sec_final_expectation="expect-unsupported"
-        if [[ "${SEC_X_MODE}" == "dual_rail_steady" ]]; then
+        if [[ "${SEC_ENCODING}" == "dual_rail_steady" ]]; then
           bp_sec_final_expectation="expect-full-coverage"
         fi
         bash regress/run_sec_strategies_regress.sh \

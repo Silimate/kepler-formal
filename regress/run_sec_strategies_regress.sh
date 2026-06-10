@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-x-mode=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
   exit 2
 fi
 
@@ -19,7 +19,7 @@ compact_mode=""
 # The CLI default is dual-rail SEC.  This regression helper keeps the
 # historical binary workflow behavior unless a caller explicitly opts into
 # dual_rail_steady, which prevents old regressions from silently changing mode.
-sec_x_mode="${SEC_X_MODE:-binary}"
+sec_encoding="${SEC_ENCODING:-binary}"
 # By default the helper is useful for local all-engine smoke checks.  CI passes
 # engine=<name> from the split regress workflows so each job owns one strategy.
 engines=(k_induction imc pdr)
@@ -44,8 +44,8 @@ for option in "${@:5}"; do
           ;;
       esac
       ;;
-    sec-x-mode=*|x-mode=*)
-      sec_x_mode="${option#*=}"
+    sec-encoding=*|encoding=*)
+      sec_encoding="${option#*=}"
       ;;
     max-k=*)
       max_k_override="${option#max-k=}"
@@ -61,11 +61,11 @@ for option in "${@:5}"; do
   esac
 done
 
-case "${sec_x_mode}" in
+case "${sec_encoding}" in
   ""|binary|dual_rail_steady)
     ;;
   *)
-    echo "Invalid SEC X mode override: ${sec_x_mode}" >&2
+    echo "Invalid SEC encoding override: ${sec_encoding}" >&2
     exit 2
     ;;
 esac
@@ -93,7 +93,7 @@ run_engine() {
     awk -v max_k_override="${max_k_override}" -v compact_mode="${compact_mode}" '
       /^[[:space:]]*verification:/ { next }
       /^[[:space:]]*sec_engine:/ { next }
-      /^[[:space:]]*sec_x_mode:/ { next }
+      /^[[:space:]]*sec_encoding:/ { next }
       /^[[:space:]]*max_k:/ { next }
       /^[[:space:]]*compact_mode:/ {
         if (compact_mode != "") {
@@ -111,8 +111,8 @@ run_engine() {
       echo
       echo "verification: sec"
       echo "sec_engine: ${engine}"
-      if [[ -n "${sec_x_mode}" ]]; then
-        echo "sec_x_mode: ${sec_x_mode}"
+      if [[ -n "${sec_encoding}" ]]; then
+        echo "sec_encoding: ${sec_encoding}"
       fi
       if [[ -n "${max_k_override}" ]]; then
         echo "max_k: ${max_k_override}"
@@ -133,7 +133,7 @@ run_engine() {
       kepler_env+=(KEPLER_SEC_KI_FRONTIER_FIRST=1)
     fi
     if [[ "${expectation}" == "expect-full-coverage" &&
-          "${sec_x_mode}" == "dual_rail_steady" ]]; then
+          "${sec_encoding}" == "dual_rail_steady" ]]; then
       # Full-coverage regressions check that every top output is modeled and
       # that no concrete counterexample is found.  They do not require the
       # selected engine to spend minutes completing an optional invariant proof.

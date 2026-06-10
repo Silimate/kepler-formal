@@ -1525,7 +1525,7 @@ SequentialEquivalenceStrategy makeBinarySecStrategy(
       top1,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       engine,
-      SecXMode::Binary);
+      SecEncoding::Binary);
 }
 
 SequentialEquivalenceStrategy makeBinaryExtractedSecStrategy(
@@ -8050,7 +8050,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
   const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
@@ -8119,7 +8119,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 8);
 
   // The workflow-only full-coverage mode is not a proof shortcut. It still
@@ -8139,7 +8139,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::KInduction,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto kiResult = kiStrategy.runExtractedModels(model0, model1, 8);
   EXPECT_EQ(kiResult.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(kiResult.coveredOutputs, 1u);
@@ -8151,7 +8151,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Imc,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 8);
   EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(imcResult.coveredOutputs, 1u);
@@ -8177,7 +8177,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto equalResult = equalStrategy.runExtractedModels(equal0, equal1, 8);
 
   EXPECT_EQ(equalResult.status, SequentialEquivalenceStatus::Equivalent);
@@ -8204,7 +8204,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto mismatchResult =
       mismatchStrategy.runExtractedModels(mismatch0, mismatch1, 8);
 
@@ -8279,7 +8279,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto wideMismatchResult =
       wideMismatchStrategy.runExtractedModels(wideMismatch0, wideMismatch1, 8);
 
@@ -8387,7 +8387,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -8538,7 +8538,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::KInduction,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto dualRailResult =
       dualRailStrategy.runExtractedModels(model0, model1, 2);
 
@@ -8601,7 +8601,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
         nullptr,
         KEPLER_FORMAL::Config::SolverType::KISSAT,
         SecEngine::KInduction,
-        SecXMode::DualRailSteady);
+        SecEncoding::DualRailSteady);
     const auto result = strategy.runExtractedModels(model0, model1, 1);
 
     // The constant output is certified by the dual-rail induction core. KI
@@ -8623,7 +8623,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
         nullptr,
         KEPLER_FORMAL::Config::SolverType::KISSAT,
         SecEngine::Pdr,
-        SecXMode::DualRailSteady);
+        SecEncoding::DualRailSteady);
     const auto pdrResult = pdrStrategy.runExtractedModels(model0, model1, 1);
 
     EXPECT_EQ(pdrResult.status, SequentialEquivalenceStatus::Equivalent);
@@ -8645,7 +8645,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
           nullptr,
           KEPLER_FORMAL::Config::SolverType::KISSAT,
           SecEngine::Pdr,
-          SecXMode::DualRailSteady);
+          SecEncoding::DualRailSteady);
       const auto budgetedPdrResult =
           budgetedPdrStrategy.runExtractedModels(model0, model1, 1);
       const std::string stderrOutput =
@@ -8670,7 +8670,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
         nullptr,
         KEPLER_FORMAL::Config::SolverType::KISSAT,
         SecEngine::Imc,
-        SecXMode::DualRailSteady);
+        SecEncoding::DualRailSteady);
     const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 1);
 
     EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Equivalent);
@@ -8693,7 +8693,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
         nullptr,
         KEPLER_FORMAL::Config::SolverType::KISSAT,
         SecEngine::KInduction,
-        SecXMode::DualRailSteady);
+        SecEncoding::DualRailSteady);
     const auto result = strategy.runExtractedModels(model0, model1, 1);
     const std::string stdoutOutput = testing::internal::GetCapturedStdout();
     const std::string stderrOutput = testing::internal::GetCapturedStderr();
@@ -8722,7 +8722,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
         nullptr,
         KEPLER_FORMAL::Config::SolverType::KISSAT,
         SecEngine::Imc,
-        SecXMode::DualRailSteady);
+        SecEncoding::DualRailSteady);
     const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 0);
     const std::string stdoutOutput = testing::internal::GetCapturedStdout();
     const std::string stderrOutput = testing::internal::GetCapturedStderr();
@@ -8747,7 +8747,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 4);
 
@@ -8886,7 +8886,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::KInduction,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto dualRailKiResult =
       dualRailKiStrategy.runExtractedModels(model0, model1, 1);
   EXPECT_EQ(dualRailKiResult.status, SequentialEquivalenceStatus::Equivalent);
@@ -8900,7 +8900,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Imc,
-      SecXMode::DualRailSteady);
+      SecEncoding::DualRailSteady);
   const auto dualRailImcResult =
       dualRailImcStrategy.runExtractedModels(model0, model1, 1);
   EXPECT_EQ(dualRailImcResult.status, SequentialEquivalenceStatus::Equivalent);

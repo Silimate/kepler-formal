@@ -22,7 +22,7 @@ enum class SecEngine {
   Pdr,
 };
 
-enum class SecXMode {
+enum class SecEncoding {
   Binary,
   DualRailSteady,
 };
@@ -76,7 +76,7 @@ class SequentialEquivalenceStrategy {
       KEPLER_FORMAL::Config::SolverType solverType =
           KEPLER_FORMAL::Config::getSolverType(),
       SecEngine secEngine = SecEngine::Legacy,
-      SecXMode xMode = SecXMode::DualRailSteady);
+      SecEncoding encoding = SecEncoding::DualRailSteady);
 
   SequentialEquivalenceResult run(size_t maxK) const;
   SequentialEquivalenceResult runExtractedModels(
@@ -89,7 +89,7 @@ class SequentialEquivalenceStrategy {
   naja::NL::SNLDesign* top1_;
   KEPLER_FORMAL::Config::SolverType solverType_;
   SecEngine secEngine_;
-  SecXMode xMode_;
+  SecEncoding encoding_;
 };
 
 }  // namespace KEPLER_FORMAL::SEC

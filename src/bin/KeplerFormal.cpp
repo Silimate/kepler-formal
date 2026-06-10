@@ -57,13 +57,13 @@ static const char* kSkippedMultiClockDomainPOReport =
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
-      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
+      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
-      "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] "
+      "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
-      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-x-mode <binary|dual_rail_steady>] "
+      "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
       "[--design1 <file...>] [--design2 <file...>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
@@ -159,26 +159,26 @@ static const char* secEngineName(KEPLER_FORMAL::SEC::SecEngine engine) {
   }
 }
 
-static bool parseSecXModeToken(const std::string& token,
-                               KEPLER_FORMAL::SEC::SecXMode& mode,
-                               std::string& error) {
+static bool parseSecEncodingToken(const std::string& token,
+                                  KEPLER_FORMAL::SEC::SecEncoding& encoding,
+                                  std::string& error) {
   if (token == "binary") {
-    mode = KEPLER_FORMAL::SEC::SecXMode::Binary;  // LCOV_EXCL_LINE
+    encoding = KEPLER_FORMAL::SEC::SecEncoding::Binary;  // LCOV_EXCL_LINE
     return true;  // LCOV_EXCL_LINE
   }
   if (token == "dual_rail_steady") {
-    mode = KEPLER_FORMAL::SEC::SecXMode::DualRailSteady;
+    encoding = KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady;
     return true;
   }
   error = "expected binary or dual_rail_steady, got `" + token + "`";
   return false;
 }
 
-static const char* secXModeName(KEPLER_FORMAL::SEC::SecXMode mode) {
-  switch (mode) {
-    case KEPLER_FORMAL::SEC::SecXMode::DualRailSteady:
+static const char* secEncodingName(KEPLER_FORMAL::SEC::SecEncoding encoding) {
+  switch (encoding) {
+    case KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady:
       return "dual_rail_steady";
-    case KEPLER_FORMAL::SEC::SecXMode::Binary:
+    case KEPLER_FORMAL::SEC::SecEncoding::Binary:
     default:
       return "binary";
   }
@@ -279,7 +279,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "verification",
       "max_k",
       "sec_engine",
-      "sec_x_mode",
+      "sec_encoding",
       "sec_uncomputable_seq_as_boundary",
       "input_paths",
       "liberty_files",
@@ -729,10 +729,10 @@ int KeplerFormalMain(int argc, char** argv) {
   std::string logLevel = "info";
   VerificationMode verificationMode = VerificationMode::LEC;
   KEPLER_FORMAL::SEC::SecEngine secEngine = KEPLER_FORMAL::SEC::SecEngine::Legacy;
-  KEPLER_FORMAL::SEC::SecXMode secXMode =
-      KEPLER_FORMAL::SEC::SecXMode::DualRailSteady;
+  KEPLER_FORMAL::SEC::SecEncoding secEncoding =
+      KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady;
   bool secEngineExplicit = false;
-  bool secXModeExplicit = false;
+  bool secEncodingExplicit = false;
   size_t secMaxK = kDefaultSecMaxK;
   bool secMaxKExplicit = false;
   bool secTreatUncomputableSeqAsBoundary = true;
@@ -830,18 +830,18 @@ int KeplerFormalMain(int argc, char** argv) {
           secEngineExplicit = true;
         }
 
-        if (cfg["sec_x_mode"]) {
-          if (!cfg["sec_x_mode"].IsScalar()) {
-            SPDLOG_CRITICAL("sec_x_mode must be a scalar");
+        if (cfg["sec_encoding"]) {
+          if (!cfg["sec_encoding"].IsScalar()) {
+            SPDLOG_CRITICAL("sec_encoding must be a scalar");
             return EXIT_FAILURE;
           }
-          std::string secXModeError;
-          if (!parseSecXModeToken(
-                  cfg["sec_x_mode"].as<std::string>(), secXMode, secXModeError)) {
-            SPDLOG_CRITICAL("Invalid sec_x_mode in config: {}", secXModeError);
+          std::string secEncodingError;
+          if (!parseSecEncodingToken(
+                  cfg["sec_encoding"].as<std::string>(), secEncoding, secEncodingError)) {
+            SPDLOG_CRITICAL("Invalid sec_encoding in config: {}", secEncodingError);
             return EXIT_FAILURE;
           }
-          secXModeExplicit = true;  // LCOV_EXCL_LINE
+          secEncodingExplicit = true;  // LCOV_EXCL_LINE
         }
 
         if (cfg["sec_uncomputable_seq_as_boundary"]) {
@@ -1010,17 +1010,17 @@ int KeplerFormalMain(int argc, char** argv) {
         parseStart += 2;
         continue;
       }
-      if (arg == "--sec-x-mode") {
+      if (arg == "--sec-encoding") {
         if (parseStart + 1 >= argc) {
-          SPDLOG_CRITICAL("Missing SEC X mode after {}", arg);
+          SPDLOG_CRITICAL("Missing SEC encoding after {}", arg);
           return EXIT_FAILURE;
         }
-        std::string secXModeError;
-        if (!parseSecXModeToken(argv[parseStart + 1], secXMode, secXModeError)) {
-          SPDLOG_CRITICAL("Invalid SEC X mode: {}", secXModeError);
+        std::string secEncodingError;
+        if (!parseSecEncodingToken(argv[parseStart + 1], secEncoding, secEncodingError)) {
+          SPDLOG_CRITICAL("Invalid SEC encoding: {}", secEncodingError);
           return EXIT_FAILURE;
         }
-        secXModeExplicit = true;
+        secEncodingExplicit = true;
         parseStart += 2;
         continue;
       }
@@ -1105,17 +1105,17 @@ int KeplerFormalMain(int argc, char** argv) {
         secEngineExplicit = true;
         continue;
       }
-      if (arg == "--sec-x-mode") {
+      if (arg == "--sec-encoding") {
         if (i + 1 >= argc) {
-          SPDLOG_CRITICAL("Missing SEC X mode after {}", arg);
+          SPDLOG_CRITICAL("Missing SEC encoding after {}", arg);
           return EXIT_FAILURE;
         }
-        std::string secXModeError;
-        if (!parseSecXModeToken(argv[++i], secXMode, secXModeError)) {
-          SPDLOG_CRITICAL("Invalid SEC X mode: {}", secXModeError);
+        std::string secEncodingError;
+        if (!parseSecEncodingToken(argv[++i], secEncoding, secEncodingError)) {
+          SPDLOG_CRITICAL("Invalid SEC encoding: {}", secEncodingError);
           return EXIT_FAILURE;
         }
-        secXModeExplicit = true;
+        secEncodingExplicit = true;
         continue;
       }
       if (arg == "--sec-uncomputable-seq-boundary") {
@@ -1260,8 +1260,8 @@ int KeplerFormalMain(int argc, char** argv) {
     SPDLOG_CRITICAL("sec_engine/--sec-engine is only supported with SEC verification");
     return EXIT_FAILURE;
   }
-  if (verificationMode == VerificationMode::LEC && secXModeExplicit) {
-    SPDLOG_CRITICAL("sec_x_mode/--sec-x-mode is only supported with SEC verification");  // LCOV_EXCL_LINE
+  if (verificationMode == VerificationMode::LEC && secEncodingExplicit) {
+    SPDLOG_CRITICAL("sec_encoding/--sec-encoding is only supported with SEC verification");  // LCOV_EXCL_LINE
     return EXIT_FAILURE;  // LCOV_EXCL_LINE
   }
   if (verificationMode == VerificationMode::SEC) {
@@ -1314,7 +1314,7 @@ int KeplerFormalMain(int argc, char** argv) {
   if (verificationMode == VerificationMode::SEC) {
     SPDLOG_INFO("SEC max_k: {}", secMaxK);
     SPDLOG_INFO("SEC engine: {}", secEngineName(secEngine));
-    SPDLOG_INFO("SEC X mode: {}", secXModeName(secXMode));
+    SPDLOG_INFO("SEC encoding: {}", secEncodingName(secEncoding));
     SPDLOG_INFO(
         "SEC uncomputable sequentials: {}",
         secTreatUncomputableSeqAsBoundary ? "boundary abstraction"
@@ -1636,7 +1636,7 @@ int KeplerFormalMain(int argc, char** argv) {
               "SEC compact mode: reusing extracted design 1 model for "
               "identical design 2 input");
           KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-              nullptr, nullptr, solverType, secEngine, secXMode);
+              nullptr, nullptr, solverType, secEngine, secEncoding);
           return emitSecResult(
               strategy.runExtractedModels(model0, model0, secMaxK));
         }
@@ -1651,7 +1651,7 @@ int KeplerFormalMain(int argc, char** argv) {
             "design 2");
 
         KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-            nullptr, nullptr, solverType, secEngine, secXMode);
+            nullptr, nullptr, solverType, secEngine, secEncoding);
         return emitSecResult(
             strategy.runExtractedModels(model0, model1, secMaxK));
       // LCOV_EXCL_START
@@ -1824,7 +1824,7 @@ int KeplerFormalMain(int argc, char** argv) {
   if (verificationMode == VerificationMode::SEC) {
     try {
       KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-          top0, top1, solverType, secEngine, secXMode);
+          top0, top1, solverType, secEngine, secEncoding);
       return emitSecResult(strategy.run(secMaxK));
     // LCOV_EXCL_START
     } catch (const std::exception& e) {

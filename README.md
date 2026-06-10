@@ -4,7 +4,7 @@
 
 ## Introduction
 
-Kepler-Formal is a logic equivalence checking (LEC) tool that operates on Verilog and the [Naja interchange format](https://github.com/najaeda/naja-if). It focuses today on combinational equivalence checking only; sequential boundary changes are not supported yet and remain planned work.
+Kepler-Formal is a logic equivalence checking tool that operates on Verilog and the [Naja interchange format](https://github.com/najaeda/naja-if). It supports combinational LEC and an active Sequential Equivalence Checking (SEC) flow for comparing sequential designs under the documented SEC restrictions.
 
 ### Acknowledgement
 
@@ -74,7 +74,7 @@ Bazel build notes, dependency details, release flow, and the BCR publication roa
 
 ## Usage
 
-The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/flags-spec.md).
+The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/flags-spec.md). SEC-specific flags, engine behavior, encoding defaults, and skipped-output reports are documented in [docs/sec-flags-spec.md](docs/sec-flags-spec.md).
 
 ### Binary Flags
 
