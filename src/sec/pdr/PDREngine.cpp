@@ -10700,6 +10700,67 @@ BoolExpr* buildStateEqualityInvariant(const KInductionProblem& problem) {
   return buildStateEqualityInvariant(problem.inductiveStateEqualityPairs);
 }
 
+bool structuredInitFactsProveEqualityPair(const InitFactIndex& initFacts,
+                                          const std::pair<size_t, size_t>& pair) {
+  // A structured Init/bootstrap equality proves `lhs == rhs` exactly when both
+  // violating two-literal cubes are excluded from the startup frontier.
+  return twoLiteralCubeIsKnownOutsideInit(
+             initFacts, pair.first, true, pair.second, false) &&
+         twoLiteralCubeIsKnownOutsideInit(
+             initFacts, pair.first, false, pair.second, true);
+}
+
+bool structuredInitFactsImplyStateEqualities(
+    const KInductionProblem& problem,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
+  if (equalityPairs.empty() || !hasStructuredInitFacts(problem)) {
+    return false;
+  }
+
+  const InitFactIndex initFacts = buildInitFactIndex(problem);
+  for (const auto& pair : equalityPairs) {
+    if (!structuredInitFactsProveEqualityPair(initFacts, pair)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool structuredInitFactsImplyCandidate(
+    const KInductionProblem& problem,
+    BoolExpr* initFormula,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    bool alsoRequireOutputProperty,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (!structuredInitFactsImplyStateEqualities(problem, equalityPairs)) {
+    return false;
+  }
+  if (!alsoRequireOutputProperty) {
+    return true;
+  }
+  // State/output candidates combine structured startup equalities with the
+  // ordinary top-output property.  The structured shortcut may prove only the
+  // state half; the output half must still be present in the validated F[0]
+  // formula before PDR can use the combined invariant.
+  return problem.property != nullptr &&
+         initialFrontierImplies(initFormula, problem.property, solverType);
+}
+
+bool pdrInitialFrontierImpliesStateEqualities(
+    const KInductionProblem& problem,
+    BoolExpr* initFormula,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
+  if (invariant == nullptr) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  if (initialFrontierImplies(initFormula, invariant, solverType)) {
+    return true;
+  }
+  return structuredInitFactsImplyStateEqualities(problem, equalityPairs);
+}
+
 BoolExpr* buildStateAndOutputInvariant(
     const KInductionProblem& problem,
     const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
@@ -10817,7 +10878,8 @@ BoolExpr* selectInductiveStateEqualitySubsetInvariant(
       problem.inductiveStateEqualityPairs;
   BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
   if (invariant == nullptr ||
-      !initialFrontierImplies(initFormula, invariant, solverType)) {
+      !pdrInitialFrontierImpliesStateEqualities(
+          problem, initFormula, equalityPairs, solverType)) {
     return nullptr;  // LCOV_EXCL_LINE
   }
 
@@ -10875,7 +10937,12 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
   }
 
   FormulaSupportCache invariantSupportCache;
-  auto validateCandidate = [&](const char* label, BoolExpr* candidate) -> BoolExpr* {
+  auto validateCandidate =
+      [&](const char* label,
+          BoolExpr* candidate,
+          const std::vector<std::pair<size_t, size_t>>* stateEqualityPairs =
+              nullptr,
+          bool alsoRequireOutputProperty = false) -> BoolExpr* {
     if (candidate == nullptr) {
       if (pdrStatsEnabled()) {
         emitSecDiag("SEC PDR stats: frame invariant ", label, " unavailable");
@@ -10883,8 +10950,16 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
       return nullptr;
     }
 
-    const bool initImpliesCandidate =
+    bool initImpliesCandidate =
         initialFrontierImplies(initFormula, candidate, solverType);
+    if (!initImpliesCandidate && stateEqualityPairs != nullptr) {
+      initImpliesCandidate = structuredInitFactsImplyCandidate(
+          problem,
+          initFormula,
+          *stateEqualityPairs,
+          alsoRequireOutputProperty,
+          solverType);
+    }
     const bool inductive =
         initImpliesCandidate &&
         isInductiveInvariant(
@@ -10912,7 +10987,10 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
   };
 
   if (BoolExpr* stateInvariant =
-          validateCandidate("state_equalities", buildStateEqualityInvariant(problem))) {
+          validateCandidate(
+              "state_equalities",
+              buildStateEqualityInvariant(problem),
+              &problem.inductiveStateEqualityPairs)) {
     if (isSecDiagEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: PDR using validated state-equality frame invariant with ",
@@ -10920,6 +10998,20 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
           " equality pairs");
     }  // LCOV_EXCL_LINE
     return stateInvariant;  // LCOV_EXCL_LINE
+  }
+
+  if (BoolExpr* stateOutputInvariant =
+          validateCandidate(
+              "state_equalities_outputs",
+              buildStateAndOutputInvariant(
+                  problem, problem.inductiveStateEqualityPairs),
+              &problem.inductiveStateEqualityPairs,
+              /*alsoRequireOutputProperty=*/true)) {
+    if (isSecDiagEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC diag: PDR using validated state/output frame invariant");
+    }  // LCOV_EXCL_LINE
+    return stateOutputInvariant;
   }
 
   std::vector<std::pair<size_t, size_t>> stateSubsetPairs;
@@ -10935,7 +11027,9 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
     if (BoolExpr* outputStrengthenedInvariant =
             validateCandidate(
                 "state_equality_subset_outputs",
-                buildStateAndOutputInvariant(problem, stateSubsetPairs))) {
+                buildStateAndOutputInvariant(problem, stateSubsetPairs),
+                &stateSubsetPairs,
+                /*alsoRequireOutputProperty=*/true)) {
       if (isSecDiagEnabled()) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
             "SEC diag: PDR using validated state/output subset frame invariant");

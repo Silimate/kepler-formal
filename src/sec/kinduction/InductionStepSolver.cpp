@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "common/SecDiag.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/TransitionExprResolver.h"
 
@@ -50,6 +51,10 @@ std::optional<unsigned> readUnsignedEnv(const char* name) {
   return static_cast<unsigned>(parsed);
 }
 
+bool isInductionStepCoiDiagEnabled() {
+  return std::getenv("KEPLER_SEC_KI_COI_DIAG") != nullptr || isSecDiagEnabled();
+}
+
 std::optional<unsigned> directInductionDecisionLimit(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType) {
@@ -67,6 +72,28 @@ std::optional<unsigned> directInductionDecisionLimit(
   // localization. Keep those dual-rail leaf obligations bounded the same way
   // KInductionEngine does, so one hard output cannot stall the workflow.
   return kDefaultDualRailLeafInductionDecisionLimit;
+}
+
+size_t countTransitionTargets(
+    const std::vector<std::vector<size_t>>& transitionTargetsByFrame) {
+  size_t count = 0;
+  for (const auto& targets : transitionTargetsByFrame) {
+    count += targets.size();
+  }
+  return count;
+}
+
+size_t countStateEqualityPairsInCoi(
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    const std::unordered_set<size_t>& solverSymbols) {
+  size_t count = 0;
+  for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+    if (solverSymbols.find(lhsSymbol) != solverSymbols.end() &&
+        solverSymbols.find(rhsSymbol) != solverSymbols.end()) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 std::unordered_set<size_t> buildStateSymbolSet(const KInductionProblem& problem) {
@@ -221,6 +248,24 @@ void addPostBootstrapResetInputSymbols(
   }
 }
 
+void closeStateEqualityDependencies(
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    std::unordered_set<size_t>& stateSymbols) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      const bool lhsNeeded = stateSymbols.find(lhsSymbol) != stateSymbols.end();
+      const bool rhsNeeded = stateSymbols.find(rhsSymbol) != stateSymbols.end();
+      if (!lhsNeeded && !rhsNeeded) {
+        continue;
+      }
+      changed |= stateSymbols.insert(lhsSymbol).second;
+      changed |= stateSymbols.insert(rhsSymbol).second;
+    }
+  }
+}
+
 InductionCoi buildInductionCoi(const KInductionProblem& problem,
                                BoolExpr* inductionProperty,
                                BoolExpr* inductionBad,
@@ -241,17 +286,18 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   transitionSupportSymbols.reserve(1024);
   for (size_t frame = 0; frame < k; ++frame) {
     addFormulaStateSupport(inductionProperty, stateSymbols, requiredStates[frame]);
-    if (addExtraInductiveEqualities) {
-      for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-        requiredStates[frame].insert(lhsSymbol);
-        requiredStates[frame].insert(rhsSymbol);
-      }
-    }
   }
   addFormulaStateSupport(inductionBad, stateSymbols, requiredStates[k]);
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(k);
   for (size_t frame = k; frame > 0; --frame) {
+    if (addExtraInductiveEqualities && frame < k) {
+      // Output-batched SEC should not carry every design-wide state relation into
+      // a local proof.  Close only relations touched by this frame's real output
+      // cone before walking one transition step backward.
+      closeStateEqualityDependencies(
+          problem.inductiveStateEqualityPairs, requiredStates[frame]);
+    }
     auto targets = expandTransitionTargets(
         requiredStates[frame],
         transitionByState,
@@ -266,17 +312,15 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
         requiredStates[frame - 1],
         transitionSupportSymbols);
   }
+  if (addExtraInductiveEqualities) {
+    closeStateEqualityDependencies(
+        problem.inductiveStateEqualityPairs, requiredStates[0]);
+  }
 
   std::unordered_set<size_t> solverSymbols;
   solverSymbols.reserve(1024);
   addFormulaSupport(inductionProperty, solverSymbols);
   addFormulaSupport(inductionBad, solverSymbols);
-  if (addExtraInductiveEqualities) {
-    for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-      solverSymbols.insert(lhsSymbol);
-      solverSymbols.insert(rhsSymbol);
-    }
-  }
 
   std::unordered_set<size_t> relevantStateSymbols;
   for (const auto& frameStates : requiredStates) {
@@ -302,6 +346,22 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   coi.solverSymbols = sortedSymbols(solverSymbols);
   coi.solverSymbolSet.insert(coi.solverSymbols.begin(), coi.solverSymbols.end());
   return coi;
+}
+
+void emitInductionStepCoiDiag(const KInductionProblem& problem,
+                              const InductionCoi& coi,
+                              size_t k) {
+  if (!isInductionStepCoiDiagEnabled()) {
+    return;
+  }
+  emitSecDiag(
+      "SEC diag: k-induction step coi k=", k,
+      " solver_symbols=", coi.solverSymbols.size(),
+      " transition_targets=", countTransitionTargets(coi.transitionTargetsByFrame),
+      " relevant_states=", coi.relevantStateSymbols.size(),
+      " inductive_equalities_in_coi=",
+      countStateEqualityPairsInCoi(
+          problem.inductiveStateEqualityPairs, coi.solverSymbolSet));
 }
 
 void addComplementedStateRelations(
@@ -440,6 +500,7 @@ InductionProofStatus proveByInductionStatus(
       inductionBad,
       addExtraInductiveEqualities,
       k);
+  emitInductionStepCoiDiag(problem, coi, k);
   const auto inductionPropertySupport = inductionProperty->getSupportVars();
   const auto inductionBadSupport = inductionBad->getSupportVars();
   const TransitionExprResolver transitionByState(problem);

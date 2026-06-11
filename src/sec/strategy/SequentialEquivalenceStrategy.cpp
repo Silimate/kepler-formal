@@ -877,6 +877,15 @@ bool markDualRailPdrOutputSkipped(
   if (outputIndex >= coveredOutputs.size()) {
     return true;  // LCOV_EXCL_LINE
   }
+  if (problem.outputImpliedByInductionCore.size() == coveredOutputs.size() &&
+      problem.outputImpliedByInductionCore[outputIndex]) {
+    // PDR may split down to an output already certified by the dual-rail
+    // induction core.  Do not let a later resource-limited PDR leaf erase that
+    // independent top-output proof.
+    coveredOutputs[outputIndex] = true;
+    skipReasons.erase(outputIndex);
+    return true;
+  }
   const std::string reason =
       "dual-rail PDR repair was inconclusive after isolating this output";
   if (!coveredOutputs[outputIndex]) {
@@ -1292,6 +1301,377 @@ bool secSummaryStatsEnabled() {
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
+constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
+constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
+constexpr unsigned kDefaultDualRailFlushCertificateConflictLimit = 250000;
+
+struct DualRailFlushCoi {
+  std::vector<std::vector<size_t>> transitionTargetsByFrame;
+  std::vector<size_t> solverSymbols;
+  std::unordered_set<size_t> solverSymbolSet;
+};
+
+std::optional<unsigned> secStrategyUnsignedEnv(const char* name) {
+  const char* valueText = std::getenv(name);
+  if (valueText == nullptr || *valueText == '\0') {
+    return std::nullopt;
+  }
+  char* end = nullptr;
+  const unsigned long value = std::strtoul(valueText, &end, 10);
+  if (end == valueText || *end != '\0' ||
+      value > std::numeric_limits<unsigned>::max()) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+  return static_cast<unsigned>(value);
+}
+
+std::vector<size_t> secStrategySortedSymbols(
+    const std::unordered_set<size_t>& symbols) {
+  std::vector<size_t> sorted(symbols.begin(), symbols.end());
+  std::sort(sorted.begin(), sorted.end());
+  return sorted;
+}
+
+std::unordered_set<size_t> dualRailFlushStateSymbols(
+    const KInductionProblem& problem) {
+  std::unordered_set<size_t> stateSymbols;
+  stateSymbols.reserve(problem.state0Symbols.size() + problem.state1Symbols.size());
+  stateSymbols.insert(problem.state0Symbols.begin(), problem.state0Symbols.end());
+  stateSymbols.insert(problem.state1Symbols.begin(), problem.state1Symbols.end());
+  return stateSymbols;
+}
+
+void addDualRailFlushFormulaSupport(
+    BoolExpr* formula,
+    std::unordered_set<size_t>& symbols) {
+  if (formula == nullptr) {
+    return;  // LCOV_EXCL_LINE
+  }
+  for (const auto symbol : formula->getSupportVars()) {
+    if (symbol >= 2) {
+      symbols.insert(symbol);
+    }
+  }
+}
+
+void addDualRailFlushFormulaStateSupport(
+    BoolExpr* formula,
+    const std::unordered_set<size_t>& stateSymbols,
+    std::unordered_set<size_t>& output) {
+  if (formula == nullptr) {
+    return;  // LCOV_EXCL_LINE
+  }
+  for (const auto symbol : formula->getSupportVars()) {
+    if (stateSymbols.find(symbol) != stateSymbols.end()) {
+      output.insert(symbol);
+    }
+  }
+}
+
+void addDualRailFlushComplementPartners(
+    const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
+    std::unordered_set<size_t>& symbols) {
+  for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {
+    if (symbols.find(primarySymbol) != symbols.end() ||
+        symbols.find(complementedSymbol) != symbols.end()) {
+      symbols.insert(primarySymbol);
+      symbols.insert(complementedSymbol);
+    }
+  }
+}
+
+void addDualRailFlushRailPartners(
+    const std::vector<DualRailSymbolPair>& railPairs,
+    std::unordered_set<size_t>& symbols) {
+  for (const auto& rails : railPairs) {
+    if (symbols.find(rails.mayBeOne) != symbols.end() ||
+        symbols.find(rails.mayBeZero) != symbols.end()) {
+      symbols.insert(rails.mayBeOne);
+      symbols.insert(rails.mayBeZero);
+    }
+  }
+}
+
+void addDualRailFlushResetInputs(const KInductionProblem& problem,
+                                 std::unordered_set<size_t>& symbols) {
+  if (problem.resetBootstrapCycles == 0) {
+    return;
+  }
+  for (const auto& [symbol, _] : problem.resetBootstrapInputs) {
+    symbols.insert(symbol);
+  }
+}
+
+std::vector<size_t> dualRailFlushTransitionTargets(
+    const std::unordered_set<size_t>& requestedTargets,
+    const TransitionExprResolver& transitionByState,
+    const std::unordered_map<size_t, size_t>& primaryByComplement) {
+  std::unordered_set<size_t> expanded;
+  expanded.reserve(requestedTargets.size());
+  for (const auto symbol : requestedTargets) {
+    if (transitionByState.contains(symbol)) {
+      expanded.insert(symbol);
+      continue;
+    }
+    const auto primaryIt = primaryByComplement.find(symbol);
+    if (primaryIt != primaryByComplement.end() &&
+        transitionByState.contains(primaryIt->second)) {
+      expanded.insert(primaryIt->second);
+    }
+  }
+  return secStrategySortedSymbols(expanded);
+}
+
+DualRailFlushCoi buildDualRailFlushCoi(const KInductionProblem& problem,
+                                       BoolExpr* badFormula,
+                                       size_t depth) {
+  const auto stateSymbols = dualRailFlushStateSymbols(problem);
+  const TransitionExprResolver transitionByState(problem);
+  const auto& primaryByComplement = transitionByState.primaryByComplement();
+
+  std::vector<std::unordered_set<size_t>> requiredStates(depth + 1);
+  addDualRailFlushFormulaStateSupport(
+      badFormula, stateSymbols, requiredStates[depth]);
+
+  std::unordered_set<size_t> transitionSupportSymbols;
+  std::vector<std::vector<size_t>> transitionTargetsByFrame(depth);
+  for (size_t frame = depth; frame > 0; --frame) {
+    std::vector<size_t> targets = dualRailFlushTransitionTargets(
+        requiredStates[frame], transitionByState, primaryByComplement);
+    transitionTargetsByFrame[frame - 1] = targets;
+    transitionByState.collectSupportForTargets(
+        targets,
+        stateSymbols,
+        requiredStates[frame - 1],
+        transitionSupportSymbols);
+  }
+
+  std::unordered_set<size_t> solverSymbols;
+  addDualRailFlushFormulaSupport(badFormula, solverSymbols);
+  for (const auto& frameStates : requiredStates) {
+    solverSymbols.insert(frameStates.begin(), frameStates.end());
+  }
+  for (const auto& targets : transitionTargetsByFrame) {
+    solverSymbols.insert(targets.begin(), targets.end());
+  }
+  solverSymbols.insert(
+      transitionSupportSymbols.begin(), transitionSupportSymbols.end());
+  addDualRailFlushComplementPartners(
+      problem.complementedStatePairs0, solverSymbols);
+  addDualRailFlushComplementPartners(
+      problem.complementedStatePairs1, solverSymbols);
+  addDualRailFlushRailPartners(problem.dualRailStatePairs, solverSymbols);
+  addDualRailFlushResetInputs(problem, solverSymbols);
+
+  DualRailFlushCoi coi;
+  coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
+  coi.solverSymbols = secStrategySortedSymbols(solverSymbols);
+  coi.solverSymbolSet.insert(coi.solverSymbols.begin(), coi.solverSymbols.end());
+  return coi;
+}
+
+void addDualRailFlushComplementRelations(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& [primarySymbol, complementedSymbol] :
+         complementedStatePairs) {
+      if (solverSymbols.find(primarySymbol) == solverSymbols.end() ||
+          solverSymbols.find(complementedSymbol) == solverSymbols.end()) {
+        continue;
+      }
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(complementedSymbol, frame),
+          -variables.getLiteral(primarySymbol, frame));
+    }
+  }
+}
+
+void addDualRailFlushStateValidity(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<DualRailSymbolPair>& railPairs,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& rails : railPairs) {
+      if (solverSymbols.find(rails.mayBeOne) == solverSymbols.end() ||
+          solverSymbols.find(rails.mayBeZero) == solverSymbols.end()) {
+        continue;
+      }
+      // The convergence certificate starts from arbitrary dual-rail state, but
+      // still requires each ternary state bit to be a legal non-empty value.
+      solver.addClause({
+          variables.getLiteral(rails.mayBeOne, frame),
+          variables.getLiteral(rails.mayBeZero, frame)});
+    }
+  }
+}
+
+void addDualRailFlushPostBootstrapInputs(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    size_t numFrames) {
+  if (problem.resetBootstrapCycles == 0) {
+    return;
+  }
+  for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
+    if (!variables.hasSymbol(symbol)) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    for (size_t frame = 0; frame < numFrames; ++frame) {
+      solver.addClause(
+          {assertedValue ? -variables.getLiteral(symbol, frame)
+                         : variables.getLiteral(symbol, frame)});
+    }
+  }
+}
+
+void addDualRailFlushTransitionRelation(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const TransitionExprResolver& transitionByState,
+    const std::vector<size_t>& targets,
+    size_t frame) {
+  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
+  for (const auto stateSymbol : targets) {
+    addLiteralEquivalence(
+        solver,
+        variables.getLiteral(stateSymbol, frame + 1),
+        encoder.encode(transitionByState.at(stateSymbol)));
+  }
+}
+
+SATSolverWrapper::SolveStatus solveDualRailFlushBadAtDepth(
+    const KInductionProblem& problem,
+    BoolExpr* badFormula,
+    size_t depth,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  const DualRailFlushCoi coi =
+      buildDualRailFlushCoi(problem, badFormula, depth);
+  SATSolverWrapper solver(solverType);
+  solver.configureForSecDualRailConeProof(coi.solverSymbols.size());
+  FrameVariableStore variables(solver, coi.solverSymbols, depth + 1);
+  addDualRailFlushComplementRelations(
+      solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet,
+      depth + 1);
+  addDualRailFlushComplementRelations(
+      solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet,
+      depth + 1);
+  addDualRailFlushStateValidity(
+      solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet,
+      depth + 1);
+  addDualRailFlushPostBootstrapInputs(solver, variables, problem, depth + 1);
+
+  const TransitionExprResolver transitionByState(problem);
+  for (size_t frame = 0; frame < depth; ++frame) {
+    addDualRailFlushTransitionRelation(
+        solver, variables, transitionByState, coi.transitionTargetsByFrame[frame],
+        frame);
+  }
+
+  FrameFormulaEncoder badEncoder(
+      solver, variables.makeLeafLits(depth, badFormula->getSupportVars()));
+  solver.addClause({badEncoder.encode(badFormula)});
+  if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+    const unsigned conflictLimit =
+        secStrategyUnsignedEnv("KEPLER_SEC_DUAL_RAIL_FLUSH_CONFLICT_LIMIT")
+            .value_or(kDefaultDualRailFlushCertificateConflictLimit);
+    return solver.solveWithKissatResourceLimits(conflictLimit, conflictLimit);
+  }
+  return solver.solveStatus();  // LCOV_EXCL_LINE
+}
+
+bool dualRailOutputStartupPrefixIsSafe(
+    const KInductionProblem& problem,
+    size_t outputIndex,
+    size_t depth,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (depth == 0) {
+    return true;
+  }
+  const KInductionProblem outputProblem =
+      makeOutputSubsetProblem(problem, {outputIndex});
+  for (size_t frame = 0; frame < depth; ++frame) {
+    if (SEC::findBaseCounterexampleAtFrontier(
+            outputProblem, solverType, frame).has_value()) {
+      return false;  // LCOV_EXCL_LINE
+    }
+  }
+  return true;
+}
+
+bool dualRailOutputConvergesFromAnyLegalState(
+    const KInductionProblem& problem,
+    size_t outputIndex,
+    size_t depth,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  BoolExpr* outputEquality = makeEqualityExpr(
+      problem.observedOutputExprs0[outputIndex],
+      problem.observedOutputExprs1[outputIndex]);
+  BoolExpr* outputBad = BoolExpr::simplify(BoolExpr::Not(outputEquality));
+  const auto status =
+      solveDualRailFlushBadAtDepth(problem, outputBad, depth, solverType);
+  return status == SATSolverWrapper::SolveStatus::Unsat;
+}
+
+size_t certifyDualRailFlushConvergedOutputs(
+    KInductionProblem& problem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    bool secDiagEnabled) {
+  if (!problem.usesDualRailStateEncoding ||
+      problem.outputImpliedByInductionCore.size() !=
+          problem.observedOutputExprs0.size() ||
+      problem.dualRailStatePairs.size() * 2 >
+          kMaxDualRailFlushCertificateStateRails) {
+    return 0;
+  }
+
+  const size_t maxDepth = std::min(
+      maxK,
+      secStrategySizeLimitFromEnv(
+          "KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH",
+          kDefaultDualRailFlushCertificateDepth));
+  if (maxDepth == 0) {
+    return 0;
+  }
+
+  size_t certifiedOutputs = 0;
+  for (size_t outputIndex = 0;
+       outputIndex < problem.outputImpliedByInductionCore.size();
+       ++outputIndex) {
+    if (problem.outputImpliedByInductionCore[outputIndex]) {
+      continue;
+    }
+    for (size_t depth = 1; depth <= maxDepth; ++depth) {
+      if (!dualRailOutputConvergesFromAnyLegalState(
+              problem, outputIndex, depth, solverType)) {
+        continue;
+      }
+      if (!dualRailOutputStartupPrefixIsSafe(
+              problem, outputIndex, depth, solverType)) {
+        break;  // LCOV_EXCL_LINE
+      }
+      problem.outputImpliedByInductionCore[outputIndex] = true;
+      ++certifiedOutputs;
+      if (secDiagEnabled) {
+        emitSecDiag(
+            "SEC diag: dual-rail flush certificate output=",
+            outputNameForProblemIndex(problem, outputIndex),
+            " depth=",
+            depth);
+      }
+      break;
+    }
+  }
+  return certifiedOutputs;
+}
 
 SequentialEquivalenceResult keepDualRailImpliedCoverageOnEngineInconclusive(  // LCOV_EXCL_LINE
     const KInductionProblem& problem,
@@ -1372,8 +1752,8 @@ OutputBatchingLimits dualRailResidualBatchingLimits(
 bool shouldUseDeferredDualRailImcResidualProof(
     const KInductionProblem& problem) {
   // IMC's exact frontier machinery is intentionally reserved for tiny explicit
-  // state spaces.  Large dual-rail residuals use the same induction fallback
-  // IMC already relies on after exact frontier construction becomes too large.
+  // state spaces.  Large dual-rail residuals use IMC's own localized induction
+  // shortcut after exact frontier construction becomes too large.
   return problem.usesDualRailStateEncoding && problem.totalStateCount > 12;
 }
 
@@ -1440,7 +1820,7 @@ void proveDualRailResidualOutputSet(
     // Localized residual proofs should not spend max_k frontier checks on a
     // single hard rail output.  First ask whether the induction step closes; if
     // it does, validate the required concrete base prefix once below.  IMC uses
-    // this same induction rule as its large-problem fallback, so this keeps the
+    // this same induction rule for large localized residuals, so this keeps the
     // selected engine sound without invoking PDR.
     subsetProblem.deferBaseCaseChecks = true;
   }
@@ -1635,21 +2015,21 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
 
   const size_t coveredCount = static_cast<size_t>(std::count(
       proofState.coveredOutputs.begin(), proofState.coveredOutputs.end(), true));
-  if (coveredCount == 0) {
-    return makeSecResult(  // LCOV_EXCL_LINE
-        SequentialEquivalenceStatus::Inconclusive,
-        proofState.provedBound,  // LCOV_EXCL_LINE
-        std::string("Dual-rail ") + dualRailResidualEngineName(engine) +  // LCOV_EXCL_LINE
-            " did not prove any output",
-        outputCoverage,  // LCOV_EXCL_LINE
-        abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-        extractedBoundaryReports);  // LCOV_EXCL_LINE
-  }
-
   const OutputCoverageSelection finalCoverage =
       buildCoverageWithDualRailOutputSkips(
           outputCoverage, problem, proofState.coveredOutputs,
           proofState.skipReasons);
+  if (coveredCount == 0) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Inconclusive,
+        proofState.provedBound,
+        std::string("Dual-rail ") + dualRailResidualEngineName(engine) +
+            " did not prove any output",
+        finalCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
   return makeSecResult(
       SequentialEquivalenceStatus::Equivalent,
       proofState.provedBound,
@@ -2545,6 +2925,7 @@ KInductionProblem buildDualRailSecProblem(
     const ReachableStateInvariant& reachableInvariant,
     SharedSecSymbolSpace& symbolSpace,
     bool useLazyTransitionRemapping,
+    size_t maxK,
     KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
   KInductionProblem problem;
@@ -2688,6 +3069,10 @@ KInductionProblem buildDualRailSecProblem(
     }
   }
 
+  const size_t flushCertifiedOutputCount =
+      certifyDualRailFlushConvergedOutputs(
+          problem, maxK, solverType, secDiagEnabled);
+
   BoolExpr* inductionProperty = inductionCore;
   inductionProperty = BoolExpr::And(inductionProperty, property);
 
@@ -2707,7 +3092,8 @@ KInductionProblem buildDualRailSecProblem(
         "bootstrap_assignments=%zu initial_equalities=%zu "
         "bootstrap_equalities=%zu inductive_equalities=%zu "
         "dual_rail_state_relation_pairs=%zu "
-        "sat_implied_outputs=%zu implication_conflict_limit=%u\n",
+        "sat_implied_outputs=%zu flush_certified_outputs=%zu "
+        "implication_conflict_limit=%u\n",
         problem.totalStateCount,
         problem.observedOutputExprs0.size(),
         problem.resetBootstrapInputs.size(),
@@ -2718,6 +3104,7 @@ KInductionProblem buildDualRailSecProblem(
         problem.inductiveStateEqualityPairs.size(),
         static_cast<size_t>(0),
         inductionCoreImpliedOutputCount,
+        flushCertifiedOutputCount,
         implicationConflictLimit);
     fflush(stdout);
   }
@@ -2904,6 +3291,18 @@ SequentialEquivalenceResult runPdrSecEngine(
 
   const std::vector<size_t> dualRailEngineOutputIndices =
       collectOutputsRequiringDualRailEngineProof(problem);
+  if (problem.usesDualRailStateEncoding &&
+      problem.outputImpliedByInductionCore.size() ==
+          problem.observedOutputExprs0.size() &&
+      dualRailEngineOutputIndices.empty()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        0,
+        "",
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
   if (problem.usesDualRailStateEncoding &&
       !dualRailEngineOutputIndices.empty() &&
       dualRailEngineOutputIndices.size() < problem.observedOutputExprs0.size()) {
@@ -3284,13 +3683,13 @@ SequentialEquivalenceResult runPdrSecEngine(
     constexpr size_t kFinalExactPdrPredecessorProjectionLimit = 16;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrBadCubeStateLimit = 32;  // LCOV_EXCL_LINE
     constexpr size_t kFinalExactPdrRootGeneralizationAttempts = 0;  // LCOV_EXCL_LINE
-    // Dual-rail final PDR validates projected roots exactly.  Give that exact
-    // CEGAR repair a tiny budget so Ibex/Swerv-size rail roots do not learn one
-    // full unreachable cube per sibling assignment. Multi-output slices split
-    // after a couple of failed repairs; isolated leaves are skipped as uncovered
-    // after the same local effort instead of consuming the whole workflow.
+    // Dual-rail final PDR validates projected roots exactly. Keep that exact
+    // CEGAR repair bounded, but leave enough queries for small ASIC leaves that
+    // need several reset-frontier blockers before the output proof converges.
+    // Multi-output slices still split quickly; isolated hard leaves are skipped
+    // as uncovered instead of consuming the whole workflow.
     constexpr size_t kDualRailFinalExactPdrRootGeneralizationAttempts = 4;  // LCOV_EXCL_LINE
-    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 16;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 64;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     if (endOutput - firstOutput > kMaxFinalExactPdrOutputBatchSize) {  // LCOV_EXCL_LINE
@@ -3890,35 +4289,18 @@ SequentialEquivalenceResult runPdrSecEngine(
       buildCoverageWithDualRailOutputSkips(
           outputCoverage, problem, pdrCoveredOutputs, pdrSkippedOutputReasons);
   if (problem.usesDualRailStateEncoding &&
-      finalCoverage.checkedOutputs.names.empty()) {
-    emitSecDiag(
-        "SEC diag: dual-rail PDR proved no observed outputs; "
-        "trying k-induction residual certificate");
-    const auto certificateResult = proveDualRailResidualsWithSelectedEngine(
-        problem,
-        maxK,
-        solverType,
-        model0,
-        model1,
-        top0,
-        top1,
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports,
-        DualRailResidualEngine::KInduction);
-    if (certificateResult.has_value() &&
-        certificateResult->status != SequentialEquivalenceStatus::Inconclusive &&
-        (certificateResult->status == SequentialEquivalenceStatus::Different ||
-         certificateResult->coveredOutputs > 0)) {
-      return *certificateResult;
+      finalCoverage.checkedOutputs.names.size() <
+          outputCoverage.checkedOutputs.names.size()) {
+    const bool pdrProvedNoOutputs = finalCoverage.checkedOutputs.names.empty();
+    if (pdrProvedNoOutputs) {
+      return makeSecResult(
+          SequentialEquivalenceStatus::Inconclusive,
+          provedBound,
+          "Dual-rail PDR did not prove any observed output",
+          finalCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
     }
-    return makeSecResult(
-        SequentialEquivalenceStatus::Inconclusive,
-        provedBound,
-        "Dual-rail PDR did not prove any observed output",
-        finalCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
   }
   return makeSecResult(
       SequentialEquivalenceStatus::Equivalent,
@@ -4406,6 +4788,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         reachableInvariant,
         symbolSpace,
         useLazyTransitionRemapping,
+        maxK,
         solverType_,
         secDiagEnabled);
   } else {

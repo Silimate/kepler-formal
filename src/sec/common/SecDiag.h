@@ -20,6 +20,7 @@ inline bool isSecDiagOutputEnabled() {
   // raw stderr as failure even when Kepler exits successfully.
   return isSecDiagEnabled() ||
          std::getenv("KEPLER_SEC_KI_DIAG") != nullptr ||
+         std::getenv("KEPLER_SEC_KI_COI_DIAG") != nullptr ||
          std::getenv("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG") != nullptr ||
          std::getenv("KEPLER_SEC_PDR_STATS") != nullptr ||
          std::getenv("KEPLER_SEC_PDR_TRACE") != nullptr ||

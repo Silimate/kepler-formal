@@ -35,6 +35,9 @@ constexpr size_t kMaxPreviousResetFrontierBlockersPerQuery = 64;
 // wall when it fails to shrink the COI, so keep it local and resource-bounded.
 constexpr size_t kMaxRelaxedResetFrontierPrecheckSymbols = 256;
 constexpr size_t kMaxRelaxedResetFrontierPrecheckTransitionTargets = 128;
+constexpr size_t kMaxTinyCubeRelaxedResetFrontierPrecheckSymbols = 8192;
+constexpr size_t kMaxTinyCubeRelaxedResetFrontierPrecheckTransitionTargets = 8192;
+constexpr size_t kMaxTinyRelaxedResetFrontierPrecheckCubeLiterals = 4;
 constexpr unsigned kRelaxedResetFrontierPrecheckConflictLimit = 10000;
 // BlackParrot PDR samples showed the full reset-frontier fallback exploding to
 // hundreds of thousands of symbols while the reset-summary query stayed much
@@ -120,6 +123,25 @@ struct ResetFrontierSolverCacheKeyHash {
 bool resetFrontierAssumptionSolvesDisabled() {
   return std::getenv("KEPLER_SEC_PDR_DISABLE_RESET_FRONTIER_ASSUMPTIONS") !=
          nullptr;
+}
+
+bool relaxedResetFrontierPrecheckCoiIsLocal(size_t solverSymbols,
+                                            size_t transitionTargets,
+                                            size_t cubeLiterals) {
+  const bool tinyPdrCube =
+      cubeLiterals <= kMaxTinyRelaxedResetFrontierPrecheckCubeLiterals;
+  // PDR leaf repair often asks about a tiny bad cube whose exact transition COI
+  // is still a few thousand symbols.  Keep broad cubes on the historical cap,
+  // but let tiny cubes try the sound relaxed UNSAT shortcut before falling into
+  // the heavier exact reset-frontier assumption solver.
+  const size_t symbolLimit =
+      tinyPdrCube ? kMaxTinyCubeRelaxedResetFrontierPrecheckSymbols
+                  : kMaxRelaxedResetFrontierPrecheckSymbols;
+  const size_t transitionTargetLimit =
+      tinyPdrCube ? kMaxTinyCubeRelaxedResetFrontierPrecheckTransitionTargets
+                  : kMaxRelaxedResetFrontierPrecheckTransitionTargets;
+  return solverSymbols <= symbolLimit &&
+         transitionTargets <= transitionTargetLimit;
 }
 
 SATSolverWrapper::SolveStatus solveResetFrontierUnitClauseQuery(  // LCOV_EXCL_LINE
@@ -3014,10 +3036,10 @@ bool isStateCubeReachableAtResetFrontier(
     }
 
     const bool relaxedCoiIsLocal =
-        relaxedSolver->coi.solverSymbols.size() <=
-            kMaxRelaxedResetFrontierPrecheckSymbols &&
-        relaxedTransitionTargets <=
-            kMaxRelaxedResetFrontierPrecheckTransitionTargets;
+        relaxedResetFrontierPrecheckCoiIsLocal(
+            relaxedSolver->coi.solverSymbols.size(),
+            relaxedTransitionTargets,
+            normalizedCube.size());
     if (relaxedCoiIsLocal) {
       bool relaxedUnsat = false;
       if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
@@ -3238,10 +3260,10 @@ bool isStateCubeReachableAtResetFrontierOneShot(
     }
 
     const bool relaxedCoiIsLocal =
-        relaxedSolver->coi.solverSymbols.size() <=
-            kMaxRelaxedResetFrontierPrecheckSymbols &&
-        relaxedTransitionTargets <=
-            kMaxRelaxedResetFrontierPrecheckTransitionTargets;
+        relaxedResetFrontierPrecheckCoiIsLocal(
+            relaxedSolver->coi.solverSymbols.size(),
+            relaxedTransitionTargets,
+            normalizedCube.size());
     if (relaxedCoiIsLocal) {
       bool relaxedUnsat = false;
       if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
