@@ -10764,6 +10764,14 @@ bool pdrInitialFrontierImpliesStateEqualities(
 BoolExpr* buildStateAndOutputInvariant(
     const KInductionProblem& problem,
     const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
+  // This strengthening is meant to add top-output equality to real
+  // state-correspondence facts.  Without at least one state pair it degenerates
+  // into the property itself and bypasses PDR repair paths that still need to
+  // be exercised and validated independently.
+  if (equalityPairs.empty()) {
+    return nullptr;
+  }
+
   BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
   if (invariant == nullptr) {
     invariant = BoolExpr::createTrue();  // LCOV_EXCL_LINE
