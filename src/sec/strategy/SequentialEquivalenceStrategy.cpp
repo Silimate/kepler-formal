@@ -1301,9 +1301,13 @@ bool secSummaryStatsEnabled() {
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
+constexpr size_t kMaxDualRailLocalImplicationOutputs = 64;
 constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
+constexpr size_t kMaxDualRailFlushCertificateOutputs = 64;
 constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
-constexpr unsigned kDefaultDualRailFlushCertificateConflictLimit = 250000;
+// Wide designs skip this certificate below.  Focused resetless cases need a
+// little more budget to avoid unstable coverage near the mock-alu boundary.
+constexpr unsigned kDefaultDualRailFlushCertificateConflictLimit = 300000;
 
 struct DualRailFlushCoi {
   std::vector<std::vector<size_t>> transitionTargetsByFrame;
@@ -1323,6 +1327,18 @@ std::optional<unsigned> secStrategyUnsignedEnv(const char* name) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
   return static_cast<unsigned>(value);
+}
+
+unsigned dualRailFlushCertificateConflictLimit() {
+  return secStrategyUnsignedEnv("KEPLER_SEC_DUAL_RAIL_FLUSH_CONFLICT_LIMIT")
+      .value_or(kDefaultDualRailFlushCertificateConflictLimit);
+}
+
+size_t secStrategySizeLimitFromOptionalUnsignedEnv(
+    const char* name,
+    size_t defaultValue) {
+  const auto value = secStrategyUnsignedEnv(name);
+  return value.has_value() ? static_cast<size_t>(*value) : defaultValue;
 }
 
 std::vector<size_t> secStrategySortedSymbols(
@@ -1579,9 +1595,7 @@ SATSolverWrapper::SolveStatus solveDualRailFlushBadAtDepth(
       solver, variables.makeLeafLits(depth, badFormula->getSupportVars()));
   solver.addClause({badEncoder.encode(badFormula)});
   if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
-    const unsigned conflictLimit =
-        secStrategyUnsignedEnv("KEPLER_SEC_DUAL_RAIL_FLUSH_CONFLICT_LIMIT")
-            .value_or(kDefaultDualRailFlushCertificateConflictLimit);
+    const unsigned conflictLimit = dualRailFlushCertificateConflictLimit();
     return solver.solveWithKissatResourceLimits(conflictLimit, conflictLimit);
   }
   return solver.solveStatus();  // LCOV_EXCL_LINE
@@ -1625,9 +1639,16 @@ size_t certifyDualRailFlushConvergedOutputs(
     size_t maxK,
     KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
+  // The flush certificate runs one SAT query per output/depth.  Keep it on for
+  // focused cases such as mock-alu, but avoid turning wide-output regressions
+  // into a setup-time SAT sweep before the selected engine runs.
   if (!problem.usesDualRailStateEncoding ||
       problem.outputImpliedByInductionCore.size() !=
           problem.observedOutputExprs0.size() ||
+      problem.observedOutputExprs0.size() >
+          secStrategySizeLimitFromOptionalUnsignedEnv(
+              "KEPLER_SEC_DUAL_RAIL_FLUSH_OUTPUT_LIMIT",
+              kMaxDualRailFlushCertificateOutputs) ||
       problem.dualRailStatePairs.size() * 2 >
           kMaxDualRailFlushCertificateStateRails) {
     return 0;
@@ -1635,7 +1656,7 @@ size_t certifyDualRailFlushConvergedOutputs(
 
   const size_t maxDepth = std::min(
       maxK,
-      secStrategySizeLimitFromEnv(
+      secStrategySizeLimitFromOptionalUnsignedEnv(
           "KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH",
           kDefaultDualRailFlushCertificateDepth));
   if (maxDepth == 0) {
@@ -3004,6 +3025,16 @@ KInductionProblem buildDualRailSecProblem(
   size_t inductionCoreImpliedOutputCount = 0;
   const unsigned implicationConflictLimit =
       dualRailLocalImplicationConflictLimit();
+  // Local implication checks are useful on focused cases because they seed the
+  // coverage map before the flush/PDR certificates run.  Keep the default
+  // bounded to small output surfaces so Ibex/SoC-size regressions do not pay a
+  // per-output SAT sweep before the selected SEC engine starts.
+  const bool runLocalImplicationChecks =
+      implicationConflictLimit != 0 &&
+      alignedOutputs.names.size() <=
+          secStrategySizeLimitFromOptionalUnsignedEnv(
+              "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_OUTPUT_LIMIT",
+              kMaxDualRailLocalImplicationOutputs);
   problem.outputImpliedByInductionCore.clear();
   problem.outputImpliedByInductionCore.reserve(alignedOutputs.names.size());
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
@@ -3025,12 +3056,18 @@ KInductionProblem buildDualRailSecProblem(
     problem.observedOutputNames.push_back(alignedOutputs.names[i]);
     problem.observedOutputExprs0.push_back(outputRailEquality);
     problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
-    const auto impliedByInductionCore = boolFormulaImpliesWithConflictLimit(
-        inductionCore,
-        outputRailEquality,
-        solverType,
-        implicationConflictLimit);
-    bool outputImplied = impliedByInductionCore.value_or(false);
+    bool outputImplied = false;
+    // This SAT sweep is only an opportunistic shortcut.  Large dual-rail cones
+    // can make even bounded per-output implication queries expensive, so the
+    // loop is guarded above and the selected SEC engine carries wide proofs.
+    if (runLocalImplicationChecks) {
+      const auto impliedByInductionCore = boolFormulaImpliesWithConflictLimit(
+          inductionCore,
+          outputRailEquality,
+          solverType,
+          implicationConflictLimit);
+      outputImplied = impliedByInductionCore.value_or(false);
+    }
     if (outputImplied) {
       ++inductionCoreImpliedOutputCount;
     } else if (secDiagEnabled) {
@@ -3093,7 +3130,7 @@ KInductionProblem buildDualRailSecProblem(
         "bootstrap_equalities=%zu inductive_equalities=%zu "
         "dual_rail_state_relation_pairs=%zu "
         "sat_implied_outputs=%zu flush_certified_outputs=%zu "
-        "implication_conflict_limit=%u\n",
+        "implication_conflict_limit=%u flush_conflict_limit=%u\n",
         problem.totalStateCount,
         problem.observedOutputExprs0.size(),
         problem.resetBootstrapInputs.size(),
@@ -3105,7 +3142,8 @@ KInductionProblem buildDualRailSecProblem(
         static_cast<size_t>(0),
         inductionCoreImpliedOutputCount,
         flushCertifiedOutputCount,
-        implicationConflictLimit);
+        implicationConflictLimit,
+        dualRailFlushCertificateConflictLimit());
     fflush(stdout);
   }
 

@@ -8141,6 +8141,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.observedOutputExprByKey.emplace(residual, BoolExpr::createFalse());
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  const ScopedEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT", "2000000");
   testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
@@ -8165,6 +8167,141 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(stdoutOutput.find("sat_implied_outputs=1"), std::string::npos);
   EXPECT_NE(stderrOutput.find("PDR dual-rail proof restricted to 1 non-implied outputs"),
             std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailRunsLocalImplicationOnSmallSurfaceByDefault) {
+  const SignalKey out = makeSignalKey("pdrDualRailSmallImplicationOut");
+
+  SequentialDesignModel model0;
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model0.displayNameByKey.emplace(out, "small_implication_out[0]");
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+  SequentialDesignModel model1;
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model1.displayNameByKey.emplace(out, "small_implication_out[0]");
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedUnsetEnvVar implicationOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_OUTPUT_LIMIT");
+  const ScopedUnsetEnvVar flushConflictLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_CONFLICT_LIMIT");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(stdoutOutput.find("sat_implied_outputs=1"), std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find("implication_conflict_limit=2000000"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find("flush_conflict_limit=300000"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailFlushDepthZeroDisablesCertificate) {
+  const SignalKey out = makeSignalKey("pdrDualRailFlushDepthZeroOut");
+
+  SequentialDesignModel model0;
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model0.displayNameByKey.emplace(out, "flush_depth_zero_out[0]");
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+  SequentialDesignModel model1;
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model1.displayNameByKey.emplace(out, "flush_depth_zero_out[0]");
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedEnvVar flushDepth("KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH", "0");
+  const ScopedEnvVar flushOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_OUTPUT_LIMIT", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      stdoutOutput.find("flush_certified_outputs=0"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailFlushSkipsWideOutputSurfaceByDefault) {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  for (size_t i = 0; i < 65; ++i) {
+    const SignalKey out =
+        makeSignalKey("pdrDualRailFlushWideOut" + std::to_string(i));
+    model0.allObservedOutputs.push_back(out);
+    model0.observedOutputs.push_back(out);
+    model0.displayNameByKey.emplace(
+        out, "flush_wide_out[" + std::to_string(i) + "]");
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model1.displayNameByKey.emplace(
+        out, "flush_wide_out[" + std::to_string(i) + "]");
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  }
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedUnsetEnvVar implicationOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_OUTPUT_LIMIT");
+  const ScopedUnsetEnvVar flushOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_OUTPUT_LIMIT");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 65u);
+  EXPECT_EQ(result.totalOutputs, 65u);
+  EXPECT_NE(stdoutOutput.find("rail_outputs=65"), std::string::npos);
+  EXPECT_NE(stdoutOutput.find("sat_implied_outputs=0"), std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find("implication_conflict_limit=2000000"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find("flush_certified_outputs=0"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
