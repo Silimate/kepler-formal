@@ -1302,6 +1302,10 @@ constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
 constexpr size_t kMaxDualRailLocalImplicationOutputs = 64;
+constexpr size_t kMinDualRailWideLocalImplicationOutputs = 256;
+constexpr size_t kMaxDualRailWideLocalImplicationOutputs = 384;
+constexpr size_t kMaxDualRailWideLocalImplicationOutputSupport = 20000;
+constexpr size_t kMaxDualRailWideLocalImplicationStateRails = 20000;
 constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
 constexpr size_t kMaxDualRailFlushCertificateOutputs = 64;
 constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
@@ -2086,6 +2090,56 @@ size_t directObservedOutputSupportSize(const KInductionProblem& problem) {
     support.insert(exprSupport.begin(), exprSupport.end());
   }
   return support.size();
+}
+
+size_t alignedObservedOutputSupportSize(const SequentialDesignModel& model0,
+                                        const SequentialDesignModel& model1,
+                                        const AlignedSignals& alignedOutputs) {
+  std::unordered_set<size_t> support0;
+  std::unordered_set<size_t> support1;
+  for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    const auto supportExpr0 =
+        model0.observedOutputExprByKey.at(alignedOutputs.keys0[i])->getSupportVars();
+    support0.insert(supportExpr0.begin(), supportExpr0.end());
+    const auto supportExpr1 =
+        model1.observedOutputExprByKey.at(alignedOutputs.keys1[i])->getSupportVars();
+    support1.insert(supportExpr1.begin(), supportExpr1.end());
+  }
+  // The two extracted designs use independent local symbol spaces.  Sum the
+  // per-design supports so overlapping local ids do not make a wide interface
+  // look cheaper than it is.
+  return support0.size() + support1.size();
+}
+
+bool shouldRunDualRailLocalImplicationChecks(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedOutputs,
+    size_t railStateBits,
+    unsigned implicationConflictLimit) {
+  if (implicationConflictLimit == 0) {
+    return false;
+  }
+
+  const size_t outputCount = alignedOutputs.names.size();
+  if (outputCount <= secStrategySizeLimitFromOptionalUnsignedEnv(
+                         "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_OUTPUT_LIMIT",
+                         kMaxDualRailLocalImplicationOutputs)) {
+    return true;
+  }
+
+  // Dynamic-node style wrappers expose a mid-wide top-output bus whose direct
+  // support is still bounded by one manageable rail surface.  Let those regain
+  // the cheap SAT implication certificate, while keeping Ibex/SoC-wide shapes
+  // out of the per-output SAT sweep that caused the runtime regression.
+  if (outputCount < kMinDualRailWideLocalImplicationOutputs ||
+      outputCount > kMaxDualRailWideLocalImplicationOutputs ||
+      railStateBits > kMaxDualRailWideLocalImplicationStateRails) {
+    return false;
+  }
+
+  return alignedObservedOutputSupportSize(model0, model1, alignedOutputs) <=
+         kMaxDualRailWideLocalImplicationOutputSupport;
 }
 
 size_t pdrCertificateStateSymbolCount(const KInductionProblem& problem) {
@@ -3025,16 +3079,13 @@ KInductionProblem buildDualRailSecProblem(
   size_t inductionCoreImpliedOutputCount = 0;
   const unsigned implicationConflictLimit =
       dualRailLocalImplicationConflictLimit();
-  // Local implication checks are useful on focused cases because they seed the
-  // coverage map before the flush/PDR certificates run.  Keep the default
-  // bounded to small output surfaces so Ibex/SoC-size regressions do not pay a
-  // per-output SAT sweep before the selected SEC engine starts.
   const bool runLocalImplicationChecks =
-      implicationConflictLimit != 0 &&
-      alignedOutputs.names.size() <=
-          secStrategySizeLimitFromOptionalUnsignedEnv(
-              "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_OUTPUT_LIMIT",
-              kMaxDualRailLocalImplicationOutputs);
+      shouldRunDualRailLocalImplicationChecks(
+          model0,
+          model1,
+          alignedOutputs,
+          problem.totalStateCount,
+          implicationConflictLimit);
   problem.outputImpliedByInductionCore.clear();
   problem.outputImpliedByInductionCore.reserve(alignedOutputs.names.size());
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {

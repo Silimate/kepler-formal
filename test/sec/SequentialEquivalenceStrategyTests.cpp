@@ -8215,6 +8215,52 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailRunsLocalImplicationOnWideShallowSurface) {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  constexpr size_t kOutputCount = 300;
+  for (size_t i = 0; i < kOutputCount; ++i) {
+    const SignalKey out =
+        makeSignalKey("pdrDualRailWideShallowOut" + std::to_string(i));
+    model0.allObservedOutputs.push_back(out);
+    model0.observedOutputs.push_back(out);
+    model0.displayNameByKey.emplace(
+        out, "wide_shallow_out[" + std::to_string(i) + "]");
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model1.displayNameByKey.emplace(
+        out, "wide_shallow_out[" + std::to_string(i) + "]");
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  }
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedUnsetEnvVar implicationOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_OUTPUT_LIMIT");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+
+  // Dynamic-node has many top outputs but a shallow output surface.  Keep the
+  // cheap local implication certificate enabled for that shape so one hard
+  // output cannot force PDR to solve the whole wide property.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, kOutputCount);
+  EXPECT_EQ(result.totalOutputs, kOutputCount);
+  EXPECT_NE(stdoutOutput.find("rail_outputs=300"), std::string::npos);
+  EXPECT_NE(stdoutOutput.find("sat_implied_outputs=300"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailFlushDepthZeroDisablesCertificate) {
   const SignalKey out = makeSignalKey("pdrDualRailFlushDepthZeroOut");
 
