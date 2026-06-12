@@ -155,6 +155,15 @@ jobs:
           "${mock_alu_expectation}" \
           compact \
           engine=${{ env.SEC_ENGINE }}
+        # The mock CPU FIFO reset-domain relations are expected to prove in both binary and dual-rail encodings.
+        bash regress/run_sec_strategies_regress.sh \
+          asap7_mock_cpu \
+          "${{github.workspace}}/kepler-formal-examples/asap7_mock_cpu" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }}
         bp_sec_final_expectation="expect-unsupported"
         if [[ "${SEC_ENCODING}" == "dual_rail_steady" ]]; then
           bp_sec_final_expectation="expect-full-coverage"

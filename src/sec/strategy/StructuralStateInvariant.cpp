@@ -40,7 +40,11 @@ constexpr size_t kDefaultResetBootstrapOutputCoiStatePairs =
     kMaxSatValidatedOrderedCoiStatePairs;
 constexpr size_t kMaxSatValidatedOrderedPairSupport = 32768;
 constexpr size_t kMaxOrderedCoiExpansionPasses = 64;
-constexpr size_t kDefaultGlobalStructuralRefinementStateLimit = 30000;
+// ASIC FIFO examples such as asap7_mock_cpu need the final structural
+// fingerprint pass to relate memory state after output-rooted COI matching is
+// exhausted.  Keep the cap explicit so much larger SoCs still skip this path
+// unless the workflow opts in through the environment override below.
+constexpr size_t kDefaultGlobalStructuralRefinementStateLimit = 40000;
 constexpr unsigned kSatValidatedStructuralConflictLimit = 4096;
 
 using KEPLER_FORMAL::BoolExpr;

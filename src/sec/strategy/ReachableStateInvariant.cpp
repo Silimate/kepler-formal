@@ -190,6 +190,29 @@ bool isResetNameToken(const std::string& candidate, const std::string& token) {
   return candidate == token || hasSuffix(candidate, "_" + token);
 }  // LCOV_EXCL_LINE
 
+bool isActiveLowResetToken(const std::string& candidate) {
+  return candidate == "RESET_N" || candidate == "RESETN" ||
+         candidate == "RESET_L" || candidate == "RST_N" ||
+         candidate == "RSTN" || candidate == "RST_L";
+}
+
+void appendDomainPrefixedActiveLowResetCandidates(
+    std::vector<std::string>& candidates) {
+  const size_t originalSize = candidates.size();
+  for (size_t index = 0; index < originalSize; ++index) {
+    const std::string& candidate = candidates[index];
+    if (candidate.size() <= 1) {
+      continue;
+    }
+    const std::string strippedDomain = candidate.substr(1);
+    if (isActiveLowResetToken(strippedDomain)) {
+      // Async FIFOs often spell read/write resets as rrst_n/wrst_n.  Keep the
+      // rule active-low and one-letter-prefixed to avoid broad reset matching.
+      candidates.push_back(strippedDomain);
+    }
+  }
+}
+
 std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   // Reset ports frequently carry RTL direction suffixes (`reset_i`, `rst_ni`).
   // Strip only those common input suffixes before classification so a real
@@ -205,6 +228,7 @@ std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   if (hasSuffix(normalized, "_NI")) {
     candidates.push_back(normalized.substr(0, normalized.size() - 1));
   }
+  appendDomainPrefixedActiveLowResetCandidates(candidates);
   return candidates;
 }
 

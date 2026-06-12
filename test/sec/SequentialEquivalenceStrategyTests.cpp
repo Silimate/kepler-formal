@@ -150,6 +150,27 @@ bool isResetNameTokenForTest(
   return candidate == token || hasSuffixForTest(candidate, "_" + token);
 }
 
+bool isActiveLowResetTokenForTest(const std::string& candidate) {
+  return candidate == "RESET_N" || candidate == "RESETN" ||
+         candidate == "RESET_L" || candidate == "RST_N" ||
+         candidate == "RSTN" || candidate == "RST_L";
+}
+
+void appendDomainPrefixedActiveLowResetCandidatesForTest(
+    std::vector<std::string>& candidates) {
+  const size_t originalSize = candidates.size();
+  for (size_t index = 0; index < originalSize; ++index) {
+    const std::string& candidate = candidates[index];
+    if (candidate.size() <= 1) {
+      continue;
+    }
+    const std::string strippedDomain = candidate.substr(1);
+    if (isActiveLowResetTokenForTest(strippedDomain)) {
+      candidates.push_back(strippedDomain);
+    }
+  }
+}
+
 std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
     const std::string& displayName);
 
@@ -689,6 +710,7 @@ std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
   if (hasSuffixForTest(normalized, "_NI")) {
     candidates.push_back(normalized.substr(0, normalized.size() - 1));
   }
+  appendDomainPrefixedActiveLowResetCandidatesForTest(candidates);
   for (const auto& candidate : candidates) {
     if (isResetNameTokenForTest(candidate, "RESET") ||
         isResetNameTokenForTest(candidate, "RST")) {
@@ -17394,6 +17416,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(
       detail::getResetAssertionValueForTest("wb_rst_ni[0]"),
       std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("rrst_n[0]"),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("wrst_n[0]"),
+      std::optional<bool>(false));
+  EXPECT_EQ(
+      detail::getResetAssertionValueForTest("aresetn[0]"),
+      std::optional<bool>(false));
+  EXPECT_EQ(detail::getResetAssertionValueForTest("burst_n[0]"), std::nullopt);
   EXPECT_EQ(detail::getResetAssertionValueForTest("enable[0]"), std::nullopt);
 
   const auto shared = BoolExpr::Not(BoolExpr::Var(3));

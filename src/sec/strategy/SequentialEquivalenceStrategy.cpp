@@ -122,6 +122,30 @@ bool isResetNameToken(const std::string& candidate, const std::string& token) {
   return candidate == token || hasSuffix(candidate, "_" + token);
 }  // LCOV_EXCL_LINE
 
+bool isActiveLowResetToken(const std::string& candidate) {
+  return candidate == "RESET_N" || candidate == "RESETN" ||
+         candidate == "RESET_L" || candidate == "RST_N" ||
+         candidate == "RSTN" || candidate == "RST_L";
+}
+
+void appendDomainPrefixedActiveLowResetCandidates(
+    std::vector<std::string>& candidates) {
+  const size_t originalSize = candidates.size();
+  for (size_t index = 0; index < originalSize; ++index) {
+    const std::string& candidate = candidates[index];
+    if (candidate.size() <= 1) {
+      continue;
+    }
+    const std::string strippedDomain = candidate.substr(1);
+    if (isActiveLowResetToken(strippedDomain)) {
+      // Async FIFO top ports commonly use rrst_n/wrst_n.  Recognize those
+      // active-low one-letter domain prefixes without treating arbitrary
+      // embedded "rst" names as reset controls.
+      candidates.push_back(strippedDomain);
+    }
+  }
+}
+
 std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   // The shared SEC symbol space sees user-visible top-input names such as
   // `reset_i[0]`.  Match the same reset spelling policy as the reachable-state
@@ -138,6 +162,7 @@ std::vector<std::string> resetNameCandidates(const std::string& displayName) {
   if (hasSuffix(normalized, "_NI")) {
     candidates.push_back(normalized.substr(0, normalized.size() - 1));  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
+  appendDomainPrefixedActiveLowResetCandidates(candidates);
   return candidates;
 }
 
