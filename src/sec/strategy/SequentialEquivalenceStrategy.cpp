@@ -4908,24 +4908,16 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         kMaxPdrGlobalResetBootstrapEqualityStates);
     fflush(stderr);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
-  const AlignedSignals emptyResetBootstrapCandidateStateEqualities;
-  const bool skipDualRailResetBootstrapCandidates =
-      encoding_ == SecEncoding::DualRailSteady && secEngine_ == SecEngine::Pdr;
-  const AlignedSignals& resetBootstrapCandidatesForInvariant =
-      skipDualRailResetBootstrapCandidates
-          ? emptyResetBootstrapCandidateStateEqualities
-          : aligned.resetBootstrapCandidateStateEqualities;
-  // Dual-rail PDR proves unknown-state behavior explicitly in the rail
-  // encoding and learns its own state clauses. KI/IMC still benefit from the
-  // same validated reset-bootstrap strengthening as binary SEC; otherwise KI
-  // tries to prove from arbitrary post-reset rail states and falls back to
-  // expensive BMC frontiers.
+  // Reset-bootstrap candidates are rooted at aligned top-output cones and then
+  // validated before becoming proof facts.  Keep that path available for
+  // dual-rail PDR too; otherwise reset-heavy designs enter PDR with no startup
+  // relation and every non-trivial top output becomes an isolated unknown rail.
   const auto reachableInvariant = integrateReachableStateInvariant(
       model0,
       model1,
       aligned.inputs,
       aligned.inductiveStateEqualities,
-      resetBootstrapCandidatesForInvariant,
+      aligned.resetBootstrapCandidateStateEqualities,
       symbolSpace.state0Symbols,
       symbolSpace.state1Symbols,
       symbolSpace.problem,

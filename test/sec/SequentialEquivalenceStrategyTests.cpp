@@ -8753,16 +8753,33 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(wideMismatchResult.reason.find(", ..."), std::string::npos);
 }
 
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierGuardCountsRailSymbols) {
+KInductionProblem makeDualRailResetFrontierGuardProblemForTest(
+    size_t railPairs,
+    size_t transitionSources) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
-  problem.totalStateCount = 4097;
-  problem.dualRailStatePairs.reserve(problem.totalStateCount);
-  for (size_t index = 0; index < problem.totalStateCount; ++index) {
+  problem.totalStateCount = railPairs;
+  problem.dualRailStatePairs.reserve(railPairs);
+  for (size_t index = 0; index < railPairs; ++index) {
     problem.dualRailStatePairs.push_back(
         DualRailSymbolPair{index * 2, index * 2 + 1});
   }
+  problem.transitions0.reserve(transitionSources);
+  for (size_t index = 0; index < transitionSources; ++index) {
+    const size_t symbol = 100000 + index;
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  return problem;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailExactResetFrontierAllowsIbexSizedSurface) {
+  // Nangate45 Ibex needs exact reset-frontier repair at this rail/transition
+  // scale; otherwise dual-rail PDR reports abstract init-reaching roots.
+  KInductionProblem problem =
+      makeDualRailResetFrontierGuardProblemForTest(
+          /*railPairs=*/7748,
+          /*transitionSources=*/15496);
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   testing::internal::CaptureStderr();
@@ -8779,14 +8796,42 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*useExactResetFrontierChecks=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The original flop count is below the small-design threshold, but the PDR
-  // reset-frontier repair pays for both rails.  Guard on rail symbols so large
-  // dual-rail SEC runs do not re-enter the exact reset-prefix validation wall.
+  EXPECT_EQ(
+      stderrOutput.find(
+          "exact reset-frontier checks disabled for large dual-rail problem"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailExactResetFrontierGuardCountsRailSymbols) {
+  KInductionProblem problem =
+      makeDualRailResetFrontierGuardProblemForTest(
+          /*railPairs=*/10001,
+          /*transitionSources=*/0);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/1,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The PDR reset-frontier repair pays for both rails.  Guard on rail symbols
+  // so large dual-rail SEC runs do not re-enter the exact reset-prefix
+  // validation wall.
   EXPECT_NE(
       stderrOutput.find(
           "exact reset-frontier checks disabled for large dual-rail problem"),
       std::string::npos);
-  EXPECT_NE(stderrOutput.find("rail_state_symbols=8194"),
+  EXPECT_NE(stderrOutput.find("rail_state_symbols=20002"),
             std::string::npos);
 }
 
@@ -10993,7 +11038,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.property = BoolExpr::Not(problem.bad);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
-  constexpr size_t railPairCount = 4097;
+  constexpr size_t railPairCount = 10001;
   problem.usesDualRailStateEncoding = true;
   for (size_t index = 0; index < railPairCount; ++index) {
     problem.dualRailStatePairs.push_back({1000 + index * 2, 1001 + index * 2});
@@ -11054,6 +11099,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   }
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar frontierStateLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_FRONTIER_STATE_SYMBOL_LIMIT", "8193");
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
@@ -14617,7 +14664,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Keep this above the production dual-rail reset-frontier cap.  The default
   // was raised for Ibex-sized proofs, so this regression must scale with it
   // instead of forcing the real flow back to the smaller historical limit.
-  for (size_t index = 0; index < 4097; ++index) {
+  for (size_t index = 0; index < 10001; ++index) {
     problem.dualRailStatePairs.push_back(
         DualRailSymbolPair{10000 + index * 2, 10001 + index * 2});
   }
@@ -14681,7 +14728,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
     problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
   }
   problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
-  for (size_t index = 0; index < 8193; ++index) {
+  for (size_t index = 0; index < 20001; ++index) {
     problem.lazyTransitions->sourceByStateSymbol.emplace(
         20000 + index,
         LazyTransitionSource{0, BoolExpr::createFalse(), LazyTransitionRail::Binary});
@@ -14827,7 +14874,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = BoolExpr::createFalse();
   problem.inductionProperty = BoolExpr::createTrue();
   problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
-  for (size_t index = 0; index < 4097; ++index) {
+  for (size_t index = 0; index < 10001; ++index) {
     problem.lazyTransitions->sourceByStateSymbol.emplace(
         20000 + index,
         LazyTransitionSource{
@@ -14836,7 +14883,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar transitionLimit(
-      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_BMC_TRANSITION_SOURCE_LIMIT", "8193");
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_BMC_TRANSITION_SOURCE_LIMIT", "10001");
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(0);
@@ -14859,7 +14906,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.property = BoolExpr::createTrue();
   problem.inductionBad = BoolExpr::createFalse();
   problem.inductionProperty = BoolExpr::createTrue();
-  for (size_t index = 0; index < 4097; ++index) {
+  for (size_t index = 0; index < 10001; ++index) {
     problem.dualRailStatePairs.push_back(
         DualRailSymbolPair{20000 + index * 2, 20001 + index * 2});
   }
@@ -14875,7 +14922,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
 
   const ScopedEnvVar stateLimit(
-      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_FRONTIER_STATE_SYMBOL_LIMIT", "8194");
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_FRONTIER_STATE_SYMBOL_LIMIT", "20002");
   testing::internal::CaptureStderr();
   PDREngine overriddenEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   stderrOutput = testing::internal::GetCapturedStderr();
@@ -15017,6 +15064,61 @@ TEST_F(SequentialEquivalenceStrategyTests,
       model0, model1, AlignedSignals{});
 
   EXPECT_EQ(aligned.names.size(), 3u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralOutputConeCandidatesSkipRejectedRoots) {
+  const SignalKey data0 = makeSignalKey("partialCoiData0");
+  const SignalKey data1 = makeSignalKey("partialCoiData1");
+  const SignalKey bad0 = makeSignalKey("partialCoiBad0");
+  const SignalKey bad1 = makeSignalKey("partialCoiBad1");
+  const SignalKey good0 = makeSignalKey("partialCoiGood0");
+  const SignalKey good1 = makeSignalKey("partialCoiGood1");
+  const SignalKey state0 = makeSignalKey("partialCoiState0");
+  const SignalKey state1 = makeSignalKey("partialCoiState1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {data0};
+  model0.inputVarByKey.emplace(data0, 2);
+  model0.inputVarByKey.emplace(bad0, 6);
+  model0.inputVarByKey.emplace(good0, 8);
+  model0.displayNameByKey.emplace(data0, "data[0]");
+  model0.observedOutputExprByKey.emplace(bad0, BoolExpr::Var(2));
+  model0.observedOutputExprByKey.emplace(good0, BoolExpr::Var(4));
+  addStateBitForTest(model0, state0, 4, "left_state_q[0]", BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {data1};
+  model1.inputVarByKey.emplace(data1, 3);
+  model1.inputVarByKey.emplace(bad1, 7);
+  model1.inputVarByKey.emplace(good1, 9);
+  model1.displayNameByKey.emplace(data1, "data[0]");
+  model1.observedOutputExprByKey.emplace(bad1, BoolExpr::Not(BoolExpr::Var(3)));
+  model1.observedOutputExprByKey.emplace(good1, BoolExpr::Var(5));
+  addStateBitForTest(model1, state1, 5, "right_state_q[0]", BoolExpr::Var(3));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"data[0]"};
+  alignedInputs.keys0 = {data0};
+  alignedInputs.keys1 = {data1};
+  AlignedSignals alignedOutputs;
+  alignedOutputs.names = {"bad[0]", "good[0]"};
+  alignedOutputs.keys0 = {bad0, good0};
+  alignedOutputs.keys1 = {bad1, good1};
+
+  const auto aligned = inferStructurallyEquivalentOutputConeStatePairs(
+      model0,
+      model1,
+      alignedInputs,
+      alignedOutputs,
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
+
+  // One mismatched top output should not discard independent candidates from a
+  // later output cone; reset/bootstrap validation will decide whether the
+  // surviving candidate is strong enough to become a proof fact.
+  ASSERT_EQ(aligned.names.size(), 1u);
+  EXPECT_EQ(aligned.keys0.front(), state0);
+  EXPECT_EQ(aligned.keys1.front(), state1);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

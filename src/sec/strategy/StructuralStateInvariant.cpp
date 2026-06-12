@@ -597,7 +597,8 @@ bool addStructuralCoiStatePair(StructuralCoiMapping& mapping,
 bool structurallyUnifyExprPairForCoi(
     BoolExpr* expr0,
     BoolExpr* expr1,
-    StructuralCoiUnificationContext& context) {
+    StructuralCoiUnificationContext& context,
+    std::string* failureReason = nullptr) {
   struct StackItem {
     BoolExpr* lhs = nullptr;
     BoolExpr* rhs = nullptr;
@@ -615,6 +616,9 @@ bool structurallyUnifyExprPairForCoi(
 
     if (lhs == nullptr || rhs == nullptr) {
       if (lhs != rhs) {  // LCOV_EXCL_LINE
+        if (failureReason != nullptr) {  // LCOV_EXCL_LINE
+          *failureReason = "null_mismatch";  // LCOV_EXCL_LINE
+        }  // LCOV_EXCL_LINE
         return false;  // LCOV_EXCL_LINE
       }
       continue;  // LCOV_EXCL_LINE
@@ -627,6 +631,9 @@ bool structurallyUnifyExprPairForCoi(
       const size_t rhsId = rhs->getId();
       if (lhsId < 2 || rhsId < 2) {
         if (lhsId != rhsId) {
+          if (failureReason != nullptr) {
+            *failureReason = "constant_mismatch";
+          }
           return false;
         }
         continue;
@@ -639,6 +646,9 @@ bool structurallyUnifyExprPairForCoi(
         if (lhsInputIt == context.inputClasses0.end() ||
             rhsInputIt == context.inputClasses1.end() ||
             lhsInputIt->second != rhsInputIt->second) {
+          if (failureReason != nullptr) {
+            *failureReason = "input_class_mismatch";
+          }
           return false;
         }
         continue;
@@ -652,15 +662,24 @@ bool structurallyUnifyExprPairForCoi(
             rhsStateIt == context.stateIndexByVar1.end() ||
             !addStructuralCoiStatePair(
                 context.mapping, lhsStateIt->second, rhsStateIt->second)) {
+          if (failureReason != nullptr) {  // LCOV_EXCL_LINE
+            *failureReason = "state_pair_conflict";  // LCOV_EXCL_LINE
+          }  // LCOV_EXCL_LINE
           return false;  // LCOV_EXCL_LINE
         }
         continue;
       }
 
+      if (failureReason != nullptr) {
+        *failureReason = "private_var_mismatch";
+      }
       return false;
     }
 
     if (lhsOp != rhsOp || lhsOp == Op::NONE || rhsOp == Op::NONE) {
+      if (failureReason != nullptr) {
+        *failureReason = "operator_mismatch";
+      }
       return false;
     }
 
@@ -688,6 +707,39 @@ AlignedSignals buildStructuralCoiStatePairs(
     aligned.keys1.push_back(model1.stateBits[index1]);
   }
   return aligned;
+}
+
+bool canMergeStructuralCoiMapping(const StructuralCoiMapping& target,
+                                  const StructuralCoiMapping& source) {
+  for (const auto& [index0, index1] : source.pairs) {
+    if (index0 >= target.state0ToState1.size() ||
+        index1 >= target.state1ToState0.size()) {
+      return false;  // LCOV_EXCL_LINE
+    }
+    const size_t existing1 = target.state0ToState1[index0];
+    const size_t existing0 = target.state1ToState0[index1];
+    if ((existing1 != StructuralCoiMapping::kUnmapped && existing1 != index1) ||
+        (existing0 != StructuralCoiMapping::kUnmapped && existing0 != index0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void mergeStructuralCoiMapping(StructuralCoiMapping& target,
+                               const StructuralCoiMapping& source) {
+  for (const auto& [index0, index1] : source.pairs) {
+    const bool added = addStructuralCoiStatePair(target, index0, index1);
+    (void)added;
+  }
+}
+
+void appendAlignedSignalByIndex(AlignedSignals& target,
+                                const AlignedSignals& source,
+                                size_t index) {
+  target.names.push_back(source.names[index]);
+  target.keys0.push_back(source.keys0[index]);
+  target.keys1.push_back(source.keys1[index]);
 }
 
 bool validateStructuralCoiRelation(
@@ -786,52 +838,99 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
   const auto stateIndexByVar1 = buildStateIndexByVar(model1);
   StructuralCoiMapping mapping =
       makeStructuralCoiMapping(model0.stateBits.size(), model1.stateBits.size());
-  std::pmr::monotonic_buffer_resource seenPairResource;
-  StructuralExprPairSet seenPairs{&seenPairResource};
-  seenPairs.reserve(std::max<size_t>(4096, alignedOutputs.names.size() * 128));
-  StructuralCoiUnificationContext unificationContext{
-      inputClasses0,
-      inputClasses1,
-      stateIndexByVar0,
-      stateIndexByVar1,
-      mapping,
-      seenPairs};
   const size_t bootstrapCoiBudget =
       std::min(kMaxSatValidatedOrderedCoiStatePairs,
                resetBootstrapOutputCoiStatePairBudget());
+  AlignedSignals acceptedOutputs;
+  acceptedOutputs.names.reserve(alignedOutputs.names.size());
+  acceptedOutputs.keys0.reserve(alignedOutputs.keys0.size());
+  acceptedOutputs.keys1.reserve(alignedOutputs.keys1.size());
 
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
     const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
     const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    StructuralCoiMapping outputMapping =
+        makeStructuralCoiMapping(model0.stateBits.size(), model1.stateBits.size());
+    std::pmr::monotonic_buffer_resource outputSeenPairResource;
+    StructuralExprPairSet outputSeenPairs{&outputSeenPairResource};
+    outputSeenPairs.reserve(std::max<size_t>(4096, static_cast<size_t>(128)));
+    StructuralCoiUnificationContext outputContext{
+        inputClasses0,
+        inputClasses1,
+        stateIndexByVar0,
+        stateIndexByVar1,
+        outputMapping,
+        outputSeenPairs};
+    std::string failureReason;
     if (exprIt0 == model0.observedOutputExprByKey.end() ||
         exprIt1 == model1.observedOutputExprByKey.end() ||
         !structurallyUnifyExprPairForCoi(
             exprIt0->second,
             exprIt1->second,
-            unificationContext)) {
+            outputContext,
+            &failureReason)) {
+      if (failureReason.empty()) {  // LCOV_EXCL_LINE
+        failureReason = "missing_output";  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
       if (structuralCoiDiagEnabled()) {
         std::fprintf(
             stderr,
-            "SEC diag: structural output coi rejected output=%zu name=%s pairs=%zu\n",
+            "SEC diag: structural output coi skipped output=%zu name=%s "
+            "pairs=%zu reason=%s\n",
             i,
             alignedOutputs.names[i].c_str(),
-            mapping.pairs.size());
+            mapping.pairs.size(),
+            failureReason.c_str());
       }
-      return {};
+      continue;
     }
-    if (mapping.pairs.size() > bootstrapCoiBudget) {
+    if (mapping.pairs.size() + outputMapping.pairs.size() > bootstrapCoiBudget) {
       if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
-            "SEC diag: structural output coi rejected budget pairs=%zu budget=%zu\n",
+            "SEC diag: structural output coi skipped budget pairs=%zu root_pairs=%zu "
+            "budget=%zu\n",
             mapping.pairs.size(),  // LCOV_EXCL_LINE
+            outputMapping.pairs.size(),  // LCOV_EXCL_LINE
             bootstrapCoiBudget);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
-      return {};  // LCOV_EXCL_LINE
+      continue;  // LCOV_EXCL_LINE
     }
+    if (!canMergeStructuralCoiMapping(mapping, outputMapping)) {
+      if (structuralCoiDiagEnabled()) {
+        std::fprintf(  // LCOV_EXCL_LINE
+            stderr,  // LCOV_EXCL_LINE
+            "SEC diag: structural output coi skipped conflict output=%zu name=%s "
+            "pairs=%zu root_pairs=%zu\n",
+            i,  // LCOV_EXCL_LINE
+            alignedOutputs.names[i].c_str(),  // LCOV_EXCL_LINE
+            mapping.pairs.size(),  // LCOV_EXCL_LINE
+            outputMapping.pairs.size());  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      continue;
+    }
+    mergeStructuralCoiMapping(mapping, outputMapping);
+    appendAlignedSignalByIndex(acceptedOutputs, alignedOutputs, i);
+  }
+
+  if (acceptedOutputs.names.empty()) {
+    if (structuralCoiDiagEnabled()) {
+      std::fprintf(stderr, "SEC diag: structural output coi rejected no roots\n");
+    }
+    return {};
   }
 
   if (resetBootstrapOutputCoiTransitionClosureEnabled()) {
+    std::pmr::monotonic_buffer_resource seenPairResource;
+    StructuralExprPairSet seenPairs{&seenPairResource};
+    seenPairs.reserve(std::max<size_t>(4096, acceptedOutputs.names.size() * 128));
+    StructuralCoiUnificationContext unificationContext{
+        inputClasses0,
+        inputClasses1,
+        stateIndexByVar0,
+        stateIndexByVar1,
+        mapping,
+        seenPairs};
     size_t checkedTransitionPairs = 0;
     for (size_t cursor = 0; cursor < mapping.pairs.size(); ++cursor) {
       if (mapping.pairs.size() >= bootstrapCoiBudget) {
@@ -888,7 +987,7 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
       buildStructuralCoiStatePairs(model0, model1, mapping);
   if (alignedStates.names.empty() ||
       !validateStructuralOutputCoiRelation(
-          model0, model1, alignedInputs, alignedOutputs, alignedStates, solverType)) {
+          model0, model1, alignedInputs, acceptedOutputs, alignedStates, solverType)) {
     if (structuralCoiDiagEnabled()) {
       std::fprintf(
           stderr,
@@ -900,8 +999,9 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
   if (structuralCoiDiagEnabled()) {
     std::fprintf(
         stderr,
-        "SEC diag: structural output coi accepted pairs=%zu\n",
-        alignedStates.names.size());
+        "SEC diag: structural output coi accepted pairs=%zu roots=%zu\n",
+        alignedStates.names.size(),
+        acceptedOutputs.names.size());
   }
   return alignedStates;
 }

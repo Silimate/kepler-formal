@@ -223,11 +223,17 @@ constexpr size_t kMaxSingleOutputExactValidatedBadFormulaClauses = 64;
 constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
     kMaxValidatedBadFormulaClauses;
 // Exact reset-frontier checks are a concrete-reachability repair path.  They
-// are useful on small designs, but large dual-rail problems rebuild the reset
-// prefix over both value/known rails for many neighboring PDR cubes.  PDR
-// remains sound without this repair because it then proves the property over a
-// larger abstract frontier; concrete validation still guards any Difference.
-constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 8192;
+// are useful on small and mid-size reset-bootstrap designs, but large dual-rail
+// problems rebuild the reset prefix over both value/known rails for many
+// neighboring PDR cubes.  Nangate45 Ibex needs this repair at 15496 rail
+// symbols/transition sources to avoid abstract reset-frontier counterexamples;
+// larger SoC-scale surfaces still stay behind the guard unless the workflow
+// opts in through the existing environment overrides.
+constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 20000;
+constexpr size_t kMaxExactResetFrontierDualRailTransitionSources = 20000;
+// The broad frame-0 reset-bootstrap BMC precheck materializes the whole output
+// slice.  Keep that accelerator conservative and let mid-size dual-rail PDR use
+// the cheaper per-cube exact reset-frontier repair above instead.
 constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 8192;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
@@ -920,6 +926,7 @@ size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
 }
 
 size_t dualRailResetBootstrapBmcTransitionSourceLimit();
+size_t dualRailResetFrontierTransitionSourceLimit();
 size_t dualRailResetFrontierStateSymbolLimit();
 
 bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
@@ -930,7 +937,7 @@ bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
   return pdrDualRailStateSymbolCount(problem) <=
              dualRailResetFrontierStateSymbolLimit() &&
          pdrTransitionSourceCount(problem) <=
-             dualRailResetBootstrapBmcTransitionSourceLimit();
+             dualRailResetFrontierTransitionSourceLimit();
 }
 
 KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
@@ -1057,6 +1064,12 @@ size_t dualRailResetBootstrapBmcTransitionSourceLimit() {
   return envSizeLimitOrDefault(
       "KEPLER_SEC_PDR_DUAL_RAIL_RESET_BMC_TRANSITION_SOURCE_LIMIT",
       kMaxDualRailResetBootstrapBmcTransitionSources);
+}
+
+size_t dualRailResetFrontierTransitionSourceLimit() {
+  return envSizeLimitOrDefault(
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_FRONTIER_TRANSITION_SOURCE_LIMIT",
+      kMaxExactResetFrontierDualRailTransitionSources);
 }
 
 size_t dualRailResetFrontierStateSymbolLimit() {
@@ -5670,7 +5683,7 @@ bool hasLargeDualRailResetFrontierSurface(const KInductionProblem& problem) {
          (pdrDualRailStateSymbolCount(problem) >
               dualRailResetFrontierStateSymbolLimit() ||
           pdrTransitionSourceCount(problem) >
-              dualRailResetBootstrapBmcTransitionSourceLimit());
+              dualRailResetFrontierTransitionSourceLimit());
 }
 
 bool canExactlyValidateBadFormulaGroup(const KInductionProblem& problem,
@@ -11311,7 +11324,9 @@ PDREngine::PDREngine(const KInductionProblem& problem,
         "SEC PDR stats: exact reset-frontier checks disabled for large ",
         "dual-rail problem rail_state_symbols=",
         pdrDualRailStateSymbolCount(problem),
-        " limit=", dualRailResetFrontierStateSymbolLimit());
+        " rail_limit=", dualRailResetFrontierStateSymbolLimit(),
+        " transition_sources=", pdrTransitionSourceCount(problem),
+        " transition_limit=", dualRailResetFrontierTransitionSourceLimit());
   }
 }
 
