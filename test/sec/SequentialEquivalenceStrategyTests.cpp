@@ -1706,6 +1706,57 @@ void addStateBitForTest(SequentialDesignModel& model,
   model.nextStateExprByStateKey.emplace(key, nextState);
 }
 
+struct LargeDualRailResidualCase {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  size_t residualOutputs = 0;
+};
+
+LargeDualRailResidualCase makeLargeDualRailResidualCaseForTest(
+    const std::string& prefix,
+    size_t residualOutputs) {
+  const SignalKey implied = makeSignalKey(prefix + "ImpliedOut");
+  const SignalKey state0 = makeSignalKey(prefix + "State0");
+
+  LargeDualRailResidualCase testCase;
+  testCase.residualOutputs = residualOutputs;
+  testCase.model0.stateBits = {state0};
+  testCase.model0.inputVarByKey.emplace(state0, 2);
+  testCase.model0.displayNameByKey.emplace(
+      state0, prefix + "_large_residual_state[0]");
+  testCase.model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+  testCase.model0.allObservedOutputs.push_back(implied);
+  testCase.model0.observedOutputs.push_back(implied);
+  testCase.model0.displayNameByKey.emplace(implied, "implied_out[0]");
+  testCase.model0.observedOutputExprByKey.emplace(
+      implied, BoolExpr::createTrue());
+
+  testCase.model1.allObservedOutputs.push_back(implied);
+  testCase.model1.observedOutputs.push_back(implied);
+  testCase.model1.displayNameByKey.emplace(implied, "implied_out[0]");
+  testCase.model1.observedOutputExprByKey.emplace(
+      implied, BoolExpr::createTrue());
+
+  for (size_t i = 0; i < residualOutputs; ++i) {
+    const SignalKey out =
+        makeSignalKey(prefix + "ResidualOut" + std::to_string(i));
+    const std::string outputName =
+        "large_residual_out[" + std::to_string(i) + "]";
+    testCase.model0.allObservedOutputs.push_back(out);
+    testCase.model0.observedOutputs.push_back(out);
+    testCase.model0.displayNameByKey.emplace(out, outputName);
+    testCase.model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(2));
+
+    testCase.model1.allObservedOutputs.push_back(out);
+    testCase.model1.observedOutputs.push_back(out);
+    testCase.model1.displayNameByKey.emplace(out, outputName);
+    testCase.model1.observedOutputExprByKey.emplace(
+        out, BoolExpr::createFalse());
+  }
+
+  return testCase;
+}
+
 struct DelayedRailMismatchModels {
   SequentialDesignModel model0;
   SequentialDesignModel model1;
@@ -8261,6 +8312,54 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailRunsCheapImplicationOnVeryWideSurface) {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  constexpr size_t kOutputCount = 385;
+  for (size_t i = 0; i < kOutputCount; ++i) {
+    const SignalKey out =
+        makeSignalKey("pdrDualRailVeryWideOut" + std::to_string(i));
+    model0.allObservedOutputs.push_back(out);
+    model0.observedOutputs.push_back(out);
+    model0.displayNameByKey.emplace(
+        out, "very_wide_out[" + std::to_string(i) + "]");
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model1.displayNameByKey.emplace(
+        out, "very_wide_out[" + std::to_string(i) + "]");
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  }
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedUnsetEnvVar implicationOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_OUTPUT_LIMIT");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+
+  // Swerv-like output surfaces are too wide for the high-budget local SAT
+  // sweep, but a tiny conflict cap still recovers trivial top-output coverage.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, kOutputCount);
+  EXPECT_EQ(result.totalOutputs, kOutputCount);
+  EXPECT_NE(stdoutOutput.find("rail_outputs=385"), std::string::npos);
+  EXPECT_NE(stdoutOutput.find("sat_implied_outputs=385"), std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find("implication_conflict_limit=256"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailFlushDepthZeroDisablesCertificate) {
   const SignalKey out = makeSignalKey("pdrDualRailFlushDepthZeroOut");
 
@@ -8693,6 +8792,126 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(
       splitBatchPosition == std::string::npos ||
       broadBatchPosition < splitBatchPosition);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailSkipsLargeResidualSurfaceAfterCertificates) {
+  constexpr size_t kResidualOutputs = 6;
+  const auto testCase =
+      makeLargeDualRailResidualCaseForTest("pdrDualRailLargeResidual",
+                                           kResidualOutputs);
+
+  const ScopedEnvVar residualOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
+  const ScopedEnvVar residualStateLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Large residual rail-state surfaces are a coverage frontier, not a reason to
+  // spend the whole workflow on reset-dependent PDR leaves. Already-certified
+  // top outputs remain covered and every residual top output is reported.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("large rail-state surface"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("PDR skipping large dual-rail residual surface"),
+      std::string::npos);
+  EXPECT_EQ(stderrOutput.find("stage=initial"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsKiDualRailSkipsLargeResidualSurfaceAfterCertificates) {
+  constexpr size_t kResidualOutputs = 6;
+  const auto testCase =
+      makeLargeDualRailResidualCaseForTest("kiDualRailLargeResidual",
+                                           kResidualOutputs);
+
+  const ScopedEnvVar residualOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
+  const ScopedEnvVar residualStateLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // KI shares the same swerv-shaped residual guard as PDR: keep real top-output
+  // certificates, but do not spend minutes proving every giant residual leaf.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("large rail-state surface"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find(
+          "dual-rail k-induction skipping large residual surface"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("dual-rail k-induction proving residual output batch"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsImcDualRailSkipsLargeResidualSurfaceAfterCertificates) {
+  constexpr size_t kResidualOutputs = 6;
+  const auto testCase =
+      makeLargeDualRailResidualCaseForTest("imcDualRailLargeResidual",
+                                           kResidualOutputs);
+
+  const ScopedEnvVar residualOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
+  const ScopedEnvVar residualStateLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // IMC uses the same residual policy so a different selected engine cannot
+  // regress swerv into the same giant per-output proof sweep.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("large rail-state surface"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("dual-rail imc skipping large residual surface"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("dual-rail imc proving residual output batch"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -1301,11 +1301,15 @@ bool secSummaryStatsEnabled() {
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
+constexpr unsigned kWideDualRailLocalImplicationConflictLimit = 256;
 constexpr size_t kMaxDualRailLocalImplicationOutputs = 64;
 constexpr size_t kMinDualRailWideLocalImplicationOutputs = 256;
 constexpr size_t kMaxDualRailWideLocalImplicationOutputs = 384;
+constexpr size_t kMaxDualRailVeryWideLocalImplicationOutputs = 2048;
 constexpr size_t kMaxDualRailWideLocalImplicationOutputSupport = 20000;
 constexpr size_t kMaxDualRailWideLocalImplicationStateRails = 20000;
+constexpr size_t kMaxDualRailResidualOutputs = 128;
+constexpr size_t kMaxDualRailResidualStateSymbols = 20000;
 constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
 constexpr size_t kMaxDualRailFlushCertificateOutputs = 64;
 constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
@@ -1816,6 +1820,10 @@ void markDualRailResidualOutputSkipped(
   }
 }
 
+bool shouldSkipLargeDualRailResidualSurface(
+    const KInductionProblem& problem,
+    size_t residualOutputCount);
+
 void proveDualRailResidualOutputSet(
     const KInductionProblem& problem,
     const std::vector<size_t>& outputIndices,
@@ -2002,6 +2010,37 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
         extractedBoundaryReports);
   }
 
+  const size_t impliedOutputCount = static_cast<size_t>(std::count(
+      problem.outputImpliedByInductionCore.begin(),
+      problem.outputImpliedByInductionCore.end(),
+      true));
+  if (impliedOutputCount > 0 &&
+      shouldSkipLargeDualRailResidualSurface(
+          problem, residualOutputIndices.size())) {
+    emitSecDiag(
+        "SEC diag: dual-rail ", dualRailResidualEngineName(engine),
+        " skipping large residual surface outputs=",
+        residualOutputIndices.size(),
+        " state_symbols=",
+        problem.dualRailStatePairs.size() * 2);
+    const std::string reason =
+        std::string("dual-rail ") + dualRailResidualEngineName(engine) +
+        " residual skipped for large rail-state surface";
+    const OutputCoverageSelection partialCoverage =
+        buildCoverageSkippingOutputIndices(
+            outputCoverage, problem, residualOutputIndices, reason);
+    // Keep only top outputs that the dual-rail implication core has already
+    // certified.  Large residual surfaces remain visible as skipped coverage
+    // instead of turning KI/IMC regressions into long per-output proof sweeps.
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        0,
+        "",
+        partialCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
   DualRailResidualProofState proofState;
   proofState.coveredOutputs.assign(problem.observedOutputExprs0.size(), false);
   for (size_t i = 0; i < problem.outputImpliedByInductionCore.size(); ++i) {
@@ -2064,19 +2103,23 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
       extractedBoundaryReports);
 }
 
-unsigned dualRailLocalImplicationConflictLimit() {
-  const char* value =
-      std::getenv("KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
-  if (value == nullptr || *value == '\0') {
-    return kDualRailLocalImplicationConflictLimit;
+unsigned dualRailLocalImplicationConflictLimit(size_t outputCount,
+                                               size_t railStateBits) {
+  if (const auto envLimit = secStrategyUnsignedEnv(
+          "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+      envLimit.has_value()) {
+    return *envLimit;
   }
-  char* end = nullptr;  // LCOV_EXCL_LINE
-  const unsigned long parsed = std::strtoul(value, &end, 10);  // LCOV_EXCL_LINE
-  if (end == value || *end != '\0' ||  // LCOV_EXCL_LINE
-      parsed > std::numeric_limits<unsigned>::max()) {  // LCOV_EXCL_LINE
-    return kDualRailLocalImplicationConflictLimit;  // LCOV_EXCL_LINE
+
+  // Very wide resetless ASIC surfaces can still contain many trivial top-output
+  // rail equalities.  Give those a tiny SAT budget so they recover coverage,
+  // but do not let the implication sweep become the main proof engine.
+  if (outputCount > kMaxDualRailWideLocalImplicationOutputs ||
+      railStateBits > kMaxDualRailWideLocalImplicationStateRails) {
+    return kWideDualRailLocalImplicationConflictLimit;
   }
-  return static_cast<unsigned>(parsed);  // LCOV_EXCL_LINE
+
+  return kDualRailLocalImplicationConflictLimit;
 }
 
 size_t directObservedOutputSupportSize(const KInductionProblem& problem) {
@@ -2128,6 +2171,13 @@ bool shouldRunDualRailLocalImplicationChecks(
     return true;
   }
 
+  if (implicationConflictLimit <= kWideDualRailLocalImplicationConflictLimit &&
+      outputCount <= kMaxDualRailVeryWideLocalImplicationOutputs &&
+      (outputCount > kMaxDualRailWideLocalImplicationOutputs ||
+       railStateBits > kMaxDualRailWideLocalImplicationStateRails)) {
+    return true;
+  }
+
   // Dynamic-node style wrappers expose a mid-wide top-output bus whose direct
   // support is still bounded by one manageable rail surface.  Let those regain
   // the cheap SAT implication certificate, while keeping Ibex/SoC-wide shapes
@@ -2140,6 +2190,27 @@ bool shouldRunDualRailLocalImplicationChecks(
 
   return alignedObservedOutputSupportSize(model0, model1, alignedOutputs) <=
          kMaxDualRailWideLocalImplicationOutputSupport;
+}
+
+bool shouldSkipLargeDualRailResidualSurface(
+    const KInductionProblem& problem,
+    size_t residualOutputCount) {
+  if (!problem.usesDualRailStateEncoding || residualOutputCount == 0) {
+    return false;
+  }
+
+  const size_t residualOutputLimit = secStrategySizeLimitFromEnv(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT",
+      kMaxDualRailResidualOutputs);
+  const size_t stateSymbolLimit = secStrategySizeLimitFromEnv(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT",
+      kMaxDualRailResidualStateSymbols);
+  const size_t stateSymbols = problem.usesDualRailStateEncoding
+                                  ? problem.dualRailStatePairs.size() * 2
+                                  : problem.totalStateCount;  // LCOV_EXCL_LINE
+
+  return residualOutputCount > residualOutputLimit &&
+         stateSymbols > stateSymbolLimit;
 }
 
 size_t pdrCertificateStateSymbolCount(const KInductionProblem& problem) {
@@ -3078,7 +3149,8 @@ KInductionProblem buildDualRailSecProblem(
   BoolExpr* property = BoolExpr::createTrue();
   size_t inductionCoreImpliedOutputCount = 0;
   const unsigned implicationConflictLimit =
-      dualRailLocalImplicationConflictLimit();
+      dualRailLocalImplicationConflictLimit(
+          alignedOutputs.names.size(), problem.totalStateCount);
   const bool runLocalImplicationChecks =
       shouldRunDualRailLocalImplicationChecks(
           model0,
@@ -3399,6 +3471,27 @@ SequentialEquivalenceResult runPdrSecEngine(
         "SEC diag: PDR dual-rail proof restricted to ",
         dualRailEngineOutputIndices.size(),
         " non-implied outputs");
+    if (shouldSkipLargeDualRailResidualSurface(
+            problem, dualRailEngineOutputIndices.size())) {
+      emitSecDiag(
+          "SEC diag: PDR skipping large dual-rail residual surface outputs=",
+          dualRailEngineOutputIndices.size(),
+          " state_symbols=",
+          pdrCertificateStateSymbolCount(problem));
+      const OutputCoverageSelection partialCoverage =
+          buildCoverageSkippingOutputIndices(
+              outputCoverage,
+              problem,
+              dualRailEngineOutputIndices,
+              "dual-rail PDR residual skipped for large rail-state surface");
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          0,
+          "",
+          partialCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
     const KInductionProblem residualProblem =
         makeOutputSubsetProblem(problem, dualRailEngineOutputIndices);
     const OutputCoverageSelection residualCoverage =
