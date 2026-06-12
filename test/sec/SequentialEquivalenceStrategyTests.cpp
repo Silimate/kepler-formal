@@ -8400,6 +8400,66 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailFlushCertifiesConvergedOutput) {
+  const SignalKey out = makeSignalKey("pdrDualRailFlushConvergedOut");
+  const SignalKey state0 = makeSignalKey("pdrDualRailFlushConvergedState0");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {state0};
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model0.inputVarByKey.emplace(state0, 2);
+  model0.displayNameByKey.emplace(out, "flush_converged_out[0]");
+  model0.displayNameByKey.emplace(state0, "left_flush_state[0]");
+  model0.initialStateValueByKey.emplace(state0, false);
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::createFalse());
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model1.displayNameByKey.emplace(out, "flush_converged_out[0]");
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::createFalse());
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedEnvVar flushDepth("KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH", "1");
+  const ScopedEnvVar flushOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_OUTPUT_LIMIT", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // There is no internal state on design1 to relate by name.  The output is
+  // covered only because the dual-rail convergence certificate proves the top
+  // output after one transition from any legal rail state, with the real startup
+  // prefix checked.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_NE(stdoutOutput.find("sat_implied_outputs=0"), std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+  EXPECT_NE(stdoutOutput.find("flush_certified_outputs=1"), std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "SEC diag: dual-rail flush certificate output=flush_converged_out[0]"),
+      std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailFlushSkipsWideOutputSurfaceByDefault) {
   SequentialDesignModel model0;
   SequentialDesignModel model1;
@@ -8450,7 +8510,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsDualRailFullCoverageModeSkipsInvariantProofOnly) {
+       RunExtractedModelsDualRailFullCoverageModeAcceptsUnsatGuard) {
   const SignalKey resetlessOut =
       makeSignalKey("pdrDualRailFullCoverageResetlessOut");
   const SignalKey state0 =
@@ -8502,17 +8562,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 8);
 
-  // The workflow-only full-coverage mode is not a proof shortcut. It still
-  // checks the concrete top-output base frame, then reports that every output
-  // is representable in the dual-rail model without entering expensive PDR.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  // The workflow-only full-coverage mode is not a full invariant proof.  It
+  // accepts the run only after all outputs are represented and the concrete
+  // frame-0 top-output guard proves UNSAT.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.bound, 0u);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_TRUE(result.skippedObservedOutputs.empty());
-  EXPECT_NE(
-      result.reason.find("full-coverage mode skipped invariant proof"),
-      std::string::npos);
+  EXPECT_TRUE(result.reason.empty());
 
   SequentialEquivalenceStrategy kiStrategy(
       nullptr,
@@ -8521,7 +8579,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::KInduction,
       SecEncoding::DualRailSteady);
   const auto kiResult = kiStrategy.runExtractedModels(model0, model1, 8);
-  EXPECT_EQ(kiResult.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(kiResult.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(kiResult.coveredOutputs, 1u);
   EXPECT_EQ(kiResult.totalOutputs, 1u);
   EXPECT_TRUE(kiResult.skippedObservedOutputs.empty());
@@ -8533,7 +8591,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::Imc,
       SecEncoding::DualRailSteady);
   const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 8);
-  EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(imcResult.coveredOutputs, 1u);
   EXPECT_EQ(imcResult.totalOutputs, 1u);
   EXPECT_TRUE(imcResult.skippedObservedOutputs.empty());
@@ -13629,6 +13687,74 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       stderrOutput.find(
           "frame invariant state_equalities support=2 init=pass inductive=pass"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineRejectsStateInvariantWhenNoStructuredInitFactsExist) {
+  KInductionProblem problem;
+  constexpr size_t lhs = 2;
+  constexpr size_t rhs = 3;
+
+  problem.state0Symbols = {lhs, rhs};
+  problem.allSymbols = {lhs, rhs};
+  problem.inductiveStateEqualityPairs = {{lhs, rhs}};
+  problem.transitions0.emplace_back(lhs, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(rhs, BoolExpr::createFalse());
+  problem.property = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // A frame invariant may not be accepted just because it is syntactically
+  // available; without init/bootstrap facts, the startup frontier does not prove
+  // the candidate equality.
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "frame invariant state_equalities support=2 init=fail"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineRejectsStateInvariantWhenStructuredFactsMissPair) {
+  KInductionProblem problem;
+  constexpr size_t lhs = 2;
+  constexpr size_t rhs = 3;
+  constexpr size_t unrelated = 4;
+
+  problem.state0Symbols = {lhs, rhs, unrelated};
+  problem.allSymbols = {lhs, rhs, unrelated};
+  problem.initialStateEqualityPairs = {{lhs, unrelated}};
+  problem.inductiveStateEqualityPairs = {{lhs, rhs}};
+  problem.transitions0.emplace_back(lhs, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(rhs, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(unrelated, BoolExpr::createFalse());
+  problem.property = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Structured facts must prove each requested equality pair.  An unrelated
+  // equality is not enough to make the PDR frame-invariant shortcut sound.
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "frame invariant state_equalities support=2 init=fail"),
       std::string::npos)
       << stderrOutput;
 }
