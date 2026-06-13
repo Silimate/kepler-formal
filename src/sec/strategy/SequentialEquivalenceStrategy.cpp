@@ -1323,15 +1323,6 @@ bool pdrStrategyStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
 }
 
-bool secExpectedDifferentMode() {
-  return std::getenv("KEPLER_SEC_EXPECT_DIFFERENT") != nullptr;
-}
-
-bool dualRailFullCoverageOnlyMode() {
-  return std::getenv("KEPLER_SEC_DUAL_RAIL_FULL_COVERAGE_ONLY") != nullptr ||
-         std::getenv("KEPLER_SEC_PDR_DUAL_RAIL_FULL_COVERAGE_ONLY") != nullptr;
-}
-
 std::vector<std::string> secStrategyCommaListFromEnv(const char* name) {
   const char* valueText = std::getenv(name);
   if (valueText == nullptr || *valueText == '\0') {
@@ -1359,28 +1350,6 @@ std::vector<std::string> secStrategyCommaListFromEnv(const char* name) {
     }
   }
   return values;
-}
-
-std::vector<size_t> collectExpectedDifferenceOutputIndices(
-    const KInductionProblem& problem) {
-  const std::vector<std::string> filters =
-      secStrategyCommaListFromEnv("KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER");
-  if (filters.empty()) {
-    return {};
-  }
-
-  std::vector<size_t> indices;
-  for (size_t i = 0; i < problem.observedOutputNames.size(); ++i) {
-    const std::string& name = problem.observedOutputNames[i];
-    const bool matches = std::any_of(
-        filters.begin(), filters.end(), [&](const std::string& filter) {
-          return name.find(filter) != std::string::npos;
-        });
-    if (matches) {
-      indices.push_back(i);
-    }
-  }
-  return indices;
 }
 
 size_t secStrategySizeLimitFromEnv(const char* name, size_t defaultValue) {
@@ -3704,135 +3673,6 @@ void addFrameZeroInitialEqualities(
   }
 }
 
-SATSolverWrapper::SolveStatus solveFrameZeroBadWithoutTransitions(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  const std::set<size_t> orderedSupport = problem.bad->getSupportVars();
-  std::vector<size_t> supportSymbols(
-      orderedSupport.begin(), orderedSupport.end());
-  std::unordered_set<size_t> support(
-      orderedSupport.begin(), orderedSupport.end());
-
-  SATSolverWrapper solver(solverType);
-  solver.configureForSecLocalBooleanCheck(supportSymbols.size());
-  FrameVariableStore variables(solver, supportSymbols, 1);
-  addFrameZeroInitialAssignments(solver, variables, support, problem);
-  addFrameZeroInitialEqualities(solver, variables, support, problem);
-
-  FrameFormulaEncoder encoder(
-      solver,
-      variables.makeLeafLits(0),
-      /*createMissingLeaves=*/false,
-      orderedSupport.size());
-  solver.addClause({encoder.encode(problem.bad)});
-  return solver.solveStatus();
-}
-
-SequentialEquivalenceResult runDualRailFullCoverageOnlyCheck(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries,
-    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
-  if (problem.bad == BoolExpr::createFalse()) {
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        0,
-        "",
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-
-  const SATSolverWrapper::SolveStatus frameZeroStatus =
-      solveFrameZeroBadWithoutTransitions(problem, solverType);
-  if (frameZeroStatus == SATSolverWrapper::SolveStatus::Sat) {
-    const KInductionResult witnessResult{KInductionStatus::Different, 0, std::nullopt};
-    return makeSecResult(
-        SequentialEquivalenceStatus::Different,
-        witnessResult.bound,
-        "Dual-rail full-coverage mode found a concrete frame-0 "
-        "top-output mismatch while guarding outputs: " +
-            summarizeGuardedOutputNames(problem),
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-
-  // This CI mode is intentionally a coverage check for resetless dual-rail SEC
-  // regressions: prove that all top outputs are representable in the rail model
-  // and run one concrete frame-0 guard.  A proven UNSAT guard means the
-  // coverage-only workflow succeeded; only an unresolved guard remains
-  // inconclusive.
-  if (frameZeroStatus == SATSolverWrapper::SolveStatus::Unsat) {
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        0,
-        "",
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-
-  return makeSecResult(  // LCOV_EXCL_LINE
-      SequentialEquivalenceStatus::Inconclusive,  // LCOV_EXCL_LINE
-      0,  // LCOV_EXCL_LINE
-      "Dual-rail full-coverage mode could not finish the frame-0 "  // LCOV_EXCL_LINE
-      "top-output guard",  // LCOV_EXCL_LINE
-      outputCoverage,  // LCOV_EXCL_LINE
-      abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-      extractedBoundaryReports);  // LCOV_EXCL_LINE
-}
-
-std::optional<KInductionResult> findExpectedDifferenceCounterexample(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t maxK) {
-  if (!secExpectedDifferentMode()) {
-    return std::nullopt;
-  }
-  const size_t outputBatchLimit = secStrategySizeLimitFromEnv(
-      "KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_LIMIT", 16);
-  const size_t supportLimit = secStrategySizeLimitFromEnv(
-      "KEPLER_SEC_EXPECT_DIFFERENT_SUPPORT_LIMIT", 512);
-  if (problem.observedOutputExprs0.empty()) {
-    return std::nullopt;
-  }
-  const std::vector<size_t> filteredOutputIndices =
-      collectExpectedDifferenceOutputIndices(problem);
-  if (std::getenv("KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER") != nullptr &&
-      filteredOutputIndices.empty()) {
-    return std::nullopt;
-  }
-  const KInductionProblem searchProblem =
-      filteredOutputIndices.empty()
-          ? problem
-          : makeOutputSubsetProblem(problem, filteredOutputIndices);
-  const OutputBatchingLimits limits{outputBatchLimit, supportLimit};
-  const std::vector<std::pair<size_t, size_t>> outputBatches =
-      buildSupportBoundedOutputBatches(searchProblem, limits);
-
-  // Expected-difference regressions care about a concrete witness more than
-  // coverage.  Search each exact frontier on bounded top-output slices before
-  // PDR is allowed to turn residual sets into skipped coverage.  This keeps
-  // TinyRocket-sized expected-different runs from either skipping the witness
-  // search entirely or materializing one giant OR cone across every top output.
-  for (size_t k = 0; k <= maxK; ++k) {
-    for (const auto& [firstOutput, endOutput] : outputBatches) {
-      KInductionProblem batchProblem = searchProblem;
-      configureOutputBatchProblem(
-          batchProblem, searchProblem, firstOutput, endOutput);
-      if (auto witness = SEC::findFastBaseCounterexampleAtFrontier(
-              batchProblem, solverType, k);
-          witness.has_value()) {
-        return KInductionResult{
-            KInductionStatus::Different, witness->badFrame, std::move(witness)};
-      }
-    }
-  }
-  return std::nullopt;
-}
-
 SequentialEquivalenceResult makeCounterexampleSecResult(
     KInductionResult witnessResult,
     const SequentialDesignModel& model0,
@@ -3944,19 +3784,6 @@ SequentialEquivalenceResult runPdrSecEngine(
         makeOutputSubsetCoverage(outputCoverage, dualRailEngineOutputIndices);
     if (shouldSkipLargeDualRailResidualSurface(
             problem, dualRailEngineOutputIndices.size())) {
-      if (auto witnessResult = findExpectedDifferenceCounterexample(
-              residualProblem, solverType, maxK);
-          witnessResult.has_value()) {
-        return makeCounterexampleSecResult(
-            std::move(*witnessResult),
-            model0,
-            model1,
-            top0,
-            top1,
-            outputCoverage,
-            abstractedSequentialBoundaries,
-            extractedBoundaryReports);
-      }
       emitSecDiag(
           "SEC diag: PDR skipping large dual-rail residual surface outputs=",
           dualRailEngineOutputIndices.size(),
@@ -3996,19 +3823,6 @@ SequentialEquivalenceResult runPdrSecEngine(
           SequentialEquivalenceStatus::Equivalent,
           residualResult.bound,
           "",
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    }
-    if (auto witnessResult = findExpectedDifferenceCounterexample(
-            residualProblem, solverType, maxK);
-        witnessResult.has_value()) {
-      return makeCounterexampleSecResult(
-          std::move(*witnessResult),
-          model0,
-          model1,
-          top0,
-          top1,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -4402,10 +4216,6 @@ SequentialEquivalenceResult runPdrSecEngine(
     const bool finalBatchCanValidateConcrete =  // LCOV_EXCL_LINE
         !problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
         endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs;  // LCOV_EXCL_LINE
-    const bool finalBatchCanValidateExpectedDifference =
-        problem.usesDualRailStateEncoding &&
-        secExpectedDifferentMode() &&
-        endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs;
     const bool finalBatchCanRefineProjectedCounterexamples = true;  // LCOV_EXCL_LINE
     // The bad-formula repair opens exact reset-frontier queries. Keep it out of
     // final dual-rail SEC slices; hard leaves can split/skip without proving a
@@ -4505,8 +4315,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     if (fullExactPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
       std::optional<KInductionResult::CounterexampleWitness>
           fullExactWitness;  // LCOV_EXCL_LINE
-      if (finalBatchCanValidateConcrete ||
-          finalBatchCanValidateExpectedDifference) {  // LCOV_EXCL_LINE
+      if (finalBatchCanValidateConcrete) {  // LCOV_EXCL_LINE
         fullExactWitness = SEC::findBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
             validationProblem, solverType, fullExactPdrResult.bound);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
@@ -4609,8 +4418,6 @@ SequentialEquivalenceResult runPdrSecEngine(
                   "KEPLER_SEC_PDR_DUAL_RAIL_PROJECTED_QUERY_BUDGET",
                   kDualRailProjectedPdrPredecessorQueryBudget)
             : kProjectedPdrPredecessorQueryBudget;
-    const bool validateProjectedPdrCandidatesBeforeFinal =
-        secExpectedDifferentMode();
     emitPdrStrategyStageStats(
         emitPdrStageStats,
         batchIndex,
@@ -4635,6 +4442,24 @@ SequentialEquivalenceResult runPdrSecEngine(
     const auto pdrResult = pdrEngine.run(maxK, broadBasePrecheckDone);
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:
+        // Projected PDR frames are proof accelerators. Before marking a batch
+        // covered, validate the actual top-output SEC base predicate through
+        // the proved bound so no abstraction is trusted as a result.
+        if (auto concreteWitness =
+                SEC::findBaseCounterexample(batchProblem, solverType, pdrResult.bound);
+            concreteWitness.has_value()) {
+          const KInductionResult witnessResult{
+              KInductionStatus::Different,
+              concreteWitness->badFrame,
+              std::move(concreteWitness)};
+          return makeSecResult(
+              SequentialEquivalenceStatus::Different,
+              witnessResult.bound,
+              formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),
+              outputCoverage,
+              abstractedSequentialBoundaries,
+              extractedBoundaryReports);
+        }
         provedBound = std::max(provedBound, pdrResult.bound);
         markDualRailPdrOutputRangeCovered(
             pdrCoveredOutputs,
@@ -4643,21 +4468,22 @@ SequentialEquivalenceResult runPdrSecEngine(
             endOutput);
         break;
       case PDRStatus::Different: {
-        // Exact concrete validation remains a one-output leaf operation. The
-        // final exact PDR retry can now repair a moderate batch by validating
-        // each output-bad formula separately, so do not split the batch until
-        // all precision stages have had that proof-preserving repair chance.
-        constexpr size_t kMaxPdrConcreteValidationOutputs = 1;  // LCOV_EXCL_LINE
-        KInductionProblem validationProblem = problem;  // LCOV_EXCL_LINE
-        configureOutputBatchProblem(  // LCOV_EXCL_LINE
-            validationProblem, problem, firstOutput, endOutput);  // LCOV_EXCL_LINE
-        std::optional<KInductionResult::CounterexampleWitness> witness;  // LCOV_EXCL_LINE
-        if (validateProjectedPdrCandidatesBeforeFinal &&
-            endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
-          witness = SEC::findBaseCounterexampleAtFrontier(
-              validationProblem, solverType, pdrResult.bound);
-        }
-        if (!witness.has_value()) {  // LCOV_EXCL_LINE
+        {
+          if (auto concreteWitness =
+                  SEC::findBaseCounterexample(batchProblem, solverType, pdrResult.bound);
+              concreteWitness.has_value()) {
+            const KInductionResult witnessResult{
+                KInductionStatus::Different,
+                concreteWitness->badFrame,
+                std::move(concreteWitness)};
+            return makeSecResult(
+                SequentialEquivalenceStatus::Different,
+                witnessResult.bound,
+                formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),
+                outputCoverage,
+                abstractedSequentialBoundaries,
+                extractedBoundaryReports);
+          }
           // ASIC cones can still produce an abstract trace when the local
           // relation slice is too small. Retry the same output batch with more
           // relation / predecessor context before concrete validation. This
@@ -4725,28 +4551,6 @@ SequentialEquivalenceResult runPdrSecEngine(
                 endOutput);  // LCOV_EXCL_LINE
             break;  // LCOV_EXCL_LINE
           }
-          if (refinedPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
-            std::optional<KInductionResult::CounterexampleWitness> refinedWitness;  // LCOV_EXCL_LINE
-            if (validateProjectedPdrCandidatesBeforeFinal &&
-                endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
-              refinedWitness = SEC::findBaseCounterexampleAtFrontier(
-                  validationProblem, solverType, refinedPdrResult.bound);
-            }
-            if (refinedWitness.has_value()) {  // LCOV_EXCL_LINE
-              const KInductionResult witnessResult{  // LCOV_EXCL_LINE
-                  KInductionStatus::Different,
-                  refinedPdrResult.bound,  // LCOV_EXCL_LINE
-                  std::move(refinedWitness)};  // LCOV_EXCL_LINE
-              return makeSecResult(  // LCOV_EXCL_LINE
-                  SequentialEquivalenceStatus::Different,
-                  refinedPdrResult.bound,  // LCOV_EXCL_LINE
-                  formatCounterexampleWitness(  // LCOV_EXCL_LINE
-                      witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
-                  outputCoverage,  // LCOV_EXCL_LINE
-                  abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-                  extractedBoundaryReports);  // LCOV_EXCL_LINE
-            }  // LCOV_EXCL_LINE
-          }  // LCOV_EXCL_LINE
           // If the wider relation still finds only an abstract trace, grow the
           // predecessor projection moderately on that same relation.  This is
           // a precision refinement, not a proof shortcut; any reported
@@ -4783,28 +4587,6 @@ SequentialEquivalenceResult runPdrSecEngine(
                 endOutput);  // LCOV_EXCL_LINE
             break;  // LCOV_EXCL_LINE
           }
-          if (widenedPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
-            std::optional<KInductionResult::CounterexampleWitness> widenedWitness;  // LCOV_EXCL_LINE
-            if (validateProjectedPdrCandidatesBeforeFinal &&
-                endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
-              widenedWitness = SEC::findBaseCounterexampleAtFrontier(
-                  validationProblem, solverType, widenedPdrResult.bound);
-            }
-            if (widenedWitness.has_value()) {  // LCOV_EXCL_LINE
-              const KInductionResult witnessResult{  // LCOV_EXCL_LINE
-                  KInductionStatus::Different,
-                  widenedPdrResult.bound,  // LCOV_EXCL_LINE
-                  std::move(widenedWitness)};  // LCOV_EXCL_LINE
-              return makeSecResult(  // LCOV_EXCL_LINE
-                  SequentialEquivalenceStatus::Different,
-                  widenedPdrResult.bound,  // LCOV_EXCL_LINE
-                  formatCounterexampleWitness(  // LCOV_EXCL_LINE
-                      witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
-                  outputCoverage,  // LCOV_EXCL_LINE
-                  abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-                  extractedBoundaryReports);  // LCOV_EXCL_LINE
-            }  // LCOV_EXCL_LINE
-          }  // LCOV_EXCL_LINE
           if (problem.usesDualRailStateEncoding) {  // LCOV_EXCL_LINE
             // Dual-rail PDR keeps hard rail predicates local by going directly
             // to the final isolated retry. The intermediate exact-frame stage
@@ -4875,28 +4657,6 @@ SequentialEquivalenceResult runPdrSecEngine(
                 endOutput);  // LCOV_EXCL_LINE
             break;  // LCOV_EXCL_LINE
           }
-          if (exactPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
-            std::optional<KInductionResult::CounterexampleWitness> exactWitness;  // LCOV_EXCL_LINE
-            if (validateProjectedPdrCandidatesBeforeFinal &&
-                endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
-              exactWitness = SEC::findBaseCounterexampleAtFrontier(
-                  validationProblem, solverType, exactPdrResult.bound);
-            }
-            if (exactWitness.has_value()) {  // LCOV_EXCL_LINE
-              const KInductionResult witnessResult{  // LCOV_EXCL_LINE
-                  KInductionStatus::Different,
-                  exactPdrResult.bound,  // LCOV_EXCL_LINE
-                  std::move(exactWitness)};  // LCOV_EXCL_LINE
-              return makeSecResult(  // LCOV_EXCL_LINE
-                  SequentialEquivalenceStatus::Different,
-                  exactPdrResult.bound,  // LCOV_EXCL_LINE
-                  formatCounterexampleWitness(  // LCOV_EXCL_LINE
-                      witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
-                  outputCoverage,  // LCOV_EXCL_LINE
-                  abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-                  extractedBoundaryReports);  // LCOV_EXCL_LINE
-            }  // LCOV_EXCL_LINE
-          }  // LCOV_EXCL_LINE
           const FinalPdrStageOutcome finalOutcome =
               runFinalExactPdrStage(batchIndex, firstOutput, endOutput);  // LCOV_EXCL_LINE
           if (finalOutcome.terminalResult.has_value()) {  // LCOV_EXCL_LINE
@@ -4926,12 +4686,16 @@ SequentialEquivalenceResult runPdrSecEngine(
             break;  // LCOV_EXCL_LINE
           }
         }  // LCOV_EXCL_LINE
-        const KInductionResult witnessResult{  // LCOV_EXCL_LINE
-            KInductionStatus::Different, pdrResult.bound, std::move(witness)};  // LCOV_EXCL_LINE
+        const std::string outputName =
+            firstOutput < problem.observedOutputNames.size()  // LCOV_EXCL_LINE
+                ? problem.observedOutputNames[firstOutput]  // LCOV_EXCL_LINE
+                : std::to_string(firstOutput);  // LCOV_EXCL_LINE
         return makeSecResult(  // LCOV_EXCL_LINE
-            SequentialEquivalenceStatus::Different,
+            SequentialEquivalenceStatus::Inconclusive,
             pdrResult.bound,  // LCOV_EXCL_LINE
-            formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
+            "PDR reached an abstract counterexample that concrete BMC did not "
+            "validate for output `" +
+                outputName + "` at k = " + std::to_string(pdrResult.bound),
             outputCoverage,  // LCOV_EXCL_LINE
             abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
             extractedBoundaryReports);  // LCOV_EXCL_LINE
@@ -4973,19 +4737,6 @@ SequentialEquivalenceResult runPdrSecEngine(
   if (problem.usesDualRailStateEncoding &&
       finalCoverage.checkedOutputs.names.size() <
           outputCoverage.checkedOutputs.names.size()) {
-    if (auto witnessResult =
-            findExpectedDifferenceCounterexample(problem, solverType, maxK);
-        witnessResult.has_value()) {
-      return makeCounterexampleSecResult(
-          std::move(*witnessResult),
-          model0,
-          model1,
-          top0,
-          top1,
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    }
     const bool pdrProvedNoOutputs = finalCoverage.checkedOutputs.names.empty();
     if (pdrProvedNoOutputs) {
       return makeSecResult(
@@ -5515,15 +5266,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // Phase 4: hand the fully normalized SEC transition system to the requested
   // top-level engine. From here on, every engine sees the same problem and only
   // differs in how it searches for proofs or counterexamples.
-  if (proofProblem.usesDualRailStateEncoding && dualRailFullCoverageOnlyMode()) {
-    return runDualRailFullCoverageOnlyCheck(
-        proofProblem,
-        solverType_,
-        aligned.outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
-
   if (secDiagEnabled) {
     fprintf(stderr, "SEC diag: entering %s\n", describeSecEngine(secEngine_));
     fflush(stderr);

@@ -54,7 +54,7 @@ module top(
 
   assign io_decode_0_fp_illegal = edited_io_decode_0_fp_illegal;
   // The delayed CSRFile edit can be skipped in binary SEC because the helper
-  // flops are intentionally unreset; this probe keeps the expected difference
-  // visible through a top output without relating internals across designs.
+  // flops are intentionally unreset; this probe keeps the edit visible through
+  // a top output without relating internals across designs.
   assign sec_csrfile_probe_o = io_interrupts_debug;
 endmodule

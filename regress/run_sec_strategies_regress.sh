@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>] [expect-output-filter=<substring[,substring...]>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
   exit 2
 fi
 
@@ -16,7 +16,6 @@ config_path="$4"
 expectation=""
 max_k_override=""
 compact_mode=""
-expect_output_filter=""
 # The CLI default is dual-rail SEC.  This regression helper keeps the
 # historical binary workflow behavior unless a caller explicitly opts into
 # dual_rail_steady, which prevents old regressions from silently changing mode.
@@ -54,9 +53,6 @@ for option in "${@:5}"; do
         echo "Invalid max-k override: ${max_k_override}" >&2
         exit 2
       fi
-      ;;
-    expect-output-filter=*)
-      expect_output_filter="${option#expect-output-filter=}"
       ;;
     *)
       echo "Unknown option: ${option}" >&2
@@ -132,27 +128,7 @@ run_engine() {
     # completion.  Large SEC/PDR cases can run for minutes between solver
     # decisions, so emit a lightweight heartbeat to keep GitHub logs obviously
     # alive and to make a true hang easier to distinguish from solver work.
-    local kepler_env=()
-    if [[ "${expectation}" == "expect-different" ]]; then
-      kepler_env+=(KEPLER_SEC_KI_FRONTIER_FIRST=1 KEPLER_SEC_EXPECT_DIFFERENT=1)
-      if [[ -n "${expect_output_filter}" ]]; then
-        kepler_env+=(
-          KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER="${expect_output_filter}")
-      fi
-    fi
-    if [[ "${expectation}" == "expect-full-coverage" &&
-          "${sec_encoding}" == "dual_rail_steady" ]]; then
-      # Full-coverage regressions check that every top output is modeled and
-      # that no concrete counterexample is found.  They do not require the
-      # selected engine to spend minutes completing an optional invariant proof.
-      kepler_env+=(KEPLER_SEC_DUAL_RAIL_FULL_COVERAGE_ONLY=1)
-    fi
-    if [[ "${#kepler_env[@]}" -ne 0 ]]; then
-      env "${kepler_env[@]}" \
-        "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
-    else
-      "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
-    fi
+    "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
     local kepler_pid=$!
     tail -n +1 -f "${stdout_log}" &
     local tail_pid=$!
@@ -180,9 +156,9 @@ run_engine() {
       if [[ "${kepler_status}" -ne 0 ]]; then
         return "${kepler_status}"
       fi
-      # Expected-different SEC regressions must be witnessed by the selected SEC
-      # engine.  A partial-coverage proof or an LEC-only structural mismatch is
-      # not enough for these workflows.
+      # Negative SEC regressions must be witnessed by the selected SEC engine.
+      # A partial-coverage proof or an LEC-only structural mismatch is not
+      # enough for these workflows.
       echo "Expected SEC counterexample for ${test_name} (${engine})" >&2
       return 1
     fi

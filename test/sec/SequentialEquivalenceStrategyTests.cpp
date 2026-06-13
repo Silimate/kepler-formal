@@ -6356,6 +6356,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverUsesFallbackWitnessNamesForUnnamedSignals) {
+  KInductionProblem problem;
+  constexpr size_t input = 2;
+  problem.inputSymbols = {input};
+  problem.allSymbols = {input};
+  problem.observedOutputExprs0 = {BoolExpr::createFalse()};
+  problem.observedOutputExprs1 = {BoolExpr::Var(input)};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0);
+
+  ASSERT_TRUE(witness.has_value());
+  ASSERT_EQ(witness->inputTrace.size(), 1u);
+  ASSERT_EQ(witness->inputTrace[0].assignments.size(), 1u);
+  EXPECT_EQ(witness->inputTrace[0].assignments[0].signal, "input_2");
+  ASSERT_EQ(witness->outputMismatches.size(), 1u);
+  EXPECT_EQ(witness->outputMismatches[0].signal, "output_0");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverPdrProofOnlyDoesNotChaseUnrelatedStartupEqualityChain) {
   KInductionProblem problem;
   constexpr size_t x = 2;
@@ -7641,6 +7664,84 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverFindsObservationOnlyProbeAtFrontier) {
+  KInductionProblem problem;
+  constexpr size_t input = 2;
+  constexpr size_t state0 = 3;
+  constexpr size_t state1 = 4;
+  problem.environmentInputNames = {"in"};
+  problem.inputSymbols = {input};
+  problem.state0Symbols = {state0};
+  problem.state1Symbols = {state1};
+  problem.allSymbols = {input, state0, state1};
+  problem.transitions0 = {{state0, BoolExpr::createFalse()}};
+  problem.transitions1 = {{state1, BoolExpr::createFalse()}};
+  problem.observedOutputNames = {"state_out", "probe"};
+  problem.observedOutputExprs0 = {
+      BoolExpr::createFalse(), BoolExpr::createFalse()};
+  problem.observedOutputExprs1 = {
+      BoolExpr::createFalse(), BoolExpr::Var(input)};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  EXPECT_FALSE(findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0).has_value());
+  const auto witness = findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  // Shared KI base validation must include the proved frontier. This exact
+  // top-output probe is invisible at k=0 under observation-only startup, but a
+  // real SEC counterexample appears as soon as frame 1 is checked.
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
+  ASSERT_EQ(witness->outputMismatches.size(), 1u);
+  EXPECT_EQ(witness->outputMismatches[0].signal, "probe");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionValidatesConcreteBaseAfterResetBootstrapProof) {
+  KInductionProblem problem;
+  constexpr size_t reset = 2;
+  constexpr size_t state0 = 3;
+  constexpr size_t state1 = 4;
+  constexpr size_t probe = 5;
+  problem.environmentInputNames = {"reset", "probe"};
+  problem.inputSymbols = {reset, probe};
+  problem.state0Symbols = {state0};
+  problem.state1Symbols = {state1};
+  problem.allSymbols = {reset, state0, state1, probe};
+  problem.totalStateCount = 2;
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateAssignments = {{state0, false}};
+  problem.transitions0 = {{state0, BoolExpr::createFalse()}};
+  problem.transitions1 = {{state1, BoolExpr::createFalse()}};
+  problem.observedOutputNames = {"probe_out"};
+  problem.observedOutputExprs0 = {BoolExpr::createFalse()};
+  problem.observedOutputExprs1 = {BoolExpr::Var(probe)};
+  problem.bad = BoolExpr::Var(probe);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = BoolExpr::createTrue();
+  problem.inductionBad = BoolExpr::createFalse();
+
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  // A strengthened induction certificate is not itself a SEC result. The
+  // engine must still check the real top-output base predicate at the proved
+  // frontier before reporting equivalence.
+  EXPECT_EQ(result.status, KInductionStatus::Different);
+  ASSERT_TRUE(result.witness.has_value());
+  EXPECT_EQ(result.witness->badFrame, 1u);
+  ASSERT_EQ(result.witness->outputMismatches.size(), 1u);
+  EXPECT_EQ(result.witness->outputMismatches[0].signal, "probe_out");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        DualRailBatchedKInductionAllowsKissatPropagationUnderBatchLimit) {
   KInductionProblem problem;
   constexpr size_t state0 = 2;
@@ -8684,228 +8785,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos);
 }
 
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsDualRailFullCoverageModeAcceptsUnsatGuard) {
-  const SignalKey resetlessOut =
-      makeSignalKey("pdrDualRailFullCoverageResetlessOut");
-  const SignalKey state0 =
-      makeSignalKey("pdrDualRailFullCoverageState0");
-  const SignalKey state1 =
-      makeSignalKey("pdrDualRailFullCoverageState1");
-  const SignalKey irrelevantState0 =
-      makeSignalKey("pdrDualRailFullCoverageIrrelevantState0");
-  const SignalKey irrelevantState1 =
-      makeSignalKey("pdrDualRailFullCoverageIrrelevantState1");
-
-  SequentialDesignModel model0;
-  model0.stateBits = {state0, irrelevantState0};
-  model0.allObservedOutputs = {resetlessOut};
-  model0.observedOutputs = {resetlessOut};
-  model0.inputVarByKey.emplace(state0, 2);
-  model0.inputVarByKey.emplace(irrelevantState0, 4);
-  model0.displayNameByKey.emplace(resetlessOut, "resetless_out[0]");
-  model0.displayNameByKey.emplace(state0, "left_resetless_state[0]");
-  model0.displayNameByKey.emplace(
-      irrelevantState0, "left_irrelevant_initialized_state[0]");
-  model0.initialStateValueByKey.emplace(irrelevantState0, false);
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
-  model0.nextStateExprByStateKey.emplace(irrelevantState0, BoolExpr::Var(4));
-  model0.observedOutputExprByKey.emplace(resetlessOut, BoolExpr::Var(2));
-
-  SequentialDesignModel model1;
-  model1.stateBits = {state1, irrelevantState1};
-  model1.allObservedOutputs = {resetlessOut};
-  model1.observedOutputs = {resetlessOut};
-  model1.inputVarByKey.emplace(state1, 3);
-  model1.inputVarByKey.emplace(irrelevantState1, 5);
-  model1.displayNameByKey.emplace(resetlessOut, "resetless_out[0]");
-  model1.displayNameByKey.emplace(state1, "right_resetless_state[0]");
-  model1.displayNameByKey.emplace(
-      irrelevantState1, "right_irrelevant_initialized_state[0]");
-  model1.initialStateValueByKey.emplace(irrelevantState1, true);
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(3));
-  model1.nextStateExprByStateKey.emplace(irrelevantState1, BoolExpr::Var(5));
-  model1.observedOutputExprByKey.emplace(resetlessOut, BoolExpr::Var(3));
-
-  const ScopedEnvVar fullCoverageMode(
-      "KEPLER_SEC_DUAL_RAIL_FULL_COVERAGE_ONLY", "1");
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result = strategy.runExtractedModels(model0, model1, 8);
-
-  // The workflow-only full-coverage mode is not a full invariant proof.  It
-  // accepts the run only after all outputs are represented and the concrete
-  // frame-0 top-output guard proves UNSAT.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 0u);
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_TRUE(result.skippedObservedOutputs.empty());
-  EXPECT_TRUE(result.reason.empty());
-
-  SequentialEquivalenceStrategy kiStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction,
-      SecEncoding::DualRailSteady);
-  const auto kiResult = kiStrategy.runExtractedModels(model0, model1, 8);
-  EXPECT_EQ(kiResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(kiResult.coveredOutputs, 1u);
-  EXPECT_EQ(kiResult.totalOutputs, 1u);
-  EXPECT_TRUE(kiResult.skippedObservedOutputs.empty());
-
-  SequentialEquivalenceStrategy imcStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Imc,
-      SecEncoding::DualRailSteady);
-  const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 8);
-  EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(imcResult.coveredOutputs, 1u);
-  EXPECT_EQ(imcResult.totalOutputs, 1u);
-  EXPECT_TRUE(imcResult.skippedObservedOutputs.empty());
-
-  const SignalKey equalOut =
-      makeSignalKey("pdrDualRailFullCoverageEqualOut");
-  SequentialDesignModel equal0;
-  equal0.allObservedOutputs = {equalOut};
-  equal0.observedOutputs = {equalOut};
-  equal0.displayNameByKey.emplace(equalOut, "equal_out[0]");
-  equal0.observedOutputExprByKey.emplace(equalOut, BoolExpr::createTrue());
-
-  SequentialDesignModel equal1;
-  equal1.allObservedOutputs = {equalOut};
-  equal1.observedOutputs = {equalOut};
-  equal1.displayNameByKey.emplace(equalOut, "equal_out[0]");
-  equal1.observedOutputExprByKey.emplace(equalOut, BoolExpr::createTrue());
-
-  SequentialEquivalenceStrategy equalStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto equalResult = equalStrategy.runExtractedModels(equal0, equal1, 8);
-
-  EXPECT_EQ(equalResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(equalResult.coveredOutputs, 1u);
-  EXPECT_EQ(equalResult.totalOutputs, 1u);
-  EXPECT_TRUE(equalResult.skippedObservedOutputs.empty());
-
-  const SignalKey mismatchOut =
-      makeSignalKey("pdrDualRailFullCoverageMismatchOut");
-  SequentialDesignModel mismatch0;
-  mismatch0.allObservedOutputs = {mismatchOut};
-  mismatch0.observedOutputs = {mismatchOut};
-  mismatch0.displayNameByKey.emplace(mismatchOut, "mismatch_out[0]");
-  mismatch0.observedOutputExprByKey.emplace(mismatchOut, BoolExpr::createTrue());
-
-  SequentialDesignModel mismatch1;
-  mismatch1.allObservedOutputs = {mismatchOut};
-  mismatch1.observedOutputs = {mismatchOut};
-  mismatch1.displayNameByKey.emplace(mismatchOut, "mismatch_out[0]");
-  mismatch1.observedOutputExprByKey.emplace(mismatchOut, BoolExpr::createFalse());
-
-  SequentialEquivalenceStrategy mismatchStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto mismatchResult =
-      mismatchStrategy.runExtractedModels(mismatch0, mismatch1, 8);
-
-  EXPECT_EQ(mismatchResult.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(mismatchResult.coveredOutputs, 1u);
-  EXPECT_EQ(mismatchResult.totalOutputs, 1u);
-  EXPECT_NE(
-      mismatchResult.reason.find("mismatch_out[0]"),
-      std::string::npos);
-
-  const SignalKey wideState0 =
-      makeSignalKey("pdrDualRailFullCoverageWideState0");
-  const SignalKey wideState1 =
-      makeSignalKey("pdrDualRailFullCoverageWideState1");
-  const SignalKey wideStateOutput =
-      makeSignalKey("pdrDualRailFullCoverageWideStateOutput");
-  std::vector<SignalKey> wideMismatchOutputs;
-  for (size_t i = 0; i < 10; ++i) {
-    wideMismatchOutputs.push_back(
-        makeSignalKey("pdrDualRailFullCoverageWideMismatchOut" +
-                      std::to_string(i)));
-  }
-
-  SequentialDesignModel wideMismatch0;
-  wideMismatch0.stateBits = {wideState0};
-  wideMismatch0.allObservedOutputs = wideMismatchOutputs;
-  wideMismatch0.allObservedOutputs.push_back(wideStateOutput);
-  wideMismatch0.observedOutputs = wideMismatchOutputs;
-  wideMismatch0.observedOutputs.push_back(wideStateOutput);
-  wideMismatch0.inputVarByKey.emplace(wideState0, 6);
-  wideMismatch0.displayNameByKey.emplace(
-      wideState0, "left_wide_structural_state[0]");
-  wideMismatch0.initialStateValueByKey.emplace(wideState0, false);
-  wideMismatch0.nextStateExprByStateKey.emplace(wideState0, BoolExpr::Var(6));
-  for (size_t i = 0; i < wideMismatchOutputs.size(); ++i) {
-    const SignalKey& output = wideMismatchOutputs[i];
-    wideMismatch0.displayNameByKey.emplace(
-        output, "wide_mismatch_out[" + std::to_string(i) + "]");
-    wideMismatch0.observedOutputExprByKey.emplace(
-        output, BoolExpr::createTrue());
-  }
-  wideMismatch0.displayNameByKey.emplace(
-      wideStateOutput, "z_equal_state_out[0]");
-  wideMismatch0.observedOutputExprByKey.emplace(
-      wideStateOutput, BoolExpr::Var(6));
-
-  SequentialDesignModel wideMismatch1;
-  wideMismatch1.stateBits = {wideState1};
-  wideMismatch1.allObservedOutputs = wideMismatchOutputs;
-  wideMismatch1.allObservedOutputs.push_back(wideStateOutput);
-  wideMismatch1.observedOutputs = wideMismatchOutputs;
-  wideMismatch1.observedOutputs.push_back(wideStateOutput);
-  wideMismatch1.inputVarByKey.emplace(wideState1, 7);
-  wideMismatch1.displayNameByKey.emplace(
-      wideState1, "right_wide_structural_state[0]");
-  wideMismatch1.initialStateValueByKey.emplace(wideState1, false);
-  wideMismatch1.nextStateExprByStateKey.emplace(wideState1, BoolExpr::Var(7));
-  for (size_t i = 0; i < wideMismatchOutputs.size(); ++i) {
-    const SignalKey& output = wideMismatchOutputs[i];
-    wideMismatch1.displayNameByKey.emplace(
-        output, "wide_mismatch_out[" + std::to_string(i) + "]");
-    wideMismatch1.observedOutputExprByKey.emplace(
-        output, BoolExpr::createFalse());
-  }
-  wideMismatch1.displayNameByKey.emplace(
-      wideStateOutput, "z_equal_state_out[0]");
-  wideMismatch1.observedOutputExprByKey.emplace(
-      wideStateOutput, BoolExpr::Var(7));
-
-  SequentialEquivalenceStrategy wideMismatchStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto wideMismatchResult =
-      wideMismatchStrategy.runExtractedModels(wideMismatch0, wideMismatch1, 8);
-
-  EXPECT_EQ(wideMismatchResult.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(wideMismatchResult.coveredOutputs, 11u);
-  EXPECT_EQ(wideMismatchResult.totalOutputs, 11u);
-  EXPECT_NE(
-      wideMismatchResult.reason.find(
-          "wide_mismatch_out[0], wide_mismatch_out[1]"),
-      std::string::npos);
-  EXPECT_NE(wideMismatchResult.reason.find(", ..."), std::string::npos);
-}
-
 KInductionProblem makeDualRailResetFrontierGuardProblemForTest(
     size_t railPairs,
     size_t transitionSources) {
@@ -9109,95 +8988,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("PDR skipping large dual-rail residual surface"),
       std::string::npos);
   EXPECT_EQ(stderrOutput.find("stage=initial"), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrExpectedDifferenceSearchesSkippedResidualSurface) {
-  constexpr size_t kResidualOutputs = 6;
-  const auto testCase =
-      makeLargeDualRailResidualCaseForTest("pdrDualRailExpectedDiffResidual",
-                                           kResidualOutputs);
-
-  const ScopedEnvVar residualOutputLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
-  const ScopedEnvVar residualStateLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
-  const ScopedEnvVar expectedDifferent("KEPLER_SEC_EXPECT_DIFFERENT", "1");
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
-
-  // Expected-difference regressions need a concrete witness, not a partial
-  // coverage pass.  Check the exact residual frontier before accepting the
-  // large-surface skip used by normal equivalence regressions.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 0u);
-  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrExpectedDifferenceBatchesWideResidualSurface) {
-  constexpr size_t kResidualOutputs = 20;
-  const auto testCase =
-      makeLargeDualRailResidualCaseForTest("pdrDualRailExpectedDiffWideResidual",
-                                           kResidualOutputs);
-
-  const ScopedEnvVar residualOutputLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
-  const ScopedEnvVar residualStateLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
-  const ScopedEnvVar expectedDifferent("KEPLER_SEC_EXPECT_DIFFERENT", "1");
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
-
-  // This surface is wider than the expected-difference default batch size.
-  // The SEC witness search must split it into real top-output batches instead
-  // of skipping the regression or accepting a non-SEC witness.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 0u);
-  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrExpectedDifferenceCanFilterTopOutputs) {
-  constexpr size_t kResidualOutputs = 20;
-  const auto testCase =
-      makeLargeDualRailResidualCaseForTest("pdrDualRailExpectedDiffFiltered",
-                                           kResidualOutputs);
-
-  const ScopedEnvVar residualOutputLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
-  const ScopedEnvVar residualStateLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
-  const ScopedEnvVar expectedDifferent("KEPLER_SEC_EXPECT_DIFFERENT", "1");
-  const ScopedEnvVar outputFilter(
-      "KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER",
-      "large_residual_out[19]");
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
-
-  // The filter is still a SEC top-output search; it just avoids spending an
-  // expected-difference regression on unrelated residual outputs.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 0u);
-  EXPECT_NE(result.reason.find("large_residual_out[19]"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

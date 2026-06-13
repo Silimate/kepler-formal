@@ -29,6 +29,6 @@ module top(
   );
 
   assign io_decode_0_fp_illegal = csr_io_decode_0_fp_illegal;
-  // Keep expected-different SEC regressions observable at a top output.
+  // Keep the wrapper edit observable at a top output.
   assign sec_csrfile_probe_o = 1'b0;
 endmodule

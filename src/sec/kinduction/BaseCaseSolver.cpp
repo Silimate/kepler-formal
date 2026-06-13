@@ -67,10 +67,8 @@ constexpr size_t kMaxResetSummaryCachedCois = 64;
 // that targets every frame widens the COI unnecessarily; use exact per-step
 // solvers while only a couple of frames remain.
 constexpr size_t kMaxSparseResetFrontierPerStepChecks = 2;
-// Expected-different k-induction regressions use a frontier-first SAT search
-// only to find a concrete witness.  Bound each localized output query so one
-// hard UNSAT cone cannot consume the whole workflow budget before easier
-// mismatching outputs are tried.
+// Fast localized counterexample searches should not let one hard UNSAT cone
+// consume the whole workflow budget before other top-output slices are tried.
 constexpr int64_t kFastCounterexampleSearchConflictLimit = 5000;
 // Some dual-rail frontier checks spend their budget in propagation-heavy
 // decision search before conflicts accumulate.  Bound decisions too so a hard
@@ -1263,8 +1261,12 @@ std::vector<KInductionResult::FrameInputAssignments> buildInputTrace(
       if (!variables.hasSymbol(problem.inputSymbols[i])) {
         continue;
       }
+      const std::string inputName =
+          i < problem.environmentInputNames.size()
+              ? problem.environmentInputNames[i]
+              : "input_" + std::to_string(problem.inputSymbols[i]);
       frameAssignments.assignments.push_back(
-          {problem.environmentInputNames[i],
+          {inputName,
            solver.getLiteralValue(
                variables.getLiteral(problem.inputSymbols[i], frame))});
     }
@@ -1292,8 +1294,12 @@ std::vector<KInductionResult::SignalMismatch> collectObservedOutputMismatches(
     const bool value0 = problem.observedOutputExprs0[i]->evaluate(environment);
     const bool value1 = problem.observedOutputExprs1[i]->evaluate(environment);
     if (value0 != value1) {
+      const std::string outputName =
+          i < problem.observedOutputNames.size()
+              ? problem.observedOutputNames[i]
+              : "output_" + std::to_string(i);
       mismatches.push_back(
-          {problem.observedOutputNames[i], value0, value1});
+          {outputName, value0, value1});
     }
   }
   return mismatches;

@@ -53,9 +53,8 @@ def create_logic0_driver(top):
 
 
 def add_sec_probe_output(source_net):
-    # SEC expected-different regressions must observe a top output.  This probe
-    # exposes the edited interrupt input as a real PO instead of relying on LEC
-    # or on any cross-design relation between internal elements.
+    # Expose the edited interrupt input as a real top output instead of relying
+    # on LEC or any cross-design relation between internal elements.
     probe = naja.SNLScalarTerm.create(
         naja.NLUniverse.get().getTopDesign(),
         naja.SNLTerm.Direction.Output,
