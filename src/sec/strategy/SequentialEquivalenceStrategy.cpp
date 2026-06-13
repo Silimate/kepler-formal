@@ -3674,11 +3674,22 @@ void addFrameZeroInitialEqualities(
 }
 
 constexpr size_t kMinDualRailSteadyFrontierGuardOutputs = 512;
+constexpr size_t kMinAutomaticDualRailResetUnanchoredRecoveryOutputs = 64;
 
 bool shouldRunDualRailSteadyFrontierGuard(const KInductionProblem& problem) {
   return problem.usesDualRailStateEncoding &&
          problem.observedOutputExprs0.size() >=
              kMinDualRailSteadyFrontierGuardOutputs;
+}
+
+bool shouldRecoverWideResetUnanchoredBinarySurfaceWithDualRail(
+    const OutputCoverageSelection& coverageBeforeResetFilter,
+    const OutputCoverageSelection& coverageAfterResetFilter) {
+  return coverageBeforeResetFilter.checkedOutputs.names.size() >=
+             kMinAutomaticDualRailResetUnanchoredRecoveryOutputs &&
+         coverageAfterResetFilter.checkedOutputs.names.empty() &&
+         coverageAfterResetFilter.resetUnanchoredSkippedOutputs.size() ==
+             coverageBeforeResetFilter.checkedOutputs.names.size();
 }
 
 SATSolverWrapper::SolveStatus solveDualRailSteadyFrontierBad(
@@ -5058,6 +5069,71 @@ SequentialEquivalenceResult runLegacySecEngine(
   }
 }
 
+SequentialEquivalenceResult runSelectedSecEngine(
+    SecEngine secEngine,
+    const KInductionProblem& proofProblem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
+  switch (secEngine) {
+    case SecEngine::Pdr:
+      return runPdrSecEngine(
+          proofProblem,
+          maxK,
+          solverType,
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    case SecEngine::KInduction:
+      return runKInductionSecEngine(
+          proofProblem,
+          maxK,
+          solverType,
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    case SecEngine::Imc:
+      return runImcSecEngine(
+          proofProblem,
+          maxK,
+          solverType,
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    case SecEngine::Legacy:
+    default:
+      return runLegacySecEngine(
+          proofProblem,
+          maxK,
+          solverType,
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+  }
+}
+
 template <typename MapT>
 void assignSymbols(const std::vector<SignalKey>& keys,
                    MapT& output,
@@ -5290,6 +5366,9 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       abstractedSequentialBoundaries,
       extractedBoundaryReports);
   }
+  const AlignedSignals outputsBeforeResetUnanchoredFilter = aligned.outputs;
+  const OutputCoverageSelection coverageBeforeResetUnanchoredFilter =
+      aligned.outputCoverage;
   if (encoding_ == SecEncoding::Binary) {
     filterOutputsRequiringUnanchoredResetState(
         model0,
@@ -5306,6 +5385,62 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         "rail-encoded proof");
   }
   symbolSpace.problem.observedOutputNames = aligned.outputs.names;
+  if (encoding_ == SecEncoding::Binary &&
+      shouldRecoverWideResetUnanchoredBinarySurfaceWithDualRail(
+          coverageBeforeResetUnanchoredFilter, aligned.outputCoverage)) {
+    // Binary SEC is intentionally conservative around resetless internal state.
+    // If that drops a wide top-output surface to zero coverage, recover by
+    // proving the same original top outputs with dual-rail encoding. This is
+    // still a normal SEC proof through the selected engine, not a same-name
+    // internal-state relation or expected-result shortcut.
+    logSecDiagLine(
+        secDiagEnabled,
+        "SEC diag: recovering zero binary coverage with dual-rail top-output proof");
+    SharedSecSymbolSpace dualRailSymbolSpace = buildSharedSecSymbolSpace(
+        model0,
+        model1,
+        aligned.inputs,
+        outputsBeforeResetUnanchoredFilter);
+    const bool useLazyDualRailTransitionRemapping =
+        secEngine_ == SecEngine::KInduction || secEngine_ == SecEngine::Pdr;
+    KInductionProblem dualRailProblem = buildDualRailSecProblem(
+        model0,
+        model1,
+        aligned.inputs,
+        outputsBeforeResetUnanchoredFilter,
+        reachableInvariant,
+        dualRailSymbolSpace,
+        useLazyDualRailTransitionRemapping,
+        maxK,
+        solverType_,
+        secDiagEnabled);
+    if (auto steadyFrontierResult = tryDualRailSteadyFrontierGuard(
+            dualRailProblem,
+            solverType_,
+            model0,
+            model1,
+            top0_,
+            top1_,
+            coverageBeforeResetUnanchoredFilter,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports,
+            secDiagEnabled);
+        steadyFrontierResult.has_value()) {
+      return *steadyFrontierResult;
+    }
+    return runSelectedSecEngine(
+        secEngine_,
+        dualRailProblem,
+        maxK,
+        solverType_,
+        model0,
+        model1,
+        top0_,
+        top1_,
+        coverageBeforeResetUnanchoredFilter,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
   if (aligned.outputs.names.empty()) {
     return makeSecResult(  // LCOV_EXCL_LINE
         SequentialEquivalenceStatus::Unsupported,
@@ -5393,57 +5528,18 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
     return *steadyFrontierResult;
   }
 
-  switch (secEngine_) {
-    case SecEngine::Pdr:
-      return runPdrSecEngine(
-          proofProblem,
-          maxK,
-          solverType_,
-          model0,
-          model1,
-          top0_,
-          top1_,
-          aligned.outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    case SecEngine::KInduction:
-      return runKInductionSecEngine(
-          proofProblem,
-          maxK,
-          solverType_,
-          model0,
-          model1,
-          top0_,
-          top1_,
-          aligned.outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    case SecEngine::Imc:
-      return runImcSecEngine(
-          proofProblem,
-          maxK,
-          solverType_,
-          model0,
-          model1,
-          top0_,
-          top1_,
-          aligned.outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    case SecEngine::Legacy:
-    default:
-      return runLegacySecEngine(
-          proofProblem,
-          maxK,
-          solverType_,
-          model0,
-          model1,
-          top0_,
-          top1_,
-          aligned.outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-  }
+  return runSelectedSecEngine(
+      secEngine_,
+      proofProblem,
+      maxK,
+      solverType_,
+      model0,
+      model1,
+      top0_,
+      top1_,
+      aligned.outputCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
 }
 
 }  // namespace KEPLER_FORMAL::SEC

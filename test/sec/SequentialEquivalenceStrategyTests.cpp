@@ -9687,6 +9687,70 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsRecoversWideResetUnanchoredBinarySurfaceWithDualRail) {
+  const SignalKey rst = makeSignalKey("wideResetUnanchoredRecoveryRst");
+  const SignalKey state0 = makeSignalKey("wideResetUnanchoredRecoveryState0");
+  const SignalKey state1 = makeSignalKey("wideResetUnanchoredRecoveryState1");
+  std::vector<SignalKey> outputs;
+  for (size_t i = 0; i < 64; ++i) {
+    outputs.push_back(
+        makeSignalKey("wideResetUnanchoredRecoveryOut" + std::to_string(i)));
+  }
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst};
+  model0.stateBits = {state0};
+  model0.allObservedOutputs = outputs;
+  model0.observedOutputs = outputs;
+  model0.inputVarByKey.emplace(rst, 2);
+  model0.inputVarByKey.emplace(state0, 4);
+  model0.displayNameByKey.emplace(rst, "rst");
+  model0.displayNameByKey.emplace(state0, "io_out_REG_left.QN[0]");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(4));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst};
+  model1.stateBits = {state1};
+  model1.allObservedOutputs = outputs;
+  model1.observedOutputs = outputs;
+  model1.inputVarByKey.emplace(rst, 3);
+  model1.inputVarByKey.emplace(state1, 5);
+  model1.displayNameByKey.emplace(rst, "rst");
+  model1.displayNameByKey.emplace(state1, "io_out_REG_right.QN[0]");
+  model1.nextStateExprByStateKey.emplace(
+      state1, BoolExpr::Not(BoolExpr::Var(5)));
+
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const std::string name = "io_out[" + std::to_string(i) + "]";
+    model0.displayNameByKey.emplace(outputs[i], name);
+    model1.displayNameByKey.emplace(outputs[i], name);
+    model0.observedOutputExprByKey.emplace(outputs[i], BoolExpr::Var(4));
+    model1.observedOutputExprByKey.emplace(outputs[i], BoolExpr::Var(5));
+  }
+
+  const std::vector<SecEngine> engines = {
+      SecEngine::Pdr, SecEngine::KInduction, SecEngine::Imc};
+  for (const SecEngine engine : engines) {
+    SequentialEquivalenceStrategy strategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        engine,
+        SecEncoding::Binary);
+    const auto result = strategy.runExtractedModels(model0, model1, 2);
+
+    // Binary mode has no sound top-output coverage here by itself: every
+    // output depends on resetless state.  The automatic recovery reruns the
+    // same top-output surface in dual-rail encoding through the selected engine
+    // instead of returning an unsupported zero-output result.
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(result.coveredOutputs, outputs.size());
+    EXPECT_EQ(result.totalOutputs, outputs.size());
+    EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsKeepsWideStartupCertificateBeforeResetCoverageFilter) {
   const SignalKey rst = makeSignalKey("wideStartupCertificateRst");
   const SignalKey stateA0 = makeSignalKey("wideStartupCertificateStateA0");
