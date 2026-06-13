@@ -2126,6 +2126,41 @@ void markDualRailResidualOutputSkipped(
   }
 }
 
+std::optional<KInductionResult::CounterexampleWitness>
+findDualRailResidualCounterexample(const KInductionProblem& subsetProblem,
+                                   KEPLER_FORMAL::Config::SolverType solverType,
+                                   size_t maxK) {
+  for (size_t depth = 0; depth <= maxK; ++depth) {
+    if (auto witness =
+            SEC::findBaseCounterexampleAtFrontier(subsetProblem, solverType, depth);
+        witness.has_value()) {
+      return witness;
+    }
+  }
+  return std::nullopt;
+}
+
+void recordDualRailResidualCounterexample(
+    KInductionResult::CounterexampleWitness witness,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    DualRailResidualProofState& proofState) {
+  KInductionResult witnessResult{
+      KInductionStatus::Different, witness.badFrame, std::move(witness)};
+  proofState.terminalResult = makeSecResult(
+      SequentialEquivalenceStatus::Different,
+      witnessResult.bound,
+      formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),
+      outputCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+}
+
 bool shouldSkipLargeDualRailResidualSurface(
     const KInductionProblem& problem,
     size_t residualOutputCount);
@@ -2155,6 +2190,27 @@ void proveDualRailResidualOutputSet(
       (engine == DualRailResidualEngine::KInduction ||
        (engine == DualRailResidualEngine::Imc &&
         shouldUseDeferredDualRailImcResidualProof(subsetProblem)));
+  if (useDeferredInductionResidualProof) {
+    if (auto witness =
+            findDualRailResidualCounterexample(subsetProblem, solverType, maxK);
+        witness.has_value()) {
+      // Deferred residual proof shortcuts still owe the selected engine's
+      // concrete top-output base search.  Check it before delaying base
+      // validation so TinyRocket-style edits become real SEC counterexamples
+      // instead of zero-coverage inconclusive residuals.
+      recordDualRailResidualCounterexample(
+          std::move(*witness),
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          proofState);
+      return;
+    }
+  }
   if (useDeferredInductionResidualProof) {
     // Localized residual proofs should not spend max_k frontier checks on a
     // single hard rail output.  First ask whether the induction step closes; if

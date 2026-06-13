@@ -9633,6 +9633,31 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsImcDualRailFindsResidualCounterexampleBeforeDeferredProof) {
+  constexpr size_t kDummyStatesPerDesign = 1024;
+  const auto models =
+      makeDelayedRailMismatchModelsForTest(kDummyStatesPerDesign);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 4);
+
+  // Large dual-rail IMC residuals may use deferred induction for proof work,
+  // but they must still run the selected engine's concrete top-output base
+  // search first so delayed observable edits are reported as SEC differences.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(result.reason.find("delayed_out[0]"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsSkipsOnlyResetUnanchoredOutputInsteadOfComparingState) {
   const SignalKey rst = makeSignalKey("keepOnlyResetUnanchoredRst");
   const SignalKey out = makeSignalKey("keepOnlyResetUnanchoredOut");
