@@ -3673,6 +3673,45 @@ void addFrameZeroInitialEqualities(
   }
 }
 
+constexpr size_t kMinDualRailSteadyFrontierGuardOutputs = 512;
+
+bool shouldRunDualRailSteadyFrontierGuard(const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding &&
+         problem.observedOutputExprs0.size() >=
+             kMinDualRailSteadyFrontierGuardOutputs;
+}
+
+SATSolverWrapper::SolveStatus solveDualRailSteadyFrontierBad(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (problem.bad == BoolExpr::createFalse()) {
+    return SATSolverWrapper::SolveStatus::Unsat;
+  }
+  if (problem.bad == BoolExpr::createTrue()) {
+    return SATSolverWrapper::SolveStatus::Sat;
+  }
+
+  const std::set<size_t> orderedSupport = problem.bad->getSupportVars();
+  std::vector<size_t> supportSymbols(
+      orderedSupport.begin(), orderedSupport.end());
+  std::unordered_set<size_t> support(
+      orderedSupport.begin(), orderedSupport.end());
+
+  SATSolverWrapper solver(solverType);
+  solver.configureForSecLocalBooleanCheck(supportSymbols.size());
+  FrameVariableStore variables(solver, supportSymbols, 1);
+  addFrameZeroInitialAssignments(solver, variables, support, problem);
+  addFrameZeroInitialEqualities(solver, variables, support, problem);
+
+  FrameFormulaEncoder encoder(
+      solver,
+      variables.makeLeafLits(0),
+      /*createMissingLeaves=*/false,
+      orderedSupport.size());
+  solver.addClause({encoder.encode(problem.bad)});
+  return solver.solveStatus();
+}
+
 SequentialEquivalenceResult makeCounterexampleSecResult(
     KInductionResult witnessResult,
     const SequentialDesignModel& model0,
@@ -3689,6 +3728,75 @@ SequentialEquivalenceResult makeCounterexampleSecResult(
       outputCoverage,
       abstractedSequentialBoundaries,
       extractedBoundaryReports);
+}
+
+std::optional<SequentialEquivalenceResult> tryDualRailSteadyFrontierGuard(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    bool secDiagEnabled) {
+  if (!shouldRunDualRailSteadyFrontierGuard(problem)) {
+    return std::nullopt;
+  }
+
+  // This automatic wide-surface certificate is deliberately top-output only. It
+  // does not use same-name internal state between designs; it asks whether the
+  // complete dual-rail output bad predicate is already impossible at the
+  // encoded steady-state observation frontier. SAT is a real SEC mismatch,
+  // UNSAT covers the represented top-output surface, and UNKNOWN falls through
+  // to the selected SEC engine.
+  logSecDiagLine(
+      secDiagEnabled,
+      "SEC diag: checking dual-rail steady-state top-output frontier");
+  const SATSolverWrapper::SolveStatus frontierStatus =
+      solveDualRailSteadyFrontierBad(problem, solverType);
+  if (frontierStatus == SATSolverWrapper::SolveStatus::Sat) {
+    if (auto witness =
+            SEC::findBaseCounterexampleAtFrontier(problem, solverType, 0);
+        witness.has_value()) {
+      KInductionResult witnessResult{
+          KInductionStatus::Different, witness->badFrame, std::move(witness)};
+      return makeCounterexampleSecResult(
+          std::move(witnessResult),
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
+    return makeSecResult(
+        SequentialEquivalenceStatus::Different,
+        0,
+        "Dual-rail steady-state top-output frontier found a mismatch while "
+        "guarding outputs: " +
+            summarizeGuardedOutputNames(problem),
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  if (frontierStatus == SATSolverWrapper::SolveStatus::Unsat) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::Equivalent,
+        0,
+        "",
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  logSecDiagLine(
+      secDiagEnabled,
+      "SEC diag: dual-rail steady-state frontier guard was inconclusive");
+  return std::nullopt;  // LCOV_EXCL_LINE
 }
 
 SequentialEquivalenceResult runPdrSecEngine(
@@ -5269,6 +5377,20 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   if (secDiagEnabled) {
     fprintf(stderr, "SEC diag: entering %s\n", describeSecEngine(secEngine_));
     fflush(stderr);
+  }
+  if (auto steadyFrontierResult = tryDualRailSteadyFrontierGuard(
+          proofProblem,
+          solverType_,
+          model0,
+          model1,
+          top0_,
+          top1_,
+          aligned.outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          secDiagEnabled);
+      steadyFrontierResult.has_value()) {
+    return *steadyFrontierResult;
   }
 
   switch (secEngine_) {

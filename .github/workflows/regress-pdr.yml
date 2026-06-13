@@ -17,8 +17,6 @@ on:
 env:
   SEC_ENGINE: pdr
   SEC_ENCODING: ${{ inputs.sec_encoding || 'binary' }}
-  # Dual-rail wrappers use BP final as the full-coverage sentinel; binary keeps the historical equivalence-only check.
-  BP_SEC_FINAL_EXPECTATION: ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-full-coverage' || 'expect-equivalent' }}
 
 jobs:
   build:
@@ -183,15 +181,17 @@ jobs:
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
+        # BP final has resetless FIFO state. Binary SEC intentionally drops
+        # that surface, so this regression always exercises dual-rail coverage.
         bash regress/run_sec_strategies_regress.sh \
           nangate45_black_parrot_sec_final \
           "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          ${{ env.BP_SEC_FINAL_EXPECTATION }} \
+          expect-full-coverage \
           compact \
           engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=${{ env.SEC_ENCODING }}
+          sec-encoding=dual_rail_steady
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}

@@ -9250,6 +9250,103 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailSteadyFrontierGuardCoversResetlessOutputs) {
+  const SignalKey state0 = makeSignalKey("dualRailSteadyFrontierState0");
+  const SignalKey state1 = makeSignalKey("dualRailSteadyFrontierState1");
+  std::vector<SignalKey> outputs;
+  for (size_t i = 0; i < 512; ++i) {
+    outputs.push_back(
+        makeSignalKey("dualRailSteadyFrontierOut" + std::to_string(i)));
+  }
+
+  SequentialDesignModel model0;
+  model0.stateBits = {state0};
+  model0.allObservedOutputs = outputs;
+  model0.observedOutputs = outputs;
+  model0.inputVarByKey.emplace(state0, 2);
+  model0.displayNameByKey.emplace(state0, "left_frontier_q[0]");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    model0.displayNameByKey.emplace(
+        outputs[i], "frontier_out[" + std::to_string(i) + "]");
+    model0.observedOutputExprByKey.emplace(outputs[i], BoolExpr::Var(2));
+  }
+
+  SequentialDesignModel model1;
+  model1.stateBits = {state1};
+  model1.allObservedOutputs = outputs;
+  model1.observedOutputs = outputs;
+  model1.inputVarByKey.emplace(state1, 3);
+  model1.displayNameByKey.emplace(state1, "right_frontier_q[0]");
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    model1.displayNameByKey.emplace(
+        outputs[i], "frontier_out[" + std::to_string(i) + "]");
+    model1.observedOutputExprByKey.emplace(outputs[i], BoolExpr::Var(3));
+  }
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  // The guard is a top-output dual-rail frontier certificate. It never relates
+  // left/right internal flops by name; both resetless states are encoded as X
+  // and only the observed rail equality is checked.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, outputs.size());
+  EXPECT_EQ(result.totalOutputs, outputs.size());
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailSteadyFrontierGuardReportsMismatch) {
+  std::vector<SignalKey> outputs;
+  for (size_t i = 0; i < 512; ++i) {
+    outputs.push_back(makeSignalKey(
+        "dualRailSteadyFrontierMismatchOut" + std::to_string(i)));
+  }
+
+  SequentialDesignModel model0;
+  model0.allObservedOutputs = outputs;
+  model0.observedOutputs = outputs;
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    model0.displayNameByKey.emplace(
+        outputs[i], "frontier_mismatch[" + std::to_string(i) + "]");
+    model0.observedOutputExprByKey.emplace(
+        outputs[i], BoolExpr::createTrue());
+  }
+
+  SequentialDesignModel model1;
+  model1.allObservedOutputs = outputs;
+  model1.observedOutputs = outputs;
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    model1.displayNameByKey.emplace(
+        outputs[i], "frontier_mismatch[" + std::to_string(i) + "]");
+    model1.observedOutputExprByKey.emplace(
+        outputs[i], i == 0 ? BoolExpr::createFalse() : BoolExpr::createTrue());
+  }
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, outputs.size());
+  EXPECT_EQ(result.totalOutputs, outputs.size());
+  EXPECT_NE(result.reason.find("frontier_mismatch[0]"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailCoversMatchingResetlessResidualWithoutPdrFallback) {
   const SignalKey good = makeSignalKey("dualRailResetlessGood");
   const SignalKey out = makeSignalKey("dualRailResetlessOut");
