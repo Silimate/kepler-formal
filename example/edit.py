@@ -4,75 +4,111 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from os import path
-import sys
 import logging
-from najaeda import netlist
+
 from najaeda import naja
+from najaeda import netlist
 
 logging.basicConfig(level=logging.INFO)
 
-# snippet-start: load_design_liberty
-benchmarks = path.join('.')
-liberty_files = [
-    'NangateOpenCellLibrary_typical.lib',
-    'fakeram45_1024x32.lib',
-    'fakeram45_64x32.lib'
+LIBERTY_FILES = [
+    "NangateOpenCellLibrary_typical.lib",
+    "fakeram45_1024x32.lib",
+    "fakeram45_64x32.lib",
 ]
-liberty_files = list(map(lambda p:path.join(benchmarks, p), liberty_files))
-    
-netlist.load_liberty(liberty_files)
-top = netlist.load_verilog('tinyrocket.v')
-netlist.get_top().dump_verilog('tinyrocket_pre_edited.v')
-netlist.dump_naja_if('tinyrocket.if')
-u = naja.NLUniverse.get()
-db = u.getTopDesign().getDB()
-prims = list(db.getPrimitiveLibraries())
-logic_1 = prims[0].getSNLDesign('LOGIC0_X1')
-print(logic_1)
-logic_1_inst = naja.SNLInstance.create(u.getTopDesign(), logic_1, "logic_1_inst")
+TARGET_INPUT_NAME = "auto_intsink_in_sync_0"
+SEC_PROBE_OUTPUT_NAME = "sec_edit_probe_o"
 
-inst = top.get_child_instance("logic_1_inst")
-print(inst)
-for term in inst.get_output_bit_terms():
-    print(term)
 
-net = None
-index = 0
-for input in top.get_input_bit_terms():
-    if index == 2:
-        net = input.get_lower_net()
-        input.disconnect_lower_net()
-        ## assert input has no net
-        if input.get_lower_net() is not None:
-            print("net", input.get_lower_net())
-            raise TypeError(f"Not disconnected: {input}")
-        print(input)
-        break
-    index += 1
+def liberty_paths():
+    return [path.join(".", liberty_file) for liberty_file in LIBERTY_FILES]
 
-out = None
-index = 0
-for output in inst.get_output_bit_terms():
-    out = output
-    break
 
-out.connect_upper_net(net) 
-# insure net has only one driver
-drivers = out.get_equipotential().get_leaf_drivers()
-number_of_drivers = 0
-for term in net.get_inst_terms():
-    print("inst term:", term)
-for term in net.get_design_terms():
-    print("design term:", term)
-for driver in drivers:
-    print("driver", driver)
-    number_of_drivers += 1
-top_drivers = out.get_equipotential().get_top_drivers()
-for top_driver in top_drivers:
-    print("top driver", top_driver)
-    number_of_drivers += 1
-if number_of_drivers > 1:
-    raise TypeError(f"Net has multiple drivers: {net}, {drivers}")
-net.set_name("edit")
-netlist.dump_naja_if('tinyrocket_naja_edited.if')
-netlist.get_top().dump_verilog('tinyrocket_edited.v')
+def load_tinyrocket():
+    netlist.load_liberty(liberty_paths())
+    return netlist.load_verilog("tinyrocket.v")
+
+
+def find_input_bit_term(top, name):
+    for term in top.get_input_bit_terms():
+        if term.get_name() == name:
+            return term
+    raise RuntimeError(f"Could not find top input {name}")
+
+
+def first_output_bit_term(instance):
+    for term in instance.get_output_bit_terms():
+        return term
+    raise RuntimeError(f"Instance {instance} has no output bit terms")
+
+
+def create_logic0_driver(top):
+    universe = naja.NLUniverse.get()
+    db = universe.getTopDesign().getDB()
+    primitive_libraries = list(db.getPrimitiveLibraries())
+    logic0 = primitive_libraries[0].getSNLDesign("LOGIC0_X1")
+    logic0_instance = naja.SNLInstance.create(
+        universe.getTopDesign(), logic0, "logic_1_inst")
+    return top.get_child_instance(logic0_instance.getName())
+
+
+def add_sec_probe_output(source_net):
+    # SEC expected-different regressions must observe a top output.  This probe
+    # exposes the edited interrupt input as a real PO instead of relying on LEC
+    # or on any cross-design relation between internal elements.
+    probe = naja.SNLScalarTerm.create(
+        naja.NLUniverse.get().getTopDesign(),
+        naja.SNLTerm.Direction.Output,
+        SEC_PROBE_OUTPUT_NAME,
+    )
+    probe.setNet(source_net.net)
+
+
+def tie_target_input_to_logic0(top, target_input):
+    target_net = target_input.get_lower_net()
+    target_input.disconnect_lower_net()
+    if target_input.get_lower_net() is not None:
+        raise RuntimeError(f"Not disconnected: {target_input}")
+
+    logic0_instance = create_logic0_driver(top)
+    first_output_bit_term(logic0_instance).connect_upper_net(target_net)
+
+    drivers = first_output_bit_term(logic0_instance).get_equipotential().get_leaf_drivers()
+    top_drivers = first_output_bit_term(logic0_instance).get_equipotential().get_top_drivers()
+    if len(list(drivers)) + len(list(top_drivers)) > 1:
+        raise RuntimeError(f"Net has multiple drivers: {target_net}")
+
+    target_net.set_name("edit")
+
+
+def dump_legacy_edit_outputs():
+    top = load_tinyrocket()
+    netlist.get_top().dump_verilog("tinyrocket_pre_edited.v")
+    netlist.dump_naja_if("tinyrocket.if")
+
+    target_input = find_input_bit_term(top, TARGET_INPUT_NAME)
+    tie_target_input_to_logic0(top, target_input)
+    netlist.dump_naja_if("tinyrocket_naja_edited.if")
+    netlist.get_top().dump_verilog("tinyrocket_edited.v")
+
+
+def dump_sec_probe_outputs():
+    naja.NLUniverse.get().destroy()
+    top = load_tinyrocket()
+    target_input = find_input_bit_term(top, TARGET_INPUT_NAME)
+    add_sec_probe_output(target_input.get_lower_net())
+    netlist.dump_naja_if("tinyrocket_sec_probe_naja.if")
+    netlist.get_top().dump_verilog("tinyrocket_sec_probe.v")
+
+    tie_target_input_to_logic0(top, target_input)
+    netlist.dump_naja_if("tinyrocket_sec_probe_naja_edited.if")
+    netlist.get_top().dump_verilog("tinyrocket_sec_probe_edited.v")
+
+
+def main():
+    dump_legacy_edit_outputs()
+    dump_sec_probe_outputs()
+
+
+if __name__ == "__main__":
+    main()

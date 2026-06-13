@@ -111,6 +111,14 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   } else {
     batch.outputImpliedByInductionCore.clear();
   }
+  if (source.dualRailOutputSkipReasons.size() ==
+      source.observedOutputExprs0.size()) {
+    batch.dualRailOutputSkipReasons.assign(
+        source.dualRailOutputSkipReasons.begin() + firstOutput,
+        source.dualRailOutputSkipReasons.begin() + endOutput);
+  } else {
+    batch.dualRailOutputSkipReasons.clear();
+  }
 
   // SEC output equality is a conjunction. Proving smaller conjunctions and
   // combining the results is logically equivalent to one monolithic property,

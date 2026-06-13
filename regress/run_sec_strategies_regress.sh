@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>] [expect-output-filter=<substring[,substring...]>]" >&2
   exit 2
 fi
 
@@ -16,6 +16,7 @@ config_path="$4"
 expectation=""
 max_k_override=""
 compact_mode=""
+expect_output_filter=""
 # The CLI default is dual-rail SEC.  This regression helper keeps the
 # historical binary workflow behavior unless a caller explicitly opts into
 # dual_rail_steady, which prevents old regressions from silently changing mode.
@@ -53,6 +54,9 @@ for option in "${@:5}"; do
         echo "Invalid max-k override: ${max_k_override}" >&2
         exit 2
       fi
+      ;;
+    expect-output-filter=*)
+      expect_output_filter="${option#expect-output-filter=}"
       ;;
     *)
       echo "Unknown option: ${option}" >&2
@@ -130,7 +134,11 @@ run_engine() {
     # alive and to make a true hang easier to distinguish from solver work.
     local kepler_env=()
     if [[ "${expectation}" == "expect-different" ]]; then
-      kepler_env+=(KEPLER_SEC_KI_FRONTIER_FIRST=1)
+      kepler_env+=(KEPLER_SEC_KI_FRONTIER_FIRST=1 KEPLER_SEC_EXPECT_DIFFERENT=1)
+      if [[ -n "${expect_output_filter}" ]]; then
+        kepler_env+=(
+          KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER="${expect_output_filter}")
+      fi
     fi
     if [[ "${expectation}" == "expect-full-coverage" &&
           "${sec_encoding}" == "dual_rail_steady" ]]; then
@@ -165,8 +173,18 @@ run_engine() {
     kill "${tail_pid}" 2>/dev/null || true
     wait "${tail_pid}" 2>/dev/null || true
     if [[ "${expectation}" == "expect-different" ]]; then
-      grep "SEC found a counterexample" "${stdout_log}"
-      return 0
+      if grep -q "SEC found a counterexample" "${stdout_log}"; then
+        grep "SEC found a counterexample" "${stdout_log}"
+        return 0
+      fi
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      # Expected-different SEC regressions must be witnessed by the selected SEC
+      # engine.  A partial-coverage proof or an LEC-only structural mismatch is
+      # not enough for these workflows.
+      echo "Expected SEC counterexample for ${test_name} (${engine})" >&2
+      return 1
     fi
 
     # Treat any discovered counterexample as a hard failure unless the caller
@@ -183,7 +201,11 @@ run_engine() {
     fi
 
     if [[ "${expectation}" == "expect-full-coverage" ]]; then
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
       grep "SEC output coverage: 100.00%" "${stdout_log}"
+      grep "SEC proved equivalence" "${stdout_log}"
       return 0
     fi
 

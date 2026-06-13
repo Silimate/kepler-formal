@@ -965,10 +965,16 @@ OutputCoverageSelection buildCoverageWithDualRailOutputSkips(
     }
 
     const auto reasonIt = skipReasons.find(i);
-    const std::string reason =
-        reasonIt == skipReasons.end()
-            ? "dual-rail proof was inconclusive"  // LCOV_EXCL_LINE
-            : reasonIt->second;
+    std::string reason;
+    if (reasonIt != skipReasons.end()) {
+      reason = reasonIt->second;
+    } else if (problem.dualRailOutputSkipReasons.size() ==
+                   coveredOutputs.size() &&
+               !problem.dualRailOutputSkipReasons[i].empty()) {
+      reason = problem.dualRailOutputSkipReasons[i];
+    } else {
+      reason = "dual-rail proof was inconclusive";  // LCOV_EXCL_LINE
+    }
     coverage.skippedOutputs.push_back(
         outputNameForProblemIndex(problem, i) + ": " + reason);
   }
@@ -983,6 +989,11 @@ std::vector<size_t> collectOutputsRequiringDualRailEngineProof(
     return outputIndices;  // LCOV_EXCL_LINE
   }
   for (size_t i = 0; i < problem.outputImpliedByInductionCore.size(); ++i) {
+    if (problem.dualRailOutputSkipReasons.size() ==
+            problem.outputImpliedByInductionCore.size() &&
+        !problem.dualRailOutputSkipReasons[i].empty()) {
+      continue;
+    }
     if (!problem.outputImpliedByInductionCore[i]) {
       outputIndices.push_back(i);
     }
@@ -1014,11 +1025,15 @@ KInductionProblem makeOutputSubsetProblem(
   subset.observedOutputExprs0.clear();
   subset.observedOutputExprs1.clear();
   subset.outputImpliedByInductionCore.clear();
+  subset.dualRailOutputSkipReasons.clear();
 
   const bool copyObservedKeys =
       source.observedOutputs.size() == source.observedOutputExprs0.size();
   const bool copyImplicationFlags =
       source.outputImpliedByInductionCore.size() ==
+      source.observedOutputExprs0.size();
+  const bool copySkipReasons =
+      source.dualRailOutputSkipReasons.size() ==
       source.observedOutputExprs0.size();
   for (const size_t outputIndex : outputIndices) {
     if (copyObservedKeys) {
@@ -1033,6 +1048,10 @@ KInductionProblem makeOutputSubsetProblem(
     if (copyImplicationFlags) {
       subset.outputImpliedByInductionCore.push_back(
           source.outputImpliedByInductionCore[outputIndex]);
+    }
+    if (copySkipReasons) {
+      subset.dualRailOutputSkipReasons.push_back(
+          source.dualRailOutputSkipReasons[outputIndex]);
     }
   }
   rebuildSelectedOutputProperty(subset);
@@ -1304,9 +1323,64 @@ bool pdrStrategyStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
 }
 
+bool secExpectedDifferentMode() {
+  return std::getenv("KEPLER_SEC_EXPECT_DIFFERENT") != nullptr;
+}
+
 bool dualRailFullCoverageOnlyMode() {
   return std::getenv("KEPLER_SEC_DUAL_RAIL_FULL_COVERAGE_ONLY") != nullptr ||
          std::getenv("KEPLER_SEC_PDR_DUAL_RAIL_FULL_COVERAGE_ONLY") != nullptr;
+}
+
+std::vector<std::string> secStrategyCommaListFromEnv(const char* name) {
+  const char* valueText = std::getenv(name);
+  if (valueText == nullptr || *valueText == '\0') {
+    return {};
+  }
+
+  std::vector<std::string> values;
+  std::string current;
+  std::istringstream stream(valueText);
+  while (std::getline(stream, current, ',')) {
+    current.erase(
+        current.begin(),
+        std::find_if(
+            current.begin(), current.end(), [](unsigned char ch) {
+              return !std::isspace(ch);
+            }));
+    current.erase(
+        std::find_if(
+            current.rbegin(), current.rend(), [](unsigned char ch) {
+              return !std::isspace(ch);
+            }).base(),
+        current.end());
+    if (!current.empty()) {
+      values.push_back(current);
+    }
+  }
+  return values;
+}
+
+std::vector<size_t> collectExpectedDifferenceOutputIndices(
+    const KInductionProblem& problem) {
+  const std::vector<std::string> filters =
+      secStrategyCommaListFromEnv("KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER");
+  if (filters.empty()) {
+    return {};
+  }
+
+  std::vector<size_t> indices;
+  for (size_t i = 0; i < problem.observedOutputNames.size(); ++i) {
+    const std::string& name = problem.observedOutputNames[i];
+    const bool matches = std::any_of(
+        filters.begin(), filters.end(), [&](const std::string& filter) {
+          return name.find(filter) != std::string::npos;
+        });
+    if (matches) {
+      indices.push_back(i);
+    }
+  }
+  return indices;
 }
 
 size_t secStrategySizeLimitFromEnv(const char* name, size_t defaultValue) {
@@ -1341,6 +1415,13 @@ constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
 // Wide designs skip this certificate below.  Focused resetless cases need a
 // little more budget to avoid unstable coverage near the mock-alu boundary.
 constexpr unsigned kDefaultDualRailFlushCertificateConflictLimit = 300000;
+// The batched flush certificate is only a shortcut before the proven
+// per-output path.  Keep its SAT budget small so a hard wide OR cannot become a
+// new setup-time wall.
+constexpr unsigned kDefaultDualRailFlushBatchConflictLimit = 10000;
+constexpr size_t kDefaultDualRailFlushBatchOutputs = 1;
+constexpr size_t kDefaultDualRailFlushTransitionTargets = 12000;
+constexpr size_t kDefaultDualRailFlushSolverSymbols = 4096;
 
 struct DualRailFlushCoi {
   std::vector<std::vector<size_t>> transitionTargetsByFrame;
@@ -1372,6 +1453,29 @@ size_t secStrategySizeLimitFromOptionalUnsignedEnv(
     size_t defaultValue) {
   const auto value = secStrategyUnsignedEnv(name);
   return value.has_value() ? static_cast<size_t>(*value) : defaultValue;
+}
+
+unsigned dualRailFlushBatchConflictLimit() {
+  return secStrategyUnsignedEnv("KEPLER_SEC_DUAL_RAIL_FLUSH_BATCH_CONFLICT_LIMIT")
+      .value_or(kDefaultDualRailFlushBatchConflictLimit);
+}
+
+size_t dualRailFlushBatchOutputLimit() {
+  return secStrategySizeLimitFromOptionalUnsignedEnv(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_BATCH_OUTPUT_LIMIT",
+      kDefaultDualRailFlushBatchOutputs);
+}
+
+size_t dualRailFlushTransitionTargetLimit() {
+  return secStrategySizeLimitFromOptionalUnsignedEnv(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_TRANSITION_TARGET_LIMIT",
+      kDefaultDualRailFlushTransitionTargets);
+}
+
+size_t dualRailFlushSolverSymbolLimit() {
+  return secStrategySizeLimitFromOptionalUnsignedEnv(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_SOLVER_SYMBOL_LIMIT",
+      kDefaultDualRailFlushSolverSymbols);
 }
 
 std::vector<size_t> secStrategySortedSymbols(
@@ -1519,6 +1623,27 @@ DualRailFlushCoi buildDualRailFlushCoi(const KInductionProblem& problem,
   return coi;
 }
 
+size_t dualRailFlushTransitionTargetCount(const DualRailFlushCoi& coi) {
+  size_t targetCount = 0;
+  for (const auto& targets : coi.transitionTargetsByFrame) {
+    targetCount += targets.size();
+  }
+  return targetCount;
+}
+
+bool dualRailFlushCoiExceedsConeLimit(const DualRailFlushCoi& coi,
+                                      size_t transitionTargetLimit,
+                                      size_t solverSymbolLimit) {
+  if (transitionTargetLimit != 0 &&
+      dualRailFlushTransitionTargetCount(coi) > transitionTargetLimit) {
+    return true;
+  }
+  if (solverSymbolLimit != 0 && coi.solverSymbols.size() > solverSymbolLimit) {
+    return true;
+  }
+  return false;
+}
+
 void addDualRailFlushComplementRelations(
     SATSolverWrapper& solver,
     const FrameVariableStore& variables,
@@ -1600,9 +1725,23 @@ SATSolverWrapper::SolveStatus solveDualRailFlushBadAtDepth(
     const KInductionProblem& problem,
     BoolExpr* badFormula,
     size_t depth,
-    KEPLER_FORMAL::Config::SolverType solverType) {
+    KEPLER_FORMAL::Config::SolverType solverType,
+    unsigned conflictLimit,
+    size_t transitionTargetLimit,
+    size_t solverSymbolLimit,
+    bool* coneLimitExceeded) {
   const DualRailFlushCoi coi =
       buildDualRailFlushCoi(problem, badFormula, depth);
+  if (coneLimitExceeded != nullptr) {
+    *coneLimitExceeded = false;
+  }
+  if (dualRailFlushCoiExceedsConeLimit(
+          coi, transitionTargetLimit, solverSymbolLimit)) {
+    if (coneLimitExceeded != nullptr) {
+      *coneLimitExceeded = true;
+    }
+    return SATSolverWrapper::SolveStatus::Unknown;
+  }
   SATSolverWrapper solver(solverType);
   solver.configureForSecDualRailConeProof(coi.solverSymbols.size());
   FrameVariableStore variables(solver, coi.solverSymbols, depth + 1);
@@ -1628,23 +1767,40 @@ SATSolverWrapper::SolveStatus solveDualRailFlushBadAtDepth(
       solver, variables.makeLeafLits(depth, badFormula->getSupportVars()));
   solver.addClause({badEncoder.encode(badFormula)});
   if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
-    const unsigned conflictLimit = dualRailFlushCertificateConflictLimit();
     return solver.solveWithKissatResourceLimits(conflictLimit, conflictLimit);
   }
   return solver.solveStatus();  // LCOV_EXCL_LINE
 }
 
-bool dualRailOutputStartupPrefixIsSafe(
+BoolExpr* makeDualRailOutputSetBadFormula(
     const KInductionProblem& problem,
-    size_t outputIndex,
+    const std::vector<size_t>& outputIndices);
+
+bool dualRailOutputSetStartupPrefixIsSafe(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
     size_t depth,
-    KEPLER_FORMAL::Config::SolverType solverType) {
+    KEPLER_FORMAL::Config::SolverType solverType,
+    bool* coneLimitExceeded = nullptr) {
+  if (coneLimitExceeded != nullptr) {
+    *coneLimitExceeded = false;
+  }
   if (depth == 0) {
     return true;
   }
   const KInductionProblem outputProblem =
-      makeOutputSubsetProblem(problem, {outputIndex});
+      makeOutputSubsetProblem(problem, outputIndices);
+  BoolExpr* outputBad = makeDualRailOutputSetBadFormula(problem, outputIndices);
   for (size_t frame = 0; frame < depth; ++frame) {
+    if (dualRailFlushCoiExceedsConeLimit(
+            buildDualRailFlushCoi(problem, outputBad, frame),
+            dualRailFlushTransitionTargetLimit(),
+            dualRailFlushSolverSymbolLimit())) {
+      if (coneLimitExceeded != nullptr) {
+        *coneLimitExceeded = true;
+      }
+      return false;
+    }
     if (SEC::findBaseCounterexampleAtFrontier(
             outputProblem, solverType, frame).has_value()) {
       return false;  // LCOV_EXCL_LINE
@@ -1653,18 +1809,74 @@ bool dualRailOutputStartupPrefixIsSafe(
   return true;
 }
 
+bool dualRailOutputStartupPrefixIsSafe(
+    const KInductionProblem& problem,
+    size_t outputIndex,
+    size_t depth,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    bool* coneLimitExceeded = nullptr) {
+  return dualRailOutputSetStartupPrefixIsSafe(
+      problem,
+      std::vector<size_t>{outputIndex},
+      depth,
+      solverType,
+      coneLimitExceeded);
+}
+
+BoolExpr* makeDualRailOutputBadFormula(
+    const KInductionProblem& problem,
+    size_t outputIndex) {
+  BoolExpr* outputEquality = makeEqualityExpr(
+      problem.observedOutputExprs0[outputIndex],
+      problem.observedOutputExprs1[outputIndex]);
+  return BoolExpr::simplify(BoolExpr::Not(outputEquality));
+}
+
+BoolExpr* makeDualRailOutputSetBadFormula(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices) {
+  BoolExpr* outputSetBad = BoolExpr::createFalse();
+  for (const size_t outputIndex : outputIndices) {
+    outputSetBad = BoolExpr::Or(
+        outputSetBad, makeDualRailOutputBadFormula(problem, outputIndex));
+  }
+  return BoolExpr::simplify(outputSetBad);
+}
+
+bool dualRailOutputSetConvergesFromAnyLegalState(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
+    size_t depth,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    unsigned conflictLimit,
+    bool* coneLimitExceeded = nullptr) {
+  BoolExpr* outputBad = makeDualRailOutputSetBadFormula(problem, outputIndices);
+  const auto status =
+      solveDualRailFlushBadAtDepth(
+          problem,
+          outputBad,
+          depth,
+          solverType,
+          conflictLimit,
+          dualRailFlushTransitionTargetLimit(),
+          dualRailFlushSolverSymbolLimit(),
+          coneLimitExceeded);
+  return status == SATSolverWrapper::SolveStatus::Unsat;
+}
+
 bool dualRailOutputConvergesFromAnyLegalState(
     const KInductionProblem& problem,
     size_t outputIndex,
     size_t depth,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  BoolExpr* outputEquality = makeEqualityExpr(
-      problem.observedOutputExprs0[outputIndex],
-      problem.observedOutputExprs1[outputIndex]);
-  BoolExpr* outputBad = BoolExpr::simplify(BoolExpr::Not(outputEquality));
-  const auto status =
-      solveDualRailFlushBadAtDepth(problem, outputBad, depth, solverType);
-  return status == SATSolverWrapper::SolveStatus::Unsat;
+    KEPLER_FORMAL::Config::SolverType solverType,
+    bool* coneLimitExceeded = nullptr) {
+  return dualRailOutputSetConvergesFromAnyLegalState(
+      problem,
+      std::vector<size_t>{outputIndex},
+      depth,
+      solverType,
+      dualRailFlushCertificateConflictLimit(),
+      coneLimitExceeded);
 }
 
 size_t certifyDualRailFlushConvergedOutputs(
@@ -1696,7 +1908,66 @@ size_t certifyDualRailFlushConvergedOutputs(
     return 0;
   }
 
+  std::vector<size_t> candidateOutputs;
+  candidateOutputs.reserve(problem.outputImpliedByInductionCore.size());
+  for (size_t outputIndex = 0;
+       outputIndex < problem.outputImpliedByInductionCore.size();
+       ++outputIndex) {
+    if (!problem.outputImpliedByInductionCore[outputIndex]) {
+      candidateOutputs.push_back(outputIndex);
+    }
+  }
   size_t certifiedOutputs = 0;
+  const size_t batchOutputLimit = dualRailFlushBatchOutputLimit();
+  if (candidateOutputs.size() > 1 && batchOutputLimit > 1) {
+    for (size_t first = 0; first < candidateOutputs.size();
+         first += batchOutputLimit) {
+      const size_t last =
+          std::min(candidateOutputs.size(), first + batchOutputLimit);
+      const std::vector<size_t> batchOutputs(
+          candidateOutputs.begin() + static_cast<std::ptrdiff_t>(first),
+          candidateOutputs.begin() + static_cast<std::ptrdiff_t>(last));
+      for (size_t depth = 1; depth <= maxDepth; ++depth) {
+        bool coneLimitExceeded = false;
+        if (!dualRailOutputSetConvergesFromAnyLegalState(
+                problem,
+                batchOutputs,
+                depth,
+                solverType,
+                dualRailFlushBatchConflictLimit(),
+                &coneLimitExceeded)) {
+          if (coneLimitExceeded) {
+            break;
+          }
+          continue;
+        }
+        bool prefixConeLimitExceeded = false;
+        if (!dualRailOutputSetStartupPrefixIsSafe(
+                problem,
+                batchOutputs,
+                depth,
+                solverType,
+                &prefixConeLimitExceeded)) {
+          break;
+        }
+        // One UNSAT query over a small disjunction proves every residual output
+        // in this chunk. Hard chunks simply fall back to the serial path below.
+        for (const size_t outputIndex : batchOutputs) {
+          problem.outputImpliedByInductionCore[outputIndex] = true;
+        }
+        certifiedOutputs += batchOutputs.size();
+        if (secDiagEnabled) {
+          emitSecDiag(
+              "SEC diag: dual-rail flush batch certificate outputs=",
+              batchOutputs.size(),
+              " depth=",
+              depth);
+        }
+        break;
+      }
+    }
+  }
+
   for (size_t outputIndex = 0;
        outputIndex < problem.outputImpliedByInductionCore.size();
        ++outputIndex) {
@@ -1704,12 +1975,53 @@ size_t certifyDualRailFlushConvergedOutputs(
       continue;
     }
     for (size_t depth = 1; depth <= maxDepth; ++depth) {
+      bool coneLimitExceeded = false;
       if (!dualRailOutputConvergesFromAnyLegalState(
-              problem, outputIndex, depth, solverType)) {
+              problem,
+              outputIndex,
+              depth,
+              solverType,
+              &coneLimitExceeded)) {
+        if (coneLimitExceeded &&
+            problem.dualRailOutputSkipReasons.size() ==
+                problem.outputImpliedByInductionCore.size()) {
+          problem.dualRailOutputSkipReasons[outputIndex] =
+              "dual-rail flush certificate exceeded cone size limit";
+          if (secDiagEnabled) {
+            emitSecDiag(
+                "SEC diag: dual-rail flush certificate skipped output=",
+                outputNameForProblemIndex(problem, outputIndex),
+                " transition_target_limit=",
+                dualRailFlushTransitionTargetLimit(),
+                " solver_symbol_limit=",
+                dualRailFlushSolverSymbolLimit());
+          }
+          break;
+        }
         continue;
       }
+      bool prefixConeLimitExceeded = false;
       if (!dualRailOutputStartupPrefixIsSafe(
-              problem, outputIndex, depth, solverType)) {
+              problem,
+              outputIndex,
+              depth,
+              solverType,
+              &prefixConeLimitExceeded)) {
+        if (prefixConeLimitExceeded &&
+            problem.dualRailOutputSkipReasons.size() ==
+                problem.outputImpliedByInductionCore.size()) {
+          problem.dualRailOutputSkipReasons[outputIndex] =
+              "dual-rail flush certificate exceeded cone size limit";
+          if (secDiagEnabled) {
+            emitSecDiag(
+                "SEC diag: dual-rail flush certificate skipped output=",
+                outputNameForProblemIndex(problem, outputIndex),
+                " transition_target_limit=",
+                dualRailFlushTransitionTargetLimit(),
+                " solver_symbol_limit=",
+                dualRailFlushSolverSymbolLimit());
+          }
+        }
         break;  // LCOV_EXCL_LINE
       }
       problem.outputImpliedByInductionCore[outputIndex] = true;
@@ -2025,7 +2337,33 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
 
   const std::vector<size_t> residualOutputIndices =
       collectOutputsRequiringDualRailEngineProof(problem);
+  std::unordered_map<size_t, std::string> presetSkipReasons;
+  if (problem.dualRailOutputSkipReasons.size() ==
+      problem.observedOutputExprs0.size()) {
+    for (size_t i = 0; i < problem.dualRailOutputSkipReasons.size(); ++i) {
+      if (!problem.dualRailOutputSkipReasons[i].empty()) {
+        presetSkipReasons.emplace(i, problem.dualRailOutputSkipReasons[i]);
+      }
+    }
+  }
   if (residualOutputIndices.empty()) {
+    if (!presetSkipReasons.empty() &&
+        problem.outputImpliedByInductionCore.size() ==
+            problem.observedOutputExprs0.size()) {
+      const OutputCoverageSelection partialCoverage =
+          buildCoverageWithDualRailOutputSkips(
+              outputCoverage,
+              problem,
+              problem.outputImpliedByInductionCore,
+              presetSkipReasons);
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          0,
+          "",
+          partialCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
     return makeSecResult(
         SequentialEquivalenceStatus::Equivalent,
         0,
@@ -2068,6 +2406,7 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
 
   DualRailResidualProofState proofState;
   proofState.coveredOutputs.assign(problem.observedOutputExprs0.size(), false);
+  proofState.skipReasons = presetSkipReasons;
   for (size_t i = 0; i < problem.outputImpliedByInductionCore.size(); ++i) {
     proofState.coveredOutputs[i] = problem.outputImpliedByInductionCore[i];
   }
@@ -3015,6 +3354,7 @@ void buildSecPropertiesAndTransitions(
   BoolExpr* inductionProperty = inductionCore;
   problem.outputImpliedByInductionCore.clear();
   problem.outputImpliedByInductionCore.reserve(problem.observedOutputExprs0.size());
+  problem.dualRailOutputSkipReasons.clear();
   for (size_t i = 0; i < problem.observedOutputExprs0.size(); ++i) {
     const auto outputEquality = makeEqualityExpr(
         problem.observedOutputExprs0[i], problem.observedOutputExprs1[i]);
@@ -3185,6 +3525,8 @@ KInductionProblem buildDualRailSecProblem(
           implicationConflictLimit);
   problem.outputImpliedByInductionCore.clear();
   problem.outputImpliedByInductionCore.reserve(alignedOutputs.names.size());
+  problem.dualRailOutputSkipReasons.clear();
+  problem.dualRailOutputSkipReasons.reserve(alignedOutputs.names.size());
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
     const auto out0 = buildDualRailBoolExpr(
         model0.observedOutputExprByKey.at(alignedOutputs.keys0[i]),
@@ -3226,6 +3568,7 @@ KInductionProblem buildDualRailSecProblem(
       fflush(stderr);
     }
     problem.outputImpliedByInductionCore.push_back(outputImplied);
+    problem.dualRailOutputSkipReasons.emplace_back();
     property = BoolExpr::And(property, outputRailEquality);
   }
 
@@ -3441,6 +3784,73 @@ SequentialEquivalenceResult runDualRailFullCoverageOnlyCheck(
       extractedBoundaryReports);  // LCOV_EXCL_LINE
 }
 
+std::optional<KInductionResult> findExpectedDifferenceCounterexample(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK) {
+  if (!secExpectedDifferentMode()) {
+    return std::nullopt;
+  }
+  const size_t outputBatchLimit = secStrategySizeLimitFromEnv(
+      "KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_LIMIT", 16);
+  const size_t supportLimit = secStrategySizeLimitFromEnv(
+      "KEPLER_SEC_EXPECT_DIFFERENT_SUPPORT_LIMIT", 512);
+  if (problem.observedOutputExprs0.empty()) {
+    return std::nullopt;
+  }
+  const std::vector<size_t> filteredOutputIndices =
+      collectExpectedDifferenceOutputIndices(problem);
+  if (std::getenv("KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER") != nullptr &&
+      filteredOutputIndices.empty()) {
+    return std::nullopt;
+  }
+  const KInductionProblem searchProblem =
+      filteredOutputIndices.empty()
+          ? problem
+          : makeOutputSubsetProblem(problem, filteredOutputIndices);
+  const OutputBatchingLimits limits{outputBatchLimit, supportLimit};
+  const std::vector<std::pair<size_t, size_t>> outputBatches =
+      buildSupportBoundedOutputBatches(searchProblem, limits);
+
+  // Expected-difference regressions care about a concrete witness more than
+  // coverage.  Search each exact frontier on bounded top-output slices before
+  // PDR is allowed to turn residual sets into skipped coverage.  This keeps
+  // TinyRocket-sized expected-different runs from either skipping the witness
+  // search entirely or materializing one giant OR cone across every top output.
+  for (size_t k = 0; k <= maxK; ++k) {
+    for (const auto& [firstOutput, endOutput] : outputBatches) {
+      KInductionProblem batchProblem = searchProblem;
+      configureOutputBatchProblem(
+          batchProblem, searchProblem, firstOutput, endOutput);
+      if (auto witness = SEC::findFastBaseCounterexampleAtFrontier(
+              batchProblem, solverType, k);
+          witness.has_value()) {
+        return KInductionResult{
+            KInductionStatus::Different, witness->badFrame, std::move(witness)};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+SequentialEquivalenceResult makeCounterexampleSecResult(
+    KInductionResult witnessResult,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
+  return makeSecResult(
+      SequentialEquivalenceStatus::Different,
+      witnessResult.bound,
+      formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),
+      outputCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+}
+
 SequentialEquivalenceResult runPdrSecEngine(
     const KInductionProblem& problem,
     size_t maxK,
@@ -3485,10 +3895,34 @@ SequentialEquivalenceResult runPdrSecEngine(
 
   const std::vector<size_t> dualRailEngineOutputIndices =
       collectOutputsRequiringDualRailEngineProof(problem);
+  std::unordered_map<size_t, std::string> presetDualRailSkipReasons;
+  if (problem.dualRailOutputSkipReasons.size() ==
+      problem.observedOutputExprs0.size()) {
+    for (size_t i = 0; i < problem.dualRailOutputSkipReasons.size(); ++i) {
+      if (!problem.dualRailOutputSkipReasons[i].empty()) {
+        presetDualRailSkipReasons.emplace(i, problem.dualRailOutputSkipReasons[i]);
+      }
+    }
+  }
   if (problem.usesDualRailStateEncoding &&
       problem.outputImpliedByInductionCore.size() ==
           problem.observedOutputExprs0.size() &&
       dualRailEngineOutputIndices.empty()) {
+    if (!presetDualRailSkipReasons.empty()) {
+      const OutputCoverageSelection partialCoverage =
+          buildCoverageWithDualRailOutputSkips(
+              outputCoverage,
+              problem,
+              problem.outputImpliedByInductionCore,
+              presetDualRailSkipReasons);
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          0,
+          "",
+          partialCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
     return makeSecResult(
         SequentialEquivalenceStatus::Equivalent,
         0,
@@ -3504,8 +3938,25 @@ SequentialEquivalenceResult runPdrSecEngine(
         "SEC diag: PDR dual-rail proof restricted to ",
         dualRailEngineOutputIndices.size(),
         " non-implied outputs");
+    const KInductionProblem residualProblem =
+        makeOutputSubsetProblem(problem, dualRailEngineOutputIndices);
+    const OutputCoverageSelection residualCoverage =
+        makeOutputSubsetCoverage(outputCoverage, dualRailEngineOutputIndices);
     if (shouldSkipLargeDualRailResidualSurface(
             problem, dualRailEngineOutputIndices.size())) {
+      if (auto witnessResult = findExpectedDifferenceCounterexample(
+              residualProblem, solverType, maxK);
+          witnessResult.has_value()) {
+        return makeCounterexampleSecResult(
+            std::move(*witnessResult),
+            model0,
+            model1,
+            top0,
+            top1,
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+      }
       emitSecDiag(
           "SEC diag: PDR skipping large dual-rail residual surface outputs=",
           dualRailEngineOutputIndices.size(),
@@ -3525,10 +3976,6 @@ SequentialEquivalenceResult runPdrSecEngine(
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
     }
-    const KInductionProblem residualProblem =
-        makeOutputSubsetProblem(problem, dualRailEngineOutputIndices);
-    const OutputCoverageSelection residualCoverage =
-        makeOutputSubsetCoverage(outputCoverage, dualRailEngineOutputIndices);
     const SequentialEquivalenceResult residualResult = runPdrSecEngine(
         residualProblem,
         maxK,
@@ -3549,6 +3996,19 @@ SequentialEquivalenceResult runPdrSecEngine(
           SequentialEquivalenceStatus::Equivalent,
           residualResult.bound,
           "",
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
+    if (auto witnessResult = findExpectedDifferenceCounterexample(
+            residualProblem, solverType, maxK);
+        witnessResult.has_value()) {
+      return makeCounterexampleSecResult(
+          std::move(*witnessResult),
+          model0,
+          model1,
+          top0,
+          top1,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -3876,7 +4336,8 @@ SequentialEquivalenceResult runPdrSecEngine(
   KInductionProblem batchProblem = problem;
   std::vector<bool> pdrCoveredOutputs =
       makeInitialDualRailPdrCoveredOutputs(problem);
-  std::unordered_map<size_t, std::string> pdrSkippedOutputReasons;
+  std::unordered_map<size_t, std::string> pdrSkippedOutputReasons =
+      presetDualRailSkipReasons;
   size_t provedBound = 0;
   const bool emitPdrStageStats = pdrStrategyStatsEnabled();
   struct FinalPdrStageOutcome {  // LCOV_EXCL_LINE
@@ -3941,6 +4402,10 @@ SequentialEquivalenceResult runPdrSecEngine(
     const bool finalBatchCanValidateConcrete =  // LCOV_EXCL_LINE
         !problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
         endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs;  // LCOV_EXCL_LINE
+    const bool finalBatchCanValidateExpectedDifference =
+        problem.usesDualRailStateEncoding &&
+        secExpectedDifferentMode() &&
+        endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs;
     const bool finalBatchCanRefineProjectedCounterexamples = true;  // LCOV_EXCL_LINE
     // The bad-formula repair opens exact reset-frontier queries. Keep it out of
     // final dual-rail SEC slices; hard leaves can split/skip without proving a
@@ -4040,7 +4505,8 @@ SequentialEquivalenceResult runPdrSecEngine(
     if (fullExactPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
       std::optional<KInductionResult::CounterexampleWitness>
           fullExactWitness;  // LCOV_EXCL_LINE
-      if (finalBatchCanValidateConcrete) {  // LCOV_EXCL_LINE
+      if (finalBatchCanValidateConcrete ||
+          finalBatchCanValidateExpectedDifference) {  // LCOV_EXCL_LINE
         fullExactWitness = SEC::findBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
             validationProblem, solverType, fullExactPdrResult.bound);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
@@ -4143,7 +4609,8 @@ SequentialEquivalenceResult runPdrSecEngine(
                   "KEPLER_SEC_PDR_DUAL_RAIL_PROJECTED_QUERY_BUDGET",
                   kDualRailProjectedPdrPredecessorQueryBudget)
             : kProjectedPdrPredecessorQueryBudget;
-    constexpr bool kValidateProjectedPdrCandidatesBeforeFinal = false;
+    const bool validateProjectedPdrCandidatesBeforeFinal =
+        secExpectedDifferentMode();
     emitPdrStrategyStageStats(
         emitPdrStageStats,
         batchIndex,
@@ -4185,7 +4652,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         configureOutputBatchProblem(  // LCOV_EXCL_LINE
             validationProblem, problem, firstOutput, endOutput);  // LCOV_EXCL_LINE
         std::optional<KInductionResult::CounterexampleWitness> witness;  // LCOV_EXCL_LINE
-        if (kValidateProjectedPdrCandidatesBeforeFinal &&
+        if (validateProjectedPdrCandidatesBeforeFinal &&
             endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
           witness = SEC::findBaseCounterexampleAtFrontier(
               validationProblem, solverType, pdrResult.bound);
@@ -4260,7 +4727,7 @@ SequentialEquivalenceResult runPdrSecEngine(
           }
           if (refinedPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
             std::optional<KInductionResult::CounterexampleWitness> refinedWitness;  // LCOV_EXCL_LINE
-            if (kValidateProjectedPdrCandidatesBeforeFinal &&
+            if (validateProjectedPdrCandidatesBeforeFinal &&
                 endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
               refinedWitness = SEC::findBaseCounterexampleAtFrontier(
                   validationProblem, solverType, refinedPdrResult.bound);
@@ -4318,7 +4785,7 @@ SequentialEquivalenceResult runPdrSecEngine(
           }
           if (widenedPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
             std::optional<KInductionResult::CounterexampleWitness> widenedWitness;  // LCOV_EXCL_LINE
-            if (kValidateProjectedPdrCandidatesBeforeFinal &&
+            if (validateProjectedPdrCandidatesBeforeFinal &&
                 endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
               widenedWitness = SEC::findBaseCounterexampleAtFrontier(
                   validationProblem, solverType, widenedPdrResult.bound);
@@ -4410,7 +4877,7 @@ SequentialEquivalenceResult runPdrSecEngine(
           }
           if (exactPdrResult.status == PDRStatus::Different) {  // LCOV_EXCL_LINE
             std::optional<KInductionResult::CounterexampleWitness> exactWitness;  // LCOV_EXCL_LINE
-            if (kValidateProjectedPdrCandidatesBeforeFinal &&
+            if (validateProjectedPdrCandidatesBeforeFinal &&
                 endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs) {
               exactWitness = SEC::findBaseCounterexampleAtFrontier(
                   validationProblem, solverType, exactPdrResult.bound);
@@ -4506,6 +4973,19 @@ SequentialEquivalenceResult runPdrSecEngine(
   if (problem.usesDualRailStateEncoding &&
       finalCoverage.checkedOutputs.names.size() <
           outputCoverage.checkedOutputs.names.size()) {
+    if (auto witnessResult =
+            findExpectedDifferenceCounterexample(problem, solverType, maxK);
+        witnessResult.has_value()) {
+      return makeCounterexampleSecResult(
+          std::move(*witnessResult),
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
     const bool pdrProvedNoOutputs = finalCoverage.checkedOutputs.names.empty();
     if (pdrProvedNoOutputs) {
       return makeSecResult(

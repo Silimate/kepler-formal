@@ -8482,6 +8482,159 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailFlushBatchCertifiesConvergedOutputs) {
+  const SignalKey out0 = makeSignalKey("pdrDualRailFlushBatchOut0");
+  const SignalKey out1 = makeSignalKey("pdrDualRailFlushBatchOut1");
+  const SignalKey state0 = makeSignalKey("pdrDualRailFlushBatchState0");
+  const SignalKey state1 = makeSignalKey("pdrDualRailFlushBatchState1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {state0, state1};
+  model0.allObservedOutputs = {out0, out1};
+  model0.observedOutputs = {out0, out1};
+  model0.inputVarByKey.emplace(state0, 2);
+  model0.inputVarByKey.emplace(state1, 3);
+  model0.displayNameByKey.emplace(out0, "flush_batch_out[0]");
+  model0.displayNameByKey.emplace(out1, "flush_batch_out[1]");
+  model0.displayNameByKey.emplace(state0, "left_flush_batch_state[0]");
+  model0.displayNameByKey.emplace(state1, "left_flush_batch_state[1]");
+  model0.initialStateValueByKey.emplace(state0, false);
+  model0.initialStateValueByKey.emplace(state1, false);
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::createFalse());
+  model0.nextStateExprByStateKey.emplace(state1, BoolExpr::createFalse());
+  model0.observedOutputExprByKey.emplace(out0, BoolExpr::Var(2));
+  model0.observedOutputExprByKey.emplace(out1, BoolExpr::Var(3));
+
+  SequentialDesignModel model1;
+  model1.allObservedOutputs = {out0, out1};
+  model1.observedOutputs = {out0, out1};
+  model1.displayNameByKey.emplace(out0, "flush_batch_out[0]");
+  model1.displayNameByKey.emplace(out1, "flush_batch_out[1]");
+  model1.observedOutputExprByKey.emplace(out0, BoolExpr::createFalse());
+  model1.observedOutputExprByKey.emplace(out1, BoolExpr::createFalse());
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedEnvVar flushDepth("KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH", "1");
+  const ScopedEnvVar flushOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_OUTPUT_LIMIT", "2");
+  const ScopedEnvVar flushBatchOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_BATCH_OUTPUT_LIMIT", "2");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 2u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_NE(stdoutOutput.find("flush_certified_outputs=2"), std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "SEC diag: dual-rail flush batch certificate outputs=2 depth=1"),
+      std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("SEC diag: dual-rail flush certificate output="),
+      std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailFlushSkipsOverLimitOutputCone) {
+  const SignalKey easyOut =
+      makeSignalKey("pdrDualRailFlushLimitEasyOut");
+  const SignalKey hardOut =
+      makeSignalKey("pdrDualRailFlushLimitHardOut");
+  const SignalKey easyState =
+      makeSignalKey("pdrDualRailFlushLimitEasyState");
+  const SignalKey hardState0 =
+      makeSignalKey("pdrDualRailFlushLimitHardState0");
+  const SignalKey hardState1 =
+      makeSignalKey("pdrDualRailFlushLimitHardState1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {easyState, hardState0, hardState1};
+  model0.allObservedOutputs = {easyOut, hardOut};
+  model0.observedOutputs = {easyOut, hardOut};
+  model0.inputVarByKey.emplace(easyState, 2);
+  model0.inputVarByKey.emplace(hardState0, 3);
+  model0.inputVarByKey.emplace(hardState1, 4);
+  model0.displayNameByKey.emplace(easyOut, "flush_limit_easy_out[0]");
+  model0.displayNameByKey.emplace(hardOut, "flush_limit_hard_out[0]");
+  model0.displayNameByKey.emplace(easyState, "flush_limit_easy_state[0]");
+  model0.displayNameByKey.emplace(hardState0, "flush_limit_hard_state[0]");
+  model0.displayNameByKey.emplace(hardState1, "flush_limit_hard_state[1]");
+  model0.initialStateValueByKey.emplace(easyState, false);
+  model0.initialStateValueByKey.emplace(hardState0, false);
+  model0.initialStateValueByKey.emplace(hardState1, false);
+  model0.nextStateExprByStateKey.emplace(easyState, BoolExpr::createFalse());
+  model0.nextStateExprByStateKey.emplace(hardState0, BoolExpr::createFalse());
+  model0.nextStateExprByStateKey.emplace(hardState1, BoolExpr::createFalse());
+  model0.observedOutputExprByKey.emplace(easyOut, BoolExpr::Var(2));
+  model0.observedOutputExprByKey.emplace(
+      hardOut, BoolExpr::Or(BoolExpr::Var(3), BoolExpr::Var(4)));
+
+  SequentialDesignModel model1;
+  model1.allObservedOutputs = {easyOut, hardOut};
+  model1.observedOutputs = {easyOut, hardOut};
+  model1.displayNameByKey.emplace(easyOut, "flush_limit_easy_out[0]");
+  model1.displayNameByKey.emplace(hardOut, "flush_limit_hard_out[0]");
+  model1.observedOutputExprByKey.emplace(easyOut, BoolExpr::createFalse());
+  model1.observedOutputExprByKey.emplace(hardOut, BoolExpr::createFalse());
+
+  const ScopedUnsetEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT");
+  const ScopedEnvVar flushDepth("KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH", "1");
+  const ScopedEnvVar flushOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_OUTPUT_LIMIT", "2");
+  const ScopedEnvVar transitionTargetLimit(
+      "KEPLER_SEC_DUAL_RAIL_FLUSH_TRANSITION_TARGET_LIMIT", "2");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find(
+          "flush_limit_hard_out[0]: dual-rail flush certificate exceeded "
+          "cone size limit"),
+      std::string::npos);
+  EXPECT_NE(stdoutOutput.find("flush_certified_outputs=1"), std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "SEC diag: dual-rail flush certificate skipped output="
+          "flush_limit_hard_out[0] transition_target_limit=2"),
+      std::string::npos)
+      << stdoutOutput << "\nSTDERR:\n" << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailFlushSkipsWideOutputSurfaceByDefault) {
   SequentialDesignModel model0;
   SequentialDesignModel model1;
@@ -8956,6 +9109,95 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("PDR skipping large dual-rail residual surface"),
       std::string::npos);
   EXPECT_EQ(stderrOutput.find("stage=initial"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrExpectedDifferenceSearchesSkippedResidualSurface) {
+  constexpr size_t kResidualOutputs = 6;
+  const auto testCase =
+      makeLargeDualRailResidualCaseForTest("pdrDualRailExpectedDiffResidual",
+                                           kResidualOutputs);
+
+  const ScopedEnvVar residualOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
+  const ScopedEnvVar residualStateLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
+  const ScopedEnvVar expectedDifferent("KEPLER_SEC_EXPECT_DIFFERENT", "1");
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+
+  // Expected-difference regressions need a concrete witness, not a partial
+  // coverage pass.  Check the exact residual frontier before accepting the
+  // large-surface skip used by normal equivalence regressions.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrExpectedDifferenceBatchesWideResidualSurface) {
+  constexpr size_t kResidualOutputs = 20;
+  const auto testCase =
+      makeLargeDualRailResidualCaseForTest("pdrDualRailExpectedDiffWideResidual",
+                                           kResidualOutputs);
+
+  const ScopedEnvVar residualOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
+  const ScopedEnvVar residualStateLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
+  const ScopedEnvVar expectedDifferent("KEPLER_SEC_EXPECT_DIFFERENT", "1");
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+
+  // This surface is wider than the expected-difference default batch size.
+  // The SEC witness search must split it into real top-output batches instead
+  // of skipping the regression or accepting a non-SEC witness.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrExpectedDifferenceCanFilterTopOutputs) {
+  constexpr size_t kResidualOutputs = 20;
+  const auto testCase =
+      makeLargeDualRailResidualCaseForTest("pdrDualRailExpectedDiffFiltered",
+                                           kResidualOutputs);
+
+  const ScopedEnvVar residualOutputLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
+  const ScopedEnvVar residualStateLimit(
+      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
+  const ScopedEnvVar expectedDifferent("KEPLER_SEC_EXPECT_DIFFERENT", "1");
+  const ScopedEnvVar outputFilter(
+      "KEPLER_SEC_EXPECT_DIFFERENT_OUTPUT_FILTER",
+      "large_residual_out[19]");
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+
+  // The filter is still a SEC top-output search; it just avoids spending an
+  // expected-difference regression on unrelated residual outputs.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_NE(result.reason.find("large_residual_out[19]"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -15067,7 +15309,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralOutputConeCandidatesSkipRejectedRoots) {
+       StructuralOutputConeCandidatesRejectMixedRoots) {
   const SignalKey data0 = makeSignalKey("partialCoiData0");
   const SignalKey data1 = makeSignalKey("partialCoiData1");
   const SignalKey bad0 = makeSignalKey("partialCoiBad0");
@@ -15113,12 +15355,63 @@ TEST_F(SequentialEquivalenceStrategyTests,
       alignedOutputs,
       KEPLER_FORMAL::Config::SolverType::KISSAT);
 
-  // One mismatched top output should not discard independent candidates from a
-  // later output cone; reset/bootstrap validation will decide whether the
-  // surviving candidate is strong enough to become a proof fact.
-  ASSERT_EQ(aligned.names.size(), 1u);
-  EXPECT_EQ(aligned.keys0.front(), state0);
-  EXPECT_EQ(aligned.keys1.front(), state1);
+  // A partial structural startup relation can over-strengthen unrelated
+  // engines. Keep this all-or-nothing across top outputs instead.
+  EXPECT_TRUE(aligned.names.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       StructuralOutputConeCandidatesKeepCheckedTransitionPrefix) {
+  const SignalKey data0 = makeSignalKey("checkedPrefixData0");
+  const SignalKey data1 = makeSignalKey("checkedPrefixData1");
+  const SignalKey out0 = makeSignalKey("checkedPrefixOut0");
+  const SignalKey out1 = makeSignalKey("checkedPrefixOut1");
+  const SignalKey root0 = makeSignalKey("checkedPrefixRoot0");
+  const SignalKey root1 = makeSignalKey("checkedPrefixRoot1");
+  const SignalKey child0 = makeSignalKey("checkedPrefixChild0");
+  const SignalKey child1 = makeSignalKey("checkedPrefixChild1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {data0};
+  model0.inputVarByKey.emplace(data0, 2);
+  model0.inputVarByKey.emplace(out0, 8);
+  model0.displayNameByKey.emplace(data0, "data[0]");
+  model0.observedOutputExprByKey.emplace(out0, BoolExpr::Var(4));
+  addStateBitForTest(model0, root0, 4, "root_q[0]", BoolExpr::Var(6));
+  addStateBitForTest(model0, child0, 6, "child_q[0]", BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {data1};
+  model1.inputVarByKey.emplace(data1, 3);
+  model1.inputVarByKey.emplace(out1, 9);
+  model1.displayNameByKey.emplace(data1, "data[0]");
+  model1.observedOutputExprByKey.emplace(out1, BoolExpr::Var(5));
+  addStateBitForTest(model1, root1, 5, "root_q[0]", BoolExpr::Var(7));
+  addStateBitForTest(
+      model1, child1, 7, "child_q[0]", BoolExpr::Not(BoolExpr::Var(3)));
+
+  AlignedSignals alignedInputs;
+  alignedInputs.names = {"data[0]"};
+  alignedInputs.keys0 = {data0};
+  alignedInputs.keys1 = {data1};
+  AlignedSignals alignedOutputs;
+  alignedOutputs.names = {"out[0]"};
+  alignedOutputs.keys0 = {out0};
+  alignedOutputs.keys1 = {out1};
+
+  const auto aligned = inferStructurallyEquivalentOutputConeStatePairs(
+      model0,
+      model1,
+      alignedInputs,
+      alignedOutputs,
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
+
+  // The child transition intentionally fails structural closure.  The
+  // top-output-rooted root pair was already checked, so keep it as a candidate
+  // while dropping the unchecked child relation.
+  EXPECT_EQ(aligned.names.size(), 1u);
+  EXPECT_EQ(aligned.keys0.front(), root0);
+  EXPECT_EQ(aligned.keys1.front(), root1);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
