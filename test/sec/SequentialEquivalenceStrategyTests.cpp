@@ -1736,17 +1736,32 @@ struct LargeDualRailResidualCase {
 
 LargeDualRailResidualCase makeLargeDualRailResidualCaseForTest(
     const std::string& prefix,
-    size_t residualOutputs) {
+    size_t residualOutputs,
+    size_t stateBitsPerDesign = 1) {
   const SignalKey implied = makeSignalKey(prefix + "ImpliedOut");
-  const SignalKey state0 = makeSignalKey(prefix + "State0");
 
   LargeDualRailResidualCase testCase;
   testCase.residualOutputs = residualOutputs;
-  testCase.model0.stateBits = {state0};
-  testCase.model0.inputVarByKey.emplace(state0, 2);
-  testCase.model0.displayNameByKey.emplace(
-      state0, prefix + "_large_residual_state[0]");
-  testCase.model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+  size_t nextLocalVar = 2;
+  for (size_t i = 0; i < stateBitsPerDesign; ++i) {
+    const SignalKey state0 =
+        makeSignalKey(prefix + "State0_" + std::to_string(i));
+    const SignalKey state1 =
+        makeSignalKey(prefix + "State1_" + std::to_string(i));
+    const size_t stateVar = nextLocalVar++;
+    addStateBitForTest(
+        testCase.model0,
+        state0,
+        stateVar,
+        prefix + "_large_residual_state0[" + std::to_string(i) + "]",
+        BoolExpr::Var(stateVar));
+    addStateBitForTest(
+        testCase.model1,
+        state1,
+        stateVar,
+        prefix + "_large_residual_state1[" + std::to_string(i) + "]",
+        BoolExpr::Var(stateVar));
+  }
   testCase.model0.allObservedOutputs.push_back(implied);
   testCase.model0.observedOutputs.push_back(implied);
   testCase.model0.displayNameByKey.emplace(implied, "implied_out[0]");
@@ -1783,6 +1798,74 @@ struct DelayedRailMismatchModels {
   SequentialDesignModel model0;
   SequentialDesignModel model1;
 };
+
+struct WideFrameZeroMismatchModels {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+};
+
+WideFrameZeroMismatchModels makeWideFrameZeroMismatchModelsForTest(
+    size_t outputCount,
+    size_t dummyStateCount) {
+  const SignalKey input = makeSignalKey("wideFrameZeroInput");
+  WideFrameZeroMismatchModels models;
+  models.model0.environmentInputs = {input};
+  models.model1.environmentInputs = {input};
+  models.model0.inputVarByKey.emplace(input, 2);
+  models.model1.inputVarByKey.emplace(input, 2);
+  models.model0.displayNameByKey.emplace(input, "wide_frame_zero_in[0]");
+  models.model1.displayNameByKey.emplace(input, "wide_frame_zero_in[0]");
+
+  size_t nextLocalVar = 3;
+  for (size_t i = 0; i < dummyStateCount; ++i) {
+    const SignalKey state0 =
+        makeSignalKey("wideFrameZeroState0_" + std::to_string(i));
+    const SignalKey state1 =
+        makeSignalKey("wideFrameZeroState1_" + std::to_string(i));
+    addStateBitForTest(
+        models.model0,
+        state0,
+        nextLocalVar,
+        "wide_frame_zero_state[" + std::to_string(i) + "]",
+        BoolExpr::Var(nextLocalVar));
+    addStateBitForTest(
+        models.model1,
+        state1,
+        nextLocalVar,
+        "wide_frame_zero_state[" + std::to_string(i) + "]",
+        BoolExpr::Var(nextLocalVar));
+    ++nextLocalVar;
+  }
+
+  for (size_t i = 0; i + 1 < outputCount; ++i) {
+    const SignalKey output =
+        makeSignalKey("wideFrameZeroStableOut" + std::to_string(i));
+    const std::string outputName =
+        "wide_frame_zero_stable[" + std::to_string(i) + "]";
+    models.model0.allObservedOutputs.push_back(output);
+    models.model0.observedOutputs.push_back(output);
+    models.model0.displayNameByKey.emplace(output, outputName);
+    models.model0.observedOutputExprByKey.emplace(output, BoolExpr::createFalse());
+
+    models.model1.allObservedOutputs.push_back(output);
+    models.model1.observedOutputs.push_back(output);
+    models.model1.displayNameByKey.emplace(output, outputName);
+    models.model1.observedOutputExprByKey.emplace(output, BoolExpr::createFalse());
+  }
+
+  const SignalKey probe = makeSignalKey("wideFrameZeroProbe");
+  models.model0.allObservedOutputs.push_back(probe);
+  models.model0.observedOutputs.push_back(probe);
+  models.model0.displayNameByKey.emplace(probe, "wide_frame_zero_probe[0]");
+  models.model0.observedOutputExprByKey.emplace(probe, BoolExpr::Var(2));
+
+  models.model1.allObservedOutputs.push_back(probe);
+  models.model1.observedOutputs.push_back(probe);
+  models.model1.displayNameByKey.emplace(probe, "wide_frame_zero_probe[0]");
+  models.model1.observedOutputExprByKey.emplace(
+      probe, BoolExpr::Not(BoolExpr::Var(2)));
+  return models;
+}
 
 SequentialDesignModel makeDelayedRailMismatchModelForTest(
     const std::string& prefix,
@@ -9032,6 +9115,36 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsKiDualRailSkipsProductionLargeResidualStateSurface) {
+  constexpr size_t kResidualOutputs = 65;
+  constexpr size_t kStateBitsPerDesign = 2049;
+  const auto testCase = makeLargeDualRailResidualCaseForTest(
+      "kiDualRailProductionLargeResidual",
+      kResidualOutputs,
+      kStateBitsPerDesign);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+
+  // Ibex-sized dual-rail residual state surfaces should not enter the deferred
+  // KI base-SAT sweep.  They remain visible as skipped top-output coverage so
+  // the workflow finishes without inventing internal cross-design assumptions.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs + 1);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("large rail-state surface"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsImcDualRailSkipsLargeResidualSurfaceAfterCertificates) {
   constexpr size_t kResidualOutputs = 6;
   const auto testCase =
@@ -9630,6 +9743,62 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(result.reason.find("delayed_out[0]"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailFindsWideFrameZeroCounterexampleBeforeSkip) {
+  constexpr size_t kObservedOutputs = 133;
+  constexpr size_t kDummyStatesPerDesign = 4100;
+  const auto models = makeWideFrameZeroMismatchModelsForTest(
+      kObservedOutputs, kDummyStatesPerDesign);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 1);
+
+  // The unrelated dummy flops keep this out of the small leaf certificate path.
+  // PDR must still honor a concrete top-output frame-0 mismatch before any
+  // residual output can be skipped as an inconclusive hard leaf.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, kObservedOutputs);
+  EXPECT_EQ(result.totalOutputs, kObservedOutputs);
+  EXPECT_NE(
+      result.reason.find("wide_frame_zero_probe[0]"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsKInductionDualRailFindsWideFrameZeroCounterexampleBeforeResidualProof) {
+  constexpr size_t kObservedOutputs = 133;
+  constexpr size_t kDummyStatesPerDesign = 4100;
+  const auto models = makeWideFrameZeroMismatchModelsForTest(
+      kObservedOutputs, kDummyStatesPerDesign);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 1);
+
+  // KI residual batching must not bury a concrete input-only top-output edit
+  // behind an expensive residual proof.  The pre-batch witness check keeps the
+  // counterexample in the selected SEC engine path without using LEC fallback.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, kObservedOutputs);
+  EXPECT_EQ(result.totalOutputs, kObservedOutputs);
+  EXPECT_NE(
+      result.reason.find("wide_frame_zero_probe[0]"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

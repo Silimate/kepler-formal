@@ -1377,6 +1377,7 @@ constexpr size_t kMaxDualRailVeryWideLocalImplicationOutputs = 2048;
 constexpr size_t kMaxDualRailWideLocalImplicationOutputSupport = 20000;
 constexpr size_t kMaxDualRailWideLocalImplicationStateRails = 20000;
 constexpr size_t kMaxDualRailResidualOutputs = 128;
+constexpr size_t kMaxDualRailResidualProofStateSymbols = 4096;
 constexpr size_t kMaxDualRailResidualStateSymbols = 20000;
 constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
 constexpr size_t kMaxDualRailFlushCertificateOutputs = 64;
@@ -2126,6 +2127,37 @@ void markDualRailResidualOutputSkipped(
   }
 }
 
+size_t dualRailResidualStateSymbolCount(const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding
+             ? problem.dualRailStatePairs.size() * 2
+             : problem.totalStateCount;
+}
+
+bool shouldRunDualRailResidualCounterexampleSweep(
+    const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding) {
+    return true;  // LCOV_EXCL_LINE
+  }
+
+  // The residual sweep is a concrete-counterexample shortcut before deferred
+  // induction.  On large dual-rail state surfaces it can dominate runtime for
+  // equivalent designs, so leave those to the selected engine's proof and final
+  // base validation instead of materializing every frontier upfront.
+  return dualRailResidualStateSymbolCount(problem) <=
+         kMaxDualRailResidualStateSymbols;
+}
+
+bool shouldSkipLargeDualRailResidualProofSurface(
+    const KInductionProblem& problem,
+    size_t residualOutputCount) {
+  if (!problem.usesDualRailStateEncoding || residualOutputCount == 0) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  return residualOutputCount > kMaxDualRailLocalImplicationOutputs &&
+         dualRailResidualStateSymbolCount(problem) >
+             kMaxDualRailResidualProofStateSymbols;
+}
+
 std::optional<KInductionResult::CounterexampleWitness>
 findDualRailResidualCounterexample(const KInductionProblem& subsetProblem,
                                    KEPLER_FORMAL::Config::SolverType solverType,
@@ -2138,6 +2170,70 @@ findDualRailResidualCounterexample(const KInductionProblem& subsetProblem,
     }
   }
   return std::nullopt;
+}
+
+std::unordered_set<size_t> combinedStateSymbolSet(
+    const KInductionProblem& problem) {
+  std::unordered_set<size_t> stateSymbols;
+  const auto combinedStateSymbols = problem.combinedStateSymbols();
+  stateSymbols.reserve(combinedStateSymbols.size());
+  stateSymbols.insert(combinedStateSymbols.begin(), combinedStateSymbols.end());
+  return stateSymbols;
+}
+
+bool isInputOnlyOutputMismatchCandidate(
+    const KInductionProblem& problem,
+    size_t outputIndex,
+    const std::unordered_set<size_t>& stateSymbols) {
+  BoolExpr* outputBad = BoolExpr::simplify(BoolExpr::Xor(
+      problem.observedOutputExprs0[outputIndex],
+      problem.observedOutputExprs1[outputIndex]));
+  if (outputBad == BoolExpr::createFalse()) {
+    return false;
+  }
+  const auto support = outputBad->getSupportVars();
+  for (const auto symbol : support) {
+    if (stateSymbols.find(symbol) != stateSymbols.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<KInductionResult::CounterexampleWitness>
+findInputOnlyFrameZeroResidualCounterexample(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (!problem.usesDualRailStateEncoding || outputIndices.empty()) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+
+  const std::unordered_set<size_t> stateSymbols =
+      combinedStateSymbolSet(problem);
+  std::vector<size_t> inputOnlyOutputs;
+  inputOnlyOutputs.reserve(outputIndices.size());
+  for (const size_t outputIndex : outputIndices) {
+    if (outputIndex >= problem.observedOutputExprs0.size() ||
+        outputIndex >= problem.observedOutputExprs1.size()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    if (isInputOnlyOutputMismatchCandidate(
+            problem, outputIndex, stateSymbols)) {
+      inputOnlyOutputs.push_back(outputIndex);
+    }
+  }
+  if (inputOnlyOutputs.empty()) {
+    return std::nullopt;
+  }
+
+  // This is a witness-only guard for skipped residual top outputs.  Restrict it
+  // to frame-0 input/constant mismatches so equivalent reset-bootstrap designs
+  // do not pay to materialize transition cones before the selected SEC engine.
+  const KInductionProblem inputOnlyProblem =
+      makeOutputSubsetProblem(problem, inputOnlyOutputs);
+  return SEC::findFastBaseCounterexampleAtFrontier(
+      inputOnlyProblem, solverType, 0);
 }
 
 void recordDualRailResidualCounterexample(
@@ -2190,7 +2286,8 @@ void proveDualRailResidualOutputSet(
       (engine == DualRailResidualEngine::KInduction ||
        (engine == DualRailResidualEngine::Imc &&
         shouldUseDeferredDualRailImcResidualProof(subsetProblem)));
-  if (useDeferredInductionResidualProof) {
+  if (useDeferredInductionResidualProof &&
+      shouldRunDualRailResidualCounterexampleSweep(subsetProblem)) {
     if (auto witness =
             findDualRailResidualCounterexample(subsetProblem, solverType, maxK);
         witness.has_value()) {
@@ -2402,9 +2499,34 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
       problem.outputImpliedByInductionCore.begin(),
       problem.outputImpliedByInductionCore.end(),
       true));
-  if (impliedOutputCount > 0 &&
-      shouldSkipLargeDualRailResidualSurface(
-          problem, residualOutputIndices.size())) {
+  DualRailResidualProofState proofState;
+  proofState.coveredOutputs.assign(problem.observedOutputExprs0.size(), false);
+  proofState.skipReasons = presetSkipReasons;
+  for (size_t i = 0; i < problem.outputImpliedByInductionCore.size(); ++i) {
+    proofState.coveredOutputs[i] = problem.outputImpliedByInductionCore[i];
+  }
+
+  if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
+          problem, residualOutputIndices, solverType);
+      witness.has_value()) {
+    recordDualRailResidualCounterexample(
+        std::move(*witness),
+        model0,
+        model1,
+        top0,
+        top1,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports,
+        proofState);
+    return proofState.terminalResult;
+  }
+
+  if (shouldSkipLargeDualRailResidualProofSurface(
+          problem, residualOutputIndices.size()) ||
+      (impliedOutputCount > 0 &&
+       shouldSkipLargeDualRailResidualSurface(
+           problem, residualOutputIndices.size()))) {
     emitSecDiag(
         "SEC diag: dual-rail ", dualRailResidualEngineName(engine),
         " skipping large residual surface outputs=",
@@ -2427,13 +2549,6 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
         partialCoverage,
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
-  }
-
-  DualRailResidualProofState proofState;
-  proofState.coveredOutputs.assign(problem.observedOutputExprs0.size(), false);
-  proofState.skipReasons = presetSkipReasons;
-  for (size_t i = 0; i < problem.outputImpliedByInductionCore.size(); ++i) {
-    proofState.coveredOutputs[i] = problem.outputImpliedByInductionCore[i];
   }
 
   const KInductionProblem residualProblem =
@@ -2594,9 +2709,7 @@ bool shouldSkipLargeDualRailResidualSurface(
   const size_t stateSymbolLimit = secStrategySizeLimitFromEnv(
       "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT",
       kMaxDualRailResidualStateSymbols);
-  const size_t stateSymbols = problem.usesDualRailStateEncoding
-                                  ? problem.dualRailStatePairs.size() * 2
-                                  : problem.totalStateCount;  // LCOV_EXCL_LINE
+  const size_t stateSymbols = dualRailResidualStateSymbolCount(problem);
 
   return residualOutputCount > residualOutputLimit &&
          stateSymbols > stateSymbolLimit;
@@ -3959,6 +4072,21 @@ SequentialEquivalenceResult runPdrSecEngine(
         makeOutputSubsetCoverage(outputCoverage, dualRailEngineOutputIndices);
     if (shouldSkipLargeDualRailResidualSurface(
             problem, dualRailEngineOutputIndices.size())) {
+      if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
+              problem, dualRailEngineOutputIndices, solverType);
+          witness.has_value()) {
+        KInductionResult witnessResult{
+            KInductionStatus::Different,
+            witness->badFrame,
+            std::move(witness)};
+        return makeSecResult(
+            SequentialEquivalenceStatus::Different,
+            witnessResult.bound,
+            formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+      }
       emitSecDiag(
           "SEC diag: PDR skipping large dual-rail residual surface outputs=",
           dualRailEngineOutputIndices.size(),
@@ -4912,6 +5040,29 @@ SequentialEquivalenceResult runPdrSecEngine(
   if (problem.usesDualRailStateEncoding &&
       finalCoverage.checkedOutputs.names.size() <
           outputCoverage.checkedOutputs.names.size()) {
+    std::vector<size_t> skippedOutputIndices;
+    skippedOutputIndices.reserve(pdrCoveredOutputs.size());
+    for (size_t outputIndex = 0; outputIndex < pdrCoveredOutputs.size();
+         ++outputIndex) {
+      if (!pdrCoveredOutputs[outputIndex]) {
+        skippedOutputIndices.push_back(outputIndex);
+      }
+    }
+    if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
+            problem, skippedOutputIndices, solverType);
+        witness.has_value()) {
+      KInductionResult witnessResult{
+          KInductionStatus::Different,
+          witness->badFrame,
+          std::move(witness)};
+      return makeSecResult(
+          SequentialEquivalenceStatus::Different,
+          witnessResult.bound,
+          formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
     const bool pdrProvedNoOutputs = finalCoverage.checkedOutputs.names.empty();
     if (pdrProvedNoOutputs) {
       return makeSecResult(
