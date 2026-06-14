@@ -3843,7 +3843,7 @@ void addFrameZeroInitialEqualities(
 }
 
 constexpr size_t kMinDualRailSteadyFrontierGuardOutputs = 512;
-constexpr size_t kMinAutomaticDualRailResetUnanchoredRecoveryOutputs = 64;
+constexpr size_t kMinWideResetUnanchoredBinarySurfaceOutputs = 64;
 
 bool shouldRunDualRailSteadyFrontierGuard(const KInductionProblem& problem) {
   return problem.usesDualRailStateEncoding &&
@@ -3851,11 +3851,11 @@ bool shouldRunDualRailSteadyFrontierGuard(const KInductionProblem& problem) {
              kMinDualRailSteadyFrontierGuardOutputs;
 }
 
-bool shouldRecoverWideResetUnanchoredBinarySurfaceWithDualRail(
+bool isWideResetUnanchoredBinarySurface(
     const OutputCoverageSelection& coverageBeforeResetFilter,
     const OutputCoverageSelection& coverageAfterResetFilter) {
   return coverageBeforeResetFilter.checkedOutputs.names.size() >=
-             kMinAutomaticDualRailResetUnanchoredRecoveryOutputs &&
+             kMinWideResetUnanchoredBinarySurfaceOutputs &&
          coverageAfterResetFilter.checkedOutputs.names.empty() &&
          coverageAfterResetFilter.resetUnanchoredSkippedOutputs.size() ==
              coverageBeforeResetFilter.checkedOutputs.names.size();
@@ -5569,11 +5569,10 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         SequentialEquivalenceStatus::Equivalent,
         0,
         "",
-      aligned.outputCoverage,
-      abstractedSequentialBoundaries,
-      extractedBoundaryReports);
+        aligned.outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
   }
-  const AlignedSignals outputsBeforeResetUnanchoredFilter = aligned.outputs;
   const OutputCoverageSelection coverageBeforeResetUnanchoredFilter =
       aligned.outputCoverage;
   if (encoding_ == SecEncoding::Binary) {
@@ -5592,70 +5591,13 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         "rail-encoded proof");
   }
   symbolSpace.problem.observedOutputNames = aligned.outputs.names;
-  if (encoding_ == SecEncoding::Binary &&
-      secEngine_ != SecEngine::Imc &&
-      shouldRecoverWideResetUnanchoredBinarySurfaceWithDualRail(
-          coverageBeforeResetUnanchoredFilter, aligned.outputCoverage)) {
-    // Binary SEC is intentionally conservative around resetless internal state.
-    // If that drops a wide top-output surface to zero coverage, recover by
-    // proving the same original top outputs with dual-rail encoding. This is
-    // still a normal SEC proof through the selected engine, not a same-name
-    // internal-state relation or expected-result shortcut.
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: recovering zero binary coverage with dual-rail top-output proof");
-    SharedSecSymbolSpace dualRailSymbolSpace = buildSharedSecSymbolSpace(
-        model0,
-        model1,
-        aligned.inputs,
-        outputsBeforeResetUnanchoredFilter);
-    const bool useLazyDualRailTransitionRemapping =
-        secEngine_ == SecEngine::KInduction || secEngine_ == SecEngine::Pdr;
-    KInductionProblem dualRailProblem = buildDualRailSecProblem(
-        model0,
-        model1,
-        aligned.inputs,
-        outputsBeforeResetUnanchoredFilter,
-        reachableInvariant,
-        dualRailSymbolSpace,
-        useLazyDualRailTransitionRemapping,
-        maxK,
-        solverType_,
-        secDiagEnabled);
-    if (auto steadyFrontierResult = tryDualRailSteadyFrontierGuard(
-            dualRailProblem,
-            solverType_,
-            model0,
-            model1,
-            top0_,
-            top1_,
-            coverageBeforeResetUnanchoredFilter,
-            abstractedSequentialBoundaries,
-            extractedBoundaryReports,
-            secDiagEnabled);
-        steadyFrontierResult.has_value()) {
-      return *steadyFrontierResult;
-    }
-    return runSelectedSecEngine(
-        secEngine_,
-        dualRailProblem,
-        maxK,
-        solverType_,
-        model0,
-        model1,
-        top0_,
-        top1_,
-        coverageBeforeResetUnanchoredFilter,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
   if (aligned.outputs.names.empty()) {
-    if (encoding_ == SecEncoding::Binary && secEngine_ == SecEngine::Imc &&
-        shouldRecoverWideResetUnanchoredBinarySurfaceWithDualRail(
+    if (encoding_ == SecEncoding::Binary &&
+        isWideResetUnanchoredBinarySurface(
             coverageBeforeResetUnanchoredFilter, aligned.outputCoverage)) {
-      // Binary IMC is allowed to be conservative around resetless state.  Do
-      // not silently switch this workflow into the expensive dual-rail recovery
-      // proof; report the existing reset-unanchored skips as partial coverage.
+      // Binary SEC is allowed to be conservative around resetless state.  Do
+      // not silently switch engine or encoding here; report the skipped
+      // top-output surface as partial coverage in the selected binary flow.
       return makeSecResult(
           SequentialEquivalenceStatus::Equivalent,
           0,
