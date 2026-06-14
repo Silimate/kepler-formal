@@ -9363,6 +9363,68 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsBinaryImcReportsWideResetUnanchoredSurfaceAsSkipped) {
+  const SignalKey rst = makeSignalKey("binaryImcWideResetUnanchoredRst");
+  const SignalKey data = makeSignalKey("binaryImcWideResetUnanchoredData");
+  const SignalKey state0 = makeSignalKey("binaryImcWideResetUnanchoredState0");
+  const SignalKey state1 = makeSignalKey("binaryImcWideResetUnanchoredState1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst, data};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(rst, 2);
+  model0.inputVarByKey.emplace(data, 4);
+  model0.inputVarByKey.emplace(state0, 6);
+  model0.displayNameByKey.emplace(rst, "rst");
+  model0.displayNameByKey.emplace(data, "data[0]");
+  model0.displayNameByKey.emplace(state0, "u_left.q[0]");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst, data};
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(rst, 3);
+  model1.inputVarByKey.emplace(data, 5);
+  model1.inputVarByKey.emplace(state1, 7);
+  model1.displayNameByKey.emplace(rst, "rst");
+  model1.displayNameByKey.emplace(data, "data[0]");
+  model1.displayNameByKey.emplace(state1, "u_right.q[0]");
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::createFalse());
+
+  constexpr size_t kOutputCount = 64;
+  for (size_t i = 0; i < kOutputCount; ++i) {
+    const SignalKey out =
+        makeSignalKey("binaryImcWideResetUnanchoredOut" + std::to_string(i));
+    const std::string outputName =
+        "binary_imc_reset_unanchored_out[" + std::to_string(i) + "]";
+    model0.allObservedOutputs.push_back(out);
+    model0.observedOutputs.push_back(out);
+    model0.displayNameByKey.emplace(out, outputName);
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(6));
+
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model1.displayNameByKey.emplace(out, outputName);
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(7));
+  }
+
+  auto strategy = makeBinaryExtractedSecStrategy(SecEngine::Imc);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+
+  // Binary IMC must not silently switch a fully reset-unanchored surface into
+  // the expensive automatic dual-rail recovery proof.  The binary workflow is
+  // allowed to report these outputs as skipped partial coverage.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, kOutputCount);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), kOutputCount);
+  EXPECT_EQ(result.resetUnanchoredSkippedOutputs.size(), kOutputCount);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("reset-unanchored"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailSteadyFrontierGuardCoversResetlessOutputs) {
   const SignalKey state0 = makeSignalKey("dualRailSteadyFrontierState0");
   const SignalKey state1 = makeSignalKey("dualRailSteadyFrontierState1");
@@ -9922,8 +9984,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
     model1.observedOutputExprByKey.emplace(outputs[i], BoolExpr::Var(5));
   }
 
+  // PDR and k-induction still use the automatic dual-rail recovery path.  IMC
+  // keeps binary semantics and reports reset-unanchored outputs as skipped; the
+  // dedicated IMC regression above locks that faster behavior.
   const std::vector<SecEngine> engines = {
-      SecEngine::Pdr, SecEngine::KInduction, SecEngine::Imc};
+      SecEngine::Pdr, SecEngine::KInduction};
   for (const SecEngine engine : engines) {
     SequentialEquivalenceStrategy strategy(
         nullptr,

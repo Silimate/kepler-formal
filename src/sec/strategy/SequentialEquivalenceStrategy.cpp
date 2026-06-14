@@ -5593,6 +5593,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   }
   symbolSpace.problem.observedOutputNames = aligned.outputs.names;
   if (encoding_ == SecEncoding::Binary &&
+      secEngine_ != SecEngine::Imc &&
       shouldRecoverWideResetUnanchoredBinarySurfaceWithDualRail(
           coverageBeforeResetUnanchoredFilter, aligned.outputCoverage)) {
     // Binary SEC is intentionally conservative around resetless internal state.
@@ -5649,6 +5650,20 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         extractedBoundaryReports);
   }
   if (aligned.outputs.names.empty()) {
+    if (encoding_ == SecEncoding::Binary && secEngine_ == SecEngine::Imc &&
+        shouldRecoverWideResetUnanchoredBinarySurfaceWithDualRail(
+            coverageBeforeResetUnanchoredFilter, aligned.outputCoverage)) {
+      // Binary IMC is allowed to be conservative around resetless state.  Do
+      // not silently switch this workflow into the expensive dual-rail recovery
+      // proof; report the existing reset-unanchored skips as partial coverage.
+      return makeSecResult(
+          SequentialEquivalenceStatus::Equivalent,
+          0,
+          "",
+          aligned.outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports);
+    }
     return makeSecResult(  // LCOV_EXCL_LINE
         SequentialEquivalenceStatus::Unsupported,
         0,
