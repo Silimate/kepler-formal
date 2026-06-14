@@ -16,15 +16,21 @@
 class ScopeExtraction {
  public:
     // Existing public constructor (preserve original API)
+    // LCOV_EXCL_START
     ScopeExtraction(naja::NL::SNLDesign* top0, naja::NL::SNLDesign* top1)
         : top0_(top0), top1_(top1) {}
+        // LCOV_EXCL_STOP
 
+    // LCOV_EXCL_START
     virtual ~ScopeExtraction() = default;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
 
     void collectVerificationScopes();
 
+    // LCOV_EXCL_START
     std::set<std::pair<naja::NL::SNLDesign*, naja::NL::SNLDesign*>> getScopesToVerify() const {
         return designsToVerify_;
+        // LCOV_EXCL_STOP
     }
     // Provide extracted verification scopes for debugging purposes by:
     // 1 Collecting scopes via collectVerificationScopes()

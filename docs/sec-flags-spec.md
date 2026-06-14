@@ -23,6 +23,7 @@ kepler-formal -verilog \
   -v sec \
   -k 4 \
   --sec-engine pdr \
+  --sec-encoding dual_rail_steady \
   --sec-uncomputable-seq-boundary \
   --report-skipped-pos \
   design0.v design1.v library.lib
@@ -31,8 +32,8 @@ kepler-formal -verilog \
 The SEC selector flags are accepted before or after the input format flag:
 
 ```sh
-kepler-formal -v sec --sec-engine k_induction -k 8 -verilog design0.v design1.v
-kepler-formal -verilog design0.v design1.v -v sec --sec-engine imc -k 8
+kepler-formal -v sec --sec-engine k_induction --sec-encoding binary -k 8 -verilog design0.v design1.v
+kepler-formal -verilog design0.v design1.v -v sec --sec-engine imc --sec-encoding dual_rail_steady -k 8
 ```
 
 For SystemVerilog, SEC uses the normal SystemVerilog source options:
@@ -45,6 +46,7 @@ kepler-formal -sv \
   --sv_design2_top top1 \
   -v sec \
   --sec-engine pdr \
+  --sec-encoding dual_rail_steady \
   -k 32
 ```
 
@@ -57,6 +59,7 @@ rest of the command line.
 format: systemverilog
 verification: sec
 sec_engine: pdr
+sec_encoding: dual_rail_steady
 max_k: 32
 sec_uncomputable_seq_as_boundary: true
 compact_mode: true
@@ -77,6 +80,7 @@ liberty_files:
 | `-v sec`, `--verification sec` | `verification: sec` | `lec` | `lec`, `sec` | Selects SEC instead of combinational LEC. Values are lowercase. |
 | `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the maximum SEC proof/search bound used by the selected engine. `0` is valid and only permits zero-bound checks. |
 | `--sec-engine <engine>` | `sec_engine: <engine>` | `legacy` | `legacy`, `k_induction`, `imc`, `pdr` | Selects the top-level SEC proof engine. Engine names are lowercase. |
+| `--sec-encoding <mode>` | `sec_encoding: <mode>` | `dual_rail_steady` | `binary`, `dual_rail_steady` | Selects how SEC models unknown or reset-unanchored state values. Omit the key/flag to use the dual-rail default. |
 | `--sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: true` | `true` | boolean | Abstracts unsupported sequential instances as SEC boundaries instead of failing immediately. |
 | `--no-sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: false` | `true` | boolean | Uses strict mode: unsupported sequential interfaces cause SEC to fail as unsupported. |
 | `--compact` | `compact_mode: true` | `false` | boolean | Enables compact SEC extraction: design 1 is extracted and released before design 2 is loaded; identical SEC inputs can reuse the extracted design 1 model. |
@@ -91,6 +95,18 @@ Accepted values for `sec_engine`:
 | `imc` | `imc` |
 | `pdr` | `pdr` |
 
+Accepted values for `sec_encoding`:
+
+| Encoding | Accepted value | Meaning |
+| --- | --- | --- |
+| Dual-rail steady-state mode | `dual_rail_steady` | Default SEC mode. Tracks value/knownness rails so outputs driven by resetless or reset-unanchored state can be represented without assuming cross-design internal flop equality. |
+| Binary mode | `binary` | Historical concrete 0/1 SEC mode. Outputs whose cones depend on reset-unanchored internal state can be skipped because SEC cannot assume equality between internal flops in different designs. |
+
+There is no `default` token for `sec_encoding`. To use the default, omit
+`--sec-encoding` or omit `sec_encoding` from YAML. Tests, scripts, and regression
+flows that require stable behavior should always spell out either `binary` or
+`dual_rail_steady` explicitly.
+
 ## Engine Semantics
 
 | Engine | Current behavior |
@@ -103,6 +119,12 @@ Accepted values for `sec_engine`:
 All engines use the same extracted SEC model: aligned environment inputs,
 state bits, observed outputs, next-state formulas, initial-state information,
 and complemented-state relations.
+
+SEC only aligns environment inputs and observed top outputs across the two
+designs. It must not use matching internal instance, net, or flop names as a
+cross-design equivalence assumption. Internal names may still be used inside a
+single extracted design for diagnostics, state updates, and local recovery
+heuristics.
 
 ## Bounds And Results
 
@@ -122,6 +144,7 @@ The log always prints:
 ```text
 SEC max_k: <n>
 SEC engine: <engine>
+SEC encoding: binary|dual_rail_steady
 SEC uncomputable sequentials: boundary abstraction|strict failure
 Compact mode: enabled|disabled
 Skipped PO reports: enabled|disabled
@@ -137,6 +160,9 @@ write the following files in the current working directory:
 | `boundary_terms.txt` | SEC | Extracted SEC boundary surface. Includes top inputs, top outputs, opaque internal cut points, abstracted sequential state terms, abstracted sequential observed terms, and connectivity-skip annotations when present. |
 | `skipped_no_driver_pos.txt` | shared cone builder | Outputs skipped because the relevant iso has no driver. |
 | `skipped_multi_driver_pos.txt` | shared cone builder | Outputs skipped because the relevant iso has multiple drivers. |
+| `skipped_logical_loop_pos.txt` | shared cone builder | Outputs skipped because the relevant cone contains a logical loop. |
+| `skipped_reset_unanchored_pos.txt` | SEC | Outputs skipped in binary SEC because their cones depend on reset-unanchored internal state. |
+| `skipped_multi_clock_domain_pos.txt` | SEC clock model | Outputs skipped because the observed output cone spans multiple extracted clock domains. |
 
 `boundary_terms.txt` starts with a category legend. Current categories are:
 
@@ -150,7 +176,8 @@ write the following files in the current working directory:
 | `abstracted_sequential_observed` | Observed-output-facing term exposed when an uncomputable sequential instance is abstracted as a SEC boundary. |
 
 Connectivity skipped outputs are also summarized in the main run log, including
-no-driver, multi-driver, and logical-loop skips.
+no-driver, multi-driver, logical-loop, reset-unanchored, and multi-clock-domain
+skips.
 
 ## Compact SEC
 
@@ -199,6 +226,8 @@ SEC still depends on the normal front-end and library flags:
 
 - `legacy` remains the default for compatibility, but new SEC work should choose
   an explicit engine (`k_induction`, `imc`, or `pdr`) when comparing behavior.
+- `dual_rail_steady` is the default SEC encoding. New tests and regressions should
+  still set `sec_encoding` explicitly when they depend on a specific mode.
 - `report_skipped_pos` still has historical LEC naming even though SEC also uses
   it to gate `boundary_terms.txt`.
 - The exact contents of SEC diagnostics and boundary reports are expected to

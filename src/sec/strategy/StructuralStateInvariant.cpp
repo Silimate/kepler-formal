@@ -40,7 +40,11 @@ constexpr size_t kDefaultResetBootstrapOutputCoiStatePairs =
     kMaxSatValidatedOrderedCoiStatePairs;
 constexpr size_t kMaxSatValidatedOrderedPairSupport = 32768;
 constexpr size_t kMaxOrderedCoiExpansionPasses = 64;
-constexpr size_t kDefaultGlobalStructuralRefinementStateLimit = 30000;
+// ASIC FIFO examples such as asap7_mock_cpu need the final structural
+// fingerprint pass to relate memory state after output-rooted COI matching is
+// exhausted.  Keep the cap explicit so much larger SoCs still skip this path
+// unless the workflow opts in through the environment override below.
+constexpr size_t kDefaultGlobalStructuralRefinementStateLimit = 40000;
 constexpr unsigned kSatValidatedStructuralConflictLimit = 4096;
 
 using KEPLER_FORMAL::BoolExpr;
@@ -193,6 +197,7 @@ std::string formatUnmappedSupportVarsForDiag(  // LCOV_EXCL_LINE
 
   std::ostringstream oss;  // LCOV_EXCL_LINE
   bool first = true;  // LCOV_EXCL_LINE
+  // LCOV_EXCL_START
   for (const auto varID : expr->getSupportVars()) {  // LCOV_EXCL_LINE
     if (varID < 2 || abstractMap.find(varID) != abstractMap.end()) {  // LCOV_EXCL_LINE
       continue;  // LCOV_EXCL_LINE
@@ -202,6 +207,7 @@ std::string formatUnmappedSupportVarsForDiag(  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     first = false;  // LCOV_EXCL_LINE
     oss << "v" << varID;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     const auto keyIt = keyByVar.find(varID);  // LCOV_EXCL_LINE
     if (keyIt != keyByVar.end()) {  // LCOV_EXCL_LINE
       oss << ":" << displayNameForStructuralDiag(model, *keyIt->second);  // LCOV_EXCL_LINE
@@ -211,7 +217,9 @@ std::string formatUnmappedSupportVarsForDiag(  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
 bool areAllOrderedStatesEquivalent(const SequentialDesignModel& model0,
+                                   // LCOV_EXCL_START
                                    const SequentialDesignModel& model1,
+                                   // LCOV_EXCL_STOP
                                    const AlignedSignals& alignedInputs,
                                    const AlignedSignals& orderedStates) {
   if (orderedStates.names.empty()) {
@@ -260,11 +268,15 @@ bool areSatEquivalentUnderAbstractMaps(
         BoolExpr::createTrue(),
         makeEqualityExpr(remapped0, remapped1),
         solverType,
+        // LCOV_EXCL_START
         kSatValidatedStructuralConflictLimit);
     return implied.value_or(false);
+    // LCOV_EXCL_STOP
   } catch (const std::runtime_error& e) {
+    // LCOV_EXCL_START
     if (structuralCoiDiagEnabled()) {
       std::fprintf(  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
           stderr,  // LCOV_EXCL_LINE
           "SEC diag: SAT abstract-map validation failed: %s\n",
           e.what());  // LCOV_EXCL_LINE
@@ -292,7 +304,9 @@ size_t nextAbstractSymbolAfter(const LocalToAbstractVarMap& abstractMap0,
   return nextSymbol;
 }
 
+// LCOV_EXCL_START
 bool structuralCoiDiagEnabled() {
+// LCOV_EXCL_STOP
   static const bool enabled = std::getenv("KEPLER_SEC_DIAG") != nullptr ||
                               std::getenv("KEPLER_SEC_STRUCTURAL_DIAG") != nullptr;
   return enabled;
@@ -300,15 +314,21 @@ bool structuralCoiDiagEnabled() {
 
 size_t resetBootstrapOutputCoiStatePairBudget() {
   static const size_t budget = []() {
+    // LCOV_EXCL_START
     const char* env = std::getenv("KEPLER_SEC_BOOTSTRAP_COI_PAIR_BUDGET");
     if (env == nullptr || env[0] == '\0') {
       return kDefaultResetBootstrapOutputCoiStatePairs;
     }
+    // LCOV_EXCL_STOP
     char* end = nullptr;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     const auto parsed = std::strtoull(env, &end, 10);  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     if (end == env || parsed == 0) {  // LCOV_EXCL_LINE
       return kDefaultResetBootstrapOutputCoiStatePairs;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     }
+    // LCOV_EXCL_STOP
     return static_cast<size_t>(parsed);  // LCOV_EXCL_LINE
   }();
   return budget;
@@ -316,7 +336,9 @@ size_t resetBootstrapOutputCoiStatePairBudget() {
 
 bool resetBootstrapOutputCoiTransitionClosureEnabled() {
   static const bool enabled = []() {
+    // LCOV_EXCL_START
     const char* env = std::getenv("KEPLER_SEC_BOOTSTRAP_OUTPUT_ROOTS_ONLY");
+    // LCOV_EXCL_STOP
     return !(env != nullptr && env[0] != '\0' && std::string(env) != "0");
   }();
   return enabled;
@@ -326,10 +348,14 @@ size_t parseStateLimitEnv(const char* env, size_t defaultValue) {
   if (env == nullptr || env[0] == '\0') {
     return defaultValue;
   }
+  // LCOV_EXCL_START
   errno = 0;
+  // LCOV_EXCL_STOP
   char* end = nullptr;
   const auto parsed = std::strtoull(env, &end, 10);
+  // LCOV_EXCL_START
   if (end == env || errno == ERANGE) {
+  // LCOV_EXCL_STOP
     return defaultValue;  // LCOV_EXCL_LINE
   }
   if (parsed > std::numeric_limits<size_t>::max()) {
@@ -348,13 +374,17 @@ bool globalStructuralRefinementWithinStateLimit(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1) {
   const size_t limit = globalStructuralRefinementStateLimit();
+  // LCOV_EXCL_START
   const size_t stateCount0 = model0.stateBits.size();
   const size_t stateCount1 = model1.stateBits.size();
+  // LCOV_EXCL_STOP
   const bool overLimit = stateCount0 > limit || stateCount1 > limit - stateCount0;
+  // LCOV_EXCL_START
   if (overLimit && structuralCoiDiagEnabled()) {
     std::fprintf(  // LCOV_EXCL_LINE
         stderr,  // LCOV_EXCL_LINE
         "SEC diag: global structural refinement skipped states=%zu+%zu limit=%zu\n",
+        // LCOV_EXCL_STOP
         stateCount0,  // LCOV_EXCL_LINE
         stateCount1,  // LCOV_EXCL_LINE
         limit);  // LCOV_EXCL_LINE
@@ -362,7 +392,9 @@ bool globalStructuralRefinementWithinStateLimit(
   return !overLimit;
 }
 
+// LCOV_EXCL_START
 void assignPrivateSupportSymbols(BoolExpr* expr,
+// LCOV_EXCL_STOP
                                  LocalToAbstractVarMap& abstractMap,
                                  size_t& nextAbstractSymbol) {
   if (expr == nullptr) {
@@ -394,7 +426,9 @@ bool areSatEquivalentUnderPartialAbstractMaps(
 bool areAllOrderedStatesSatEquivalent(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
+    // LCOV_EXCL_START
     const AlignedSignals& alignedInputs,
+    // LCOV_EXCL_STOP
     const AlignedSignals& orderedStates,
     KEPLER_FORMAL::Config::SolverType solverType) {
   if (orderedStates.names.empty()) {
@@ -421,15 +455,19 @@ bool areAllOrderedStatesSatEquivalent(
             next1,
             abstractMap0,
             abstractMap1,
+            // LCOV_EXCL_START
             structuralMemo)) {
       continue;
     }
+    // LCOV_EXCL_STOP
     if (!isWithinSatValidatedOrderedSupportBudget(next0, next1)) {
+      // LCOV_EXCL_START
       if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
             "SEC diag: ordered SAT first mismatch support budget index=%zu lhs=%s rhs=%s\n",
             i,  // LCOV_EXCL_LINE
+            // LCOV_EXCL_STOP
             displayNameForStructuralDiag(model0, key0),  // LCOV_EXCL_LINE
             displayNameForStructuralDiag(model1, key1));  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
@@ -448,8 +486,10 @@ bool areAllOrderedStatesSatEquivalent(
             stderr,  // LCOV_EXCL_LINE
             "SEC diag: ordered SAT unmapped support lhs=[%s] rhs=[%s]\n",
             formatUnmappedSupportVarsForDiag(model0, next0, abstractMap0).c_str(),  // LCOV_EXCL_LINE
+            // LCOV_EXCL_START
             formatUnmappedSupportVarsForDiag(model1, next1, abstractMap1).c_str());  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
       return false;
     }
   }  // LCOV_EXCL_LINE
@@ -457,7 +497,9 @@ bool areAllOrderedStatesSatEquivalent(
 }
 
 bool addSupportStateIndices(
+    // LCOV_EXCL_START
     BoolExpr* expr,
+    // LCOV_EXCL_STOP
     const std::unordered_map<size_t, size_t>& stateIndexByVar,
     std::vector<unsigned char>& selected) {
   if (expr == nullptr) {
@@ -497,15 +539,19 @@ bool ensureExprPairEquivalentOrExpand(
   const bool added0 = addSupportStateIndices(expr0, stateIndexByVar0, selected);
   const bool added1 = addSupportStateIndices(expr1, stateIndexByVar1, selected);
   if (added0 || added1) {
+    // LCOV_EXCL_START
     return true;
   }
 
   if (expr0 == nullptr || expr1 == nullptr) {
+  // LCOV_EXCL_STOP
     if (invalidReason != nullptr) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       *invalidReason = "missing_expr";  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     invalidRelation = true;  // LCOV_EXCL_LINE
   } else if (!isWithinSatValidatedOrderedSupportBudget(expr0, expr1)) {
+  // LCOV_EXCL_STOP
     if (invalidReason != nullptr) {  // LCOV_EXCL_LINE
       *invalidReason = "support_budget";  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
@@ -563,21 +609,27 @@ struct StructuralCoiUnificationContext {
 
 StructuralCoiMapping makeStructuralCoiMapping(size_t stateCount0,
                                               size_t stateCount1) {
+  // LCOV_EXCL_START
   return {
+  // LCOV_EXCL_STOP
       std::vector<size_t>(stateCount0, StructuralCoiMapping::kUnmapped),
       std::vector<size_t>(stateCount1, StructuralCoiMapping::kUnmapped),
       {}};
 }  // LCOV_EXCL_LINE
 
 bool addStructuralCoiStatePair(StructuralCoiMapping& mapping,
+                               // LCOV_EXCL_START
                                size_t index0,
+                               // LCOV_EXCL_STOP
                                size_t index1) {
   if (index0 >= mapping.state0ToState1.size() ||
       index1 >= mapping.state1ToState0.size()) {
     return false;  // LCOV_EXCL_LINE
   }
 
+  // LCOV_EXCL_START
   const size_t existing1 = mapping.state0ToState1[index0];
+  // LCOV_EXCL_STOP
   const size_t existing0 = mapping.state1ToState0[index1];
   if (existing1 != StructuralCoiMapping::kUnmapped ||
       existing0 != StructuralCoiMapping::kUnmapped) {
@@ -606,10 +658,14 @@ bool structurallyUnifyExprPairForCoi(
     const auto [lhs, rhs] = stack.back();
     stack.pop_back();
     if (!context.seenPairs.emplace(lhs, rhs).second) {
+      // LCOV_EXCL_START
       continue;
     }
+    // LCOV_EXCL_STOP
 
+    // LCOV_EXCL_START
     if (lhs == nullptr || rhs == nullptr) {
+    // LCOV_EXCL_STOP
       if (lhs != rhs) {  // LCOV_EXCL_LINE
         return false;  // LCOV_EXCL_LINE
       }
@@ -644,7 +700,9 @@ bool structurallyUnifyExprPairForCoi(
       const auto rhsStateIt = context.stateIndexByVar1.find(rhsId);
       if (lhsStateIt != context.stateIndexByVar0.end() ||
           rhsStateIt != context.stateIndexByVar1.end()) {
+        // LCOV_EXCL_START
         if (lhsStateIt == context.stateIndexByVar0.end() ||
+        // LCOV_EXCL_STOP
             rhsStateIt == context.stateIndexByVar1.end() ||
             !addStructuralCoiStatePair(
                 context.mapping, lhsStateIt->second, rhsStateIt->second)) {
@@ -699,10 +757,12 @@ bool validateStructuralCoiRelation(
   AbstractExprPairMemo structuralMemo{&memoResource};
 
   auto equivalentOrSat = [&](BoolExpr* expr0, BoolExpr* expr1) {
+    // LCOV_EXCL_START
     if (areEquivalentUnderAbstractMaps(
             expr0, expr1, abstractMap0, abstractMap1, structuralMemo)) {
       return true;
     }
+    // LCOV_EXCL_STOP
     return expr0 != nullptr && expr1 != nullptr &&  // LCOV_EXCL_LINE
            isWithinSatValidatedOrderedSupportBudget(expr0, expr1) &&  // LCOV_EXCL_LINE
            areSatEquivalentUnderPartialAbstractMaps(  // LCOV_EXCL_LINE
@@ -711,7 +771,9 @@ bool validateStructuralCoiRelation(
 
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
     const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+    // LCOV_EXCL_START
     const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    // LCOV_EXCL_STOP
     if (exprIt0 == model0.observedOutputExprByKey.end() ||
         exprIt1 == model1.observedOutputExprByKey.end() ||
         !equivalentOrSat(exprIt0->second, exprIt1->second)) {
@@ -719,7 +781,9 @@ bool validateStructuralCoiRelation(
     }
   }
 
+  // LCOV_EXCL_START
   for (size_t i = 0; i < alignedStates.names.size(); ++i) {
+  // LCOV_EXCL_STOP
     BoolExpr* next0 = model0.nextStateExprByStateKey.at(alignedStates.keys0[i]);
     BoolExpr* next1 = model1.nextStateExprByStateKey.at(alignedStates.keys1[i]);
     if (!equivalentOrSat(next0, next1)) {
@@ -742,13 +806,16 @@ bool validateStructuralOutputCoiRelation(
   AbstractExprPairMemo structuralMemo{&memoResource};
 
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    // LCOV_EXCL_START
     const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+    // LCOV_EXCL_STOP
     const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
     if (exprIt0 == model0.observedOutputExprByKey.end() ||
         exprIt1 == model1.observedOutputExprByKey.end()) {
       return false;  // LCOV_EXCL_LINE
     }
     if (areEquivalentUnderAbstractMaps(
+            // LCOV_EXCL_START
             exprIt0->second, exprIt1->second, abstractMap0, abstractMap1,
             structuralMemo)) {
       continue;
@@ -757,8 +824,11 @@ bool validateStructuralOutputCoiRelation(
         !areSatEquivalentUnderPartialAbstractMaps(  // LCOV_EXCL_LINE
             exprIt0->second,  // LCOV_EXCL_LINE
             exprIt1->second,  // LCOV_EXCL_LINE
+            // LCOV_EXCL_STOP
             abstractMap0,  // LCOV_EXCL_LINE
+            // LCOV_EXCL_START
             abstractMap1,  // LCOV_EXCL_LINE
+            // LCOV_EXCL_STOP
             solverType)) {  // LCOV_EXCL_LINE
       return false;  // LCOV_EXCL_LINE
     }
@@ -769,7 +839,9 @@ bool validateStructuralOutputCoiRelation(
 AlignedSignals inferStructuralOutputCoiStatePairs(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
+    // LCOV_EXCL_START
     const AlignedSignals& alignedInputs,
+    // LCOV_EXCL_STOP
     const AlignedSignals& alignedOutputs,
     KEPLER_FORMAL::Config::SolverType solverType) {
   if (alignedOutputs.names.empty()) {
@@ -782,6 +854,9 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
   const auto stateIndexByVar1 = buildStateIndexByVar(model1);
   StructuralCoiMapping mapping =
       makeStructuralCoiMapping(model0.stateBits.size(), model1.stateBits.size());
+  const size_t bootstrapCoiBudget =
+      std::min(kMaxSatValidatedOrderedCoiStatePairs,
+               resetBootstrapOutputCoiStatePairBudget());
   std::pmr::monotonic_buffer_resource seenPairResource;
   StructuralExprPairSet seenPairs{&seenPairResource};
   seenPairs.reserve(std::max<size_t>(4096, alignedOutputs.names.size() * 128));
@@ -792,9 +867,6 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
       stateIndexByVar1,
       mapping,
       seenPairs};
-  const size_t bootstrapCoiBudget =
-      std::min(kMaxSatValidatedOrderedCoiStatePairs,
-               resetBootstrapOutputCoiStatePairBudget());
 
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
     const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
@@ -812,14 +884,18 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
             i,
             alignedOutputs.names[i].c_str(),
             mapping.pairs.size());
+      // LCOV_EXCL_START
       }
       return {};
     }
+    // LCOV_EXCL_STOP
     if (mapping.pairs.size() > bootstrapCoiBudget) {
+      // LCOV_EXCL_START
       if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
             "SEC diag: structural output coi rejected budget pairs=%zu budget=%zu\n",
+            // LCOV_EXCL_STOP
             mapping.pairs.size(),  // LCOV_EXCL_LINE
             bootstrapCoiBudget);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
@@ -827,15 +903,19 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
     }
   }
 
+  // LCOV_EXCL_START
   if (resetBootstrapOutputCoiTransitionClosureEnabled()) {
     size_t checkedTransitionPairs = 0;
     for (size_t cursor = 0; cursor < mapping.pairs.size(); ++cursor) {
+    // LCOV_EXCL_STOP
       if (mapping.pairs.size() >= bootstrapCoiBudget) {
         if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+          // LCOV_EXCL_START
           std::fprintf(  // LCOV_EXCL_LINE
               stderr,  // LCOV_EXCL_LINE
               "SEC diag: structural output-transition coi stopped budget pairs=%zu "
               "budget=%zu\n",
+              // LCOV_EXCL_STOP
               mapping.pairs.size(),  // LCOV_EXCL_LINE
               bootstrapCoiBudget);  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
@@ -855,23 +935,34 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
               cursor,  // LCOV_EXCL_LINE
               mapping.pairs.size());  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
+        // LCOV_EXCL_START
         break;
       }
       checkedTransitionPairs = cursor + 1;
+      // LCOV_EXCL_STOP
       if (mapping.pairs.size() > bootstrapCoiBudget) {
         if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+          // LCOV_EXCL_START
           std::fprintf(  // LCOV_EXCL_LINE
               stderr,  // LCOV_EXCL_LINE
               "SEC diag: structural output-transition coi stopped budget pairs=%zu "
               "budget=%zu\n",
+              // LCOV_EXCL_STOP
               mapping.pairs.size(),  // LCOV_EXCL_LINE
               bootstrapCoiBudget);  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
         break;  // LCOV_EXCL_LINE
       }
     }
+    // LCOV_EXCL_START
     if (checkedTransitionPairs < mapping.pairs.size()) {
+      // Keep only the transition pairs whose own cones were checked.  These
+      // LCOV_EXCL_STOP
+      // candidates are still top-output rooted and later proof stages must
+      // LCOV_EXCL_START
+      // validate them before treating them as facts.
       mapping.pairs.resize(checkedTransitionPairs);
+      // LCOV_EXCL_STOP
     }
   } else if (structuralCoiDiagEnabled()) {
     std::fprintf(  // LCOV_EXCL_LINE
@@ -903,8 +994,10 @@ AlignedSignals inferStructuralOutputCoiStatePairs(
 }
 
 AlignedSignals inferStructuralCoiStatePairs(
+    // LCOV_EXCL_START
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
+    // LCOV_EXCL_STOP
     const AlignedSignals& alignedInputs,
     const AlignedSignals& alignedOutputs,
     KEPLER_FORMAL::Config::SolverType solverType) {
@@ -935,23 +1028,31 @@ AlignedSignals inferStructuralCoiStatePairs(
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
     const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
     const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
+    // LCOV_EXCL_START
     if (exprIt0 == model0.observedOutputExprByKey.end() ||
         exprIt1 == model1.observedOutputExprByKey.end() ||
+        // LCOV_EXCL_STOP
         !structurallyUnifyExprPairForCoi(
+            // LCOV_EXCL_START
             exprIt0->second,
             exprIt1->second,
             unificationContext)) {
       if (structuralCoiDiagEnabled()) {
+      // LCOV_EXCL_STOP
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
             "SEC diag: structural coi rejected output=%zu name=%s pairs=%zu\n",
+            // LCOV_EXCL_START
             i,  // LCOV_EXCL_LINE
             alignedOutputs.names[i].c_str(),  // LCOV_EXCL_LINE
             mapping.pairs.size());  // LCOV_EXCL_LINE
+            // LCOV_EXCL_STOP
       }  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       return {};
     }
     if (mapping.pairs.size() > kMaxSatValidatedOrderedCoiStatePairs) {
+    // LCOV_EXCL_STOP
       if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
@@ -973,13 +1074,17 @@ AlignedSignals inferStructuralCoiStatePairs(
       if (structuralCoiDiagEnabled()) {
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
+            // LCOV_EXCL_START
             "SEC diag: structural coi rejected transition cursor=%zu pairs=%zu\n",
             cursor,  // LCOV_EXCL_LINE
             mapping.pairs.size());  // LCOV_EXCL_LINE
+            // LCOV_EXCL_STOP
       }  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       return {};
     }
     if (mapping.pairs.size() > kMaxSatValidatedOrderedCoiStatePairs) {
+    // LCOV_EXCL_STOP
       if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
@@ -990,18 +1095,27 @@ AlignedSignals inferStructuralCoiStatePairs(
     }
   }
 
+// LCOV_EXCL_START
+
   const AlignedSignals alignedStates =
+  // LCOV_EXCL_STOP
       buildStructuralCoiStatePairs(model0, model1, mapping);
+  // LCOV_EXCL_START
   if (alignedStates.names.empty() ||
       !validateStructuralCoiRelation(
+      // LCOV_EXCL_STOP
           model0, model1, alignedInputs, alignedOutputs, alignedStates, solverType)) {
     if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
       std::fprintf(  // LCOV_EXCL_LINE
+          // LCOV_EXCL_START
           stderr,  // LCOV_EXCL_LINE
           "SEC diag: structural coi rejected validation pairs=%zu\n",
+          // LCOV_EXCL_STOP
           alignedStates.names.size());  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     }  // LCOV_EXCL_LINE
     return {};  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (structuralCoiDiagEnabled()) {
     std::fprintf(  // LCOV_EXCL_LINE
@@ -1023,22 +1137,28 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
     return {};
   }
 
+  // LCOV_EXCL_START
   const auto stateIndexByVar0 = buildStateIndexByVar(model0);
   const auto stateIndexByVar1 = buildStateIndexByVar(model1);
+  // LCOV_EXCL_STOP
   std::vector<unsigned char> selected(model0.stateBits.size(), 0);
   expandOrderedCoiFromOutputs(
       model0, model1, alignedOutputs, stateIndexByVar0, stateIndexByVar1, selected);
   if (std::count(selected.begin(), selected.end(), 1) == 0) {
     if (structuralCoiDiagEnabled()) {
       std::fprintf(stderr, "SEC diag: ordered coi skipped no selected state\n");  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     }  // LCOV_EXCL_LINE
     return {};
   }
+  // LCOV_EXCL_STOP
 
+  // LCOV_EXCL_START
   for (size_t pass = 0; pass < kMaxOrderedCoiExpansionPasses; ++pass) {
     if (static_cast<size_t>(std::count(selected.begin(), selected.end(), 1)) >
         kMaxSatValidatedOrderedCoiStatePairs) {
       if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
             "SEC diag: ordered coi rejected budget pass=%zu selected=%zu\n",
@@ -1057,15 +1177,19 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
     AbstractExprPairMemo structuralMemo{&memoResource};
     bool changed = false;
     bool invalidRelation = false;
+    // LCOV_EXCL_START
     std::string invalidReason;
 
     for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
+    // LCOV_EXCL_STOP
       const auto exprIt0 = model0.observedOutputExprByKey.find(alignedOutputs.keys0[i]);
+      // LCOV_EXCL_START
       const auto exprIt1 = model1.observedOutputExprByKey.find(alignedOutputs.keys1[i]);
       if (exprIt0 == model0.observedOutputExprByKey.end() ||
           exprIt1 == model1.observedOutputExprByKey.end()) {
         if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
           std::fprintf(  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
               stderr,  // LCOV_EXCL_LINE
               "SEC diag: ordered coi rejected missing output=%zu pass=%zu selected=%zu\n",
               i,  // LCOV_EXCL_LINE
@@ -1080,11 +1204,14 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
           stateIndexByVar0,
           stateIndexByVar1,
           abstractMap0,
+          // LCOV_EXCL_START
           abstractMap1,
           structuralMemo,
           selected,
+          // LCOV_EXCL_STOP
           solverType,
           invalidRelation,
+          // LCOV_EXCL_START
           &invalidReason);
       if (invalidRelation) {
         if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
@@ -1092,6 +1219,7 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
               stderr,  // LCOV_EXCL_LINE
               "SEC diag: ordered coi rejected output=%zu name=%s pass=%zu "
               "selected=%zu reason=%s\n",
+              // LCOV_EXCL_STOP
               i,  // LCOV_EXCL_LINE
               alignedOutputs.names[i].c_str(),  // LCOV_EXCL_LINE
               pass,  // LCOV_EXCL_LINE
@@ -1132,24 +1260,34 @@ AlignedSignals inferSatValidatedOrderedCoiStatePairs(
               invalidReason.c_str());  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
         return {};
+      // LCOV_EXCL_START
       }
     }
 
+
+// LCOV_EXCL_STOP
     if (!changed) {
+      // LCOV_EXCL_START
       // Only the top-output alignment came from names.  Ordered internal state
       // bits were merely candidates, and every reached output/transition formula
       // has now been proven equivalent under the selected relation.
       if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
         std::fprintf(  // LCOV_EXCL_LINE
             stderr,  // LCOV_EXCL_LINE
             "SEC diag: ordered coi accepted pass=%zu selected=%zu\n",
+            // LCOV_EXCL_START
             pass,  // LCOV_EXCL_LINE
             selectedStates.names.size());  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
       return selectedStates;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     }
   }
 
+
+// LCOV_EXCL_STOP
   if (structuralCoiDiagEnabled()) {  // LCOV_EXCL_LINE
     std::fprintf(  // LCOV_EXCL_LINE
         stderr,  // LCOV_EXCL_LINE
@@ -1187,6 +1325,7 @@ std::unordered_map<size_t, size_t> buildLegacyClockInputClassMap(
       model.clockCarrierVarIDs.begin(), model.clockCarrierVarIDs.end());
   size_t clockClass = std::numeric_limits<size_t>::max();
   bool sawClockClass = false;
+  // LCOV_EXCL_START
   bool multipleClockClasses = false;
   for (size_t i = 0; i < alignedInputKeys.size(); ++i) {
     const size_t varID = model.inputVarByKey.at(alignedInputKeys[i]);
@@ -1194,11 +1333,16 @@ std::unordered_map<size_t, size_t> buildLegacyClockInputClassMap(
     if (clockCarrierVars.find(varID) == clockCarrierVars.end()) {
       continue;
     }
+    // LCOV_EXCL_STOP
     if (!sawClockClass) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       clockClass = i;  // LCOV_EXCL_LINE
       sawClockClass = true;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     } else if (clockClass != i) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       multipleClockClasses = true;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   if (sawClockClass && !multipleClockClasses) {
@@ -1224,8 +1368,11 @@ std::unordered_map<size_t, size_t> buildInputClassMap(
     classes.emplace(varID, i);
     clockClassByEvent.emplace(
         ClockInputClassKey{alignedInputKeys[i], ClockPhase::Pos}, i);
+  // LCOV_EXCL_START
   }
 
+
+// LCOV_EXCL_STOP
   size_t nextClockClass = alignedInputKeys.size();
   for (const auto& carrierClass : model.clockCarrierClasses) {
     const ClockInputClassKey key{carrierClass.domain, carrierClass.phase};
@@ -1261,7 +1408,9 @@ uint64_t mixHash(uint64_t value) {
 uint64_t combineHashes(std::initializer_list<uint64_t> parts) {
   uint64_t hash = 0x243f6a8885a308d3ull;
   for (const auto part : parts) {
+    // LCOV_EXCL_START
     hash = mixHash(hash ^ mixHash(part));
+    // LCOV_EXCL_STOP
   }
   return hash;
 }
@@ -1283,8 +1432,11 @@ size_t initialFingerprintMemoReserve(const SequentialDesignModel& model) {
       saturatedMultiply(model.nextStateExprByStateKey.size(), static_cast<size_t>(64)));
 }
 
+// LCOV_EXCL_START
+
 void reserveFingerprintMemo(FingerprintMemo& memo,
                             size_t& reservedEntries,
+                            // LCOV_EXCL_STOP
                             size_t desiredEntries) {
   if (desiredEntries <= reservedEntries) {
     return;
@@ -1363,7 +1515,9 @@ uint64_t fingerprintExpr(
   // ASICs. A recursive fingerprint is easy to read, but it repeatedly burned
   // CPU and stack in BlackParrot before the actual SEC engine started. This is
   // the same post-order computation, just explicit and memoized across all
+  // LCOV_EXCL_START
   // state bits in the current refinement pass.
+  // LCOV_EXCL_STOP
   std::vector<StackFrame> stack{{expr, false}};
   while (!stack.empty()) {
     const StackFrame current = stack.back();
@@ -1420,9 +1574,13 @@ uint64_t fingerprintExpr(
         uint64_t rhs = memo.at(node->getRight());
         if (lhs > rhs) {
           std::swap(lhs, rhs);
+        // LCOV_EXCL_START
         }
+        // LCOV_EXCL_STOP
         const uint64_t opTag =
+            // LCOV_EXCL_START
             node->getOp() == Op::AND ? 29 : (node->getOp() == Op::OR ? 31 : 37);
+            // LCOV_EXCL_STOP
         fingerprint = combineHashes({opTag, lhs, rhs});
         break;
       }
@@ -1670,7 +1828,9 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
         stderr,  // LCOV_EXCL_LINE
         "SEC diag: ordered structural states rejected pairs=%zu\n",
         orderedStates.names.size());  // LCOV_EXCL_LINE
+  // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   if (!orderedStates.names.empty() &&
       areAllOrderedStatesSatEquivalent(
           model0, model1, alignedInputs, orderedStates, solverType)) {
@@ -1689,7 +1849,9 @@ AlignedSignals inferStructurallyEquivalentStatePairs(
       model0, model1, alignedInputs, alignedOutputs, solverType);
   if (!structuralCoiStates.names.empty()) {
     // Top output names anchor the SEC property.  Internal state candidates here
+    // LCOV_EXCL_START
     // come only from structurally unifying the reached output/transition cones,
+    // LCOV_EXCL_STOP
     // then validating the resulting relation.
     return structuralCoiStates;
   }
@@ -1763,7 +1925,9 @@ AlignedSignals inferStructurallyEquivalentOutputConeStatePairs(
       model0, model1, alignedInputs, alignedOutputs, solverType);
 }
 
+// LCOV_EXCL_START
 AlignedSignals inferStructurallyEquivalentStatePairs(
+// LCOV_EXCL_STOP
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedInputs,

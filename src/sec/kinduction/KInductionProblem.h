@@ -80,6 +80,7 @@ struct KInductionProblem {
   std::vector<BoolExpr*> observedOutputExprs0;
   std::vector<BoolExpr*> observedOutputExprs1;
   std::vector<bool> outputImpliedByInductionCore;
+  std::vector<std::string> dualRailOutputSkipReasons;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
   std::vector<std::pair<size_t, BoolExpr*>> transitions1;
   std::shared_ptr<LazyTransitionStore> lazyTransitions;
@@ -115,6 +116,26 @@ struct KInductionProblem {
 
   bool hasResetBootstrap() const {
     return !resetBootstrapInputs.empty();
+  }
+
+  size_t effectiveTotalStateCount() const {
+    return totalStateCount != 0 ? totalStateCount
+                                : state0Symbols.size() + state1Symbols.size();
+  }
+
+  bool hasCompleteBootstrapStateAssignments() const {
+    const size_t stateCount = effectiveTotalStateCount();
+    return stateCount != 0 && bootstrapStateAssignments.size() >= stateCount;
+  }
+
+  bool usesResetBootstrapObservationFrontier() const {
+    // Binary SEC cannot compare internal resetless state across designs.  When
+    // reset/bootstrap leaves part of the startup state arbitrary, use the same
+    // top-observation frontier as incomplete-init SEC instead of reporting an
+    // arbitrary post-reset flop value as a cycle-0 counterexample.
+    return !usesDualRailStateEncoding && hasSequentialState() &&
+           hasResetBootstrap() && resetBootstrapCycles != 0 &&
+           property != nullptr && !hasCompleteBootstrapStateAssignments();
   }
 
   std::vector<size_t> combinedStateSymbols() const {

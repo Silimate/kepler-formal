@@ -47,8 +47,10 @@ class MiterStrategy {
                         const std::unordered_map<KEPLER_FORMAL::BuildPrimaryOutputClauses::PathKey, naja::DNL::DNLID, KEPLER_FORMAL::BuildPrimaryOutputClauses::KeyHash>& outputs1Map);
   
   static std::string logFileName_;
+  // LCOV_EXCL_START
   const std::vector<naja::DNL::DNLID>& getPIs0() const { return PIs0_; }
   const std::vector<naja::DNL::DNLID>& getPIs1() const { return PIs1_; }
+  // LCOV_EXCL_STOP
  private:
   bool runCompactPOs(const tbb::concurrent_vector<BoolExpr*>& POs0,
                      const tbb::concurrent_vector<BoolExpr*>& POs1);

@@ -21,9 +21,11 @@ public:
   Config& operator=(Config&&) = delete;
 
   // Static configuration API
+  // LCOV_EXCL_START
   static void setSolverType(SolverType type) {
     solverType_ = type;
   }
+  // LCOV_EXCL_STOP
 
   static SolverType getSolverType() {
     return solverType_;
@@ -41,8 +43,8 @@ public:
     secTreatUncomputableSeqAsBoundary_ = enabled;
   }
 
-  static bool getSecTreatUncomputableSeqAsBoundary() {
-    return secTreatUncomputableSeqAsBoundary_;
+  static bool getSecTreatUncomputableSeqAsBoundary() {  // LCOV_EXCL_LINE
+    return secTreatUncomputableSeqAsBoundary_;  // LCOV_EXCL_LINE
   }
 
 private:

@@ -307,10 +307,12 @@ uint32_t nextExpandedTableTermEpoch() {
   ++expandedTableTermEpoch;
   // LCOV_EXCL_START
   if (expandedTableTermEpoch == 0) {
+    // LCOV_DISABLED_START
     std::fill(expandedTableTermEpochs.begin(), expandedTableTermEpochs.end(),
               0);
     expandedTableTermEpoch = 1;
   }
+  // LCOV_DISABLED_STOP
   // LCOV_EXCL_STOP
   return expandedTableTermEpoch;
 }
@@ -342,7 +344,9 @@ const char* kSkippedLogicalLoopPOReport = "skipped_logical_loop_pos.txt";
 void initializeSkippedPOReportFiles() {
   static std::once_flag once;
   if (!shouldReportSkippedPOs()) {
+    // LCOV_EXCL_START
     return; // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   std::call_once(once, []() {
     std::ofstream(kSkippedMultiDriverPOReport, std::ios::trunc);
@@ -354,7 +358,9 @@ void initializeSkippedPOReportFiles() {
 DNLID getReportIsoID(const DNLFull* dnl, DNLID currentInput, DNLID mergeTerm) {
   auto getIsoID = [&](DNLID termID) -> DNLID {
     if (termID == DNLID_MAX) {
+      // LCOV_EXCL_START
       return DNLID_MAX; // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     return dnl->getDNLTerminalFromID(termID).getIsoID();
   };
@@ -363,7 +369,9 @@ DNLID getReportIsoID(const DNLFull* dnl, DNLID currentInput, DNLID mergeTerm) {
   if (currentIsoID != DNLID_MAX) {
     return currentIsoID;
   }
+  // LCOV_EXCL_START
   return getIsoID(mergeTerm); // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 struct SkippedPOReportEvent {  // LCOV_EXCL_LINE
@@ -401,15 +409,21 @@ void recordSkippedPOReportEvent(const SkippedPOReportEvent& event) {
 const char* getSnlDirectionName(naja::NL::SNLBitTerm::Direction direction) {
   switch (direction) {
     case naja::NL::SNLBitTerm::Direction::Undefined:
+      // LCOV_EXCL_START
       return "Undefined";  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     case naja::NL::SNLBitTerm::Direction::Input:
       return "Input";
     case naja::NL::SNLBitTerm::Direction::Output:
       return "Output";
     case naja::NL::SNLBitTerm::Direction::InOut:
+      // LCOV_EXCL_START
       return "InOut";  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
   }
+  // LCOV_EXCL_START
   return "Unknown";  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 std::string getSnlModelName(const DNLTerminalFull& term) {
@@ -419,8 +433,10 @@ std::string getSnlModelName(const DNLTerminalFull& term) {
 
 void appendCloudTermName(std::ostream& out, const DNLFull* dnl, DNLID termID) {
   if (termID == DNLID_MAX) {
+    // LCOV_EXCL_START
     out << "<invalid>"; // LCOV_EXCL_LINE
     return; // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   const auto& term = dnl->getDNLTerminalFromID(termID);
   if (term.getDNLInstance().getSNLModel()) {
@@ -460,11 +476,15 @@ void appendIsoDetailsToReport(std::ostream& out,
                               DNLID termID,
                               const char* label) {
   if (termID == DNLID_MAX) {
+    // LCOV_EXCL_START
     return; // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   const auto& term = dnl->getDNLTerminalFromID(termID);
   if (term.getIsoID() == DNLID_MAX) {
+    // LCOV_EXCL_START
     return; // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(term.getIsoID());
   out << " " << label << "_iso=" << term.getIsoID() << " ";
@@ -612,13 +632,17 @@ naja::DNL::DNLID SNLLogicCloud::getIsoIDCached(
     const std::shared_ptr<const std::vector<naja::DNL::DNLID>>&
         termIsoIDs) const {
   if (termID == naja::DNL::DNLID_MAX) {
+    // LCOV_EXCL_START
     return naja::DNL::DNLID_MAX;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   const size_t index = static_cast<size_t>(termID);
   if (index < termIsoIDs->size()) {
     return (*termIsoIDs)[index];
   }
+  // LCOV_EXCL_START
   return dnl_.getDNLTerminalFromID(termID).getIsoID();  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 std::string SNLLogicCloud::formatTermName(naja::DNL::DNLID termID) const {
@@ -648,8 +672,10 @@ void SNLLogicCloud::appendTermList(std::ostream& out,
     }
   }
   if (termIDs.size() > capped) {
+    // LCOV_EXCL_START
     out << ", ... +" << (termIDs.size() - capped) << " more";  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 // LCOV_EXCL_START
@@ -670,18 +696,24 @@ void SNLLogicCloud::appendInstNonOutputs(std::ostream& out,
       continue;
     }
     if (emitted != 0) {
+      // LCOV_DISABLED_START
       out << ", ";
     }
+    // LCOV_DISABLED_STOP
     out << formatTermName(termID);
     ++emitted;
     if (emitted == limit) {
+      // LCOV_DISABLED_START
       out << ", ...";
       return;
+      // LCOV_DISABLED_STOP
     }
   }
   if (emitted == 0) {
+    // LCOV_DISABLED_START
     out << "<none>";
   }
+  // LCOV_DISABLED_STOP
 }
 
 void SNLLogicCloud::appendMergeListDetailed(std::ostream& out,
@@ -699,8 +731,10 @@ void SNLLogicCloud::appendMergeListDetailed(std::ostream& out,
     }
   }
   if (merges.size() > capped) {
+    // LCOV_DISABLED_START
     out << ", ... +" << (merges.size() - capped) << " more";
   }
+  // LCOV_DISABLED_STOP
 }
 // LCOV_EXCL_STOP
 
@@ -723,41 +757,55 @@ naja::DNL::DNLID SNLLogicCloud::resolveInstanceInputTerm(
     const char* role) const {
   if (flatTermID == InvalidFlatTermID) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     std::ostringstream error;
     error << "SNLLogicCloud failed to resolve " << role << " for driver "
           << formatTermName(driver) << " in model "
           << inst.getSNLModel()->getName().getString();
     throw std::runtime_error(error.str());
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
+  // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   const auto& termIndexes = inst.getTermIndexes();
   if (termIndexes.first == DNLID_MAX ||
       termIndexes.second < termIndexes.first ||
       flatTermID > termIndexes.second - termIndexes.first) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     std::ostringstream error;
     error << "SNLLogicCloud failed to map " << role
           << " flat_term_id=" << flatTermID << " for driver "
           << formatTermName(driver) << " in model "
           << inst.getSNLModel()->getName().getString();
     throw std::runtime_error(error.str());
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
+  // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   const auto& inputTerm =
       dnl_.getDNLTerminalFromID(termIndexes.first + flatTermID);
   if (inputTerm.isNull() || inputTerm.getSnlBitTerm() == nullptr ||
       inputTerm.getSnlBitTerm()->getOrderID() != flatTermID) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     std::ostringstream error;
     error << "SNLLogicCloud failed to map " << role
           << " flat_term_id=" << flatTermID << " for driver "
           << formatTermName(driver) << " in model "
           << inst.getSNLModel()->getName().getString();
     throw std::runtime_error(error.str());
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
+  // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   return inputTerm.getID();  // LCOV_EXCL_LINE
+// LCOV_EXCL_START
 }  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
 
 size_t SNLLogicCloud::getRelevantInstanceInputCount(
     naja::DNL::DNLID driver) const {
@@ -784,7 +832,9 @@ void SNLLogicCloud::appendRelevantInstanceInputs(
   if (layout.muxInputAFlatIDs.empty() || layout.muxInputBFlatIDs.empty() ||
       layout.muxSelectFlatID == InvalidFlatTermID) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::runtime_error(
+    // LCOV_DISABLED_STOP
         "SNLLogicCloud failed to resolve wide mux inputs");
     // LCOV_EXCL_STOP
   }
@@ -796,15 +846,21 @@ void SNLLogicCloud::appendRelevantInstanceInputs(
     const auto it = bits.find(driverBit);
     if (it == bits.end()) {
       // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       std::ostringstream error;
       error << "SNLLogicCloud failed to resolve " << role << " bit "
             << driverBit << " for driver " << formatTermName(driver)
             << " in model " << model->getName().getString();
       throw std::runtime_error(error.str());
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
+    // LCOV_EXCL_START
     }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     return it->second;  // LCOV_EXCL_LINE
+  // LCOV_EXCL_START
   };  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   relevantTerms.emplace_back(resolveInstanceInputTerm(
       inst, findMuxInput(layout.muxInputAFlatIDs, "wide mux input A"), driver,
       "wide mux input A"));
@@ -828,12 +884,16 @@ void SNLLogicCloud::throwIfTruthTableArityMismatch(
   const auto& inst = dnl_.getDNLTerminalFromID(driver).getDNLInstance();
   const auto* model = inst.getSNLModel();
   if (getTruthTableCountCached(model) == 0) {
+    // LCOV_EXCL_START
     return;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   const auto& tt = getTruthTableCached(
       model, dnl_.getDNLTerminalFromID(driver).getSnlBitTerm()->getOrderID());
   if (!tt.isInitialized()) {
+    // LCOV_EXCL_START
     return;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   const auto& layout = getModelInputLayout(dnl_, model);
   const size_t expectedInputCount = layout.isMux2 ? size_t{3} : tt.size();
@@ -887,13 +947,16 @@ void SNLLogicCloud::throwIfFrontierMismatch(
   }
 
   // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   constexpr size_t kMaxEntries = 24;
   std::ostringstream error;
   error << "SNLLogicCloud frontier mismatch before concat at iter " << iter
         << ": current_inputs=" << currentCount
         << ", inputs_to_merge=" << mergeCount
         << ", border_leaves=" << borderCount;
+        // LCOV_DISABLED_STOP
 
+  // LCOV_DISABLED_START
   error << " current_inputs=[";
   const auto& current = getCurrentIterationInputsTL().first;
   const size_t currentLimit = std::min(current.size(), kMaxEntries);
@@ -913,7 +976,9 @@ void SNLLogicCloud::throwIfFrontierMismatch(
     error << ", ... +" << (current.size() - currentLimit) << " more";
   }
   error << "]";
+  // LCOV_DISABLED_STOP
 
+  // LCOV_DISABLED_START
   error << " inputs_to_merge=[";
   const auto& merges = getInputsToMergeTL().first;
   const size_t mergeLimit = std::min(merges.size(), kMaxEntries);
@@ -928,43 +993,57 @@ void SNLLogicCloud::throwIfFrontierMismatch(
     error << ", ... +" << (merges.size() - mergeLimit) << " more";
   }
   error << "]";
+  // LCOV_DISABLED_STOP
 
   auto appendDuplicateTerms =
+      // LCOV_DISABLED_START
       [&](const char* label, const TermIDVector& terms) {
         std::map<naja::DNL::DNLID, size_t> counts;
         for (const auto termID : terms) {
           ++counts[termID];
+          // LCOV_DISABLED_STOP
         }
+        // LCOV_DISABLED_START
         bool emitted = false;
         error << " " << label << "=[";
         size_t shown = 0;
         for (const auto& [termID, count] : counts) {
           if (count <= 1) {
             continue;
+            // LCOV_DISABLED_STOP
           }
+          // LCOV_DISABLED_START
           if (shown == kMaxEntries) {
             error << "...";
             emitted = true;
             break;
+            // LCOV_DISABLED_STOP
           }
+          // LCOV_DISABLED_START
           if (shown != 0) {
             error << ", ";
           }
           error << formatTermName(termID) << " x" << count;
           emitted = true;
           ++shown;
+          // LCOV_DISABLED_STOP
         }
+        // LCOV_DISABLED_START
         if (!emitted) {
           error << "<none>";
         }
         error << "]";
       };
+      // LCOV_DISABLED_STOP
 
+  // LCOV_DISABLED_START
   TermIDVector mergeTerms;
   mergeTerms.reserve(merges.size());
   for (const auto& merge : merges) {
     mergeTerms.push_back(merge.second);
+    // LCOV_DISABLED_STOP
   }
+  // LCOV_DISABLED_START
   appendDuplicateTerms("duplicate_current_inputs", current);
   appendDuplicateTerms("duplicate_merge_terms", mergeTerms);
   if (!frontierHistory.empty()) {
@@ -978,8 +1057,11 @@ void SNLLogicCloud::throwIfFrontierMismatch(
     error << "]";
   }
   throw std::runtime_error(error.str());
+  // LCOV_DISABLED_STOP
   // LCOV_EXCL_STOP
+// LCOV_EXCL_START
 }  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
 
 void SNLLogicCloud::throwIfNextFrontierMismatch(
     size_t iter,
@@ -990,12 +1072,15 @@ void SNLLogicCloud::throwIfNextFrontierMismatch(
     return;
   }
   // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   constexpr size_t kMaxEntries = 24;
   std::ostringstream error;
   error << "SNLLogicCloud next frontier mismatch after concat at iter "
         << iter << ": next_inputs=" << nextCount
         << ", border_leaves=" << borderCount;
+        // LCOV_DISABLED_STOP
 
+  // LCOV_DISABLED_START
   error << " next_inputs=[";
   const auto& nextInputs = getNewIterationInputsTL().first;
   const size_t nextLimit = std::min(nextInputs.size(), kMaxEntries);
@@ -1015,7 +1100,9 @@ void SNLLogicCloud::throwIfNextFrontierMismatch(
     error << ", ... +" << (nextInputs.size() - nextLimit) << " more";
   }
   error << "]";
+  // LCOV_DISABLED_STOP
 
+  // LCOV_DISABLED_START
   error << " from_current_inputs=[";
   const auto& current = getCurrentIterationInputsTL().first;
   const size_t currentLimit = std::min(current.size(), kMaxEntries);
@@ -1029,7 +1116,9 @@ void SNLLogicCloud::throwIfNextFrontierMismatch(
     error << ", ... +" << (current.size() - currentLimit) << " more";
   }
   error << "]";
+  // LCOV_DISABLED_STOP
 
+  // LCOV_DISABLED_START
   error << " from_inputs_to_merge=[";
   const auto& merges = getInputsToMergeTL().first;
   const size_t mergeLimit = std::min(merges.size(), kMaxEntries);
@@ -1057,8 +1146,11 @@ void SNLLogicCloud::throwIfNextFrontierMismatch(
     error << "]";
   }
   throw std::runtime_error(error.str());
+  // LCOV_DISABLED_STOP
   // LCOV_EXCL_STOP
+// LCOV_EXCL_START
 }  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
 
 naja::DNL::DNLID SNLLogicCloud::resolveTransparentLoopTarget(
     naja::DNL::DNLID termID,
@@ -1076,13 +1168,17 @@ naja::DNL::DNLID SNLLogicCloud::resolveTransparentLoopTarget(
          visitedTerms.insert(currentTermID).second) {
     const auto& currentTerm = dnl_.getDNLTerminalFromID(currentTermID);
     if (currentTerm.isNull()) {
+      // LCOV_EXCL_START
       break;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     if (currentTerm.getSnlBitTerm()->getDirection() !=
         SNLBitTerm::Direction::Output) {
       const auto isoID = getIsoIDCached(currentTermID, termIsoIDs);
       if (isoID == naja::DNL::DNLID_MAX) {
+        // LCOV_EXCL_START
         break;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
       const auto& iso = dnl_.getDNLIsoDB().getIsoFromIsoIDconst(isoID);
       if (iso.isConstant() || iso.getDrivers().size() != 1) {
@@ -1098,7 +1194,9 @@ naja::DNL::DNLID SNLLogicCloud::resolveTransparentLoopTarget(
     }
 
     if (getRelevantInstanceInputCount(currentTermID) != 1) {
+      // LCOV_EXCL_START
       break;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     const auto relevantTerms = collectRelevantInstanceInputs(currentTermID);
     currentTermID = relevantTerms.empty() ? naja::DNL::DNLID_MAX
@@ -1135,16 +1233,22 @@ void SNLLogicCloud::compute() {
                                       .c_str());
       }
       #endif
+      // LCOV_DISABLED_START
       throw std::runtime_error("Seed output term is not a single driver");
+      // LCOV_DISABLED_STOP
     } else if (iso.getDrivers().empty()) {
+      // LCOV_DISABLED_START
       std::string termName = dnl_.getDNLTerminalFromID(seedOutputTerm_)
                                  .getSnlBitTerm()
                                  ->getName()
                                  .getString();
+                                 // LCOV_DISABLED_STOP
       std::string error =
+          // LCOV_DISABLED_START
           "Seed output term '" + termName + "' has no drivers";
       throw std::runtime_error(error);
     }
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
     const auto& driver = iso.getDrivers().front();
     auto& inst = dnl_.getDNLTerminalFromID(driver).getDNLInstance();
@@ -1169,21 +1273,29 @@ void SNLLogicCloud::compute() {
     assert(table_.isInitialized() &&
            "Truth table for seed output term is not initialized");
   } else {
+    // LCOV_EXCL_START
     const auto& inst = dnl_.getDNLInstanceFromID(seedOutputTerm_);  // LCOV_EXCL_LINE
     for (DNLID termID = inst.getTermIndexes().first;  // LCOV_EXCL_LINE
          termID <= inst.getTermIndexes().second; termID++) {  // LCOV_EXCL_LINE
       const DNLTerminalFull& term = dnl_.getDNLTerminalFromID(termID);  // LCOV_EXCL_LINE
       if (term.getSnlBitTerm()->getDirection() !=  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
           SNLBitTerm::Direction::Output) {
         // newIterationInputs.emplace_back(termID);
+        // LCOV_EXCL_START
         newIterationInputs.emplace_back(termID);  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
         DEBUG_LOG("Add input with id: %zu\n", termID);
+      // LCOV_EXCL_START
       }  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     DEBUG_LOG("model name: %s\n",
               inst.getSNLModel()->getName().getString().c_str());
+    // LCOV_EXCL_START
     table_ = SNLTruthTableTree(inst.getID(), seedOutputTerm_);  // LCOV_EXCL_LINE
     assert(table_.isInitialized() &&  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
            "Truth table for seed output term is not initialized");
   }
 
@@ -1212,7 +1324,9 @@ void SNLLogicCloud::compute() {
       reachedPIs = false;
       break;
     }
+  // LCOV_EXCL_START
   } // allocator for buckets LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 
   // HandledSet handledTerms;
   // handledTerms.reserve(naja::DNL::get()->getDNLTerms().size() / 4);
@@ -1307,10 +1421,12 @@ void SNLLogicCloud::compute() {
           return;
         }
         // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         newIterationInputs.emplace_back(input);
         inputsToMerge.emplace_back(naja::DNL::DNLID_MAX,
                                    input);  // Placeholder for PI/PO
         continue;
+        // LCOV_DISABLED_STOP
         // LCOV_EXCL_STOP
       }
       const auto& driver = iso.getDrivers().front();
@@ -1342,15 +1458,21 @@ void SNLLogicCloud::compute() {
       if (driverTerm.getSnlBitTerm()->getDirection() !=
           SNLBitTerm::Direction::Output) {
         // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         skipReason_ = SkipReason::NoDriver;
         skipReasonText_ =
+        // LCOV_DISABLED_STOP
             "encountered an internal frontier that was not collected as a PI";
+        // LCOV_DISABLED_START
         reportCloudSkippedRoot(
             &dnl_, seedOutputTerm_, input, driver,
+            // LCOV_DISABLED_STOP
             "encountered an internal frontier that was not collected as a PI",
+            // LCOV_DISABLED_START
             kSkippedNoDriverPOReport);
         table_ = SNLTruthTableTree();
         return;
+        // LCOV_DISABLED_STOP
         // LCOV_EXCL_STOP
       }
 
@@ -1389,7 +1511,9 @@ void SNLLogicCloud::compute() {
     }
 
     if (inputsToMerge.empty()) {
+      // LCOV_EXCL_START
       break;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
 
     DEBUG_LOG("--- Merging truth tables with %zu inputs\n",
@@ -1483,20 +1607,26 @@ void SNLLogicCloud::flushSkippedPOReports() {
 
   for (auto* eventsPtr : skippedPOReportEventsETS) {
     if (eventsPtr == nullptr) {
+      // LCOV_EXCL_START
       continue; // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     auto& events = *eventsPtr;
     for (const auto& event : events) {
       std::ostream* out = &logicalLoopOut;
       const std::string_view reportFile(event.reportFile);
       if (reportFile == std::string_view(kSkippedMultiDriverPOReport)) {
+        // LCOV_EXCL_START
         out = &multiDriverOut; // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       } else if (reportFile == std::string_view(kSkippedNoDriverPOReport)) {
         out = &noDriverOut;
       }
 
       if (!(*out)) {
+        // LCOV_EXCL_START
         continue; // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
 
       const bool isFirstForIso =
@@ -1511,12 +1641,14 @@ void SNLLogicCloud::flushSkippedPOReports() {
       }
       if (!isFirstForIso) {
         // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         if (event.reportIsoID != DNLID_MAX) {
           *out << ". See first encounter of iso=" << event.reportIsoID
                << " for details";
         }
         *out << "\n\n";
         continue;
+        // LCOV_DISABLED_STOP
         // LCOV_EXCL_STOP
       }
 

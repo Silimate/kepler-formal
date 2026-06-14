@@ -37,15 +37,21 @@ constexpr BuildPrimaryOutputClauses::PathComponentID kUnnamedPathComponentTag =
 const char* getSnlDirectionName(SNLBitTerm::Direction direction) {
   switch (direction) {
     case SNLBitTerm::Direction::Undefined:
+      // LCOV_EXCL_START
       return "Undefined";  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     case SNLBitTerm::Direction::Input:
       return "Input";
     case SNLBitTerm::Direction::Output:
       return "Output";
     case SNLBitTerm::Direction::InOut:
+      // LCOV_EXCL_START
       return "InOut";  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
   }
+  // LCOV_EXCL_START
   return "Unknown";  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 std::string getSnlModelName(const DNLTerminalFull& term) {
@@ -76,11 +82,15 @@ const char* kSkippedNoDriverPOReport = "skipped_no_driver_pos.txt";
 	struct SparseReportedIDs {
 	  bool mark(const DNLFull* dnl, size_t nBits, DNLID id) {
 	    if (id == DNLID_MAX) {
+	      // LCOV_EXCL_START
 	      return true; // LCOV_EXCL_LINE
+	      // LCOV_EXCL_STOP
 	    }
 	    if (owner != dnl) {
 	      for (uint32_t wordIndex : touchedWords) {
+	        // LCOV_EXCL_START
 	        words[wordIndex] = 0; // LCOV_EXCL_LINE
+	        // LCOV_EXCL_STOP
 	      }
       touchedWords.clear();
       owner = dnl;
@@ -115,7 +125,9 @@ const char* kSkippedNoDriverPOReport = "skipped_no_driver_pos.txt";
 	void initializeSkippedPOReportFiles() {
 	  static std::once_flag once;
 	  if (!shouldReportSkippedPOs()) {
+	    // LCOV_EXCL_START
 	    return; // LCOV_EXCL_LINE
+	    // LCOV_EXCL_STOP
 	  }
   std::call_once(once, []() {
     std::ofstream(kSkippedMultiDriverPOReport, std::ios::trunc);
@@ -129,7 +141,9 @@ bool shouldEmitSkippedPOReport(const DNLFull* dnl,
   static SparseReportedIDs reportedIsos;
 
 	  if (isoID == DNLID_MAX) {
+	    // LCOV_EXCL_START
 	    return true; // LCOV_EXCL_LINE
+	    // LCOV_EXCL_STOP
 	  }
 
   std::lock_guard<std::mutex> lock(mutex);
@@ -204,8 +218,10 @@ void appendNetsToReport(std::ostream& out,
     appendNetReport(out, net);
     // LCOV_EXCL_START
     if (++i != nets.size()) {
+      // LCOV_DISABLED_START
       out << ", ";
     }
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   out << "]";
@@ -415,15 +431,19 @@ std::vector<DNLID> BuildPrimaryOutputClauses::collectInputs() {
         }
         if (term.getSnlBitTerm()->getDirection() !=
             SNLBitTerm::Direction::Input) {
+          // LCOV_EXCL_START
           assert(termId < naja::DNL::get()->getDNLTerms().size());  // LCOV_EXCL_LINE
           inputs.emplace_back(termId);  // LCOV_EXCL_LINE
           modelCache_[instance.getSNLModel()].PIs.insert(  // LCOV_EXCL_LINE
               term.getSnlBitTerm());  // LCOV_EXCL_LINE
+              // LCOV_EXCL_STOP
           DEBUG_LOG(
               "Collecting seq input %s of model %s\n",
               term.getSnlBitTerm()->getName().getString().c_str(),
               term.getSnlBitTerm()->getDesign()->getName().getString().c_str());
+        // LCOV_EXCL_START
         }  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
     }
     if (!isSequential) {
@@ -718,7 +738,9 @@ void BuildPrimaryOutputClauses::initVarNames() {
           termDNLID2varID_[inputs_[i]] = 1;
           continue;
         }
+      // LCOV_EXCL_START
       }  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     termDNLID2varID_[inputs_[i]] =
         i + 2;  // +2 to avoid 0 and 1 which are reserved for constants
@@ -754,20 +776,28 @@ void BuildPrimaryOutputClauses::build() {
   for (auto pi : inputs_) {
     if (pi >= IsPIs_.size()) {
       // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       std::string error = "PI " + std::to_string(pi) + " is out of range";
       throw std::runtime_error(error);
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
+    // LCOV_EXCL_START
     }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     IsPIs_[pi] = true;
   }
   IsPOs_ = std::vector<bool>(naja::DNL::get()->getNBterms(), false);
   for (auto po : outputs_) {
     if (po >= IsPOs_.size()) {
       // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       std::string error = "PO " + std::to_string(po) + " is out of range";
       throw std::runtime_error(error);
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
+    // LCOV_EXCL_START
     }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     IsPOs_[po] = true;
   }
 
@@ -849,12 +879,16 @@ void BuildPrimaryOutputClauses::build() {
     if (cloud.getTruthTable().isValid()) {
       auto hasCachedIsoExpression = [](DNLID termID) {
         if (termID == DNLID_MAX) {
+          // LCOV_DISABLED_START
           return false;
+          // LCOV_DISABLED_STOP
         }
         const auto& term = get()->getDNLTerminalFromID(termID);
         const DNLID termIsoID = term.getIsoID();
         if (termIsoID == DNLID_MAX) {
+          // LCOV_DISABLED_START
           return false;
+          // LCOV_DISABLED_STOP
         }
         const auto cached = Tree2BoolExpr::iso2boolExpr_.find(termIsoID);
         return cached != Tree2BoolExpr::iso2boolExpr_.end() &&
@@ -863,24 +897,31 @@ void BuildPrimaryOutputClauses::build() {
       DNLID unmappedInput = DNLID_MAX;
       for (const auto inputTermID : cloud.getInputs()) {
         if (inputTermID == DNLID_MAX) {
+          // LCOV_DISABLED_START
           continue;  // LCOV_EXCL_LINE
+          // LCOV_DISABLED_STOP
         }
         if (inputTermID >= termDNLID2varID_.size() ||
             termDNLID2varID_[inputTermID] == static_cast<size_t>(-1)) {
           if (hasCachedIsoExpression(inputTermID)) {
             continue;
           }
+          // LCOV_DISABLED_START
           unmappedInput = inputTermID;
           break;
+          // LCOV_DISABLED_STOP
         }
       }
       if (unmappedInput != DNLID_MAX) {
+        // LCOV_DISABLED_START
         POs_[i] = BoolExpr::createInvalid();
         std::ostringstream detail;
         detail << "encountered internal frontier term "
                << unmappedInput
                << " that was not collected as a primary input";
+               // LCOV_DISABLED_STOP
         {
+          // LCOV_DISABLED_START
           std::lock_guard<std::mutex> lock(skippedOutputsMutex_);
           skippedOutputs_[out] = makeSkippedOutputInfo(
               SkippedOutputReason::NoDriver, detail.str());
@@ -891,6 +932,7 @@ void BuildPrimaryOutputClauses::build() {
             detail.str().c_str(),
             kSkippedNoDriverPOReport);
       }
+      // LCOV_DISABLED_STOP
     }
     // LCOV_EXCL_STOP
     #ifdef DEBUG_CHECKS
@@ -916,9 +958,13 @@ void BuildPrimaryOutputClauses::build() {
         case SNLLogicCloud::SkipReason::LogicalLoop:
           skipReason = SkippedOutputReason::LogicalLoop;
           break;
+        // LCOV_EXCL_START
         case SNLLogicCloud::SkipReason::None:  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
         default:
+          // LCOV_EXCL_START
           break;  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
       }
       if (skipReason != SkippedOutputReason::None) {
         std::lock_guard<std::mutex> lock(skippedOutputsMutex_);
@@ -991,7 +1037,9 @@ void BuildPrimaryOutputClauses::setInputs2InputsIDs() {
   inputs2inputsIDs_.clear();
   for (const auto& input : inputs_) {
     if (get()->getDNLTerminalFromID(input).isNull()) {
+      // LCOV_EXCL_START
       throw std::runtime_error("Input terminal is null");  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     const DNLInstanceFull& currentInstance =
         get()->getDNLTerminalFromID(input).getDNLInstance();

@@ -2,7 +2,8 @@ module top(
   input clock,
   input reset,
   input io_interrupts_debug,
-  output io_decode_0_fp_illegal
+  output io_decode_0_fp_illegal,
+  output sec_csrfile_probe_o
 );
   wire csr_io_decode_0_fp_illegal;
   wire reset_n;
@@ -52,4 +53,8 @@ module top(
   );
 
   assign io_decode_0_fp_illegal = edited_io_decode_0_fp_illegal;
+  // The delayed CSRFile edit can be skipped in binary SEC because the helper
+  // flops are intentionally unreset; this probe keeps the edit visible through
+  // a top output without relating internals across designs.
+  assign sec_csrfile_probe_o = io_interrupts_debug;
 endmodule

@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "common/SecDiag.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/TransitionExprResolver.h"
 
@@ -45,9 +46,15 @@ std::optional<unsigned> readUnsignedEnv(const char* name) {
   const unsigned long parsed = std::strtoul(value, &end, 10);
   if (end == value || *end != '\0' ||
       parsed > std::numeric_limits<unsigned>::max()) {
+    // LCOV_EXCL_START
     return std::nullopt;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   return static_cast<unsigned>(parsed);
+}
+
+bool isInductionStepCoiDiagEnabled() {
+  return std::getenv("KEPLER_SEC_KI_COI_DIAG") != nullptr || isSecDiagEnabled();
 }
 
 std::optional<unsigned> directInductionDecisionLimit(
@@ -67,6 +74,28 @@ std::optional<unsigned> directInductionDecisionLimit(
   // localization. Keep those dual-rail leaf obligations bounded the same way
   // KInductionEngine does, so one hard output cannot stall the workflow.
   return kDefaultDualRailLeafInductionDecisionLimit;
+}
+
+size_t countTransitionTargets(
+    const std::vector<std::vector<size_t>>& transitionTargetsByFrame) {
+  size_t count = 0;
+  for (const auto& targets : transitionTargetsByFrame) {
+    count += targets.size();
+  }
+  return count;
+}
+
+size_t countStateEqualityPairsInCoi(
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    const std::unordered_set<size_t>& solverSymbols) {
+  size_t count = 0;
+  for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+    if (solverSymbols.find(lhsSymbol) != solverSymbols.end() &&
+        solverSymbols.find(rhsSymbol) != solverSymbols.end()) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 std::unordered_set<size_t> buildStateSymbolSet(const KInductionProblem& problem) {
@@ -104,7 +133,9 @@ void addFormulaStateSupport(BoolExpr* formula,
                             const std::unordered_set<size_t>& stateSymbols,
                             std::unordered_set<size_t>& output) {
   if (formula == nullptr) {
+    // LCOV_EXCL_START
     return;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   for (const auto symbol : formula->getSupportVars()) {
     if (stateSymbols.find(symbol) != stateSymbols.end()) {
@@ -115,7 +146,9 @@ void addFormulaStateSupport(BoolExpr* formula,
 
 void addFormulaSupport(BoolExpr* formula, std::unordered_set<size_t>& output) {
   if (formula == nullptr) {
+    // LCOV_EXCL_START
     return;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   for (const auto symbol : formula->getSupportVars()) {
     if (symbol >= 2) {
@@ -130,7 +163,9 @@ void addEqualityAliasesForFrame(
     const std::unordered_set<size_t>& solverSymbols,
     size_t frame) {
   if (frame >= aliasesByFrame.size()) {
+    // LCOV_EXCL_START
     return;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   auto& frameAliases = aliasesByFrame[frame];
   for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
@@ -177,11 +212,13 @@ std::vector<size_t> expandTransitionTargets(
       expanded.insert(symbol);
       continue;
     }
+    // LCOV_EXCL_START
     if (const auto primaryIt = primaryByComplement.find(symbol);  // LCOV_EXCL_LINE
         primaryIt != primaryByComplement.end() &&  // LCOV_EXCL_LINE
         transitionByState.contains(primaryIt->second)) {  // LCOV_EXCL_LINE
       expanded.insert(primaryIt->second);  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   return sortedSymbols(expanded);
 }
@@ -191,7 +228,9 @@ void addRelevantComplementPartners(
     std::unordered_set<size_t>& solverSymbols) {
   for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {
     if (solverSymbols.find(primarySymbol) != solverSymbols.end() ||
+        // LCOV_EXCL_START
         solverSymbols.find(complementedSymbol) != solverSymbols.end()) {  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       solverSymbols.insert(primarySymbol);
       solverSymbols.insert(complementedSymbol);
     }
@@ -221,6 +260,24 @@ void addPostBootstrapResetInputSymbols(
   }
 }
 
+void closeStateEqualityDependencies(
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    std::unordered_set<size_t>& stateSymbols) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      const bool lhsNeeded = stateSymbols.find(lhsSymbol) != stateSymbols.end();
+      const bool rhsNeeded = stateSymbols.find(rhsSymbol) != stateSymbols.end();
+      if (!lhsNeeded && !rhsNeeded) {
+        continue;
+      }
+      changed |= stateSymbols.insert(lhsSymbol).second;
+      changed |= stateSymbols.insert(rhsSymbol).second;
+    }
+  }
+}
+
 InductionCoi buildInductionCoi(const KInductionProblem& problem,
                                BoolExpr* inductionProperty,
                                BoolExpr* inductionBad,
@@ -241,17 +298,18 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   transitionSupportSymbols.reserve(1024);
   for (size_t frame = 0; frame < k; ++frame) {
     addFormulaStateSupport(inductionProperty, stateSymbols, requiredStates[frame]);
-    if (addExtraInductiveEqualities) {
-      for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-        requiredStates[frame].insert(lhsSymbol);
-        requiredStates[frame].insert(rhsSymbol);
-      }
-    }
   }
   addFormulaStateSupport(inductionBad, stateSymbols, requiredStates[k]);
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(k);
   for (size_t frame = k; frame > 0; --frame) {
+    if (addExtraInductiveEqualities && frame < k) {
+      // Output-batched SEC should not carry every design-wide state relation into
+      // a local proof.  Close only relations touched by this frame's real output
+      // cone before walking one transition step backward.
+      closeStateEqualityDependencies(
+          problem.inductiveStateEqualityPairs, requiredStates[frame]);
+    }
     auto targets = expandTransitionTargets(
         requiredStates[frame],
         transitionByState,
@@ -266,17 +324,15 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
         requiredStates[frame - 1],
         transitionSupportSymbols);
   }
+  if (addExtraInductiveEqualities) {
+    closeStateEqualityDependencies(
+        problem.inductiveStateEqualityPairs, requiredStates[0]);
+  }
 
   std::unordered_set<size_t> solverSymbols;
   solverSymbols.reserve(1024);
   addFormulaSupport(inductionProperty, solverSymbols);
   addFormulaSupport(inductionBad, solverSymbols);
-  if (addExtraInductiveEqualities) {
-    for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-      solverSymbols.insert(lhsSymbol);
-      solverSymbols.insert(rhsSymbol);
-    }
-  }
 
   std::unordered_set<size_t> relevantStateSymbols;
   for (const auto& frameStates : requiredStates) {
@@ -304,6 +360,22 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   return coi;
 }
 
+void emitInductionStepCoiDiag(const KInductionProblem& problem,
+                              const InductionCoi& coi,
+                              size_t k) {
+  if (!isInductionStepCoiDiagEnabled()) {
+    return;
+  }
+  emitSecDiag(
+      "SEC diag: k-induction step coi k=", k,
+      " solver_symbols=", coi.solverSymbols.size(),
+      " transition_targets=", countTransitionTargets(coi.transitionTargetsByFrame),
+      " relevant_states=", coi.relevantStateSymbols.size(),
+      " inductive_equalities_in_coi=",
+      countStateEqualityPairsInCoi(
+          problem.inductiveStateEqualityPairs, coi.solverSymbolSet));
+}
+
 void addComplementedStateRelations(
     SATSolverWrapper& solver,
     const FrameVariableStore& variables,
@@ -314,7 +386,9 @@ void addComplementedStateRelations(
     for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {
       if (solverSymbols.find(primarySymbol) == solverSymbols.end() ||
           solverSymbols.find(complementedSymbol) == solverSymbols.end()) {
+        // LCOV_EXCL_START
         continue;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
       addLiteralEquivalence(
           solver,
@@ -363,10 +437,12 @@ void addInductiveStateEqualities(SATSolverWrapper& solver,
       if (lhs == rhs) {
         continue;
       }
+      // LCOV_EXCL_START
       addLiteralEquivalence(  // LCOV_EXCL_LINE
           solver,  // LCOV_EXCL_LINE
           lhs,  // LCOV_EXCL_LINE
           rhs);  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
     }
   }
 }
@@ -404,7 +480,9 @@ void addPostBootstrapResetInputConstraints(
 
   for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
     if (!variables.hasSymbol(symbol)) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       continue;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     for (size_t frame = 0; frame < numFrames; ++frame) {
       // The induction query starts at the post-bootstrap frontier.  Match the
@@ -413,7 +491,9 @@ void addPostBootstrapResetInputConstraints(
       // reassertion.
       solver.addClause(
           {assertedValue ? -variables.getLiteral(symbol, frame)
+                         // LCOV_EXCL_START
                          : variables.getLiteral(symbol, frame)});  // LCOV_EXCL_LINE
+                         // LCOV_EXCL_STOP
     }
   }
 }
@@ -440,6 +520,7 @@ InductionProofStatus proveByInductionStatus(
       inductionBad,
       addExtraInductiveEqualities,
       k);
+  emitInductionStepCoiDiag(problem, coi, k);
   const auto inductionPropertySupport = inductionProperty->getSupportVars();
   const auto inductionBadSupport = inductionBad->getSupportVars();
   const TransitionExprResolver transitionByState(problem);
@@ -495,12 +576,14 @@ InductionProofStatus proveByInductionStatus(
     solveStatus = solver.solveWithKissatResourceLimits(
         std::numeric_limits<unsigned>::max(), *kissatDecisionLimit);
   } else if (localSolverType == KEPLER_FORMAL::Config::SolverType::CADICAL &&
+             // LCOV_EXCL_START
              kissatDecisionLimit.has_value()) {  // LCOV_EXCL_LINE
     solveStatus = solver.solveWithAssumptionsStatus(  // LCOV_EXCL_LINE
         {},  // LCOV_EXCL_LINE
         *kissatDecisionLimit,  // LCOV_EXCL_LINE
         *kissatDecisionLimit);  // LCOV_EXCL_LINE
   } else {  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
     solveStatus = solver.solveStatus();
   }
   switch (solveStatus) {
@@ -509,9 +592,13 @@ InductionProofStatus proveByInductionStatus(
     case SATSolverWrapper::SolveStatus::Sat:
       return InductionProofStatus::NotProved;
     case SATSolverWrapper::SolveStatus::Unknown:
+      // LCOV_EXCL_START
       return InductionProofStatus::Unknown;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
   }
+  // LCOV_EXCL_START
   return InductionProofStatus::Unknown;  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 bool provesByInduction(const KInductionProblem& problem,

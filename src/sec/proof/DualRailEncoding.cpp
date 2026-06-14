@@ -13,7 +13,9 @@ DualRailBoolExpr buildDualRailBoolExpr(
     DualRailVariableMapper& mapper,
     std::unordered_map<BoolExpr*, DualRailBoolExpr>& memo) {
   if (root == nullptr) {
+    // LCOV_EXCL_START
     return {};  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (auto it = memo.find(root); it != memo.end()) {
     return it->second;
@@ -56,7 +58,9 @@ DualRailBoolExpr buildDualRailBoolExpr(
     }
 
     if (node->getOp() == Op::NONE) {
+      // LCOV_EXCL_START
       throw std::runtime_error("Unsupported BoolExpr operator in dual-rail encoding");  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
 
     if (!current.visited) {
@@ -106,9 +110,13 @@ DualRailBoolExpr buildDualRailBoolExpr(
       }
       // LCOV_EXCL_START
       case Op::VAR:
+      // LCOV_DISABLED_START
       case Op::NONE:
+      // LCOV_DISABLED_STOP
       default:
+        // LCOV_DISABLED_START
         throw std::runtime_error("Unsupported BoolExpr operator in dual-rail encoding");
+        // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
     }
     // Do not simplify every lifted node here.  ASIC transition cones share

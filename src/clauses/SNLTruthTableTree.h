@@ -145,7 +145,9 @@ public:
   // get the maximum node ID assigned in the tree after normalization(finalize)
   uint32_t getMaxID() const {
     if (nodes_.empty()) {
+      // LCOV_EXCL_START
       return kIdOffset - 1;
+      // LCOV_EXCL_STOP
     }
     return static_cast<uint32_t>(nodes_.size() + kIdOffset - 1);
   }

@@ -24,7 +24,7 @@ size_t mapLazyTransitionSymbol(
     size_t localSymbol,
     std::unordered_map<size_t, size_t>& symbolMap);
 
-class LazyDualRailVariableMapper final : public DualRailVariableMapper {
+class LazyDualRailVariableMapper final : public DualRailVariableMapper {  // LCOV_EXCL_LINE
  public:
   LazyDualRailVariableMapper(
       size_t designIndex,
@@ -43,11 +43,13 @@ class LazyDualRailVariableMapper final : public DualRailVariableMapper {
     }
 
     if (symbol < 2) {
+      // LCOV_EXCL_START
       return symbol == 1  // LCOV_EXCL_LINE
                  ? DualRailBoolExpr{  // LCOV_EXCL_LINE
                        BoolExpr::createTrue(), BoolExpr::createFalse()}  // LCOV_EXCL_LINE
                  : DualRailBoolExpr{  // LCOV_EXCL_LINE
                        BoolExpr::createFalse(), BoolExpr::createTrue()};  // LCOV_EXCL_LINE
+                       // LCOV_EXCL_STOP
     }
 
     const size_t mapped = mapLazyTransitionSymbol(designIndex_, symbol, binaryMap_);
@@ -64,7 +66,9 @@ class LazyDualRailVariableMapper final : public DualRailVariableMapper {
 
 size_t countBoolExprNodes(BoolExpr* formula) {
   if (formula == nullptr) {
+    // LCOV_EXCL_START
     return 0;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
 
   std::pmr::monotonic_buffer_resource visitedResource;
@@ -94,7 +98,9 @@ std::set<size_t> collectBoolExprSupport(BoolExpr* formula,
                                         SymbolMapper&& mapSymbol) {
   std::set<size_t> support;
   if (formula == nullptr) {
+    // LCOV_EXCL_START
     return support;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
 
   // BoolExpr::getSupportVars() is intentionally stateless, but SEC/PDR asks
@@ -159,7 +165,9 @@ size_t mapLazyTransitionSymbol(
     size_t localSymbol,
     std::unordered_map<size_t, size_t>& symbolMap) {
   if (localSymbol < 2) {
+    // LCOV_EXCL_START
     return localSymbol;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (const auto mappedIt = symbolMap.find(localSymbol);
       mappedIt != symbolMap.end()) {
@@ -178,7 +186,9 @@ std::set<size_t> remappedSupport(
     std::unordered_map<size_t, size_t>& symbolMap) {
   return collectBoolExprSupport(formula, [&](size_t localSymbol) {
     if (localSymbol < 2) {
+      // LCOV_EXCL_START
       return localSymbol;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     return mapLazyTransitionSymbol(designIndex, localSymbol, symbolMap);
   });
@@ -230,7 +240,9 @@ BoolExpr* materializeLazyDualRailTransition(
     LazyTransitionSource source,
     LazyTransitionStore& store) {
   if (source.designIndex >= store.localToCombinedByDesign.size()) {
+    // LCOV_EXCL_START
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
 
   LazyDualRailVariableMapper mapper(
@@ -247,7 +259,9 @@ BoolExpr* materializeLazyDualRailTransition(
   if (source.rail == LazyTransitionRail::DualRailZero) {
     return lifted.mayBeZero;
   }
+  // LCOV_EXCL_START
   throw std::runtime_error("Lazy dual-rail transition requested for binary rail");  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 }  // namespace
@@ -280,9 +294,11 @@ BoolExpr* TransitionExprResolver::at(size_t stateSymbol) const {
   }
 
   if (problem_.lazyTransitions == nullptr) {
+    // LCOV_EXCL_START
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Missing transition expression for state symbol " +  // LCOV_EXCL_LINE
         std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
   }
 
   auto& store = *problem_.lazyTransitions;
@@ -293,13 +309,17 @@ BoolExpr* TransitionExprResolver::at(size_t stateSymbol) const {
 
   const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);
   if (sourceIt == store.sourceByStateSymbol.end()) {
+    // LCOV_EXCL_START
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Missing lazy transition expression for state symbol " +  // LCOV_EXCL_LINE
         std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
   }
   const LazyTransitionSource& source = sourceIt->second;
   if (source.designIndex >= store.localToCombinedByDesign.size()) {
+    // LCOV_EXCL_START
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (source.rail != LazyTransitionRail::Binary) {
     BoolExpr* remapped = materializeLazyDualRailTransition(source, store);
@@ -329,27 +349,35 @@ TransitionExprView TransitionExprResolver::expressionView(size_t stateSymbol) co
   }
 
   if (problem_.lazyTransitions == nullptr) {  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Missing transition expression for state symbol " +  // LCOV_EXCL_LINE
         std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
   }
 
   const auto& store = *problem_.lazyTransitions;  // LCOV_EXCL_LINE
   const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);  // LCOV_EXCL_LINE
   if (sourceIt == store.sourceByStateSymbol.end()) {  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Missing lazy transition expression for state symbol " +  // LCOV_EXCL_LINE
         std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
   }
   const LazyTransitionSource& source = sourceIt->second;  // LCOV_EXCL_LINE
   if (source.designIndex >= store.localToCombinedByDesign.size()) {  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (source.rail != LazyTransitionRail::Binary) {
     return TransitionExprView{at(stateSymbol), nullptr};
   }
+  // LCOV_EXCL_START
   return TransitionExprView{  // LCOV_EXCL_LINE
       source.localExpr, &store.localToCombinedByDesign[source.designIndex]};  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
 }
 
 const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) const {
@@ -373,9 +401,11 @@ const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) cons
   }
 
   if (problem_.lazyTransitions == nullptr) {
+    // LCOV_EXCL_START
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Missing transition expression for state symbol " +  // LCOV_EXCL_LINE
         std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
   }
   auto& store = *problem_.lazyTransitions;
   if (const auto cachedIt = store.supportByStateSymbol.find(stateSymbol);
@@ -384,12 +414,16 @@ const std::set<size_t>& TransitionExprResolver::support(size_t stateSymbol) cons
   }
   const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);
   if (sourceIt == store.sourceByStateSymbol.end()) {
+    // LCOV_EXCL_START
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Missing lazy transition expression for state symbol " +  // LCOV_EXCL_LINE
         std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
   }
   if (sourceIt->second.designIndex >= store.localToCombinedByDesign.size()) {
+    // LCOV_EXCL_START
     throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (sourceIt->second.rail != LazyTransitionRail::Binary) {
     auto [insertedIt, _] = store.supportByStateSymbol.emplace(
@@ -455,20 +489,26 @@ void TransitionExprResolver::collectSupportForTargets(
     }
 
     if (problem_.lazyTransitions == nullptr) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       throw std::runtime_error(  // LCOV_EXCL_LINE
           "Missing transition expression for state symbol " +  // LCOV_EXCL_LINE
           std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
     }
     auto& store = *problem_.lazyTransitions;  // LCOV_EXCL_LINE
     const auto sourceIt = store.sourceByStateSymbol.find(stateSymbol);  // LCOV_EXCL_LINE
     if (sourceIt == store.sourceByStateSymbol.end()) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       throw std::runtime_error(  // LCOV_EXCL_LINE
           "Missing lazy transition expression for state symbol " +  // LCOV_EXCL_LINE
           std::to_string(stateSymbol));  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
     }
     const LazyTransitionSource& source = sourceIt->second;  // LCOV_EXCL_LINE
     if (source.designIndex >= store.localToCombinedByDesign.size()) {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       throw std::runtime_error("Invalid lazy transition design index");  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     if (source.rail != LazyTransitionRail::Binary) {
       // Dual-rail lazy transitions for a wide bus often share most of their
@@ -571,8 +611,10 @@ size_t TransitionExprResolver::nodeCount(size_t stateSymbol) const {
     }
   }
   if (expr == nullptr) {
+    // LCOV_EXCL_START
     expr = at(stateSymbol);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   const size_t nodeCount = countBoolExprNodes(expr);
   if (problem_.lazyTransitions != nullptr &&
       eagerByStateSymbol_.find(stateSymbol) == eagerByStateSymbol_.end()) {

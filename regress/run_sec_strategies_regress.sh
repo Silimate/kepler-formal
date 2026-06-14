@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different] [max-k=<n>] [compact] [engine=<name>] [sec-x-mode=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
   exit 2
 fi
 
@@ -16,14 +16,17 @@ config_path="$4"
 expectation=""
 max_k_override=""
 compact_mode=""
-sec_x_mode="${SEC_X_MODE:-}"
+# The CLI default is dual-rail SEC.  This regression helper keeps the
+# historical binary workflow behavior unless a caller explicitly opts into
+# dual_rail_steady, which prevents old regressions from silently changing mode.
+sec_encoding="${SEC_ENCODING:-binary}"
 # By default the helper is useful for local all-engine smoke checks.  CI passes
 # engine=<name> from the split regress workflows so each job owns one strategy.
 engines=(k_induction imc pdr)
 
 for option in "${@:5}"; do
   case "${option}" in
-    expect-equivalent|expect-different)
+    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage)
       expectation="${option}"
       ;;
     compact)
@@ -41,8 +44,8 @@ for option in "${@:5}"; do
           ;;
       esac
       ;;
-    sec-x-mode=*|x-mode=*)
-      sec_x_mode="${option#*=}"
+    sec-encoding=*|encoding=*)
+      sec_encoding="${option#*=}"
       ;;
     max-k=*)
       max_k_override="${option#max-k=}"
@@ -58,11 +61,11 @@ for option in "${@:5}"; do
   esac
 done
 
-case "${sec_x_mode}" in
-  ""|binary|default|dual_rail_steady)
+case "${sec_encoding}" in
+  ""|binary|dual_rail_steady)
     ;;
   *)
-    echo "Invalid SEC X mode override: ${sec_x_mode}" >&2
+    echo "Invalid SEC encoding override: ${sec_encoding}" >&2
     exit 2
     ;;
 esac
@@ -90,7 +93,7 @@ run_engine() {
     awk -v max_k_override="${max_k_override}" -v compact_mode="${compact_mode}" '
       /^[[:space:]]*verification:/ { next }
       /^[[:space:]]*sec_engine:/ { next }
-      /^[[:space:]]*sec_x_mode:/ { next }
+      /^[[:space:]]*sec_encoding:/ { next }
       /^[[:space:]]*max_k:/ { next }
       /^[[:space:]]*compact_mode:/ {
         if (compact_mode != "") {
@@ -108,8 +111,8 @@ run_engine() {
       echo
       echo "verification: sec"
       echo "sec_engine: ${engine}"
-      if [[ -n "${sec_x_mode}" ]]; then
-        echo "sec_x_mode: ${sec_x_mode}"
+      if [[ -n "${sec_encoding}" ]]; then
+        echo "sec_encoding: ${sec_encoding}"
       fi
       if [[ -n "${max_k_override}" ]]; then
         echo "max_k: ${max_k_override}"
@@ -125,12 +128,7 @@ run_engine() {
     # completion.  Large SEC/PDR cases can run for minutes between solver
     # decisions, so emit a lightweight heartbeat to keep GitHub logs obviously
     # alive and to make a true hang easier to distinguish from solver work.
-    if [[ "${expectation}" == "expect-different" ]]; then
-      KEPLER_SEC_KI_FRONTIER_FIRST=1 \
-        "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
-    else
-      "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
-    fi
+    "${kepler_formal_bin}" --config "${tmp_config}" > "${stdout_log}" 2>&1 &
     local kepler_pid=$!
     tail -n +1 -f "${stdout_log}" &
     local tail_pid=$!
@@ -150,14 +148,49 @@ run_engine() {
     sleep 1
     kill "${tail_pid}" 2>/dev/null || true
     wait "${tail_pid}" 2>/dev/null || true
+    if [[ "${expectation}" == "expect-different" ]]; then
+      if grep -q "SEC found a counterexample" "${stdout_log}"; then
+        grep "SEC found a counterexample" "${stdout_log}"
+        return 0
+      fi
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      # Negative SEC regressions must be witnessed by the selected SEC engine.
+      # A partial-coverage proof or an LEC-only structural mismatch is not
+      # enough for these workflows.
+      echo "Expected SEC counterexample for ${test_name} (${engine})" >&2
+      return 1
+    fi
+
+    # Treat any discovered counterexample as a hard failure unless the caller
+    # explicitly asked for one.  This keeps coverage-only checks from masking a
+    # real SEC mismatch.
+    if grep -q "SEC found a counterexample" "${stdout_log}"; then
+      echo "Unexpected SEC counterexample for ${test_name} (${engine})" >&2
+      return 1
+    fi
+
+    if [[ "${expectation}" == "expect-unsupported" ]]; then
+      grep "SEC cannot run on this design pair" "${stdout_log}"
+      return 0
+    fi
+
+    if [[ "${expectation}" == "expect-full-coverage" ]]; then
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      grep "SEC output coverage: 100.00%" "${stdout_log}"
+      grep "SEC proved equivalence" "${stdout_log}"
+      return 0
+    fi
+
     if [[ "${kepler_status}" -ne 0 ]]; then
       return "${kepler_status}"
     fi
 
     if [[ "${expectation}" == "expect-equivalent" ]]; then
       grep "SEC proved equivalence" "${stdout_log}"
-    elif [[ "${expectation}" == "expect-different" ]]; then
-      grep "SEC found a counterexample" "${stdout_log}"
     else
       grep -E "SEC proved equivalence|SEC found a counterexample" "${stdout_log}"
     fi

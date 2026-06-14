@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
-      sec_x_mode:
+      sec_encoding:
         required: false
         type: string
-        default: ""
+        default: "binary"
 
 env:
   SEC_ENGINE: imc
-  SEC_X_MODE: ${{ inputs.sec_x_mode }}
+  SEC_ENCODING: ${{ inputs.sec_encoding || 'binary' }}
 
 jobs:
   build:
@@ -70,7 +70,8 @@ jobs:
           objects/asap7/aes/base/4_rsz_lec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           sky130hd_gcd \
           "${{github.workspace}}/kepler-formal-regress/sky130hd_gcd" \
@@ -78,7 +79,8 @@ jobs:
           objects/sky130hd/gcd/base/4_rsz_lec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           nangate45_black_parrot \
           "${{github.workspace}}/kepler-formal-regress/nangate45_black_parrot" \
@@ -86,7 +88,8 @@ jobs:
           objects/nangate45/bp/base/4_rsz_lec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           ihp_sg13g2_i2c_gpio_expander \
           "${{github.workspace}}/kepler-formal-regress/ihp-sg13g2_i2c-gpio-expander" \
@@ -94,7 +97,8 @@ jobs:
           objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           nangate45_dynamic_node \
           "${{github.workspace}}/kepler-formal-examples/nangate45_dynamic_node" \
@@ -102,7 +106,8 @@ jobs:
           6_final_sec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           asap7_jpeg_lvt \
           "${{github.workspace}}/kepler-formal-examples/asap7_jpeg_lvt" \
@@ -110,7 +115,8 @@ jobs:
           6_final_sec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           sky130hs_ibex \
           "${{github.workspace}}/kepler-formal-examples/sky130hs_ibex" \
@@ -118,7 +124,17 @@ jobs:
           6_final_sec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
+        bash regress/run_sec_strategies_regress.sh \
+          nangate45_ibex \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_ibex" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           nangate45_swerv \
           "${{github.workspace}}/kepler-formal-examples/nangate45_swerv" \
@@ -126,7 +142,8 @@ jobs:
           6_final_sec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           nangate45_ariane136 \
           "${{github.workspace}}/kepler-formal-examples/nangate45_ariane136" \
@@ -134,7 +151,8 @@ jobs:
           6_final_sec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           asap7_ethmac \
           "${{github.workspace}}/kepler-formal-examples/asap7_ethmac" \
@@ -142,7 +160,38 @@ jobs:
           6_final_sec_test.yml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
+        bash regress/run_sec_strategies_regress.sh \
+          asap7_mock_alu \
+          "${{github.workspace}}/kepler-formal-examples/asap7_mock-alu" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
+        # The mock CPU FIFO reset-domain relations are expected to prove in both binary and dual-rail encodings.
+        bash regress/run_sec_strategies_regress.sh \
+          asap7_mock_cpu \
+          "${{github.workspace}}/kepler-formal-examples/asap7_mock_cpu" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
+        # BP final has resetless FIFO state. Binary SEC intentionally drops
+        # that surface, so this regression always exercises dual-rail coverage.
+        bash regress/run_sec_strategies_regress.sh \
+          nangate45_black_parrot_sec_final \
+          "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-full-coverage \
+          compact \
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=dual_rail_steady
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}
@@ -154,7 +203,8 @@ jobs:
           regress/tinyrocket_naja_if/config.yaml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           tinyrocket_verilog \
           "${{github.workspace}}" \
@@ -162,7 +212,8 @@ jobs:
           regress/tinyrocket_verilog/config.yaml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
 
     - name: Install najaeda
       run: pip install najaeda
@@ -172,18 +223,6 @@ jobs:
       run: |
         python edit.py
         python extract_tinyrocket_csrfile_sec.py
-
-    - name: Run TinyRocket CSRFile SEC counterexample
-      working-directory: ${{github.workspace}}
-      run: |
-        bash regress/run_sec_strategies_regress.sh \
-          tinyrocket_csrfile_sec \
-          "${{github.workspace}}/example" \
-          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
-          test_config_verilog_tinyrocket_csrfile_sec.yaml \
-          expect-different \
-          compact \
-          engine=${{ env.SEC_ENGINE }}
 
     - name: Run TinyRocket SEC self-check
       working-directory: ${{github.workspace}}
@@ -195,22 +234,38 @@ jobs:
           test_config_verilog_tinyrocket_sec.yaml \
           expect-equivalent \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
+        bash regress/run_sec_strategies_regress.sh \
+          tinyrocket_csrfile_sec \
+          "${{github.workspace}}/example" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          test_config_verilog_tinyrocket_csrfile_sec.yaml \
+          expect-different \
+          compact \
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
 
     - name: Run TinyRocket edited SEC regressions
       working-directory: ${{github.workspace}}
       run: |
         bash regress/run_sec_strategies_regress.sh \
-          tinyrocket_naja_if_edited \
+          tinyrocket_naja_if_edited_sec_probe \
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
-          regress/tinyrocket_naja_if_edited/config.yaml \
+          regress/tinyrocket_naja_if_edited_sec_probe/config.yaml \
+          expect-different \
+          max-k=1 \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
-          tinyrocket_verilog_edited \
+          tinyrocket_verilog_edited_sec_probe \
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
-          regress/tinyrocket_verilog_edited/config.yaml \
+          regress/tinyrocket_verilog_edited_sec_probe/config.yaml \
+          expect-different \
+          max-k=1 \
           compact \
-          engine=${{ env.SEC_ENGINE }}
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=${{ env.SEC_ENCODING }}
