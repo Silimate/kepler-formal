@@ -16,7 +16,7 @@
 
 namespace KEPLER_FORMAL {
 
-class BuildPrimaryOutputClauses {
+class BuildPrimaryOutputClauses {  // LCOV_EXCL_LINE
  public:
   using PathComponentID = uint64_t;
   using PathNameIDs = std::vector<PathComponentID>;
@@ -145,7 +145,7 @@ class BuildPrimaryOutputClauses {
 
   std::unordered_map<std::pair<naja::NL::NLID::DesignObjectID, size_t>, naja::NL::SNLTruthTable, hash> ttCache_;
 
-  struct CachedModel {
+  struct CachedModel {  // LCOV_EXCL_LINE
     CachedModel() : analyzedPIs(false), analyzedPOs(false) {}
     std::unordered_set<naja::NL::SNLBitTerm*> PIs;
     bool analyzedPIs = false;

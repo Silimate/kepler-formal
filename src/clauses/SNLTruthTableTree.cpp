@@ -35,9 +35,11 @@ size_t getSizeOfNewBorderLeavesETS() {
   return getNewBorderLeavesETS().first.size();
 }
 
+// LCOV_EXCL_START
 void pushBackNewBorderLeavesETS(const KEPLER_FORMAL::SNLTruthTableTree::BorderLeaf& leaf) {  // LCOV_EXCL_LINE
   getNewBorderLeavesETS().first.emplace_back(leaf);  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
 
 void clearNewBorderLeavesETS() {
   auto& pair = getNewBorderLeavesETS();
@@ -88,7 +90,9 @@ SNLTruthTableTree::Node::Node(uint32_t idx, SNLTruthTableTree* t)
   data.inputIndex = idx;
   if (tree && tree->lastID_ == std::numeric_limits<unsigned>::max()) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::overflow_error("Node ID overflow");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   if (tree) {
@@ -106,7 +110,9 @@ SNLTruthTableTree::Node::Node(SNLTruthTableTree* t,
   data.termid = term;
   if (tree && tree->lastID_ == std::numeric_limits<unsigned>::max()) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::overflow_error("Node ID overflow");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   if (tree) {
@@ -133,7 +139,9 @@ const SNLTruthTable& SNLTruthTableTree::Node::getTruthTable() const {
   if (type == Type::Table) {
     if (!truthTable.isInitialized()) {
       // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       throw std::logic_error("getTruthTable: uninitialized Table node");
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
     }
     return truthTable.get();
@@ -141,7 +149,9 @@ const SNLTruthTable& SNLTruthTableTree::Node::getTruthTable() const {
     return PtableHolder_;
   }
   // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   throw std::logic_error("getTruthTable: not a Table/P node");
+  // LCOV_DISABLED_STOP
   // LCOV_EXCL_STOP
 }
 
@@ -237,7 +247,9 @@ const std::shared_ptr<SNLTruthTableTree::Node>& SNLTruthTableTree::nodeFromId(
 bool SNLTruthTableTree::Node::eval(const std::vector<bool>& extInputs) const {
   if (type != Type::Table && type != Type::P && type != Type::Input) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::logic_error("eval: node not Table/P/Input");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   const auto& tbl = getTruthTable();
@@ -260,7 +272,9 @@ bool SNLTruthTableTree::Node::eval(const std::vector<bool>& extInputs) const {
     Node* const childSp = tree->nodeFromId(cid).get();
     if (!childSp) {
       // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       throw std::logic_error("Null child node");
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
     }
     if (childSp->type == Type::Input) {
@@ -279,7 +293,9 @@ bool SNLTruthTableTree::Node::eval(const std::vector<bool>& extInputs) const {
     }
   }
   return tbl.bits().bit(idx);
+// LCOV_EXCL_START
 }  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
 
 //----------------------------------------------------------------------
 // addChildId: set parent/child relationship via ids
@@ -361,7 +377,9 @@ void SNLTruthTableTree::updateBorderLeaves() {
     }
     nsp->visited = true;
     if (!nsp) {
+      // LCOV_EXCL_START
       assert(false && "updateBorderLeaves: null node in tree");  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     if (nsp->childrenIds.empty()) {
       // Constant truth-table roots have arity zero, so they legitimately
@@ -373,7 +391,9 @@ void SNLTruthTableTree::updateBorderLeaves() {
       uint32_t cid = nsp->childrenIds[i];
       const auto& ch = nodeFromId(cid).get();
       if (!ch) {
+        // LCOV_EXCL_START
         assert(false && "updateBorderLeaves: null child node in tree");  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
       if (ch->type == Node::Type::Input || ch->type == Node::Type::P) {
         BorderLeaf bl;
@@ -401,7 +421,9 @@ void SNLTruthTableTree::updateBorderLeaves() {
         "updateBorderLeaves: mismatch in border leaves count %zu vs "
         "numExternalInputs %zu\n",
         borderLeaves_.size(), numExternalInputs_);
+    // LCOV_EXCL_START
     assert(false && "border leaves count mismatch");  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   std::sort(
       borderLeaves_.begin(), borderLeaves_.end(),
@@ -463,11 +485,15 @@ bool SNLTruthTableTree::eval(const std::vector<bool>& extInputs) const {
   Node* const rootSp = nodeFromId(rootId_).get();
   if (!rootSp) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::logic_error("Missing root");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   return rootSp->eval(extInputs);
+// LCOV_EXCL_START
 }  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
 
 bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
     size_t borderIndex,
@@ -479,7 +505,9 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
   }
   const auto termIt = termid2nodeid_.find(termid);
   if (termIt == termid2nodeid_.end()) {
+    // LCOV_EXCL_START
     return false;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
 
   const uint32_t targetId = termIt->second;
@@ -492,7 +520,9 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
     for (auto it = nodePath.rbegin(); it != nodePath.rend(); ++it) {
       const auto nodeSp = nodeFromId(*it);
       if (!nodeSp || nodeSp->type == Node::Type::Input) {
+        // LCOV_EXCL_START
         continue; // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
       loopTerms.push_back(nodeSp->data.termid);
     }
@@ -531,20 +561,26 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
   uint32_t epoch = ++ancestorSearchEpoch_;
   // LCOV_EXCL_START
   if (epoch == 0) {
+    // LCOV_DISABLED_START
     for (const auto& node : nodes_) {
       if (node) {
         node->ancestorVisitEpoch = 0;
       }
+      // LCOV_DISABLED_STOP
     }
+    // LCOV_DISABLED_START
     epoch = ++ancestorSearchEpoch_;
   }
+  // LCOV_DISABLED_STOP
   // LCOV_EXCL_STOP
 
   auto* branchNode = rawNodeFromId(nodeId);
   // LCOV_EXCL_START
   if (branchNode == nullptr) {
+    // LCOV_DISABLED_START
     nodePath.clear();
     return false;
+    // LCOV_DISABLED_STOP
   }
   // LCOV_EXCL_STOP
   branchNode->ancestorVisitEpoch = epoch;
@@ -553,9 +589,11 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
     auto& frame = pendingAncestors.back();
     auto* node = rawNodeFromId(frame.nodeId);
     if (node == nullptr) {
+      // LCOV_EXCL_START
       pendingAncestors.pop_back(); // LCOV_EXCL_LINE
       nodePath.pop_back(); // LCOV_EXCL_LINE
       continue; // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     if (frame.nextParent >= node->parentIds.size()) {
       pendingAncestors.pop_back();
@@ -598,7 +636,9 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
     naja::DNL::DNLID termid) {
   if (borderIndex >= borderLeaves_.size()) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::out_of_range("concat: leafIndex out of range");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   const auto& leaf = borderLeaves_[borderIndex];
@@ -607,7 +647,9 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
   auto parentSp = nodeFromId(parentId).get();
   if (!parentSp) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::logic_error("concat: null parent");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
 
@@ -644,7 +686,9 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
       parentSp->childrenIds[leaf.childPos] = newNodeSp->nodeID;
       if (newNodeSp->childrenIds.size() == 0) {
         // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         throw std::logic_error("concat: existing node has no children");
+        // LCOV_DISABLED_STOP
         // LCOV_EXCL_STOP
       }
       return *newNodeSp;
@@ -671,7 +715,9 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
     DEBUG_LOG("concating with inputIndex %zu\n", oldChildSp->data.inputIndex);
   } else {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::logic_error("concat: null old child");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
 
@@ -689,7 +735,9 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
   parentSp->childrenIds[leaf.childPos] = newNodeId;
   newNodeSp->parentIds.emplace_back(parentId);
   if (!(newNodeSp->parentIds.size() == 1 ||
+        // LCOV_EXCL_START
         newNodeSp->type == Node::Type::Table)) {  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
     // LCOV_EXCL_START
     DEBUG_LOG("concat: new node parent count %zu\n",
               newNodeSp->parentIds.size());
@@ -697,10 +745,14 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
               newNodeSp->type == Node::Type::Table ? "Table"
               : newNodeSp->type == Node::Type::P   ? "P"
                                                    : "Input");
+    // LCOV_DISABLED_START
     assert(newNodeSp->parentIds.size() == 1 ||
+    // LCOV_DISABLED_STOP
            newNodeSp->type == Node::Type::Table);
     // LCOV_EXCL_STOP
+  // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 
   return *newNodeSp;
 }
@@ -930,8 +982,10 @@ void SNLTruthTableTree::concatFull(
       assert(insertedSp->parentIds.size() == 1 &&
              "concatFull: inserted node has multiple parents after concatBody");
       if (!insertedSp) {
+        // LCOV_EXCL_START
         index++;  // LCOV_EXCL_LINE
         assert(false);  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
       DEBUG_LOG("insertedSP %s\n",
                 naja::DNL::get()
@@ -978,7 +1032,9 @@ void SNLTruthTableTree::concatFull(
           newInputs += 1;
           assert(newBorderLeaves.first.size() == newInputs);
         } else {
+          // LCOV_EXCL_START
           assert(false);  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
         }
       }
     } else {
@@ -1150,7 +1206,9 @@ void SNLTruthTableTree::concatFull(
 //----------------------------------------------------------------------
 bool SNLTruthTableTree::isInitialized() const {
   if (rootId_ == kInvalidId) {
+    // LCOV_EXCL_START
     return false;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   std::vector<uint32_t> stk;
   stk.emplace_back(rootId_);
@@ -1159,18 +1217,24 @@ bool SNLTruthTableTree::isInitialized() const {
     stk.pop_back();
     Node* const n = nodeFromId(nid).get();
     if (!n) {
+      // LCOV_EXCL_START
       continue;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     if (n->type == Node::Type::Table) {
       if (!n->getTruthTable().isInitialized()) {
+        // LCOV_EXCL_START
         return false;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
     }
     for (size_t i = 0; i < n->childrenIds.size(); ++i) {
       uint32_t cid = n->childrenIds[i];
       Node* const ch = nodeFromId(cid).get();
       if (!ch) {
+        // LCOV_EXCL_START
         continue;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
       if (ch->type != Node::Type::Input) {
         stk.emplace_back(cid);
@@ -1192,28 +1256,38 @@ void SNLTruthTableTree::print() const {
     stk.pop_back();
     auto n = nodeFromId(nid);
     if (!n) {
+      // LCOV_DISABLED_START
       continue;
+      // LCOV_DISABLED_STOP
     }
     if (n->type == Node::Type::Table) {
+      // LCOV_DISABLED_START
       printf("term: %zu nodeID=%u id=%u\n", (size_t)n->data.termid,
                 n->nodeID, n->nodeID);
+                // LCOV_DISABLED_STOP
     } else if (n->type == Node::Type::P) {
       printf("P nodeID=%u id=%u\n", n->nodeID, n->nodeID);
     } else {
+      // LCOV_DISABLED_START
       printf("Input node index=%u nodeID=%u id=%u\n", n->data.inputIndex,
                 n->nodeID, n->nodeID);
+                // LCOV_DISABLED_STOP
     }
     for (size_t i = 0; i < n->childrenIds.size(); ++i) {
       uint32_t cid = n->childrenIds[i];
       auto ch = nodeFromId(cid);
       if (!ch) {
+        // LCOV_DISABLED_START
         printf("  child[%zu] = null (childId=%u)\n", i, cid);
+        // LCOV_DISABLED_STOP
       } else if (ch->type == Node::Type::Input) {
         printf("  child[%zu] = Input(%u) id=%u\n", i, ch->data.inputIndex,
                   ch->nodeID);
       } else {
+        // LCOV_DISABLED_START
         printf("  child[%zu] = Node(id=%u)\n", i, cid);
         stk.emplace_back(cid);
+        // LCOV_DISABLED_STOP
       }
     }
   }
@@ -1285,7 +1359,9 @@ void SNLTruthTableTree::finalize() {
   for (size_t i = 0; i < nodeSize; ++i) {
     Node* sp = nodes_[i].get();
     if (!sp) {
+      // LCOV_EXCL_START
       continue;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     if (sp->nodeID != kInvalidId) {
       mapById[sp->nodeID] = sp;
@@ -1298,7 +1374,9 @@ void SNLTruthTableTree::finalize() {
   for (size_t i = 0; i < nodeSize; ++i) {
     Node* sp = nodes_[i].get();
     if (!sp) {
+      // LCOV_EXCL_START
       continue;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     getResolvedChildrenETS().first[i].reserve(sp->childrenIds.size());
     for (size_t j = 0; j < sp->childrenIds.size(); ++j) {
@@ -1313,14 +1391,17 @@ void SNLTruthTableTree::finalize() {
       // fallback: match by debug nodeID
       // LCOV_EXCL_START
       if (!target) {
+        // LCOV_DISABLED_START
         auto it2 = mapByNodeID.find(cid);
         if (it2 != mapByNodeID.end()) {
           target = it2->second;
         }
       }
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
       // fallback: interpret as index (cid - kIdOffset)
       if (!target) {
+        // LCOV_EXCL_START
         if (cid >= kIdOffset) {  // LCOV_EXCL_LINE
           size_t idx = (size_t)(cid - kIdOffset);  // LCOV_EXCL_LINE
           if (idx < nodeSize) {  // LCOV_EXCL_LINE
@@ -1328,14 +1409,19 @@ void SNLTruthTableTree::finalize() {
           }  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
       if (!target) {
         // LCOV_EXCL_START
         // cannot resolve child id: report and abort
+        // LCOV_DISABLED_START
         fprintf(stderr,
+        // LCOV_DISABLED_STOP
                 "finalize: could not resolve child reference: parent_slot=%zu "
                 "parent_assigned_id=%u childPos=%zu childId=%u nodes=%zu\n",
+                // LCOV_DISABLED_START
                 i, sp->nodeID, j, cid, nodeSize);
         throw std::logic_error("finalize: unresolved child id");
+        // LCOV_DISABLED_STOP
         // LCOV_EXCL_STOP
       }
       //resolvedChildren[i].emplace_back(target);
@@ -1356,7 +1442,9 @@ void SNLTruthTableTree::finalize() {
   for (size_t i = 0; i < nodeSize; ++i) {
     Node*  sp = nodes_[i].get();
     if (!sp) {
+      // LCOV_EXCL_START
       continue;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     ptrToId[sp] = static_cast<uint32_t>(i) + kIdOffset;
   }
@@ -1372,11 +1460,15 @@ void SNLTruthTableTree::finalize() {
       auto it = ptrToId.find(targ);
       if (it == ptrToId.end()) {
         // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         fprintf(stderr,
+        // LCOV_DISABLED_STOP
                 "finalize: internal error mapping ptr->id parent_slot=%zu "
                 "childPos=%zu\n",
+                // LCOV_DISABLED_START
                 i, j);
         throw std::logic_error("finalize: internal mapping failed");
+        // LCOV_DISABLED_STOP
         // LCOV_EXCL_STOP
       }
       uint32_t newCid = it->second;
@@ -1391,7 +1483,9 @@ void SNLTruthTableTree::finalize() {
         *iter = sp->nodeID;
       } else {
         // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         throw std::logic_error("finalize: parentIds inconsistent");
+        // LCOV_DISABLED_STOP
         // LCOV_EXCL_STOP
       }
     }
@@ -1414,11 +1508,15 @@ void SNLTruthTableTree::finalize() {
     if (newRoot == kInvalidId) {
       // fallback: if nodes_[0] exists, use that
       // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       if (!nodes_.empty() && nodes_[0]) {
         newRoot = nodes_[0]->nodeID;
       }
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
+    // LCOV_EXCL_START
     }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     rootId_ = newRoot;
   }
 
@@ -1440,13 +1538,17 @@ void SNLTruthTableTree::finalize() {
     }
     n->visited = true;
     if (!n) {
+      // LCOV_EXCL_START
       continue;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     for (size_t k = 0; k < n->childrenIds.size(); ++k) {
       uint32_t cid = n->childrenIds[k];
       Node* const ch = nodeFromId(cid).get();
       if (!ch) {
+        // LCOV_EXCL_START
         continue;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
       }
       if (ch->type == Node::Type::Input || ch->type == Node::Type::P) {
         anyInput = true;

@@ -161,9 +161,13 @@ BoolExpr* remapBoolExprVariables(
       }
       // LCOV_EXCL_START
       case Op::VAR:
+      // LCOV_DISABLED_START
       case Op::NONE:
+      // LCOV_DISABLED_STOP
       default:
+        // LCOV_DISABLED_START
         throw std::runtime_error("Unsupported BoolExpr operator in remap");
+        // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
     }
     memo.emplace(node, remapped);
@@ -290,7 +294,9 @@ std::optional<bool> boolFormulaImpliesWithConflictLimit(
     KEPLER_FORMAL::Config::SolverType solverType,
     unsigned conflictLimit) {
   if (conclusion == nullptr) {
+    // LCOV_EXCL_START
     return false;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (isBoolConst(conclusion, true) || isBoolConst(assumptions, false)) {
     return true;
@@ -301,7 +307,9 @@ std::optional<bool> boolFormulaImpliesWithConflictLimit(
       solverType,
       conflictLimit);
   if (status == SATSolverWrapper::SolveStatus::Unknown) {
+    // LCOV_EXCL_START
     return std::nullopt;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   return status == SATSolverWrapper::SolveStatus::Unsat;
 }

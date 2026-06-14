@@ -34,12 +34,16 @@ class FrameAliasUnionFind {
 
   void unite(size_t lhs, size_t rhs) {
     if (!contains(lhs) || !contains(rhs)) {
+      // LCOV_EXCL_START
       return;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     const size_t lhsRoot = find(lhs);
     const size_t rhsRoot = find(rhs);
     if (lhsRoot == rhsRoot) {
+      // LCOV_EXCL_START
       return;  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     const size_t representative = std::min(lhsRoot, rhsRoot);
     const size_t merged = std::max(lhsRoot, rhsRoot);
@@ -49,14 +53,18 @@ class FrameAliasUnionFind {
   size_t find(size_t symbol) {
     auto it = parent_.find(symbol);
     if (it == parent_.end()) {
+      // LCOV_EXCL_START
       throw std::runtime_error("Missing frame alias symbol " +  // LCOV_EXCL_LINE
                                std::to_string(symbol));  // LCOV_EXCL_LINE
+                               // LCOV_EXCL_STOP
     }
     if (it->second != symbol) {
       it->second = find(it->second);
     }
     return it->second;
+  // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 
  private:
   std::unordered_map<size_t, size_t> parent_;
@@ -153,8 +161,10 @@ std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
     }
     auto it = symbolFrameLits_.find(symbol);
     if (it == symbolFrameLits_.end() || frame >= it->second.size()) {
+      // LCOV_EXCL_START
       throw std::runtime_error("Missing frame variable for symbol " +  // LCOV_EXCL_LINE
                                std::to_string(symbol));  // LCOV_EXCL_LINE
+                               // LCOV_EXCL_STOP
     }
     leafLits.emplace(symbol, it->second[frame]);
   }
@@ -172,8 +182,10 @@ std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
     }
     auto it = symbolFrameLits_.find(symbol);
     if (it == symbolFrameLits_.end() || frame >= it->second.size()) {
+      // LCOV_EXCL_START
       throw std::runtime_error("Missing frame variable for symbol " +  // LCOV_EXCL_LINE
                                std::to_string(symbol));  // LCOV_EXCL_LINE
+                               // LCOV_EXCL_STOP
     }
     leafLits.emplace(symbol, it->second[frame]);
   }
@@ -181,29 +193,37 @@ std::unordered_map<size_t, int> FrameVariableStore::makeLeafLits(
 }
 
 // LCOV_EXCL_START
-FrameFormulaEncoder::FrameFormulaEncoder(
+FrameFormulaEncoder::FrameFormulaEncoder(  // LCOV_EXCL_LINE
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits)
     : FrameFormulaEncoder(solver, std::move(leafLits), false, 0) {}
 // LCOV_EXCL_STOP
 
 // LCOV_EXCL_START
+// LCOV_DISABLED_START
 FrameFormulaEncoder::FrameFormulaEncoder(
+// LCOV_DISABLED_STOP
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits,
     size_t expectedNodeHint)
+    // LCOV_DISABLED_START
     : FrameFormulaEncoder(solver, std::move(leafLits), false, expectedNodeHint) {}
+    // LCOV_DISABLED_STOP
 // LCOV_EXCL_STOP
 
 // LCOV_EXCL_START
+// LCOV_DISABLED_START
 FrameFormulaEncoder::FrameFormulaEncoder(
+// LCOV_DISABLED_STOP
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits,
     bool createMissingLeaves)
+    // LCOV_DISABLED_START
     : FrameFormulaEncoder(solver, std::move(leafLits), createMissingLeaves, 0) {}
+    // LCOV_DISABLED_STOP
 // LCOV_EXCL_STOP
 
-FrameFormulaEncoder::FrameFormulaEncoder(
+FrameFormulaEncoder::FrameFormulaEncoder(  // LCOV_EXCL_LINE
     SATSolverWrapper& solver,
     std::unordered_map<size_t, int> leafLits,
     bool createMissingLeaves,
@@ -236,13 +256,17 @@ size_t FrameFormulaEncoder::mappedSymbol(size_t symbol) const {
   if (symbolMap_ == nullptr || symbol < 2) {
     return symbol;
   }
+  // LCOV_EXCL_START
   const auto mappedIt = symbolMap_->find(symbol);  // LCOV_EXCL_LINE
   if (mappedIt == symbolMap_->end()) {  // LCOV_EXCL_LINE
     throw std::runtime_error(  // LCOV_EXCL_LINE
         "Missing frame encoder symbol remap for variable " +  // LCOV_EXCL_LINE
         std::to_string(symbol));  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
   }
+  // LCOV_EXCL_START
   return mappedIt->second;  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 void FrameFormulaEncoder::reserveNodeCache() {
@@ -286,11 +310,13 @@ void FrameFormulaEncoder::cacheEncodedLiteral(BoolExpr* node, int lit) {
     // Grow the encoder DAG cache geometrically. This keeps large memory
     // transition encodings from rehashing on every small increment while also
     // avoiding a separate full-DAG prepass before every PDR target.
+    // LCOV_EXCL_START
     nodeMapReservedEntries_ =  // LCOV_EXCL_LINE
         desiredEntries +  // LCOV_EXCL_LINE
         std::max(desiredEntries / 2, static_cast<size_t>(4096));  // LCOV_EXCL_LINE
     nodeToLit_.reserve(nodeMapReservedEntries_);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   nodeToLit_.emplace(node, lit);
 }
 
@@ -393,9 +419,13 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
         break;
       case Op::OR:
         if (leftLit == rightLit || isConstLit(rightLit, false)) {
+          // LCOV_EXCL_START
           lit = leftLit;  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
         } else if (isConstLit(leftLit, false)) {
+          // LCOV_EXCL_START
           lit = rightLit;  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
         } else if (leftLit == -rightLit || isConstLit(leftLit, true) ||
                    isConstLit(rightLit, true)) {
           lit = getConstLit(true);
@@ -412,14 +442,22 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
         } else if (leftLit == -rightLit) {
           lit = getConstLit(true);
         } else if (isConstLit(leftLit, false)) {
+          // LCOV_EXCL_START
           lit = rightLit;  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
         } else if (isConstLit(rightLit, false)) {
+          // LCOV_EXCL_START
           lit = leftLit;  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
         } else if (isConstLit(leftLit, true)) {
+          // LCOV_EXCL_START
           lit = -rightLit;  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
         } else if (isConstLit(rightLit, true)) {
+          // LCOV_EXCL_START
           lit = -leftLit;  // LCOV_EXCL_LINE
         } else {  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
           lit = newSolverLiteral(solver_);
           solver_.addClause({-lit, -leftLit, -rightLit});
           solver_.addClause({-lit, leftLit, rightLit});

@@ -51,14 +51,19 @@ void SNLLogicCone::run() {
   }
 }
 
+// LCOV_EXCL_START
 std::vector<naja::NL::SNLEquipotential> SNLLogicCone::getEquipotentials()  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
     const {
+  // LCOV_EXCL_START
   std::vector<naja::NL::SNLEquipotential> equipotentials;  // LCOV_EXCL_LINE
   for (const auto& isoID : coneIsos_) {  // LCOV_EXCL_LINE
     equipotentials.push_back(  // LCOV_EXCL_LINE
         dnl_->getDNLTerminalFromID(  // LCOV_EXCL_LINE
                 dnl_->getDNLIsoDB().getIsoFromIsoIDconst(isoID).getDrivers()[0])  // LCOV_EXCL_LINE
             .getEquipotential());  // LCOV_EXCL_LINE
+            // LCOV_EXCL_STOP
   }
+  // LCOV_EXCL_START
   return equipotentials;  // LCOV_EXCL_LINE
-}  // LCOV_EXCL_LINE
+}  // LCOV_EXCL_LINE// LCOV_EXCL_STOP

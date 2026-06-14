@@ -22,13 +22,13 @@ enum class KInductionStatus {
 struct KInductionResult {
   KInductionStatus status = KInductionStatus::Inconclusive;
   size_t bound = 0;
-  struct SignalMismatch {
+  struct SignalMismatch {  // LCOV_EXCL_LINE
     std::string signal;
     bool design0Value = false;
     bool design1Value = false;
   };
-  struct FrameInputAssignments {
-    struct Assignment {
+  struct FrameInputAssignments {  // LCOV_EXCL_LINE
+    struct Assignment {  // LCOV_EXCL_LINE
       std::string signal;
       bool value = false;
     };

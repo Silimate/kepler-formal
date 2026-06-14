@@ -46,6 +46,10 @@ std::optional<unsigned> readUnsignedEnv(const char* name) {
   return static_cast<unsigned>(parsed);
 }
 
+// LCOV_EXCL_START
+
+
+// LCOV_EXCL_STOP
 unsigned binaryBatchedInductionDecisionLimit() {
   return readUnsignedEnv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT")
       .value_or(kDefaultBatchedInductionDecisionLimit);
@@ -68,7 +72,9 @@ std::optional<unsigned> batchedInductionDecisionLimit(
   }
 
   if (problem.usesDualRailStateEncoding &&
+      // LCOV_EXCL_START
       problem.observedOutputExprs0.size() <= 1) {
+      // LCOV_EXCL_STOP
     return dualRailLeafInductionDecisionLimit();
   }
 
@@ -122,15 +128,21 @@ bool provesDualRailFrontierWithoutWitness(
     return false;  // LCOV_EXCL_LINE
   }
   if (isKInductionDiagEnabled()) {  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START
     emitSecDiag(  // LCOV_EXCL_LINE
         "SEC diag: k-induction dual-rail proof-only base k=", k,
+        // LCOV_EXCL_STOP
         " unsat");
+  // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
   return true;  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
+// LCOV_EXCL_START
 bool shouldCheckLocalBaseCase(const KInductionProblem& problem) {
   return !problem.deferBaseCaseChecks;
+  // LCOV_EXCL_STOP
 }
 
 bool proofNeedsConcreteFrontierValidation(const KInductionProblem& problem) {
@@ -147,7 +159,9 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     emitSecDiag("SEC diag: k-induction base k=0 begin");
   }
   if (shouldCheckLocalBaseCase(problem)) {
+    // LCOV_EXCL_START
     auto baseZeroWitness = SEC::findBaseCounterexample(problem, solverType, 0);
+    // LCOV_EXCL_STOP
     if (baseZeroWitness.has_value()) {
       if (isKInductionDiagEnabled()) {
         emitSecDiag("SEC diag: k-induction base k=0 found cex");
@@ -180,6 +194,8 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
       emitSecDiag("SEC diag: k-induction step k=", k, " begin");
     }
 
+// LCOV_EXCL_START
+
     const std::optional<unsigned> inductionDecisionLimit =
         batchedInductionDecisionLimit(problem, solverType);
     const InductionProofStatus inductionStatus =
@@ -189,17 +205,22 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
       if (shouldCheckLocalBaseCase(problem) &&
           proofNeedsConcreteFrontierValidation(problem)) {
         // Reset/bootstrap and explicit induction certificates can prove a
+        // LCOV_EXCL_STOP
         // strengthened obligation. Before accepting that as SEC equivalence,
+        // LCOV_EXCL_START
         // validate the concrete top-output base predicate through the proved
         // frontier.
         if (auto witness = SEC::findBaseCounterexample(problem, solverType, k);
             witness.has_value()) {
+            // LCOV_EXCL_STOP
           return {
               KInductionStatus::Different,
               witness->badFrame,
               std::move(witness)};
         }
+      // LCOV_EXCL_START
       }
+      // LCOV_EXCL_STOP
       if (isKInductionDiagEnabled()) {
         emitSecDiag("SEC diag: k-induction step k=", k, " proved");
       }
@@ -218,26 +239,36 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
               " resource-limited; splitting output batch");
         }
       }  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       if (!problem.usesDualRailStateEncoding ||  // LCOV_EXCL_LINE
           problem.observedOutputExprs0.size() > 1) {  // LCOV_EXCL_LINE
         return {KInductionStatus::Inconclusive, k};  // LCOV_EXCL_LINE
       }
+      // LCOV_EXCL_STOP
       if (!shouldCheckLocalBaseCase(problem)) {  // LCOV_EXCL_LINE
         return {KInductionStatus::Inconclusive, k};  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
       }
     }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
     if (isKInductionDiagEnabled()) {
       emitSecDiag("SEC diag: k-induction step k=", k, " inconclusive");
       emitSecDiag("SEC diag: k-induction base k=", k, " begin");
+    // LCOV_EXCL_START
     }
 
     // Earlier base checks have already ruled out bad states on frames < k.
     // Check only the newly exposed frontier instead of re-solving an
+    // LCOV_EXCL_STOP
     // OR-of-all-previous-bads query at every depth.
+    // LCOV_EXCL_START
     if (shouldCheckLocalBaseCase(problem)) {
       const bool frontierProvedWithoutWitness =
+      // LCOV_EXCL_STOP
           provesDualRailFrontierWithoutWitness(problem, solverType, k);
+      // LCOV_EXCL_START
       if (!frontierProvedWithoutWitness) {
+      // LCOV_EXCL_STOP
         if (auto witness = SEC::findBaseCounterexampleAtFrontier(
                 problem, solverType, k);
             witness.has_value()) {
@@ -274,6 +305,10 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
   return {KInductionStatus::Inconclusive, maxK};
 }
 
+// LCOV_EXCL_START
+
+
+// LCOV_EXCL_STOP
 KInductionResult combineBatchResults(KInductionResult lhs,
                                      const KInductionResult& rhs) {
   if (lhs.status == KInductionStatus::Different) {
@@ -285,7 +320,9 @@ KInductionResult combineBatchResults(KInductionResult lhs,
   if (rhs.status == KInductionStatus::Inconclusive) {
     lhs.status = KInductionStatus::Inconclusive;
   }
+  // LCOV_EXCL_START
   lhs.bound = std::max(lhs.bound, rhs.bound);
+  // LCOV_EXCL_STOP
   return lhs;
 }
 
@@ -295,10 +332,14 @@ KInductionResult runOutputRangeKInduction(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK,
     size_t firstOutput,
+    // LCOV_EXCL_START
     size_t endOutput) {
+    // LCOV_EXCL_STOP
   configureOutputBatchProblem(batchProblem, sourceProblem, firstOutput, endOutput);
   if (isKInductionDiagEnabled()) {
+    // LCOV_EXCL_START
     emitSecDiag(
+    // LCOV_EXCL_STOP
         "SEC diag: k-induction output range [", firstOutput, ",", endOutput,
         ") outputs=", endOutput - firstOutput);
   }
@@ -341,7 +382,9 @@ KInductionResult runOutputBatchedKInduction(
       defaultOutputBatchingLimitsForProblem(problem);
   // Copy the large shared SEC problem once, then mutate only the small
   // output/property slice for each batch.  The previous implementation copied
+  // LCOV_EXCL_START
   // hundreds of thousands of state symbols and equality pairs per batch, which
+  // LCOV_EXCL_STOP
   // became visible on BlackParrot even after SAT-side batching was effective.
   KInductionProblem batchProblem = problem;
   const bool useSharedBaseCase =

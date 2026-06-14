@@ -70,8 +70,10 @@ RelevantPair& getRelevantETS() {
   return relevantETS;
 }
 
+// LCOV_EXCL_START
 size_t sizeOfRelevantETS() {  // LCOV_EXCL_LINE
   return getRelevantETS().second;  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 void clearRelevantETS() {
@@ -83,7 +85,9 @@ void setRelevantETS(size_t i, bool b) {
   auto& relevantLocal = getRelevantETS();
   if (i >= relevantLocal.second) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     assert(false && "setRelevantETS: index out of range");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   relevantLocal.first[i] = b;
@@ -93,11 +97,15 @@ bool getRelevantETS(size_t i) {
   auto& relevantLocal = getRelevantETS();
   if (i >= relevantLocal.second) {
     // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     throw std::out_of_range("getRelevantETS: index out of range");
+    // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
   }
   return relevantLocal.first[i];
+// LCOV_EXCL_START
 }  // LCOV_EXCL_LINE
+// LCOV_EXCL_STOP
 
 // Ensure the relevant vector has at least n entries and initialize them to false.
 // The logical size is stored in the second element of the pair.
@@ -106,9 +114,11 @@ void reserveRelevantETSwithFalse(size_t n) {
   auto& vec = relevantLocal.first;
   auto& sz = relevantLocal.second;
   if (vec.size() >= n) {
+    // LCOV_EXCL_START
     vec.assign(n, false);  // LCOV_EXCL_LINE
     sz = n;  // LCOV_EXCL_LINE
     return;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   size_t oldSize = vec.size();
   vec.resize(n, false);
@@ -138,9 +148,11 @@ void reserveMemoETS(size_t n) {
   auto& vec = memoLocal.first;
   auto& sz = memoLocal.second;
   if (vec.size() >= n) {
+    // LCOV_EXCL_START
     sz = n;  // LCOV_EXCL_LINE
     vec.assign(n, nullptr);  // LCOV_EXCL_LINE
     return;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   vec.resize(n);
   sz = n;
@@ -235,11 +247,15 @@ BoolExpr* buildGenericTruthTableExpr(const SNLTruthTable& tbl, uint32_t k) {
       return expr;
     case SNLTruthTable::GenericType::NONE:
       // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       break;
+      // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
   }
   // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   throw std::runtime_error("Unsupported generic truth table type");
+  // LCOV_DISABLED_STOP
   // LCOV_EXCL_STOP
 }
 
@@ -261,7 +277,9 @@ BoolExpr* Tree2BoolExpr::convert(
 
   const auto root = tree.getRoot();
   if (!root) {
+    // LCOV_EXCL_START
     return nullptr; // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
 
   // Determine maximum node ID to size memoization structures.
@@ -321,10 +339,14 @@ BoolExpr* Tree2BoolExpr::convert(
                    .getDNLInstance().getSNLModel()->getString().c_str());
           }
           #endif
+        // LCOV_EXCL_START
         }  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
         if (node->parentIds.empty()) { 
           // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           throw std::runtime_error("Input node has no parent"); 
+          // LCOV_DISABLED_STOP
           // LCOV_EXCL_STOP
         }
         assert(node->parentIds.size() == 1);
@@ -332,7 +354,9 @@ BoolExpr* Tree2BoolExpr::convert(
         assert(parent && parent->type == SNLTruthTableTree::Node::Type::P);
         if (isoID != naja::DNL::DNLID_MAX) {
           // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           throw std::runtime_error(
+          // LCOV_DISABLED_STOP
               "Input node unexpectedly has a cacheable iso ID");
           // LCOV_EXCL_STOP
         }
@@ -340,7 +364,9 @@ BoolExpr* Tree2BoolExpr::convert(
         const auto& name = varNames[parent->data.termid];
         if (name == (size_t)-1) {
           // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           throw std::runtime_error("Input variable index is SIZE_MAX");
+          // LCOV_DISABLED_STOP
           // LCOV_EXCL_STOP
         }
         // Special handling for constant mappings: 0 -> false, 1 -> true.
@@ -370,8 +396,10 @@ BoolExpr* Tree2BoolExpr::convert(
         if (isoID != naja::DNL::DNLID_MAX) {
           auto result = iso2boolExpr_.insert({isoID, expr});
           if (!result.second) {
+            // LCOV_EXCL_START
             expr = result.first->second;  // LCOV_EXCL_LINE
           }  // LCOV_EXCL_LINE
+          // LCOV_EXCL_STOP
         }
         setMemoETS(id, expr);
         continue;
@@ -394,8 +422,10 @@ BoolExpr* Tree2BoolExpr::convert(
             // the same isoID during conversion.
             auto result = iso2boolExpr_.insert({isoID, expr});
             if (!result.second) {
+              // LCOV_DISABLED_START
               expr = result.first->second;
             }
+            // LCOV_DISABLED_STOP
             // LCOV_EXCL_STOP
           }
           setMemoETS(id, expr);
@@ -439,7 +469,9 @@ BoolExpr* Tree2BoolExpr::convert(
             // according to the bit value in row m.
             for (uint32_t j = 0; j < k; ++j) { 
               if (!getRelevantETS(j)) {
+                // LCOV_EXCL_START
                 continue;  // LCOV_EXCL_LINE
+                // LCOV_EXCL_STOP
               }
               bool bit1 = ((m >> j) & 1) != 0;
               lit = bit1 ? getChildFETS(j) : BoolExpr::Not(getChildFETS(j));

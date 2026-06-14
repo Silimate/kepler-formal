@@ -17,7 +17,7 @@ enum class ClockPhase {
   Neg,
 };
 
-struct ClockEvent {
+struct ClockEvent {  // LCOV_EXCL_LINE
   SignalKey domain;
   ClockPhase phase = ClockPhase::Pos;
   // nullptr means the clock event is unconditionally active.

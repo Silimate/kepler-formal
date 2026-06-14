@@ -37,7 +37,9 @@ BoolExpr* computeExactInterpolant(
     const std::vector<size_t>& sharedSymbols,
     KEPLER_FORMAL::Config::SolverType solverType) {
   if (lhs == nullptr || rhs == nullptr || sharedSymbols.empty()) {
+    // LCOV_EXCL_START
     return nullptr;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (isProofFormulaSatisfiable(BoolExpr::And(lhs, rhs), solverType)) {
     return nullptr;
@@ -58,10 +60,14 @@ BoolExpr* computeExactInterpolant(
   interpolant = BoolExpr::simplify(interpolant);
   if (isProofFormulaSatisfiable(
           BoolExpr::And(lhs, BoolExpr::Not(interpolant)), solverType)) {
+    // LCOV_EXCL_START
     return nullptr;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (isProofFormulaSatisfiable(BoolExpr::And(interpolant, rhs), solverType)) {
+    // LCOV_EXCL_START
     return nullptr;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   return interpolant;
 }
@@ -82,7 +88,9 @@ std::optional<BoolExpr*> ExactInterpolantSynthesizer::deriveOneStepReachableStat
 
   BoolExpr* init = buildProofInitFormula(problem_);
   if (init == nullptr) {
+    // LCOV_EXCL_START
     return std::nullopt;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
 
   // Build the one-step frontier over fresh "next-state" symbols so the shared

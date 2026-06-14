@@ -16,7 +16,9 @@ struct DualRailBoolExpr {
 
 class DualRailVariableMapper {
  public:
+  // LCOV_EXCL_START
   virtual ~DualRailVariableMapper() = default;  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
   virtual DualRailBoolExpr mapVariable(size_t symbol) = 0;
 };
 

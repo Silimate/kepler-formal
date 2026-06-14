@@ -17,7 +17,7 @@ class SNLDesign;
 
 namespace KEPLER_FORMAL::SEC {
 
-struct ComplementedStateRelation {
+struct ComplementedStateRelation {  // LCOV_EXCL_LINE
   SignalKey primaryKey;
   SignalKey complementedKey;
 };
@@ -43,7 +43,7 @@ struct AbstractedSequentialBoundaryDetail {  // LCOV_EXCL_LINE
 // Normalized view of a sequential design after extracting the interface we
 // need for SEC: environment inputs, current-state bits, observed outputs, and
 // the Boolean formulas that describe outputs and next-state updates.
-struct SequentialDesignModel {
+struct SequentialDesignModel {  // LCOV_EXCL_LINE
   std::vector<SignalKey> environmentInputs;
   std::vector<SignalKey> stateBits;
   std::vector<SignalKey> topInputKeys;

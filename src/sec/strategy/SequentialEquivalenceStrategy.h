@@ -34,7 +34,7 @@ enum class SequentialEquivalenceStatus {
   Unsupported,
 };
 
-struct ExtractedBoundaryReportEntry {
+struct ExtractedBoundaryReportEntry {  // LCOV_EXCL_LINE
   std::string design;
   std::string signal;
   std::vector<std::string> roles;
@@ -55,7 +55,9 @@ struct SequentialEquivalenceResult {  // LCOV_EXCL_LINE
 
   double outputCoveragePercent() const {
     if (totalOutputs == 0) {
+      // LCOV_EXCL_START
       return 0.0;
+      // LCOV_EXCL_STOP
     }
     return (100.0 * static_cast<double>(coveredOutputs)) /
            static_cast<double>(totalOutputs);

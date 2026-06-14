@@ -19,7 +19,7 @@ namespace KEPLER_FORMAL {
 
 /// A hash-consed Boolean expression DAG with eager constant-folding,
 /// now protected for concurrent calls.
-class BoolExpr : public std::enable_shared_from_this<BoolExpr> {
+class BoolExpr : public std::enable_shared_from_this<BoolExpr> {  // LCOV_EXCL_LINE
   friend class BoolExprCache;
 
  public:
@@ -52,7 +52,9 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {
   BoolExpr* getRight() const { return right_; }
   std::string getName() const {
     if (op_ != Op::VAR) {
+      // LCOV_EXCL_START
       throw std::logic_error("getName: not a variable");  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
     }
     if (varID_ == 0) {
       return "FALSE";

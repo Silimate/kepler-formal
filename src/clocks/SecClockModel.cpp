@@ -25,7 +25,9 @@ BoolExpr* substituteBoolExprAssignments(
     const std::unordered_map<size_t, bool>& assignments,
     std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
   if (root == nullptr) {
+    // LCOV_EXCL_START
     return nullptr;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (const auto it = memo.find(root); it != memo.end()) {
     return it->second;
@@ -160,7 +162,9 @@ std::optional<ClockEvent> classifyClockEventExpression(
 
   const auto carrierIt = carrierEvents.find(*carrierVarID);
   if (carrierIt == carrierEvents.end()) {
+    // LCOV_EXCL_START
     return std::nullopt;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
 
   BoolExpr* whenClockLow = specializeClockCarrier(expr, *carrierVarID, false);
@@ -191,7 +195,9 @@ BoolExpr* substituteBoolExprVariableExpressionsImpl(
     const std::unordered_map<size_t, BoolExpr*>& replacements,
     std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
   if (root == nullptr) {
+    // LCOV_EXCL_START
     return nullptr;  // LCOV_EXCL_LINE
+    // LCOV_EXCL_STOP
   }
   if (const auto it = memo.find(root); it != memo.end()) {
     return it->second;
