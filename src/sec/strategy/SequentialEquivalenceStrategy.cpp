@@ -1534,7 +1534,7 @@ bool secSummaryStatsEnabled() {
 }
 
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
-constexpr size_t kMaxPdrInductiveStateEqualityStates = 8192;
+constexpr size_t kMaxPdrInductiveStateEqualityOutputs = 128;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
 // LCOV_EXCL_START
@@ -6202,12 +6202,15 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   const size_t totalStateBits = model0.stateBits.size() + model1.stateBits.size();
   AlignedSecInterface aligned;
   try {
-    // PDR consumes these correspondences only after validating them as frame
-    // invariants.  Keep broad ASICs on the previous skip path, but let medium
-    // designs avoid relearning the same equality facts one bad cube at a time.
+    // PDR validates these correspondences before using them as frame invariants.
+    // Gate the mining by output surface, not raw flop count: FIFO/CPU blocks can
+    // have many state bits but only a small top-output property that needs these
+    // facts to avoid relearning identical state relations one cube at a time.
+    const size_t observedOutputSurface =
+        std::max(model0.observedOutputs.size(), model1.observedOutputs.size());
     const bool inferInductiveStateEqualities =
         secEngine_ != SecEngine::Pdr ||
-        totalStateBits <= kMaxPdrInductiveStateEqualityStates;
+        observedOutputSurface <= kMaxPdrInductiveStateEqualityOutputs;
     aligned = alignSecInterface(
         model0,
         model1,

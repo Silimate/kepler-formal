@@ -10024,6 +10024,69 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrMinesStateEqualitiesForSmallOutputLargeStateSurface) {
+  constexpr size_t kStateBitsPerDesign = 4097;
+  const SignalKey out = makeSignalKey("smallOutputLargeStateOut");
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model0.displayNameByKey.emplace(out, "small_output_large_state_out[0]");
+  model1.displayNameByKey.emplace(out, "small_output_large_state_out[0]");
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+
+  size_t nextLocalVar = 2;
+  for (size_t i = 0; i < kStateBitsPerDesign; ++i) {
+    const SignalKey state0 =
+        makeSignalKey("smallOutputLargeStateLeft" + std::to_string(i));
+    const SignalKey state1 =
+        makeSignalKey("smallOutputLargeStateRight" + std::to_string(i));
+    const size_t var0 = nextLocalVar++;
+    const size_t var1 = nextLocalVar++;
+    addStateBitForTest(
+        model0,
+        state0,
+        var0,
+        "small_output_large_state_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(var0));
+    addStateBitForTest(
+        model1,
+        state1,
+        var1,
+        "small_output_large_state_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(var1));
+  }
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Large state count alone should not disable validated state-equality mining.
+  // Mock CPU has a small top-output surface but many FIFO state bits; without
+  // this path PDR relearns those relations per cube and can cover no outputs.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find(
+          "SEC diag: skipping inductive state equality mining for selected engine"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsPdrDualRailFindsWideFrameZeroCounterexampleBeforeSkip) {
   constexpr size_t kObservedOutputs = 133;
   constexpr size_t kDummyStatesPerDesign = 4100;
