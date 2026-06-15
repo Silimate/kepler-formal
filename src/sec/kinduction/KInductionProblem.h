@@ -34,6 +34,17 @@ struct LazyTransitionSource {
   LazyTransitionRail rail = LazyTransitionRail::Binary;
 };
 
+struct PdrStateEqualitySubsetCacheEntry {
+  std::vector<std::pair<size_t, size_t>> inputPairs;
+  std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
+  size_t resetBootstrapCycles = 0;
+  std::vector<std::pair<size_t, bool>> initialStateAssignments;
+  std::vector<std::pair<size_t, size_t>> initialStateEqualityPairs;
+  std::vector<std::pair<size_t, bool>> bootstrapStateAssignments;
+  std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
+  std::vector<std::pair<size_t, size_t>> selectedPairs;
+};
+
 struct LazyTransitionStore {
   // Large SEC designs can have hundreds of thousands of modeled state bits.
   // K-induction proves one output cone at a time, so eagerly remapping every
@@ -50,6 +61,11 @@ struct LazyTransitionStore {
   mutable std::array<std::unordered_map<BoolExpr*, DualRailBoolExpr>, 2>
       dualRailRemapMemoByDesign;
   mutable std::unordered_map<size_t, BoolExpr*> remappedByStateSymbol;
+  // Output-batched PDR slices share the same transition store. Cache validated
+  // state-equality subsets here so split leaves do not re-prove the same
+  // transition-preserved relation for every output batch.
+  mutable std::vector<PdrStateEqualitySubsetCacheEntry>
+      pdrStateEqualitySubsetCache;
   // Output-batched SEC creates a fresh transition resolver for each PDR slice.
   // Keep lazy support and size metadata with the shared transition store so
   // reset-frontier COI rebuilding does not repeatedly walk the same large
@@ -63,6 +79,10 @@ struct KInductionProblem {
   std::vector<SignalKey> observedOutputs;
   std::vector<std::string> environmentInputNames;
   std::vector<std::string> observedOutputNames;
+  // Preserve the top-level SEC output width after batching/slicing. Some PDR
+  // heuristics must size themselves by the original property, not by the
+  // currently selected one-output leaf.
+  size_t originalObservedOutputCount = 0;
   std::vector<size_t> inputSymbols;
   size_t resetBootstrapCycles = 0;
   std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
@@ -76,6 +96,11 @@ struct KInductionProblem {
   std::vector<size_t> allSymbols;
   std::vector<std::pair<size_t, size_t>> complementedStatePairs0;
   std::vector<std::pair<size_t, size_t>> complementedStatePairs1;
+  // Same-design state equalities that hold in every frame. Dual-rail SEC uses
+  // this for Q/QN complemented state outputs, where the structural relation is
+  // cross-rail equality rather than Boolean complement on one rail.
+  std::vector<std::pair<size_t, size_t>> sameFrameStateEqualityPairs0;
+  std::vector<std::pair<size_t, size_t>> sameFrameStateEqualityPairs1;
   std::vector<DualRailSymbolPair> dualRailStatePairs;
   std::vector<BoolExpr*> observedOutputExprs0;
   std::vector<BoolExpr*> observedOutputExprs1;

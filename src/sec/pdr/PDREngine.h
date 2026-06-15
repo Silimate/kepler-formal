@@ -19,6 +19,25 @@ struct PDRResult {
   size_t bound = 0;
 };
 
+namespace detail {
+
+bool pdrStateEqualitySubsetPrefersCadical(
+    bool usesDualRailStateEncoding,
+    size_t equalityPairCount,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t solverSymbols,
+    size_t pairLimit = 64,
+    size_t symbolLimit = 256);
+
+bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
+                                       size_t observedOutputCount,
+                                       size_t originalObservedOutputCount,
+                                       size_t transitionSources,
+                                       size_t transitionSourceLimit,
+                                       size_t outputLimit = 64);
+
+}  // namespace detail
+
 // Top-level clause-based Property Directed Reachability strategy for SEC. It
 // follows the classic proof-obligation/blocking loop over the already-built
 // SEC transition system.

@@ -26,6 +26,37 @@
 
 namespace KEPLER_FORMAL::SEC {
 
+namespace detail {
+
+bool pdrStateEqualitySubsetPrefersCadical(
+    bool usesDualRailStateEncoding,
+    size_t equalityPairCount,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t solverSymbols,
+    size_t pairLimit,
+    size_t symbolLimit) {
+  return usesDualRailStateEncoding &&
+         solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+         (equalityPairCount >= pairLimit || solverSymbols >= symbolLimit);
+}
+
+bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
+                                       size_t observedOutputCount,
+                                       size_t originalObservedOutputCount,
+                                       size_t transitionSources,
+                                       size_t transitionSourceLimit,
+                                       size_t outputLimit) {
+  if (!usesDualRailStateEncoding) {
+    return false;
+  }
+  const size_t fullOutputSurface =
+      std::max(observedOutputCount, originalObservedOutputCount);
+  return transitionSources > transitionSourceLimit ||
+         fullOutputSurface > outputLimit;
+}
+
+}  // namespace detail
+
 // Overall PDR algorithm:
 // 1. Build Init from the SEC startup constraints and reuse any already
 //    validated strengthening invariant when it is sound to do so.
@@ -231,10 +262,16 @@ constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
 // opts in through the existing environment overrides.
 constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 20000;
 constexpr size_t kMaxExactResetFrontierDualRailTransitionSources = 20000;
+constexpr size_t kMaxExactResetFrontierDualRailObservedOutputs = 128;
+// Allow medium CPU-style interfaces to use exact reset-frontier repair.  The
+// original-output and state/transition guards keep larger SoC-scale surfaces out
+// of this path without disabling it for 99/106-output residual buses.
+constexpr size_t kMaxExactResetFrontierDualRailOriginalOutputs = 128;
 // The broad frame-0 reset-bootstrap BMC precheck materializes the whole output
 // slice.  Keep that accelerator conservative and let mid-size dual-rail PDR use
 // the cheaper per-cube exact reset-frontier repair above instead.
 constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 8192;
+constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs = 64;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
 constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
@@ -475,7 +512,10 @@ constexpr unsigned kTransitionImpossibleResetCoreConflictLimit = 20000;
 // for the wider BlackParrot cones that otherwise enumerate thousands of
 // abstract predecessors.
 constexpr size_t kMaxGlucoseExactResetPrecheckTransitionSupport = 256;
-constexpr size_t kMaxCadicalExactResetPrecheckTransitionSupport = 4096;
+// sky130hd_riscv32i reset-frontier roots measure at 4128 transition-support
+// symbols.  Let CaDiCaL's reusable assumption solver handle that still-local
+// cone instead of falling back to thousands of sibling projected PDR cubes.
+constexpr size_t kMaxCadicalExactResetPrecheckTransitionSupport = 8192;
 constexpr size_t kDefaultPdrStatsInterval = 1000;
 constexpr size_t kInitialPdrStatsQueries = 20;
 // PDR can use inferred state correspondences as an ordinary frame invariant,
@@ -939,6 +979,12 @@ size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
   return count;
 }
 
+size_t pdrOriginalObservedOutputCount(const KInductionProblem& problem) {
+  return problem.originalObservedOutputCount == 0
+             ? problem.observedOutputExprs0.size()
+             : problem.originalObservedOutputCount;
+}
+
 size_t dualRailResetBootstrapBmcTransitionSourceLimit();
 size_t dualRailResetFrontierTransitionSourceLimit();
 size_t dualRailResetFrontierStateSymbolLimit();
@@ -951,7 +997,11 @@ bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
   return pdrDualRailStateSymbolCount(problem) <=
              dualRailResetFrontierStateSymbolLimit() &&
          pdrTransitionSourceCount(problem) <=
-             dualRailResetFrontierTransitionSourceLimit();
+             dualRailResetFrontierTransitionSourceLimit() &&
+         problem.observedOutputExprs0.size() <=
+             kMaxExactResetFrontierDualRailObservedOutputs &&
+         pdrOriginalObservedOutputCount(problem) <=
+             kMaxExactResetFrontierDualRailOriginalOutputs;
 }
 
 KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
@@ -972,23 +1022,24 @@ KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
 
 size_t envSizeLimitOrDefault(const char* name, size_t defaultValue);
 
-KEPLER_FORMAL::Config::SolverType badCubeQuerySolverType(
+KEPLER_FORMAL::Config::SolverType stateEqualitySubsetSolverType(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
+    size_t equalityPairCount,
     size_t solverSymbols) {
-  constexpr size_t kLargeDualRailBadCubeQuerySymbols = 2048;
-  // Large dual-rail bad predicates are shallow, model-producing queries.  The
-  // main PDR loop still uses the selected solver, but this local query is a bad
-  // fit for Kissat when thousands of rail literals are present: a single bad
-  // query can spend minutes before PDR gets a cube to block.  CaDiCaL already
-  // serves the same role for wide exact validation and keeps the result fully
-  // sound because SAT still supplies the concrete model used below.
-  const size_t largeDualRailQuerySymbols = envSizeLimitOrDefault(
-      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_LOCAL_SOLVER_SYMBOLS",
-      kLargeDualRailBadCubeQuerySymbols);
-  if (problem.usesDualRailStateEncoding &&
-      solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
-      solverSymbols >= largeDualRailQuerySymbols) {
+  constexpr size_t kMediumDualRailStateEqualityPairs = 64;
+  constexpr size_t kMediumDualRailStateEqualitySymbols = 256;
+  // This is still the selected PDR proof path. Only the local SAT backend for
+  // the inductiveness-pruning query changes: medium dual-rail equality
+  // surfaces are model-producing and much wider than normal predecessor
+  // blocking queries, where Kissat remains the default.
+  if (detail::pdrStateEqualitySubsetPrefersCadical(
+          problem.usesDualRailStateEncoding,
+          equalityPairCount,
+          solverType,
+          solverSymbols,
+          kMediumDualRailStateEqualityPairs,
+          kMediumDualRailStateEqualitySymbols)) {
     return KEPLER_FORMAL::Config::SolverType::CADICAL;
   }
   return solverType;
@@ -1217,6 +1268,11 @@ void addComplementedStateRelations(
     const FrameVariableStore& variables,
     const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
     size_t numFrames);
+
+void addSameFrameStateEqualities(SATSolverWrapper& solver,
+                                 const FrameVariableStore& variables,
+                                 const KInductionProblem& problem,
+                                 size_t numFrames);
 
 void addDualRailStateValidity(SATSolverWrapper& solver,
                               const FrameVariableStore& variables,
@@ -2989,8 +3045,20 @@ class ResetExpressionCanonicalizer {
 // LCOV_EXCL_STOP
  public:
   explicit ResetExpressionCanonicalizer(const KInductionProblem& problem) {
-    parent_.reserve(problem.initialStateEqualityPairs.size() * 2);
+    parent_.reserve(
+        (problem.initialStateEqualityPairs.size() +
+         problem.sameFrameStateEqualityPairs0.size() +
+         problem.sameFrameStateEqualityPairs1.size()) *
+        2);
     for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
+      unite(lhsSymbol, rhsSymbol);
+    }
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.sameFrameStateEqualityPairs0) {
+      unite(lhsSymbol, rhsSymbol);
+    }
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.sameFrameStateEqualityPairs1) {
       unite(lhsSymbol, rhsSymbol);
     }
     // LCOV_EXCL_START
@@ -4985,6 +5053,31 @@ void addRelevantComplementedStatePartners(
   }
 }
 
+void addRelevantStateEqualityPartners(
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    std::unordered_set<size_t>& symbols) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      const bool lhsNeeded = symbols.find(lhsSymbol) != symbols.end();
+      const bool rhsNeeded = symbols.find(rhsSymbol) != symbols.end();
+      if (!lhsNeeded && !rhsNeeded) {
+        continue;
+      }
+      changed |= symbols.insert(lhsSymbol).second;
+      changed |= symbols.insert(rhsSymbol).second;
+    }
+  }
+}
+
+void addRelevantSameFrameStateEqualityPartners(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& symbols) {
+  addRelevantStateEqualityPartners(problem.sameFrameStateEqualityPairs0, symbols);
+  addRelevantStateEqualityPartners(problem.sameFrameStateEqualityPairs1, symbols);
+}
+
 void addRelevantDualRailPartners(
     const std::vector<DualRailSymbolPair>& railPairs,
     std::unordered_set<size_t>& symbols) {
@@ -5177,6 +5270,7 @@ void addFrameConstraintSymbols(const KInductionProblem& problem,
     }
   }
   addRelevantComplementedStatePartners(complementPartners, symbols);
+  addRelevantSameFrameStateEqualityPartners(problem, symbols);
   addRelevantDualRailPartners(supportCache, problem.dualRailStatePairs, symbols);
 }
 
@@ -5245,6 +5339,7 @@ std::vector<size_t> predecessorCurrentFrameQuerySymbols(
     }
   }
   addRelevantComplementedStatePartners(complementPartners, symbols);
+  addRelevantSameFrameStateEqualityPartners(problem, symbols);
   addRelevantDualRailPartners(supportCache, problem.dualRailStatePairs, symbols);
   if (excludeTargetOnCurrentFrame) {
     addCubeSymbols(targetCube, symbols);
@@ -5271,6 +5366,7 @@ std::vector<size_t> initIntersectionSymbols(const KInductionProblem& problem,
   }
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, symbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, symbols);
+  addRelevantSameFrameStateEqualityPartners(problem, symbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, symbols);
   return sortUniqueSymbols(std::move(symbols));
 }
@@ -5642,6 +5738,7 @@ std::optional<StateCube> findPreviousResetCoreImpliedByOneStepTransition(
         problem.complementedStatePairs0, querySymbols);
     addRelevantComplementedStatePartners(
         problem.complementedStatePairs1, querySymbols);
+    addRelevantSameFrameStateEqualityPartners(problem, querySymbols);
     addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
     const std::vector<size_t> solverSymbols =
         sortUniqueSymbols(std::move(querySymbols));
@@ -5657,6 +5754,7 @@ std::optional<StateCube> findPreviousResetCoreImpliedByOneStepTransition(
         solver, variables, problem.complementedStatePairs0, 1);
     addComplementedStateRelations(
         solver, variables, problem.complementedStatePairs1, 1);
+    addSameFrameStateEqualities(solver, variables, problem, 1);
     addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
     addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
     addTransitionConstraintsForTargetCube(
@@ -5837,6 +5935,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
         problem.complementedStatePairs0, querySymbols);
     addRelevantComplementedStatePartners(
         problem.complementedStatePairs1, querySymbols);
+    addRelevantSameFrameStateEqualityPartners(problem, querySymbols);
     addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
     const std::vector<size_t> solverSymbols =
         sortUniqueSymbols(std::move(querySymbols));
@@ -5852,6 +5951,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
         solver, variables, problem.complementedStatePairs0, 1);
     addComplementedStateRelations(
         solver, variables, problem.complementedStatePairs1, 1);
+    addSameFrameStateEqualities(solver, variables, problem, 1);
     addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
     addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
     addTransitionConstraintsForTargetCube(
@@ -6126,6 +6226,7 @@ std::vector<size_t> predecessorProjectionSymbols(
     addFormulaStateSupport(frameInvariant, stateSymbolSet, projection, *supportCache);
   }
   addRelevantComplementedStatePartners(complementPartners, projection);
+  addRelevantSameFrameStateEqualityPartners(problem, projection);
   return sortUniqueSymbols(std::move(projection));
 }
 
@@ -6146,6 +6247,34 @@ void addComplementedStateRelations(
           -variables.getLiteral(primarySymbol, frame));
     }
   }
+}
+
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      if (!variables.hasSymbol(lhsSymbol) || !variables.hasSymbol(rhsSymbol)) {
+        continue;
+      }
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(lhsSymbol, frame),
+          variables.getLiteral(rhsSymbol, frame));
+    }
+  }
+}
+
+void addSameFrameStateEqualities(SATSolverWrapper& solver,
+                                 const FrameVariableStore& variables,
+                                 const KInductionProblem& problem,
+                                 size_t numFrames) {
+  addSameFrameStateEqualities(
+      solver, variables, problem.sameFrameStateEqualityPairs0, numFrames);
+  addSameFrameStateEqualities(
+      solver, variables, problem.sameFrameStateEqualityPairs1, numFrames);
 }
 
 void addDualRailStateValidity(SATSolverWrapper& solver,
@@ -6220,6 +6349,16 @@ InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
   }
   index.equalities.reserve(equalities.size());
   for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
+    index.equalities.insert(canonicalPair(lhsSymbol, rhsSymbol));
+    index.relations.addEquality(lhsSymbol, rhsSymbol);
+  }
+  for (const auto& [lhsSymbol, rhsSymbol] :
+       problem.sameFrameStateEqualityPairs0) {
+    index.equalities.insert(canonicalPair(lhsSymbol, rhsSymbol));
+    index.relations.addEquality(lhsSymbol, rhsSymbol);
+  }
+  for (const auto& [lhsSymbol, rhsSymbol] :
+       problem.sameFrameStateEqualityPairs1) {
     index.equalities.insert(canonicalPair(lhsSymbol, rhsSymbol));
     index.relations.addEquality(lhsSymbol, rhsSymbol);
   }
@@ -6452,7 +6591,13 @@ bool hasLargeDualRailResetFrontierSurface(const KInductionProblem& problem) {
           // LCOV_EXCL_START
           pdrTransitionSourceCount(problem) >
           // LCOV_EXCL_STOP
-              dualRailResetFrontierTransitionSourceLimit());
+              dualRailResetFrontierTransitionSourceLimit() ||
+          // A one-output leaf from a medium interface should still be allowed
+          // to use local reset/bad-formula repair.  The current-slice cap keeps
+          // broad reset-frontier queries out of PDR; the original-output cap
+          // only prevents this repair from re-entering SoC-scale surfaces.
+          pdrOriginalObservedOutputCount(problem) >
+              kMaxExactResetFrontierDualRailOriginalOutputs);
 }
 
 bool canExactlyValidateBadFormulaGroup(const KInductionProblem& problem,
@@ -8896,14 +9041,7 @@ std::optional<StateCube> findBadCubeForFormula(
           complementPartners,
           exactFrameClauses,
           supportCache);
-  const auto querySolverType =
-      badCubeQuerySolverType(problem, solverType, solverSymbols.size());
-  if (pdrStatsEnabled() && querySolverType != solverType) {
-    emitSecDiag(
-        "SEC PDR stats: bad cube query solver=cadical symbols=",
-        solverSymbols.size());
-  }
-  SATSolverWrapper solver(querySolverType);
+  SATSolverWrapper solver(solverType);
   // Bad-state queries are local PDR obligations and are rebuilt repeatedly as
   // frames advance. Keep them on the PDR-local profile: small regressions such
   // as GCD can otherwise spend minutes in Kissat's speculative
@@ -8914,6 +9052,7 @@ std::optional<StateCube> findBadCubeForFormula(
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
   // LCOV_EXCL_STOP
+  addSameFrameStateEqualities(solver, variables, problem, 1);
   addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       solver, variables, problem, initFormula, frameInvariant, frames, level, 0,
@@ -9261,6 +9400,7 @@ std::optional<StateCube> findPredecessorCube(
   FrameVariableStore variables(solver, solverSymbols, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
+  addSameFrameStateEqualities(solver, variables, problem, 1);
   addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       solver, variables, problem, initFormula, frameInvariant, frames, level, 0,
@@ -9373,6 +9513,7 @@ bool cubeIntersectsInit(const KInductionProblem& problem,
   // LCOV_EXCL_STOP
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
   // LCOV_EXCL_START
+  addSameFrameStateEqualities(solver, variables, problem, 1);
   addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
   solver.addClause({encoder.encode(initFormula)});
@@ -9818,6 +9959,7 @@ std::optional<StateCube> findValidatedPredecessorCore(
       coreSolver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(
       coreSolver, variables, problem.complementedStatePairs1, 1);
+  addSameFrameStateEqualities(coreSolver, variables, problem, 1);
   addDualRailStateValidity(coreSolver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       // LCOV_EXCL_START
@@ -12366,6 +12508,11 @@ bool pdrInitialFrontierImpliesStateEqualities(
     BoolExpr* initFormula,
     const std::vector<std::pair<size_t, size_t>>& equalityPairs,
     KEPLER_FORMAL::Config::SolverType solverType) {
+  // Structured startup equalities are exact F0 facts; consult them before
+  // building a broad monolithic Init SAT query for the same relation.
+  if (structuredInitFactsImplyStateEqualities(problem, equalityPairs)) {
+    return true;
+  }
   BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
   if (invariant == nullptr) {
     return false;  // LCOV_EXCL_LINE
@@ -12373,7 +12520,7 @@ bool pdrInitialFrontierImpliesStateEqualities(
   if (initialFrontierImplies(initFormula, invariant, solverType)) {
     return true;
   }
-  return structuredInitFactsImplyStateEqualities(problem, equalityPairs);
+  return false;
 }
 
 // LCOV_EXCL_START
@@ -12420,6 +12567,62 @@ std::vector<size_t> stateEqualitySymbols(
   return sortUniqueSymbols(std::move(symbols));
 }
 
+bool pdrStateEqualitySubsetCacheEntryMatches(
+    const KInductionProblem& problem,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    const PdrStateEqualitySubsetCacheEntry& entry) {
+  return entry.inputPairs == equalityPairs &&
+         entry.resetBootstrapInputs == problem.resetBootstrapInputs &&
+         entry.resetBootstrapCycles == problem.resetBootstrapCycles &&
+         entry.initialStateAssignments == problem.initialStateAssignments &&
+         entry.initialStateEqualityPairs == problem.initialStateEqualityPairs &&
+         entry.bootstrapStateAssignments == problem.bootstrapStateAssignments &&
+         entry.bootstrapStateEqualityPairs == problem.bootstrapStateEqualityPairs;
+}
+
+std::optional<std::vector<std::pair<size_t, size_t>>>
+lookupCachedPdrStateEqualitySubset(
+    const KInductionProblem& problem,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
+  if (problem.lazyTransitions == nullptr) {
+    return std::nullopt;
+  }
+  for (const auto& entry :
+       problem.lazyTransitions->pdrStateEqualitySubsetCache) {
+    if (pdrStateEqualitySubsetCacheEntryMatches(
+            problem, equalityPairs, entry)) {
+      return entry.selectedPairs;
+    }
+  }
+  return std::nullopt;
+}
+
+void rememberCachedPdrStateEqualitySubset(
+    const KInductionProblem& problem,
+    const std::vector<std::pair<size_t, size_t>>& inputPairs,
+    const std::vector<std::pair<size_t, size_t>>& selectedPairs) {
+  if (problem.lazyTransitions == nullptr || selectedPairs.empty()) {
+    return;
+  }
+  auto& cache = problem.lazyTransitions->pdrStateEqualitySubsetCache;
+  for (auto& entry : cache) {
+    if (pdrStateEqualitySubsetCacheEntryMatches(problem, inputPairs, entry)) {
+      entry.selectedPairs = selectedPairs;
+      return;
+    }
+  }
+  PdrStateEqualitySubsetCacheEntry entry;
+  entry.inputPairs = inputPairs;
+  entry.resetBootstrapInputs = problem.resetBootstrapInputs;
+  entry.resetBootstrapCycles = problem.resetBootstrapCycles;
+  entry.initialStateAssignments = problem.initialStateAssignments;
+  entry.initialStateEqualityPairs = problem.initialStateEqualityPairs;
+  entry.bootstrapStateAssignments = problem.bootstrapStateAssignments;
+  entry.bootstrapStateEqualityPairs = problem.bootstrapStateEqualityPairs;
+  entry.selectedPairs = selectedPairs;
+  cache.push_back(std::move(entry));
+}
+
 bool equalityPairViolatedAtFrame(const SATSolverWrapper& solver,
                                  const FrameVariableStore& variables,
                                  const std::pair<size_t, size_t>& pair,
@@ -12451,13 +12654,28 @@ pruneStateEqualitySubsetByInductiveCounterexample(
       transitionSupportSymbols.begin(), transitionSupportSymbols.end());
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, querySymbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, querySymbols);
+  addRelevantSameFrameStateEqualityPartners(problem, querySymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
 
-  SATSolverWrapper solver(solverType);
   const auto solverSymbols = sortUniqueSymbols(std::move(querySymbols));
+  const auto querySolverType = stateEqualitySubsetSolverType(
+      problem, solverType, equalityPairs.size(), solverSymbols.size());
+  if (pdrStatsEnabled() && querySolverType != solverType) {
+    emitSecDiag(  // LCOV_EXCL_LINE
+        "SEC PDR stats: state equality subset solver=cadical symbols=",
+        solverSymbols.size(),
+        " pairs=",
+        equalityPairs.size());
+  }  // LCOV_EXCL_LINE
+  SATSolverWrapper solver(querySolverType);
+  // This local SAT query is part of PDR's invariant-pruning path, not a
+  // standalone preprocessing proof. Keep the selected backend on the same
+  // short-lived PDR query profile as predecessor and bad-state checks.
+  solver.configureForSecPdrQuery(solverSymbols.size());
   FrameVariableStore variables(solver, solverSymbols, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
+  addSameFrameStateEqualities(solver, variables, problem, 2);
   addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 2);
   addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
   addTransitionRelationForTargets(
@@ -12511,6 +12729,20 @@ BoolExpr* selectInductiveStateEqualitySubsetInvariant(
           problem, initFormula, equalityPairs, solverType)) {
     return nullptr;  // LCOV_EXCL_LINE
   }
+  if (const auto cachedSubset =
+          lookupCachedPdrStateEqualitySubset(problem, equalityPairs);
+      cachedSubset.has_value()) {
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: frame invariant state_equality_subset cache hit ",
+          "pairs=", cachedSubset->size());
+    }
+    invariant = buildStateEqualityInvariant(*cachedSubset);
+    if (selectedPairs != nullptr) {
+      *selectedPairs = *cachedSubset;
+    }
+    return invariant;
+  }
 
   TransitionExprResolver transitionByState(problem);
   for (size_t iteration = 0;
@@ -12535,6 +12767,8 @@ BoolExpr* selectInductiveStateEqualitySubsetInvariant(
         *selectedPairs = equalityPairs;
         // LCOV_EXCL_STOP
       }
+      rememberCachedPdrStateEqualitySubset(
+          problem, problem.inductiveStateEqualityPairs, equalityPairs);
       // LCOV_EXCL_START
       return invariant;
       // LCOV_EXCL_STOP
@@ -12887,19 +13121,29 @@ std::optional<PDRResult> checkResetBootstrapFrameZero(
   const size_t transitionSources = pdrTransitionSourceCount(problem);
   const size_t transitionSourceLimit =
       dualRailResetBootstrapBmcTransitionSourceLimit();
-  if (problem.usesDualRailStateEncoding &&
-      transitionSources > transitionSourceLimit) {
+  const size_t observedOutputCount = problem.observedOutputExprs0.size();
+  if (detail::pdrResetBootstrapPrecheckTooLarge(
+          problem.usesDualRailStateEncoding,
+          observedOutputCount,
+          problem.originalObservedOutputCount,
+          transitionSources,
+          transitionSourceLimit,
+          kMaxDualRailResetBootstrapBmcObservedOutputs)) {
     // This precheck is an accelerator that lets PDR add the property as an F0
     // fact after reset.  On large dual-rail cones it can become the whole run;
-    // skipping it is conservative because PDR then works from the weaker
-    // bootstrap summary and may split/skip instead of proving this slice.
+    // check the original property width as well as the current batch so output
+    // slicing cannot re-enable the expensive whole-transition BMC. Skipping is
+    // conservative: PDR works from the weaker bootstrap summary instead.
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: skipped dual-rail reset-bootstrap BMC precheck ",
           // LCOV_EXCL_START
           "transition_sources=", transitionSources,
+          " outputs=", observedOutputCount,
+          " original_outputs=", problem.originalObservedOutputCount,
           // LCOV_EXCL_STOP
-          " limit=", transitionSourceLimit);
+          " transition_limit=", transitionSourceLimit,
+          " output_limit=", kMaxDualRailResetBootstrapBmcObservedOutputs);
     }  // LCOV_EXCL_LINE
     return std::nullopt;
   }
@@ -12981,7 +13225,11 @@ PDREngine::PDREngine(const KInductionProblem& problem,
         // LCOV_EXCL_STOP
         " rail_limit=", dualRailResetFrontierStateSymbolLimit(),
         " transition_sources=", pdrTransitionSourceCount(problem),
-        " transition_limit=", dualRailResetFrontierTransitionSourceLimit());
+        " transition_limit=", dualRailResetFrontierTransitionSourceLimit(),
+        " outputs=", problem.observedOutputExprs0.size(),
+        " original_outputs=", pdrOriginalObservedOutputCount(problem),
+        " output_limit=", kMaxExactResetFrontierDualRailObservedOutputs,
+        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs);
   }
 }
 

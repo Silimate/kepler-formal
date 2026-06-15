@@ -87,6 +87,10 @@ void configureOutputBatchProblem(KInductionProblem& batch,
                                  const KInductionProblem& source,
                                  size_t firstOutput,
                                  size_t endOutput) {
+  batch.originalObservedOutputCount =
+      source.originalObservedOutputCount == 0
+          ? source.observedOutputExprs0.size()
+          : source.originalObservedOutputCount;
   if (source.observedOutputs.size() == source.observedOutputExprs0.size()) {
     batch.observedOutputs.assign(
         source.observedOutputs.begin() + firstOutput,
@@ -119,6 +123,8 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   } else {
     batch.dualRailOutputSkipReasons.clear();
   }
+  batch.sameFrameStateEqualityPairs0 = source.sameFrameStateEqualityPairs0;
+  batch.sameFrameStateEqualityPairs1 = source.sameFrameStateEqualityPairs1;
 
   // SEC output equality is a conjunction. Proving smaller conjunctions and
   // combining the results is logically equivalent to one monolithic property,

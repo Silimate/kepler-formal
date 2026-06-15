@@ -1717,6 +1717,86 @@ SequentialDesignModel makeCombinationalExtractedModel(BoolExpr* outputExpr) {
   return model;
 }
 
+KInductionProblem makeDualRailComplementedOutputProblemForTest() {
+  constexpr size_t p0One = 2;
+  constexpr size_t p0Zero = 3;
+  constexpr size_t c0One = 4;
+  constexpr size_t c0Zero = 5;
+  constexpr size_t p1One = 6;
+  constexpr size_t p1Zero = 7;
+  constexpr size_t c1One = 8;
+  constexpr size_t c1Zero = 9;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {p0One, p0Zero, c0One, c0Zero};
+  problem.state1Symbols = {p1One, p1Zero, c1One, c1Zero};
+  problem.allSymbols = {
+      p0One, p0Zero, c0One, c0Zero, p1One, p1Zero, c1One, c1Zero};
+  problem.dualRailStatePairs = {
+      {p0One, p0Zero}, {c0One, c0Zero}, {p1One, p1Zero}, {c1One, c1Zero}};
+  problem.initialStateEqualityPairs = {{p0One, p1One}, {p0Zero, p1Zero}};
+  problem.inductiveStateEqualityPairs = problem.initialStateEqualityPairs;
+  problem.sameFrameStateEqualityPairs0 = {{c0One, p0Zero}, {c0Zero, p0One}};
+  problem.sameFrameStateEqualityPairs1 = {{c1One, p1Zero}, {c1Zero, p1One}};
+
+  for (const auto symbol : problem.state0Symbols) {
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  for (const auto symbol : problem.state1Symbols) {
+    problem.transitions1.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+
+  BoolExpr* primaryEquality = BoolExpr::And(
+      makeEqualityExpr(BoolExpr::Var(p0One), BoolExpr::Var(p1One)),
+      makeEqualityExpr(BoolExpr::Var(p0Zero), BoolExpr::Var(p1Zero)));
+  BoolExpr* complementedOutputEquality = BoolExpr::And(
+      makeEqualityExpr(BoolExpr::Var(c0One), BoolExpr::Var(c1One)),
+      makeEqualityExpr(BoolExpr::Var(c0Zero), BoolExpr::Var(c1Zero)));
+  problem.observedOutputNames = {"complemented_rail_output"};
+  problem.observedOutputExprs0 = {complementedOutputEquality};
+  problem.observedOutputExprs1 = {BoolExpr::createTrue()};
+  problem.property = complementedOutputEquality;
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty =
+      BoolExpr::And(primaryEquality, complementedOutputEquality);
+  problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
+  problem.inductionPropertyAssumesInductiveStateEqualities = true;
+  problem.totalStateCount = problem.state0Symbols.size() + problem.state1Symbols.size();
+  return problem;
+}
+
+KInductionProblem makePartiallyInductiveEqualitySubsetProblemForTest() {
+  constexpr size_t stable0 = 2;
+  constexpr size_t unstable0 = 3;
+  constexpr size_t stable1 = 4;
+  constexpr size_t unstable1 = 5;
+
+  KInductionProblem problem;
+  problem.state0Symbols = {stable0, unstable0};
+  problem.state1Symbols = {stable1, unstable1};
+  problem.allSymbols = {stable0, unstable0, stable1, unstable1};
+  problem.initialStateEqualityPairs = {
+      {stable0, stable1}, {unstable0, unstable1}};
+  problem.inductiveStateEqualityPairs = problem.initialStateEqualityPairs;
+  problem.transitions0.emplace_back(stable0, BoolExpr::Var(stable0));
+  problem.transitions1.emplace_back(stable1, BoolExpr::Var(stable1));
+  problem.transitions0.emplace_back(unstable0, BoolExpr::Not(BoolExpr::Var(unstable0)));
+  problem.transitions1.emplace_back(unstable1, BoolExpr::Var(unstable1));
+
+  problem.observedOutputNames = {"stable_out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(stable0)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(stable1)};
+  problem.property =
+      makeEqualityExpr(BoolExpr::Var(stable0), BoolExpr::Var(stable1));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size() + problem.state1Symbols.size();
+  problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  return problem;
+}
+
 void addStateBitForTest(SequentialDesignModel& model,
                         const SignalKey& key,
                         size_t localVar,
@@ -7274,6 +7354,98 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailUsesSameFrameComplementRailEqualities) {
+  KInductionProblem problem = makeDualRailComplementedOutputProblemForTest();
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailStateEqualitySubsetUsesCadical) {
+  EXPECT_TRUE(detail::pdrStateEqualitySubsetPrefersCadical(
+      /*usesDualRailStateEncoding=*/true,
+      /*equalityPairCount=*/64,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*solverSymbols=*/4,
+      /*pairLimit=*/64,
+      /*symbolLimit=*/256));
+  EXPECT_TRUE(detail::pdrStateEqualitySubsetPrefersCadical(
+      /*usesDualRailStateEncoding=*/true,
+      /*equalityPairCount=*/1,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*solverSymbols=*/256,
+      /*pairLimit=*/64,
+      /*symbolLimit=*/256));
+  EXPECT_FALSE(detail::pdrStateEqualitySubsetPrefersCadical(
+      /*usesDualRailStateEncoding=*/true,
+      /*equalityPairCount=*/63,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*solverSymbols=*/255,
+      /*pairLimit=*/64,
+      /*symbolLimit=*/256));
+  EXPECT_FALSE(detail::pdrStateEqualitySubsetPrefersCadical(
+      /*usesDualRailStateEncoding=*/true,
+      /*equalityPairCount=*/64,
+      KEPLER_FORMAL::Config::SolverType::CADICAL,
+      /*solverSymbols=*/4,
+      /*pairLimit=*/64,
+      /*symbolLimit=*/256));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineReusesCachedStateEqualitySubsetAcrossSlices) {
+  KInductionProblem problem =
+      makePartiallyInductiveEqualitySubsetProblemForTest();
+  ASSERT_NE(problem.lazyTransitions, nullptr);
+
+  PDREngine firstEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto firstResult = firstEngine.run(2);
+
+  EXPECT_EQ(firstResult.status, PDRStatus::Equivalent);
+  ASSERT_EQ(problem.lazyTransitions->pdrStateEqualitySubsetCache.size(), 1u);
+  const std::vector<std::pair<size_t, size_t>> expectedSubset = {{2, 4}};
+  EXPECT_EQ(
+      problem.lazyTransitions->pdrStateEqualitySubsetCache.front().selectedPairs,
+      expectedSubset);
+
+  KInductionProblem copiedSlice = problem;
+  PDREngine secondEngine(
+      copiedSlice, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto secondResult = secondEngine.run(2);
+
+  EXPECT_EQ(secondResult.status, PDRStatus::Equivalent);
+  EXPECT_EQ(problem.lazyTransitions->pdrStateEqualitySubsetCache.size(), 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailResetBootstrapUsesOriginalOutputSurface) {
+  EXPECT_TRUE(detail::pdrResetBootstrapPrecheckTooLarge(
+      /*usesDualRailStateEncoding=*/true,
+      /*observedOutputCount=*/16,
+      /*originalObservedOutputCount=*/99,
+      /*transitionSources=*/8,
+      /*transitionSourceLimit=*/1024,
+      /*outputLimit=*/64));
+  EXPECT_FALSE(detail::pdrResetBootstrapPrecheckTooLarge(
+      /*usesDualRailStateEncoding=*/false,
+      /*observedOutputCount=*/16,
+      /*originalObservedOutputCount=*/99,
+      /*transitionSources=*/8,
+      /*transitionSourceLimit=*/1024,
+      /*outputLimit=*/64));
+  EXPECT_FALSE(detail::pdrResetBootstrapPrecheckTooLarge(
+      /*usesDualRailStateEncoding=*/true,
+      /*observedOutputCount=*/16,
+      /*originalObservedOutputCount=*/16,
+      /*transitionSources=*/8,
+      /*transitionSourceLimit=*/1024,
+      /*outputLimit=*/64));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDoesNotReuseNonInductiveStrengtheningAsFrameInvariant) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
@@ -7446,6 +7618,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
   EXPECT_LE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionDualRailUsesSameFrameComplementRailEqualities) {
+  KInductionProblem problem = makeDualRailComplementedOutputProblemForTest();
+
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -8918,6 +9100,42 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailExactResetFrontierAllowsMediumOutputSurface) {
+  KInductionProblem problem =
+      makeDualRailResetFrontierGuardProblemForTest(
+          /*railPairs=*/2112,
+          /*transitionSources=*/4224);
+  while (problem.observedOutputExprs0.size() < 99) {
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
+    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+  }
+  problem.originalObservedOutputCount = 99;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/1,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // sky130hd_riscv32i has a medium 99-output dual-rail surface.  Its hard data
+  // outputs need exact reset-frontier repair, while the rail-state/transition
+  // guards still keep larger SoC-scale cases out of this path.
+  EXPECT_EQ(
+      stderrOutput.find(
+          "exact reset-frontier checks disabled for large dual-rail problem"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PdrDualRailExactResetFrontierGuardCountsRailSymbols) {
   KInductionProblem problem =
       makeDualRailResetFrontierGuardProblemForTest(
@@ -9035,7 +9253,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailSkipsLargeResidualSurfaceAfterCertificates) {
+       RunExtractedModelsPdrDualRailFindsMismatchBeforeResidualSkip) {
   constexpr size_t kResidualOutputs = 6;
   const auto testCase =
       makeLargeDualRailResidualCaseForTest("pdrDualRailLargeResidual",
@@ -9057,20 +9275,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Large residual rail-state surfaces are a coverage frontier, not a reason to
-  // spend the whole workflow on reset-dependent PDR leaves. Already-certified
-  // top outputs remain covered and every residual top output is reported.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.coveredOutputs, 1u);
+  // A residual-size guard is only a proof-cost control. It must not mask a
+  // concrete top-output difference that the selected PDR SEC path can witness.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.coveredOutputs, kResidualOutputs + 1);
   EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
-  ASSERT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs);
-  EXPECT_NE(
-      result.skippedObservedOutputs.front().find("large rail-state surface"),
-      std::string::npos);
-  EXPECT_NE(
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
+  EXPECT_EQ(
       stderrOutput.find("PDR skipping large dual-rail residual surface"),
       std::string::npos);
-  EXPECT_EQ(stderrOutput.find("stage=initial"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9115,7 +9329,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsKiDualRailSkipsProductionLargeResidualStateSurface) {
+       RunExtractedModelsKiDualRailFindsProductionResidualMismatch) {
   constexpr size_t kResidualOutputs = 65;
   constexpr size_t kStateBitsPerDesign = 2049;
   const auto testCase = makeLargeDualRailResidualCaseForTest(
@@ -9132,16 +9346,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result =
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
 
-  // Ibex-sized dual-rail residual state surfaces should not enter the deferred
-  // KI base-SAT sweep.  They remain visible as skipped top-output coverage so
-  // the workflow finishes without inventing internal cross-design assumptions.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.coveredOutputs, 0u);
+  // The large-state guard must not become a result assumption. If the selected
+  // KI SEC path can witness a top-output mismatch, report it rather than
+  // skipping the residual surface.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.coveredOutputs, kResidualOutputs + 1);
   EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
-  ASSERT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs + 1);
-  EXPECT_NE(
-      result.skippedObservedOutputs.front().find("large rail-state surface"),
-      std::string::npos);
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9433,7 +9645,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const SignalKey state0 = makeSignalKey("dualRailSteadyFrontierState0");
   const SignalKey state1 = makeSignalKey("dualRailSteadyFrontierState1");
   std::vector<SignalKey> outputs;
-  for (size_t i = 0; i < 512; ++i) {
+  for (size_t i = 0; i < 64; ++i) {
     outputs.push_back(
         makeSignalKey("dualRailSteadyFrontierOut" + std::to_string(i)));
   }
@@ -9485,7 +9697,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailSteadyFrontierGuardReportsMismatch) {
   std::vector<SignalKey> outputs;
-  for (size_t i = 0; i < 512; ++i) {
+  for (size_t i = 0; i < 64; ++i) {
     outputs.push_back(makeSignalKey(
         "dualRailSteadyFrontierMismatchOut" + std::to_string(i)));
   }
@@ -14459,7 +14671,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDualRailUsesLocalSolverForLargeBadCubeQueries) {
+       PDREngineDualRailKeepsSelectedSolverForBadCubeQueries) {
   KInductionProblem problem;
   std::vector<size_t> symbols;
   constexpr size_t kSmallStateCount = 6;
@@ -14484,8 +14696,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = problem.bad;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar smallDualRailQueryLimit(
-      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_LOCAL_SOLVER_SYMBOLS", "1");
   const ScopedEnvVar proofConflictLimit(
       "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_CONFLICT_LIMIT", "5000");
   testing::internal::CaptureStderr();
@@ -14494,7 +14704,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(
+  // Bad-cube queries are core PDR obligations. They should stay on the selected
+  // engine solver rather than silently switching to a separate backend.
+  EXPECT_EQ(
       stderrOutput.find("SEC PDR stats: bad cube query solver=cadical"),
       std::string::npos)
       << stderrOutput;

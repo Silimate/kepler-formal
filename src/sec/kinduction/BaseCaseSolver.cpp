@@ -535,6 +535,13 @@ void closeFrameEqualityDependencies(
   EqualityIndex(equalityPairs).close(frameStates);
 }
 
+void closeSameFrameStateEqualityDependencies(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& frameStates) {
+  closeFrameEqualityDependencies(problem.sameFrameStateEqualityPairs0, frameStates);
+  closeFrameEqualityDependencies(problem.sameFrameStateEqualityPairs1, frameStates);
+}
+
 void addRelevantComplementPartners(
     const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
     std::unordered_set<size_t>& solverSymbols) {
@@ -547,6 +554,12 @@ void addRelevantComplementPartners(
       // LCOV_EXCL_STOP
     }
   }
+}
+
+void addRelevantSameFrameStateEqualityPartners(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& solverSymbols) {
+  closeSameFrameStateEqualityDependencies(problem, solverSymbols);
 }
 
 void addRelevantDualRailPartners(
@@ -634,6 +647,7 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
       closeFrameEqualityDependencies(
           problem.bootstrapStateEqualityPairs, requiredStates[frame]);
     }
+    closeSameFrameStateEqualityDependencies(problem, requiredStates[frame]);
     auto targets = expandTransitionTargets(
         requiredStates[frame],
         transitionByState,
@@ -647,6 +661,7 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
     closeFrameEqualityDependencies(
         problem.initialStateEqualityPairs, requiredStates[0]);
   }
+  closeSameFrameStateEqualityDependencies(problem, requiredStates[0]);
 
   for (const auto& frameStates : requiredStates) {
     solverSymbols.insert(frameStates.begin(), frameStates.end());
@@ -658,6 +673,7 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantSameFrameStateEqualityPartners(problem, solverSymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
 
   BaseCaseCoi coi;
@@ -724,6 +740,7 @@ BaseCaseCoi buildStateCubeReachabilityCoiForTargetFrames(
         context.bootstrapFrames != 0 && frame == context.bootstrapFrames) {
       context.bootstrapEqualities.close(requiredStates[frame]);
     }
+    closeSameFrameStateEqualityDependencies(problem, requiredStates[frame]);
     auto targets = expandTransitionTargets(
         requiredStates[frame],
         transitionByState,
@@ -736,6 +753,7 @@ BaseCaseCoi buildStateCubeReachabilityCoiForTargetFrames(
   if (closeStartupEqualityDependencies) {
     context.initialEqualities.close(requiredStates[0]);
   }
+  closeSameFrameStateEqualityDependencies(problem, requiredStates[0]);
 
   for (const auto& frameStates : requiredStates) {
     solverSymbols.insert(frameStates.begin(), frameStates.end());
@@ -747,6 +765,7 @@ BaseCaseCoi buildStateCubeReachabilityCoiForTargetFrames(
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantSameFrameStateEqualityPartners(problem, solverSymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
 
   BaseCaseCoi coi;
@@ -828,6 +847,7 @@ BaseCaseCoi buildResetSummaryCubeReachabilityCoi(
   std::vector<std::vector<size_t>> transitionTargetsByFrame(postBootstrapSteps);
   // LCOV_EXCL_STOP
   for (size_t frame = postBootstrapSteps; frame > 0; --frame) {
+    closeSameFrameStateEqualityDependencies(problem, requiredStates[frame]);
     auto targets = expandTransitionTargets(
         requiredStates[frame],
         transitionByState,
@@ -838,6 +858,7 @@ BaseCaseCoi buildResetSummaryCubeReachabilityCoi(
   }
 
   context.bootstrapEqualities.close(requiredStates[0]);
+  closeSameFrameStateEqualityDependencies(problem, requiredStates[0]);
 
   for (const auto& frameStates : requiredStates) {
     solverSymbols.insert(frameStates.begin(), frameStates.end());
@@ -849,6 +870,7 @@ BaseCaseCoi buildResetSummaryCubeReachabilityCoi(
   }
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantSameFrameStateEqualityPartners(problem, solverSymbols);
 
   BaseCaseCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
@@ -1123,6 +1145,46 @@ void addComplementedStateRelations(
           -variables.getLiteral(primarySymbol, frame));
     }
   }
+}
+
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      if (solverSymbols.find(lhsSymbol) == solverSymbols.end() ||
+          solverSymbols.find(rhsSymbol) == solverSymbols.end()) {
+        continue;  // LCOV_EXCL_LINE
+      }
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(lhsSymbol, frame),
+          variables.getLiteral(rhsSymbol, frame));
+    }
+  }
+}
+
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  addSameFrameStateEqualities(
+      solver,
+      variables,
+      problem.sameFrameStateEqualityPairs0,
+      solverSymbols,
+      numFrames);
+  addSameFrameStateEqualities(
+      solver,
+      variables,
+      problem.sameFrameStateEqualityPairs1,
+      solverSymbols,
+      numFrames);
 }
 
 void addDualRailStateValidity(
@@ -1615,6 +1677,8 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
   addComplementedStateRelations(
       solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet,
       internalK + 1);
+  addSameFrameStateEqualities(
+      solver, variables, problem, coi.solverSymbolSet, internalK + 1);
   addDualRailStateValidity(
       solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet,
       internalK + 1);
@@ -2070,7 +2134,9 @@ knownResetFrontierConflictCore(
                                : data.problem.initialStateEqualityPairs;
   if (assignments.empty() && equalities.empty() &&
       data.problem.complementedStatePairs0.empty() &&
-      data.problem.complementedStatePairs1.empty()) {
+      data.problem.complementedStatePairs1.empty() &&
+      data.problem.sameFrameStateEqualityPairs0.empty() &&
+      data.problem.sameFrameStateEqualityPairs1.empty()) {
     return std::nullopt;
   }
 
@@ -2079,6 +2145,14 @@ knownResetFrontierConflictCore(
   // LCOV_EXCL_STOP
   for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
     relations.addEquality(lhsSymbol, rhsSymbol);
+  }
+  for (const auto& [lhsSymbol, rhsSymbol] :
+       data.problem.sameFrameStateEqualityPairs0) {
+    relations.addEquality(lhsSymbol, rhsSymbol);  // LCOV_EXCL_LINE
+  }
+  for (const auto& [lhsSymbol, rhsSymbol] :
+       data.problem.sameFrameStateEqualityPairs1) {
+    relations.addEquality(lhsSymbol, rhsSymbol);  // LCOV_EXCL_LINE
   }
   // LCOV_EXCL_START
   for (const auto& [primarySymbol, complementedSymbol] :
@@ -2420,6 +2494,12 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolver(
       problem.complementedStatePairs1,
       cached->coi.solverSymbolSet,
       targetFrame + 1);
+  addSameFrameStateEqualities(
+      *cached->solver,
+      *cached->variables,
+      problem,
+      cached->coi.solverSymbolSet,
+      targetFrame + 1);
   addDualRailStateValidity(
       *cached->solver,
       *cached->variables,
@@ -2526,6 +2606,12 @@ std::unique_ptr<CachedResetFrontierSolver> buildResetFrontierSolverForCoi(  // L
       *cached->solver,  // LCOV_EXCL_LINE
       *cached->variables,  // LCOV_EXCL_LINE
       problem.complementedStatePairs1,  // LCOV_EXCL_LINE
+      cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
+      targetFrame + 1);  // LCOV_EXCL_LINE
+  addSameFrameStateEqualities(  // LCOV_EXCL_LINE
+      *cached->solver,  // LCOV_EXCL_LINE
+      *cached->variables,  // LCOV_EXCL_LINE
+      problem,  // LCOV_EXCL_LINE
       cached->coi.solverSymbolSet,  // LCOV_EXCL_LINE
       targetFrame + 1);  // LCOV_EXCL_LINE
   addDualRailStateValidity(  // LCOV_EXCL_LINE
@@ -3037,6 +3123,12 @@ bool resetSummaryPrecheckProvesUnreachable(
         solver,
         variables,
         problem.complementedStatePairs1,
+        coi.solverSymbolSet,
+        postBootstrapSteps + 1);
+    addSameFrameStateEqualities(
+        solver,
+        variables,
+        problem,
         coi.solverSymbolSet,
         postBootstrapSteps + 1);
     addDualRailStateValidity(

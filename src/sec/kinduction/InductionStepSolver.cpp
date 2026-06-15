@@ -278,6 +278,19 @@ void closeStateEqualityDependencies(
   }
 }
 
+void closeSameFrameStateEqualityDependencies(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& stateSymbols) {
+  closeStateEqualityDependencies(problem.sameFrameStateEqualityPairs0, stateSymbols);
+  closeStateEqualityDependencies(problem.sameFrameStateEqualityPairs1, stateSymbols);
+}
+
+void addRelevantSameFrameStateEqualityPartners(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& solverSymbols) {
+  closeSameFrameStateEqualityDependencies(problem, solverSymbols);
+}
+
 InductionCoi buildInductionCoi(const KInductionProblem& problem,
                                BoolExpr* inductionProperty,
                                BoolExpr* inductionBad,
@@ -310,6 +323,7 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
       closeStateEqualityDependencies(
           problem.inductiveStateEqualityPairs, requiredStates[frame]);
     }
+    closeSameFrameStateEqualityDependencies(problem, requiredStates[frame]);
     auto targets = expandTransitionTargets(
         requiredStates[frame],
         transitionByState,
@@ -328,6 +342,7 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
     closeStateEqualityDependencies(
         problem.inductiveStateEqualityPairs, requiredStates[0]);
   }
+  closeSameFrameStateEqualityDependencies(problem, requiredStates[0]);
 
   std::unordered_set<size_t> solverSymbols;
   solverSymbols.reserve(1024);
@@ -349,6 +364,7 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
       transitionSupportSymbols.begin(), transitionSupportSymbols.end());
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantSameFrameStateEqualityPartners(problem, solverSymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
   addPostBootstrapResetInputSymbols(problem, solverSymbols);
 
@@ -396,6 +412,46 @@ void addComplementedStateRelations(
           -variables.getLiteral(primarySymbol, frame));
     }
   }
+}
+
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      if (solverSymbols.find(lhsSymbol) == solverSymbols.end() ||
+          solverSymbols.find(rhsSymbol) == solverSymbols.end()) {
+        continue;  // LCOV_EXCL_LINE
+      }
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(lhsSymbol, frame),
+          variables.getLiteral(rhsSymbol, frame));
+    }
+  }
+}
+
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  addSameFrameStateEqualities(
+      solver,
+      variables,
+      problem.sameFrameStateEqualityPairs0,
+      solverSymbols,
+      numFrames);
+  addSameFrameStateEqualities(
+      solver,
+      variables,
+      problem.sameFrameStateEqualityPairs1,
+      solverSymbols,
+      numFrames);
 }
 
 void addTransitionRelation(SATSolverWrapper& solver,
@@ -539,6 +595,8 @@ InductionProofStatus proveByInductionStatus(
       solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet, k + 1);
   addComplementedStateRelations(
       solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet, k + 1);
+  addSameFrameStateEqualities(
+      solver, variables, problem, coi.solverSymbolSet, k + 1);
   addDualRailStateValidity(
       solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet, k + 1);
   addPostBootstrapResetInputConstraints(solver, variables, problem, k + 1);
