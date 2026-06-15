@@ -94,4 +94,17 @@ class SequentialEquivalenceStrategy {
   SecEncoding encoding_;
 };
 
+namespace detail {
+
+constexpr size_t kMaxPdrInductiveStateEqualityOutputs = 64;
+
+inline bool shouldInferPdrInductiveStateEqualities(
+    SecEngine secEngine,
+    size_t observedOutputSurface) {
+  return secEngine != SecEngine::Pdr ||
+         observedOutputSurface <= kMaxPdrInductiveStateEqualityOutputs;
+}
+
+}  // namespace detail
+
 }  // namespace KEPLER_FORMAL::SEC

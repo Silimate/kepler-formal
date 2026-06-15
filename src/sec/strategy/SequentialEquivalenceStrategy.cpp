@@ -1534,7 +1534,8 @@ bool secSummaryStatsEnabled() {
 }
 
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
-constexpr size_t kMaxPdrInductiveStateEqualityOutputs = 128;
+constexpr size_t kMaxPdrResetBootstrapCandidateStates = 8192;
+constexpr size_t kMinPdrStartupCertificateOutputs = 129;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
 // LCOV_EXCL_START
@@ -3203,6 +3204,7 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
                                       const SequentialDesignModel& model1,
                                       KEPLER_FORMAL::Config::SolverType solverType,
                                       bool inferInductiveStateEqualities,
+                                      bool inferResetBootstrapCandidateEqualities,
                                       bool secDiagEnabled) {
   AlignedSecInterface aligned;
   logSecDiagLine(secDiagEnabled, "SEC diag: aligning inputs/outputs");
@@ -3257,9 +3259,22 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
         model0, model1, aligned.inputs, aligned.outputs, localValidationSolverType);
     logSecDiagLine(secDiagEnabled, "SEC diag: inferred inductive state equalities");
   }
-  aligned.resetBootstrapCandidateStateEqualities =
-      inferStructurallyEquivalentOutputConeStatePairs(
-          model0, model1, aligned.inputs, aligned.outputs, localValidationSolverType);
+  if (!inferResetBootstrapCandidateEqualities) {
+    // PDR proves top-output properties directly.  Output-rooted startup
+    // candidates are useful for the wide startup certificate, but on smaller
+    // sequential ASICs this pre-engine SAT mining can dominate runtime.
+    logSecDiagLine(
+        secDiagEnabled,
+        "SEC diag: skipping reset-bootstrap candidate equality mining");
+  } else {
+    aligned.resetBootstrapCandidateStateEqualities =
+        inferStructurallyEquivalentOutputConeStatePairs(
+            model0,
+            model1,
+            aligned.inputs,
+            aligned.outputs,
+            localValidationSolverType);
+  }
   return aligned;
 }
 
@@ -4447,14 +4462,15 @@ std::optional<SequentialEquivalenceResult> tryDualRailSteadyFrontierGuard(
       solveDualRailSteadyFrontierBad(problem, solverType);
   if (frontierStatus == SATSolverWrapper::SolveStatus::Sat) {
     // LCOV_EXCL_START
-    if (auto witness =
+    if (problem.canReportSteadyFrontierMismatchAsCounterexample()) {
+      if (auto witness =
             SEC::findBaseCounterexampleAtFrontier(problem, solverType, 0);
             // LCOV_EXCL_STOP
-        witness.has_value()) {
-      KInductionResult witnessResult{
+          witness.has_value()) {
+        KInductionResult witnessResult{
           // LCOV_EXCL_START
           KInductionStatus::Different, witness->badFrame, std::move(witness)};
-      return makeCounterexampleSecResult(
+        return makeCounterexampleSecResult(
           std::move(witnessResult),
           model0,
           model1,
@@ -4466,22 +4482,31 @@ std::optional<SequentialEquivalenceResult> tryDualRailSteadyFrontierGuard(
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
+      // LCOV_EXCL_START
+      }
+      // LCOV_EXCL_STOP
+      return makeSecResult(  // LCOV_EXCL_LINE
+          // LCOV_EXCL_START
+          SequentialEquivalenceStatus::Different,
+          // LCOV_EXCL_STOP
+          0,
+          "Dual-rail steady-state top-output frontier found a mismatch while "
+          "guarding outputs: " +  // LCOV_EXCL_LINE
+              summarizeGuardedOutputNames(problem),  // LCOV_EXCL_LINE
+          // LCOV_EXCL_START
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          // LCOV_EXCL_STOP
+          extractedBoundaryReports);  // LCOV_EXCL_LINE
     // LCOV_EXCL_START
     }
     // LCOV_EXCL_STOP
-    return makeSecResult(  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
-        SequentialEquivalenceStatus::Different,
-        // LCOV_EXCL_STOP
-        0,
-        "Dual-rail steady-state top-output frontier found a mismatch while "
-        "guarding outputs: " +  // LCOV_EXCL_LINE
-            summarizeGuardedOutputNames(problem),  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
-        outputCoverage,
-        abstractedSequentialBoundaries,
-        // LCOV_EXCL_STOP
-        extractedBoundaryReports);  // LCOV_EXCL_LINE
+    logSecDiagLine(  // LCOV_EXCL_LINE
+        secDiagEnabled,  // LCOV_EXCL_LINE
+        "SEC diag: dual-rail steady-state frontier found only an "
+        "over-approximate sequential mismatch; falling through to selected "
+        "SEC engine");  // LCOV_EXCL_LINE
+    return std::nullopt;
   }
 
   if (frontierStatus == SATSolverWrapper::SolveStatus::Unsat) {
@@ -6208,14 +6233,23 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
     // facts to avoid relearning identical state relations one cube at a time.
     const size_t observedOutputSurface =
         std::max(model0.observedOutputs.size(), model1.observedOutputs.size());
+    // PDR validates mined state equalities before using them, but medium
+    // reset-bootstrap CPU surfaces can spend proof effort on state relations
+    // that are not needed for the top-output property and may expose abstract
+    // startup counterexamples. Keep this accelerator for focused properties.
     const bool inferInductiveStateEqualities =
+        detail::shouldInferPdrInductiveStateEqualities(
+            secEngine_, observedOutputSurface);
+    const bool inferResetBootstrapCandidateEqualities =
         secEngine_ != SecEngine::Pdr ||
-        observedOutputSurface <= kMaxPdrInductiveStateEqualityOutputs;
+        observedOutputSurface >= kMinPdrStartupCertificateOutputs ||
+        totalStateBits <= kMaxPdrResetBootstrapCandidateStates;
     aligned = alignSecInterface(
         model0,
         model1,
         solverType_,
         inferInductiveStateEqualities,
+        inferResetBootstrapCandidateEqualities,
         secDiagEnabled);
   } catch (const std::exception& e) {
     return makeSecResult(
@@ -6306,9 +6340,8 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       deriveResetBootstrapStrengthening,
       deriveResetBootstrapEqualities,
       secDiagEnabled);
-  constexpr size_t kMinOutputsForStartupCertificateFastPath = 129;
   const bool useStartupCertificateFastPath =
-      aligned.outputs.names.size() >= kMinOutputsForStartupCertificateFastPath &&
+      aligned.outputs.names.size() >= kMinPdrStartupCertificateOutputs &&
       !aligned.resetBootstrapCandidateStateEqualities.names.empty() &&
       !symbolSpace.problem.resetBootstrapInputs.empty();
   if (useStartupCertificateFastPath) {

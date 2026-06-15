@@ -2143,9 +2143,9 @@ SNLDesign* createInvModel(NLLibrary* library) {
   return model;
 }
 
-SNLDesign* createBufModel(NLLibrary* library) {
+SNLDesign* createBufModelWithName(NLLibrary* library, const std::string& name) {
   auto* model =
-      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("BUF"));
+      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
   auto* input =
       SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("A"));
   auto* output =
@@ -2154,6 +2154,10 @@ SNLDesign* createBufModel(NLLibrary* library) {
   SNLDesignModeling::setTruthTable(
       model, SNLTruthTable(1, 0b10, SNLTruthTable::fullDependencies(1)));
   return model;
+}
+
+SNLDesign* createBufModel(NLLibrary* library) {
+  return createBufModelWithName(library, "BUF");
 }
 
 SNLDesign* createAnd2Model(NLLibrary* library) {
@@ -4185,6 +4189,44 @@ SNLDesign* createClockTreeBufferedDffTop(
 
   ff->getInstTerm(NLDB0::getDFFData())->setNet(netIn);
   ff->getInstTerm(NLDB0::getDFFClock())->setNet(netLeafClock);
+  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netOut);
+
+  return top;
+}
+
+SNLDesign* createDataBufferedDffTop(
+    NLLibrary* library,
+    const std::string& name,
+    SNLDesign* bufferModel) {
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
+  auto* topIn =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
+  auto* topClock =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+
+  auto* dataBuffer =
+      SNLInstance::create(top, bufferModel, NLName("data_buffer"));
+  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
+
+  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
+  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
+  auto* netData = SNLScalarNet::create(top, NLName("net_data"));
+  auto* netOut = SNLScalarNet::create(top, NLName("net_out"));
+
+  topIn->setNet(netIn);
+  topClock->setNet(netClock);
+  topOut->setNet(netOut);
+
+  dataBuffer->getInstTerm(bufferModel->getScalarTerm(NLName("A")))->setNet(
+      netIn);
+  dataBuffer->getInstTerm(bufferModel->getScalarTerm(NLName("Y")))->setNet(
+      netData);
+
+  ff->getInstTerm(NLDB0::getDFFData())->setNet(netData);
+  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
   ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netOut);
 
   return top;
@@ -6678,6 +6720,56 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailResetBootstrapDoesNotUseBinaryObservationFrontier) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{2, true}};
+  problem.bootstrapStateAssignments = {{3, true}, {4, true}};
+  problem.state0Symbols = {3, 4};
+  problem.state1Symbols = {5, 6};
+  problem.totalStateCount = 4;
+  problem.property = BoolExpr::Var(7);
+
+  // Dual rail represents resetless startup values as unknown rails.  Reusing
+  // the binary observation frontier would make PDR validate an over-approximate
+  // startup mismatch instead of proving the selected dual-rail property.
+  EXPECT_FALSE(problem.usesResetBootstrapObservationFrontier());
+
+  KInductionProblem binaryProblem = problem;
+  binaryProblem.usesDualRailStateEncoding = false;
+  EXPECT_TRUE(binaryProblem.usesResetBootstrapObservationFrontier());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialSteadyFrontierMismatchRequiresEngineValidation) {
+  KInductionProblem combinationalProblem;
+  EXPECT_TRUE(
+      combinationalProblem.canReportSteadyFrontierMismatchAsCounterexample());
+
+  KInductionProblem sequentialProblem;
+  sequentialProblem.state0Symbols = {2};
+
+  // A SAT steady-frontier result on sequential SEC can come from an arbitrary
+  // reset-bootstrap startup assignment, so it is not a concrete counterexample
+  // until the selected engine validates reachability.
+  sequentialProblem.resetBootstrapCycles = 1;
+  sequentialProblem.resetBootstrapInputs = {{3, true}};
+  EXPECT_FALSE(
+      sequentialProblem.canReportSteadyFrontierMismatchAsCounterexample());
+
+  KInductionProblem completeBootstrapProblem = sequentialProblem;
+  completeBootstrapProblem.bootstrapStateAssignments = {{2, true}};
+  EXPECT_FALSE(
+      completeBootstrapProblem.canReportSteadyFrontierMismatchAsCounterexample());
+
+  KInductionProblem resetlessSequentialProblem;
+  resetlessSequentialProblem.state0Symbols = {2};
+  EXPECT_TRUE(
+      resetlessSequentialProblem.canReportSteadyFrontierMismatchAsCounterexample());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverHandlesActiveLowResetBootstrapInputs) {
   KInductionProblem problem;
   problem.environmentInputNames = {"rst_n", "in"};
@@ -7443,6 +7535,30 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*transitionSources=*/8,
       /*transitionSourceLimit=*/1024,
       /*outputLimit=*/64));
+  EXPECT_FALSE(detail::pdrResetBootstrapPrecheckTooLarge(
+      /*usesDualRailStateEncoding=*/true,
+      /*observedOutputCount=*/99,
+      /*originalObservedOutputCount=*/99,
+      /*transitionSources=*/4224,
+      /*transitionSourceLimit=*/8192));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrStateEqualityMiningSkipsRiscvSizedOutputSurface) {
+  EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
+      SecEngine::Pdr,
+      /*observedOutputSurface=*/64));
+
+  // The sky130hs_riscv32i SEC surface has 99 top outputs. Keeping PDR's mined
+  // state equalities out of that medium reset-bootstrap case prevents an
+  // abstract startup state from being reported as a real cycle-0 diff.
+  EXPECT_FALSE(detail::shouldInferPdrInductiveStateEqualities(
+      SecEngine::Pdr,
+      /*observedOutputSurface=*/99));
+
+  EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
+      SecEngine::KInduction,
+      /*observedOutputSurface=*/99));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9100,7 +9216,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierAllowsMediumOutputSurface) {
+       PdrDualRailExactResetFrontierBlocksRiscvSizedMediumOutputSurface) {
   KInductionProblem problem =
       makeDualRailResetFrontierGuardProblemForTest(
           /*railPairs=*/2112,
@@ -9126,13 +9242,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*useExactResetFrontierChecks=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // sky130hd_riscv32i has a medium 99-output dual-rail surface.  Its hard data
-  // outputs need exact reset-frontier repair, while the rail-state/transition
-  // guards still keep larger SoC-scale cases out of this path.
-  EXPECT_EQ(
+  // sky130hs_riscv32i has a medium 99-output dual-rail surface, but its rail
+  // state is far smaller than the Ibex case that needs exact reset-frontier
+  // repair. Keep it on PDR/startup certificates instead of the reset-prefix SAT
+  // wall sampled on this regression.
+  EXPECT_NE(
       stderrOutput.find(
           "exact reset-frontier checks disabled for large dual-rail problem"),
       std::string::npos);
+  EXPECT_NE(stderrOutput.find("medium_state_min=8192"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17102,6 +17220,47 @@ TEST_F(SequentialEquivalenceStrategyTests,
       {{extracted.inputVarByKey.at(inKey), true}, {stateVar, false}}));
   EXPECT_FALSE(expr->evaluate(
       {{extracted.inputVarByKey.at(inKey), false}, {stateVar, true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractDoesNotTreatDataClkbufCellAsClockCarrier) {
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+  auto* dataBufferModel =
+      createBufModelWithName(primitives, "sky130_fd_sc_hs__clkbuf_1");
+  auto* top = createDataBufferedDffTop(library, "top", dataBufferModel);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+  expectAllExpressionSupportIsPublished(extracted);
+  const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
+  const auto inKey = findKeyByDisplayName(extracted, "in[0]");
+  const auto clockKey = findKeyByDisplayName(extracted, "clk[0]");
+  const size_t stateVar = extracted.inputVarByKey.at(stateKey);
+  const size_t inVar = extracted.inputVarByKey.at(inKey);
+  const size_t clockVar = extracted.inputVarByKey.at(clockKey);
+  auto* expr = extracted.nextStateExprByStateKey.at(stateKey);
+
+  // sky130hs uses clkbuf cells for ordinary routed data too.  Only a branch
+  // that structurally traces to the top clock may become a SEC clock carrier.
+  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
+  EXPECT_EQ(expr->getSupportVars().count(inVar), 1u);
+  EXPECT_EQ(expr->getSupportVars().count(clockVar), 0u);
+  EXPECT_NE(
+      std::find(
+          extracted.clockCarrierVarIDs.begin(),
+          extracted.clockCarrierVarIDs.end(),
+          clockVar),
+      extracted.clockCarrierVarIDs.end());
+  EXPECT_EQ(
+      std::find(
+          extracted.clockCarrierVarIDs.begin(),
+          extracted.clockCarrierVarIDs.end(),
+          inVar),
+      extracted.clockCarrierVarIDs.end());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

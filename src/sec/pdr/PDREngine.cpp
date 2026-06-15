@@ -258,20 +258,19 @@ constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
 // problems rebuild the reset prefix over both value/known rails for many
 // neighboring PDR cubes.  Nangate45 Ibex needs this repair at 15496 rail
 // symbols/transition sources to avoid abstract reset-frontier counterexamples;
-// larger SoC-scale surfaces still stay behind the guard unless the workflow
-// opts in through the existing environment overrides.
+// smaller medium-output CPU surfaces are handled better by ordinary PDR
+// splitting, without repeatedly rebuilding the reset image.
 constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 20000;
 constexpr size_t kMaxExactResetFrontierDualRailTransitionSources = 20000;
 constexpr size_t kMaxExactResetFrontierDualRailObservedOutputs = 128;
-// Allow medium CPU-style interfaces to use exact reset-frontier repair.  The
-// original-output and state/transition guards keep larger SoC-scale surfaces out
-// of this path without disabling it for 99/106-output residual buses.
+constexpr size_t kMaxExactResetFrontierDualRailSmallOriginalOutputs = 64;
+constexpr size_t kMinExactResetFrontierDualRailMediumStateSymbols = 8192;
 constexpr size_t kMaxExactResetFrontierDualRailOriginalOutputs = 128;
 // The broad frame-0 reset-bootstrap BMC precheck materializes the whole output
-// slice.  Keep that accelerator conservative and let mid-size dual-rail PDR use
-// the cheaper per-cube exact reset-frontier repair above instead.
+// slice.  Allow medium CPU interfaces such as 99-output RISC-V, but still keep
+// larger SoC-scale surfaces behind the transition/original-output guards.
 constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 8192;
-constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs = 64;
+constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs = 128;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
 constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
@@ -994,14 +993,20 @@ bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
   if (!requested || !problem.usesDualRailStateEncoding) {
     return requested;
   }
-  return pdrDualRailStateSymbolCount(problem) <=
-             dualRailResetFrontierStateSymbolLimit() &&
+  const size_t railStateSymbols = pdrDualRailStateSymbolCount(problem);
+  const size_t originalOutputs = pdrOriginalObservedOutputCount(problem);
+  const bool outputSurfaceAllowed =
+      problem.observedOutputExprs0.size() <=
+          kMaxExactResetFrontierDualRailObservedOutputs &&
+      originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs &&
+      (originalOutputs <= kMaxExactResetFrontierDualRailSmallOriginalOutputs ||
+       railStateSymbols >=
+           kMinExactResetFrontierDualRailMediumStateSymbols);
+
+  return railStateSymbols <= dualRailResetFrontierStateSymbolLimit() &&
          pdrTransitionSourceCount(problem) <=
              dualRailResetFrontierTransitionSourceLimit() &&
-         problem.observedOutputExprs0.size() <=
-             kMaxExactResetFrontierDualRailObservedOutputs &&
-         pdrOriginalObservedOutputCount(problem) <=
-             kMaxExactResetFrontierDualRailOriginalOutputs;
+         outputSurfaceAllowed;
 }
 
 KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
@@ -13229,7 +13234,9 @@ PDREngine::PDREngine(const KInductionProblem& problem,
         " outputs=", problem.observedOutputExprs0.size(),
         " original_outputs=", pdrOriginalObservedOutputCount(problem),
         " output_limit=", kMaxExactResetFrontierDualRailObservedOutputs,
-        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs);
+        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs,
+        " medium_state_min=",
+        kMinExactResetFrontierDualRailMediumStateSymbols);
   }
 }
 

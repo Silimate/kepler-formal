@@ -34,7 +34,7 @@ bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
                                        size_t originalObservedOutputCount,
                                        size_t transitionSources,
                                        size_t transitionSourceLimit,
-                                       size_t outputLimit = 64);
+                                       size_t outputLimit = 128);
 
 }  // namespace detail
 

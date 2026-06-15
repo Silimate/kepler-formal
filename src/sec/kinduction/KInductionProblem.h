@@ -154,13 +154,23 @@ struct KInductionProblem {
   }
 
   bool usesResetBootstrapObservationFrontier() const {
-    // Binary SEC cannot compare internal resetless state across designs.  When
-    // reset/bootstrap leaves part of the startup state arbitrary, use the same
-    // top-observation frontier as incomplete-init SEC instead of reporting an
-    // arbitrary post-reset flop value as a cycle-0 counterexample.
+    // Binary SEC cannot compare resetless internal state across designs unless
+    // that relation was proved. Dual rail already carries unknown startup state
+    // on value/known rails, so forcing it onto this frontier can turn an
+    // over-approximate startup state into a false counterexample.
     return !usesDualRailStateEncoding && hasSequentialState() &&
            hasResetBootstrap() && resetBootstrapCycles != 0 &&
            property != nullptr && !hasCompleteBootstrapStateAssignments();
+  }
+
+  bool canReportSteadyFrontierMismatchAsCounterexample() const {
+    // With reset/bootstrap startup, the steady-frontier SAT model can be an
+    // over-approximate startup assignment rather than a concrete design trace,
+    // even when the rail-state bootstrap map is complete. Resetless sequential
+    // SEC can still report a real top-output frontier mismatch through the
+    // selected engine path.
+    return !(hasSequentialState() && hasResetBootstrap() &&
+             resetBootstrapCycles != 0);
   }
 
   std::vector<size_t> combinedStateSymbols() const {

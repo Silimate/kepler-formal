@@ -136,6 +136,15 @@ jobs:
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=dual_rail_steady
         bash regress/run_sec_strategies_regress.sh \
+          sky130hs_riscv32i \
+          "${{github.workspace}}/kepler-formal-examples/sky130hs_riscv32i" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          6_final_sec_test.yml \
+          expect-equivalent \
+          compact \
+          engine=${{ env.SEC_ENGINE }} \
+          sec-encoding=dual_rail_steady
+        bash regress/run_sec_strategies_regress.sh \
           nangate45_ibex \
           "${{github.workspace}}/kepler-formal-examples/nangate45_ibex" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \

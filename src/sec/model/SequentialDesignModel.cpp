@@ -153,6 +153,8 @@ std::string normalizePinName(const std::string& name);
 
 bool isClockTreeBufferCell(const naja::DNL::DNLTerminalFull& term);
 
+bool isPotentialClockTreeBufferCell(const naja::DNL::DNLTerminalFull& term);
+
 std::optional<naja::DNL::DNLID> getClockTreeBufferSourceDriverTerm(
     naja::DNL::DNLFull* dnl,
     const naja::DNL::DNLTerminalFull& outputTerm);
@@ -2273,11 +2275,6 @@ bool isClockTreeCarrierTerminalName(const naja::DNL::DNLTerminalFull& term) {
       isClockTreeCarrierBoundaryName(snlInstance->getName().getString())) {
     return true;  // LCOV_EXCL_LINE
   }
-  if (const auto* model = instance.getSNLModel();
-      model != nullptr &&
-      isClockTreeCarrierBoundaryName(model->getName().getString())) {
-    return true;
-  }
   return false;
 // LCOV_EXCL_START
 }
@@ -2305,6 +2302,8 @@ bool isClockTreeBufferCell(const naja::DNL::DNLTerminalFull& term) {
   // CTS tools may keep a generic BUF/INV library cell while marking only the
   // placed instance or flattened DNL path as clkbuf/clkload.  Use that path
   // marker so routed clock leaves are not mis-modeled as SEC clock enables.
+  // Library model names alone are not enough: sky130hs also uses clkbuf cells
+  // as ordinary routed data buffers.
   if (isClockTreeCarrierTerminalName(term)) {
     return true;
   }
@@ -2328,11 +2327,25 @@ bool isClockTreeBufferCell(const naja::DNL::DNLTerminalFull& term) {
   }
   // LCOV_EXCL_STOP
 
-  if (const auto* model = instance.getSNLModel();
-      model != nullptr && isClockTreeBufferCellName(model->getName().getString())) {
-    return true;  // LCOV_EXCL_LINE
+  return false;
+}
+
+bool isPotentialClockTreeBufferCell(const naja::DNL::DNLTerminalFull& term) {
+  if (isClockTreeBufferCell(term)) {
+    return true;
+  }
+  if (term.isNull() || term.isTopPort()) {
+    return false;  // LCOV_EXCL_LINE
   }
 
+  // Only the source-tracing structural pass may use the library model name:
+  // the candidate becomes a clock carrier only if it recursively reaches a top
+  // clock. Generic cone passthrough must not erase data-path clkbuf cells.
+  const auto& instance = term.getDNLInstance();
+  if (const auto* model = instance.getSNLModel();
+      model != nullptr && isClockTreeBufferCellName(model->getName().getString())) {
+    return true;
+  }
   return false;
 }
 
@@ -2569,23 +2582,12 @@ size_t expandClockCarrierVarIDsFromTermNames(
     if (term.isNull()) {
       continue;  // LCOV_EXCL_LINE
     }
+    // Model names such as sky130_fd_sc_hs__clkbuf_* are also used as ordinary
+    // data buffers after routing.  Name-only promotion is therefore limited to
+    // routed branches whose terminal/path/instance name marks them as clock
+    // tree; library-cell clkbufs are handled by the structural pass below only
+    // when their source actually traces back to a top clock.
     bool isClockCarrier = isClockTreeCarrierTerminalName(term);
-    if (!isClockCarrier && !term.isTopPort()) {
-      const auto& instance = term.getDNLInstance();
-      if (const auto* snlInstance = instance.getSNLInstance();
-          snlInstance != nullptr) {
-        isClockCarrier = isClockTreeCarrierBoundaryName(
-            snlInstance->getName().getString());
-      }
-      if (!isClockCarrier) {
-        if (const auto* model = instance.getSNLModel(); model != nullptr) {
-          // LCOV_EXCL_START
-          isClockCarrier = isClockTreeCarrierBoundaryName(
-          // LCOV_EXCL_STOP
-              model->getName().getString());
-        }
-      }
-    }
     if (!isClockCarrier) {
       continue;
     }
@@ -2731,7 +2733,7 @@ size_t expandClockCarrierVarIDsFromStructure(
       return false;
     }
 
-    if (isClockTreeBufferCell(term)) {
+    if (isPotentialClockTreeBufferCell(term)) {
       const auto sourceDriver = getClockTreeBufferSourceDriverTerm(dnl, term);
       const bool result =
           sourceDriver.has_value() && self(self, *sourceDriver, true);
