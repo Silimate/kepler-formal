@@ -262,7 +262,7 @@ IMCResult IMCEngine::run(size_t maxK) const {
 
   for (size_t k = 1; k <= maxK; ++k) {
     // IMC keeps counterexample discovery and proof growth in lockstep by depth:
-    // first rule out a real bug at k, then try to turn the reachable frontier
+    // first rule out a real bug at k, then attempt to turn the reachable frontier
     // up to k into an inductive invariant.
     if (const auto counterexample = findImcCounterexample(problem_, solverType_, k);
         counterexample.has_value()) {

@@ -6622,6 +6622,27 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverPdrProofOnlyRejectsReachableFrontierBad) {
+  KInductionProblem problem;
+  constexpr size_t badState = 2;
+  problem.state0Symbols = {badState};
+  problem.allSymbols = {badState};
+  problem.initialStateAssignments = {{badState, true}};
+  problem.initializedStateCount = 1;
+  problem.initialCondition = BoolExpr::Var(badState);
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionBad = problem.bad;
+  problem.inductionProperty = problem.property;
+  problem.totalStateCount = problem.state0Symbols.size();
+
+  // PDR callers use this helper as a proof certificate. A reachable bad
+  // frontier is SAT and must never be collapsed into "no witness means UNSAT".
+  EXPECT_FALSE(provesNoBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverObservationOnlyStartsSearchingAtFrameOne) {
   KInductionProblem problem;
   problem.environmentInputNames = {"in"};
@@ -8864,6 +8885,67 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailValidatesRiscvSizedFrameZeroSurface) {
+  constexpr size_t kOutputCount = 99;
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+
+  for (size_t index = 0; index < kOutputCount; ++index) {
+    const SignalKey out =
+        makeSignalKey("pdrDualRailRiscvSizedFrameZeroOut" +
+                      std::to_string(index));
+    const SignalKey state =
+        makeSignalKey("pdrDualRailRiscvSizedFrameZeroState" +
+                      std::to_string(index));
+    const size_t stateVar = 2000 + index;
+    const std::string outputName =
+        "riscv_sized_frame_zero_out[" + std::to_string(index) + "]";
+
+    model0.allObservedOutputs.push_back(out);
+    model0.observedOutputs.push_back(out);
+    model0.displayNameByKey.emplace(out, outputName);
+    addStateBitForTest(
+        model0,
+        state,
+        stateVar,
+        "riscv_sized_frame_zero_state[" + std::to_string(index) + "]",
+        BoolExpr::createFalse());
+    model0.initialStateValueByKey.emplace(state, false);
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(stateVar));
+
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model1.displayNameByKey.emplace(out, outputName);
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::createFalse());
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT", "0");
+  const ScopedEnvVar flushDepth("KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH", "0");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // RISC-V exposes 99 observed outputs.  Keep that medium surface inside the
+  // exact frame-0 guard so PDR does not rely on abstract empty-cube witnesses
+  // when reset/bootstrap facts are enough to prove the post-reset outputs.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, kOutputCount);
+  EXPECT_EQ(result.totalOutputs, kOutputCount);
+  EXPECT_EQ(
+      stderrOutput.find("skipped dual-rail frame-0 validation"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailFlushDepthZeroDisablesCertificate) {
   const SignalKey out = makeSignalKey("pdrDualRailFlushDepthZeroOut");
 
@@ -9216,7 +9298,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierBlocksRiscvSizedMediumOutputSurface) {
+       PdrDualRailExactResetFrontierAllowsRiscvSizedMediumOutputSurface) {
   KInductionProblem problem =
       makeDualRailResetFrontierGuardProblemForTest(
           /*railPairs=*/2112,
@@ -9242,15 +9324,49 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*useExactResetFrontierChecks=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // sky130hs_riscv32i has a medium 99-output dual-rail surface, but its rail
-  // state is far smaller than the Ibex case that needs exact reset-frontier
-  // repair. Keep it on PDR/startup certificates instead of the reset-prefix SAT
-  // wall sampled on this regression.
+  // sky130hs_riscv32i has a medium 99-output dual-rail bus surface.  Keeping it
+  // eligible for exact reset-frontier repair avoids exhausting ordinary PDR
+  // bad-cube budgets on its reset-unanchored datapath buses.
+  EXPECT_EQ(
+      stderrOutput.find(
+          "exact reset-frontier checks disabled for large dual-rail problem"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailExactResetFrontierStillBlocksSmallMediumOutputSurface) {
+  KInductionProblem problem =
+      makeDualRailResetFrontierGuardProblemForTest(
+          /*railPairs=*/2047,
+          /*transitionSources=*/4094);
+  while (problem.observedOutputExprs0.size() < 99) {
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
+    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+  }
+  problem.originalObservedOutputCount = 99;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/1,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Keep the exact reset-prefix SAT repair reserved for CPU-sized bus surfaces;
+  // smaller medium-output cases should still rely on the cheaper PDR path.
   EXPECT_NE(
       stderrOutput.find(
           "exact reset-frontier checks disabled for large dual-rail problem"),
       std::string::npos);
-  EXPECT_NE(stderrOutput.find("medium_state_min=8192"), std::string::npos);
+  EXPECT_NE(stderrOutput.find("medium_state_min=4096"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9810,6 +9926,75 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.coveredOutputs, outputs.size());
   EXPECT_EQ(result.totalOutputs, outputs.size());
   EXPECT_TRUE(result.skippedObservedOutputs.empty());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsDualRailSteadyFrontierUsesExactResetBootstrap) {
+  constexpr size_t kOutputCount = 65;
+  const SignalKey rst = makeSignalKey("exactResetFrontierRst");
+  const SignalKey state0 = makeSignalKey("exactResetFrontierState0");
+  std::vector<SignalKey> outputs;
+  outputs.reserve(kOutputCount);
+  for (size_t i = 0; i < kOutputCount; ++i) {
+    outputs.push_back(
+        makeSignalKey("exactResetFrontierOut" + std::to_string(i)));
+  }
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {rst};
+  model0.allObservedOutputs = outputs;
+  model0.observedOutputs = outputs;
+  model0.inputVarByKey.emplace(rst, 4);
+  model0.displayNameByKey.emplace(rst, "rst[0]");
+  addStateBitForTest(
+      model0,
+      state0,
+      2,
+      "exact_reset_frontier_left_q[0]",
+      BoolExpr::Or(BoolExpr::Var(4), BoolExpr::Var(2)));
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    model0.displayNameByKey.emplace(
+        outputs[i], "exact_reset_frontier_out[" + std::to_string(i) + "]");
+    model0.observedOutputExprByKey.emplace(outputs[i], BoolExpr::Var(2));
+  }
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {rst};
+  model1.allObservedOutputs = outputs;
+  model1.observedOutputs = outputs;
+  model1.inputVarByKey.emplace(rst, 5);
+  model1.displayNameByKey.emplace(rst, "rst[0]");
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    model1.displayNameByKey.emplace(
+        outputs[i], "exact_reset_frontier_out[" + std::to_string(i) + "]");
+    model1.observedOutputExprByKey.emplace(outputs[i], BoolExpr::createTrue());
+  }
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The cheap steady-frontier guard sees the reset-dominated state as rail-X
+  // against a constant one and is SAT. The concrete reset prefix forces the
+  // state high, so only the exact reset-bootstrap frontier may turn this into
+  // full output coverage.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, outputs.size());
+  EXPECT_EQ(result.totalOutputs, outputs.size());
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_NE(
+      stderrOutput.find(
+          "exact reset-bootstrap frontier covers dual-rail top-output surface"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -10587,18 +10772,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsReportsMissingOutputExpression) {
+       RunExtractedModelsThrowsOnMissingOutputExpression) {
   auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
   auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
   model1.observedOutputExprByKey.clear();
 
   auto strategy = makeBinaryExtractedSecStrategy();
-  const auto result = strategy.runExtractedModels(model0, model1, 1);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
-  EXPECT_NE(
-      result.reason.find("Missing observed output expression"),
-      std::string::npos);
+  EXPECT_THROW(
+      static_cast<void>(strategy.runExtractedModels(model0, model1, 1)),
+      std::runtime_error);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17654,7 +17836,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       MismatchedObservedOutputNamesAreReportedAsUnsupported) {
+       MismatchedObservedOutputNamesThrow) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -17666,14 +17848,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createNamedOutputDffTop(library, "top1", invModel, "out1");
 
   auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(1);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
-  EXPECT_NE(result.reason.find("Mismatched observed output sets"), std::string::npos);
+  EXPECT_THROW(static_cast<void>(strategy.run(1)), std::runtime_error);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       MismatchedObservedOutputCountsAreReportedAsUnsupported) {
+       MismatchedObservedOutputCountsThrow) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -17685,14 +17864,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createExtraOutputDffTop(library, "top1", invModel);
 
   auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(1);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
-  EXPECT_NE(result.reason.find("Mismatched observed output sets"), std::string::npos);
+  EXPECT_THROW(static_cast<void>(strategy.run(1)), std::runtime_error);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       MismatchedInputNamesAreReportedAsUnsupported) {
+       MismatchedInputNamesThrow) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -17704,16 +17880,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createNamedInputDffTop(library, "top1", invModel, "in1");
 
   auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(1);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
-  EXPECT_NE(
-      result.reason.find("Mismatched environment input sets"),
-      std::string::npos);
+  EXPECT_THROW(static_cast<void>(strategy.run(1)), std::runtime_error);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       MismatchedInputCountsAreReportedAsUnsupported) {
+       MismatchedInputCountsThrow) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -17725,12 +17896,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createExtraInputDffTop(library, "top1");
 
   auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(1);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
-  EXPECT_NE(
-      result.reason.find("Mismatched environment input sets"),
-      std::string::npos);
+  EXPECT_THROW(static_cast<void>(strategy.run(1)), std::runtime_error);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

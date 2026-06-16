@@ -679,50 +679,46 @@ std::string formatConeTraceback(const KInductionResult::CounterexampleWitness& w
     return oss.str();
   }
 
-  try {
-    const auto report0 = buildConeDiffReport(
-        top0, differencePoint.signal, model0.environmentInputs);
-    const auto report1 = buildConeDiffReport(
-        top1, differencePoint.signal, model1.environmentInputs);
+  const auto report0 = buildConeDiffReport(
+      top0, differencePoint.signal, model0.environmentInputs);
+  const auto report1 = buildConeDiffReport(
+      top1, differencePoint.signal, model1.environmentInputs);
 
-    if (!report0.error.empty() || !report1.error.empty()) {
-      oss << "  Cone traceback unavailable: ";  // LCOV_EXCL_LINE
-      if (!report0.error.empty()) {  // LCOV_EXCL_LINE
-        oss << "design0 " << report0.error;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
-      if (!report0.error.empty() && !report1.error.empty()) {  // LCOV_EXCL_LINE
-        oss << "; ";  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-      }  // LCOV_EXCL_LINE
-      if (!report1.error.empty()) {  // LCOV_EXCL_LINE
-        oss << "design1 " << report1.error;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      oss << "\n";  // LCOV_EXCL_LINE
-      return oss.str();  // LCOV_EXCL_LINE
-    }
-
-    oss << "  design0 cone to environment inputs:\n"
-        << formatConeLevels(report0.trace);
+  if (!report0.error.empty() || !report1.error.empty()) {
+    oss << "  Cone traceback unavailable: ";  // LCOV_EXCL_LINE
+    if (!report0.error.empty()) {  // LCOV_EXCL_LINE
+      oss << "design0 " << report0.error;  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     // LCOV_EXCL_START
-    oss << "  design1 cone to environment inputs:\n"
-    // LCOV_EXCL_STOP
-        << formatConeLevels(report1.trace);
+    if (!report0.error.empty() && !report1.error.empty()) {  // LCOV_EXCL_LINE
+      oss << "; ";  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
+    }  // LCOV_EXCL_LINE
+    if (!report1.error.empty()) {  // LCOV_EXCL_LINE
+      oss << "design1 " << report1.error;  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
+    oss << "\n";  // LCOV_EXCL_LINE
+    return oss.str();  // LCOV_EXCL_LINE
+  }
 
-    constexpr size_t kMaxDiffTerms = 20;
-    const auto onlyInDesign0 =
-        setDifference(report0.trace.allTerms, report1.trace.allTerms);
-    const auto onlyInDesign1 =
-        setDifference(report1.trace.allTerms, report0.trace.allTerms);
-    oss << "  cone terms only in design0: "
-        // LCOV_EXCL_START
-        << formatStringList(onlyInDesign0, kMaxDiffTerms) << "\n";
-    oss << "  cone terms only in design1: "
-    // LCOV_EXCL_STOP
-        << formatStringList(onlyInDesign1, kMaxDiffTerms) << "\n";
-  } catch (const std::exception& e) {
-    oss << "  Cone traceback unavailable: " << e.what() << "\n";  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
+  oss << "  design0 cone to environment inputs:\n"
+      << formatConeLevels(report0.trace);
+  // LCOV_EXCL_START
+  oss << "  design1 cone to environment inputs:\n"
+  // LCOV_EXCL_STOP
+      << formatConeLevels(report1.trace);
+
+  constexpr size_t kMaxDiffTerms = 20;
+  const auto onlyInDesign0 =
+      setDifference(report0.trace.allTerms, report1.trace.allTerms);
+  const auto onlyInDesign1 =
+      setDifference(report1.trace.allTerms, report0.trace.allTerms);
+  oss << "  cone terms only in design0: "
+      // LCOV_EXCL_START
+      << formatStringList(onlyInDesign0, kMaxDiffTerms) << "\n";
+  oss << "  cone terms only in design1: "
+  // LCOV_EXCL_STOP
+      << formatStringList(onlyInDesign1, kMaxDiffTerms) << "\n";
 
   return oss.str();
 }
@@ -2993,6 +2989,10 @@ size_t pdrCertificateStateSymbolCount(const KInductionProblem& problem) {
   return problem.dualRailStatePairs.size() * 2;
 }
 
+bool canReportPdrValidationCounterexample(
+    const KInductionProblem& problem,
+    const KInductionResult::CounterexampleWitness& witness);
+
 std::optional<KInductionResult::CounterexampleWitness>
 findPdrValidationCounterexample(const KInductionProblem& problem,
                                 KEPLER_FORMAL::Config::SolverType solverType,
@@ -3004,10 +3004,71 @@ findPdrValidationCounterexample(const KInductionProblem& problem,
     if (auto witness = SEC::findBaseCounterexampleAtFrontier(
             problem, solverType, depth);
         witness.has_value()) {
-      return witness;
+      if (canReportPdrValidationCounterexample(problem, *witness)) {
+        return witness;
+      }
     }
   }
   return std::nullopt;
+}
+
+bool isUnknownBootstrapRailPair(
+    const DualRailSymbolPair& rails,
+    const std::unordered_map<size_t, bool>& bootstrapValueBySymbol) {
+  const auto oneIt = bootstrapValueBySymbol.find(rails.mayBeOne);
+  const auto zeroIt = bootstrapValueBySymbol.find(rails.mayBeZero);
+  return oneIt != bootstrapValueBySymbol.end() &&
+         zeroIt != bootstrapValueBySymbol.end() &&
+         oneIt->second &&
+         zeroIt->second;
+}
+
+bool dualRailBadDependsOnUnknownBootstrapState(
+    const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding ||
+      problem.resetBootstrapCycles == 0 ||
+      problem.bad == nullptr ||
+      problem.bootstrapStateAssignments.empty()) {
+    return false;
+  }
+
+  const std::set<size_t> support = problem.bad->getSupportVars();
+  if (support.empty()) {
+    return false;
+  }
+
+  std::unordered_map<size_t, bool> bootstrapValueBySymbol;
+  bootstrapValueBySymbol.reserve(problem.bootstrapStateAssignments.size());
+  for (const auto& [symbol, value] : problem.bootstrapStateAssignments) {
+    bootstrapValueBySymbol.emplace(symbol, value);
+  }
+
+  for (const auto& rails : problem.dualRailStatePairs) {
+    if (!isUnknownBootstrapRailPair(rails, bootstrapValueBySymbol)) {
+      continue;
+    }
+    if (support.find(rails.mayBeOne) != support.end() ||
+        support.find(rails.mayBeZero) != support.end()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool canReportPdrValidationCounterexample(
+    const KInductionProblem& problem,
+    const KInductionResult::CounterexampleWitness& witness) {
+  if (!problem.usesDualRailStateEncoding ||
+      problem.canReportSteadyFrontierMismatchAsCounterexample()) {
+    return true;
+  }
+  if (witness.badFrame != 0) {
+    return true;
+  }
+  // A frame-0 dual-rail mismatch that depends on X-valued reset-bootstrap
+  // state can be only a rail-overapproximation artifact. Keep it as proof
+  // feedback for PDR, but do not expose it as a concrete SEC counterexample.
+  return !dualRailBadDependsOnUnknownBootstrapState(problem);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -3026,7 +3087,10 @@ findPdrPerOutputValidationCounterexample(
       if (auto witness = SEC::findBaseCounterexampleAtFrontier(
               singleOutputProblem, solverType, depth);
           witness.has_value()) {
-        return witness;
+        if (canReportPdrValidationCounterexample(
+                singleOutputProblem, *witness)) {
+          return witness;
+        }
       }
     }
   }
@@ -4280,6 +4344,20 @@ void addFrameZeroInitialAssignments(
   }
 }
 
+void addFrameZeroBootstrapAssignments(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::unordered_set<size_t>& support,
+    const KInductionProblem& problem) {
+  for (const auto& [symbol, value] : problem.bootstrapStateAssignments) {
+    if (support.find(symbol) == support.end()) {
+      continue;
+    }
+    const int literal = variables.getLiteral(symbol, 0);
+    solver.addClause({value ? literal : -literal});
+  }
+}
+
 void addFrameZeroInitialEqualities(
     SATSolverWrapper& solver,
     const FrameVariableStore& variables,
@@ -4297,6 +4375,24 @@ void addFrameZeroInitialEqualities(
     if (lhs != rhs) {  // LCOV_EXCL_LINE
       addLiteralEquivalence(solver, lhs, rhs);  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
+  }
+}
+
+void addFrameZeroBootstrapEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::unordered_set<size_t>& support,
+    const KInductionProblem& problem) {
+  for (const auto& [lhsSymbol, rhsSymbol] : problem.bootstrapStateEqualityPairs) {
+    if (support.find(lhsSymbol) == support.end() ||
+        support.find(rhsSymbol) == support.end()) {
+      continue;
+    }
+    const int lhs = variables.getLiteral(lhsSymbol, 0);
+    const int rhs = variables.getLiteral(rhsSymbol, 0);
+    if (lhs != rhs) {
+      addLiteralEquivalence(solver, lhs, rhs);
+    }
   }
 }
 
@@ -4381,8 +4477,16 @@ SATSolverWrapper::SolveStatus solveDualRailSteadyFrontierBad(
   // LCOV_EXCL_START
   solver.configureForSecLocalBooleanCheck(supportSymbols.size());
   FrameVariableStore variables(solver, supportSymbols, 1);
-  addFrameZeroInitialAssignments(solver, variables, support, problem);
-  addFrameZeroInitialEqualities(solver, variables, support, problem);
+  // The steady frontier is after reset/bootstrap when that startup proof is
+  // active.  Use the concrete boot facts here; otherwise HS-style reset maps
+  // can look SAT only because the guard checked the looser pre-reset frontier.
+  if (problem.hasResetBootstrap() && problem.resetBootstrapCycles != 0) {
+    addFrameZeroBootstrapAssignments(solver, variables, support, problem);
+    addFrameZeroBootstrapEqualities(solver, variables, support, problem);
+  } else {
+    addFrameZeroInitialAssignments(solver, variables, support, problem);
+    addFrameZeroInitialEqualities(solver, variables, support, problem);
+  }
   addFrameZeroSameFrameStateEqualities(
       solver, variables, problem.sameFrameStateEqualityPairs0);
   addFrameZeroSameFrameStateEqualities(
@@ -4506,6 +4610,25 @@ std::optional<SequentialEquivalenceResult> tryDualRailSteadyFrontierGuard(
         "SEC diag: dual-rail steady-state frontier found only an "
         "over-approximate sequential mismatch; falling through to selected "
         "SEC engine");  // LCOV_EXCL_LINE
+    if (problem.hasResetBootstrap() && problem.resetBootstrapCycles != 0) {
+      // The cheap frontier guard intentionally uses the post-reset state summary,
+      // which can admit rail-X states that the concrete reset prefix cannot reach.
+      // Accept coverage only when the exact prefix proves the same top-output bad
+      // predicate UNSAT; SAT/UNKNOWN stays conservative.
+      if (SEC::provesNoBaseCounterexampleAtFrontier(problem, solverType, 0)) {
+        logSecDiagLine(
+            secDiagEnabled,
+            "SEC diag: exact reset-bootstrap frontier covers dual-rail "
+            "top-output surface");
+        return makeSecResult(
+            SequentialEquivalenceStatus::Equivalent,
+            0,
+            "",
+            outputCoverage,
+            abstractedSequentialBoundaries,
+            extractedBoundaryReports);
+      }
+    }
     return std::nullopt;
   }
 
@@ -4552,10 +4675,11 @@ SequentialEquivalenceResult runPdrSecEngine(
   // LCOV_EXCL_START
   // problems, which made the output-batching fallback split every output and
   // repeat the same BMC setup hundreds of times before PDR even started.
-  // Keep this optional validation local in dual-rail SEC.  Wider properties
-  // stay inside PDR and split there, instead of spending minutes in a broad
-  // pre-PDR reset-frontier query.
-  constexpr size_t kMaxDualRailFrameZeroValidationOutputs = 64;
+  // Keep this optional validation local in dual-rail SEC.  Medium CPU bus
+  // properties such as 99-output RISC-V need the exact frame-0 guard so PDR
+  // does not accept abstract empty-cube reset-bootstrap witnesses as real
+  // differences, while larger SoC surfaces still split inside PDR.
+  constexpr size_t kMaxDualRailFrameZeroValidationOutputs = 128;
   bool broadBasePrecheckDone = false;
   if (problem.usesDualRailStateEncoding) {
     if (problem.observedOutputExprs0.size() <=
@@ -6225,41 +6349,30 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // Phase 2: align the externally visible SEC interface, then drop any outputs
   // whose cones were already classified as skipped by extraction.
   const size_t totalStateBits = model0.stateBits.size() + model1.stateBits.size();
-  AlignedSecInterface aligned;
-  try {
-    // PDR validates these correspondences before using them as frame invariants.
-    // Gate the mining by output surface, not raw flop count: FIFO/CPU blocks can
-    // have many state bits but only a small top-output property that needs these
-    // facts to avoid relearning identical state relations one cube at a time.
-    const size_t observedOutputSurface =
-        std::max(model0.observedOutputs.size(), model1.observedOutputs.size());
-    // PDR validates mined state equalities before using them, but medium
-    // reset-bootstrap CPU surfaces can spend proof effort on state relations
-    // that are not needed for the top-output property and may expose abstract
-    // startup counterexamples. Keep this accelerator for focused properties.
-    const bool inferInductiveStateEqualities =
-        detail::shouldInferPdrInductiveStateEqualities(
-            secEngine_, observedOutputSurface);
-    const bool inferResetBootstrapCandidateEqualities =
-        secEngine_ != SecEngine::Pdr ||
-        observedOutputSurface >= kMinPdrStartupCertificateOutputs ||
-        totalStateBits <= kMaxPdrResetBootstrapCandidateStates;
-    aligned = alignSecInterface(
-        model0,
-        model1,
-        solverType_,
-        inferInductiveStateEqualities,
-        inferResetBootstrapCandidateEqualities,
-        secDiagEnabled);
-  } catch (const std::exception& e) {
-    return makeSecResult(
-        SequentialEquivalenceStatus::Unsupported,
-        0,
-        e.what(),
-        aligned.outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
+  // PDR validates these correspondences before using them as frame invariants.
+  // Gate the mining by output surface, not raw flop count: FIFO/CPU blocks can
+  // have many state bits but only a small top-output property that needs these
+  // facts to avoid relearning identical state relations one cube at a time.
+  const size_t observedOutputSurface =
+      std::max(model0.observedOutputs.size(), model1.observedOutputs.size());
+  // PDR validates mined state equalities before using them, but medium
+  // reset-bootstrap CPU surfaces can spend proof effort on state relations
+  // that are not needed for the top-output property and may expose abstract
+  // startup counterexamples. Keep this accelerator for focused properties.
+  const bool inferInductiveStateEqualities =
+      detail::shouldInferPdrInductiveStateEqualities(
+          secEngine_, observedOutputSurface);
+  const bool inferResetBootstrapCandidateEqualities =
+      secEngine_ != SecEngine::Pdr ||
+      observedOutputSurface >= kMinPdrStartupCertificateOutputs ||
+      totalStateBits <= kMaxPdrResetBootstrapCandidateStates;
+  AlignedSecInterface aligned = alignSecInterface(
+      model0,
+      model1,
+      solverType_,
+      inferInductiveStateEqualities,
+      inferResetBootstrapCandidateEqualities,
+      secDiagEnabled);
   if (aligned.outputs.names.empty()) {
     return makeSecResult(
         SequentialEquivalenceStatus::Unsupported,

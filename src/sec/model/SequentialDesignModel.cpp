@@ -274,15 +274,14 @@ bool hasBuildableCombinationalRoot(
       return false;
     }
 
-    try {
-      const auto& truthTable = naja::NL::SNLDesignModeling::getTruthTable(
-          model, currentTerm.getSnlBitTerm()->getOrderID());
-      return truthTable.isInitialized();
-    } catch (const std::exception&) {
-      // LCOV_EXCL_START
-      return false;  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    const auto* bitTerm = currentTerm.getSnlBitTerm();
+    if (naja::NL::SNLDesignModeling::getTruthTableCount(model) <=
+        bitTerm->getOrderID()) {
+      return false;
+    }
+    const auto& truthTable = naja::NL::SNLDesignModeling::getTruthTable(
+        model, bitTerm->getOrderID());
+    return truthTable.isInitialized();
   }
 
   // LCOV_EXCL_START
@@ -888,96 +887,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
         normalizedRoots.size());
     fflush(stderr);
   }
-  try {
-    builder.build();
-  } catch (const std::exception& e) {
-    const std::string detail =
-        // LCOV_EXCL_START
-        "failed to materialize dependency cone: " + std::string(e.what());  // LCOV_EXCL_LINE
-    if (requestedOutputs.size() > 1) {  // LCOV_EXCL_LINE
-      if (secDiagEnabled) {  // LCOV_EXCL_LINE
-        std::fprintf(  // LCOV_EXCL_LINE
-            stderr,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
-            "SEC diag: extract(%s) %s split fallback outputs=%zu: %s\n",
-            // LCOV_EXCL_START
-            topName,  // LCOV_EXCL_LINE
-            phaseLabel,  // LCOV_EXCL_LINE
-            requestedOutputs.size(),  // LCOV_EXCL_LINE
-            detail.c_str());  // LCOV_EXCL_LINE
-        std::fflush(stderr);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      MaterializedBuilderOutputs merged;  // LCOV_EXCL_LINE
-      const auto midpoint = requestedOutputs.begin() + requestedOutputs.size() / 2;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-      // Keep the common case batched: isolate the bad root by halves instead of
-      // rebuilding every good root as an independent DNL/cloud extraction.
-      // LCOV_EXCL_START
-      const std::vector<naja::DNL::DNLID> left(  // LCOV_EXCL_LINE
-          requestedOutputs.begin(), midpoint);  // LCOV_EXCL_LINE
-      const std::vector<naja::DNL::DNLID> right(  // LCOV_EXCL_LINE
-          midpoint, requestedOutputs.end());  // LCOV_EXCL_LINE
-      const auto leftResult = materializeBuilderOutputs(  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-          left,
-          // LCOV_EXCL_START
-          collectedInputs,  // LCOV_EXCL_LINE
-          stableTermDNLID2varID,  // LCOV_EXCL_LINE
-          collectedSkippedOutputs,  // LCOV_EXCL_LINE
-          secDiagEnabled,  // LCOV_EXCL_LINE
-          topName,  // LCOV_EXCL_LINE
-          phaseLabel);  // LCOV_EXCL_LINE
-      mergeMaterializedBuilderOutputs(merged, leftResult);  // LCOV_EXCL_LINE
-      const auto rightResult = materializeBuilderOutputs(  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-          right,
-          // LCOV_EXCL_START
-          collectedInputs,  // LCOV_EXCL_LINE
-          stableTermDNLID2varID,  // LCOV_EXCL_LINE
-          collectedSkippedOutputs,  // LCOV_EXCL_LINE
-          secDiagEnabled,  // LCOV_EXCL_LINE
-          topName,  // LCOV_EXCL_LINE
-          phaseLabel);  // LCOV_EXCL_LINE
-      mergeMaterializedBuilderOutputs(merged, rightResult);  // LCOV_EXCL_LINE
-      return merged;  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    if (secDiagEnabled) {  // LCOV_EXCL_LINE
-      std::fprintf(  // LCOV_EXCL_LINE
-          stderr,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-          "SEC diag: extract(%s) %s skipped all outputs: %s\n",
-          // LCOV_EXCL_START
-          topName,  // LCOV_EXCL_LINE
-          phaseLabel,  // LCOV_EXCL_LINE
-          detail.c_str());  // LCOV_EXCL_LINE
-      std::fflush(stderr);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    for (const auto rootTermID : normalizedRoots) {  // LCOV_EXCL_LINE
-      result.skippedOutputsByTerm.emplace(  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-          rootTermID,
-          // LCOV_EXCL_START
-          BuilderSkippedOutputInfo{BuilderSkippedOutputReason::NoDriver, detail});  // LCOV_EXCL_LINE
-      const auto requestedIt = requestedByRoot.find(rootTermID);  // LCOV_EXCL_LINE
-      if (requestedIt == requestedByRoot.end()) {  // LCOV_EXCL_LINE
-        continue;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-      }
-      // LCOV_EXCL_START
-      for (const auto requestedTermID : requestedIt->second) {  // LCOV_EXCL_LINE
-        result.skippedOutputsByTerm.emplace(  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-            requestedTermID,
-            // LCOV_EXCL_START
-            BuilderSkippedOutputInfo{  // LCOV_EXCL_LINE
-                BuilderSkippedOutputReason::NoDriver, detail});  // LCOV_EXCL_LINE
-                // LCOV_EXCL_STOP
-      }
-    }
-    // LCOV_EXCL_START
-    return result;  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  builder.build();
   // BuildPrimaryOutputClauses owns a temporary DNL expansion and destroys the
   // singleton when build() completes. Rebuilding the full DNL here is very
   // expensive on CVA6, so only reacquire it when the detailed dependency-root
@@ -1040,29 +950,13 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
     if (expr == nullptr || !expr->isValid()) {
       continue;
     }
-    try {
-      // Dependency materialization may temporarily remove internal roots from
-      // the PI list to force cone rebuilding. That changes builder-local
-      // variable IDs, so normalize every dependency formula back to the stable
-      // SEC model variable space before the expression is shared with proofs.
-      if (needsStableVarRemap) {
-        expr = remapBoolExprVariables(expr, stableVarRemap, stableRemapMemo);
-      }
-    } catch (const std::exception& e) {
-      // LCOV_EXCL_START
-      result.skippedOutputsByTerm.emplace(  // LCOV_EXCL_LINE
-          result.outputs[i],  // LCOV_EXCL_LINE
-          BuilderSkippedOutputInfo{  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-              BuilderSkippedOutputReason::NoDriver,
-              // LCOV_EXCL_START
-              "failed to remap dependency cone to stable SEC variables: " +  // LCOV_EXCL_LINE
-                  std::string(e.what())});  // LCOV_EXCL_LINE
-                  // LCOV_EXCL_STOP
-      continue;
-    // LCOV_EXCL_START
-    }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // Dependency materialization may temporarily remove internal roots from
+    // the PI list to force cone rebuilding. That changes builder-local
+    // variable IDs, so normalize every dependency formula back to the stable
+    // SEC model variable space before the expression is shared with proofs.
+    if (needsStableVarRemap) {
+      expr = remapBoolExprVariables(expr, stableVarRemap, stableRemapMemo);
+    }
     result.outputExprByTerm.emplace(result.outputs[i], expr);
     if (const auto requestedIt = requestedByRoot.find(result.outputs[i]);
         requestedIt != requestedByRoot.end()) {
@@ -1868,21 +1762,42 @@ BoolExpr* getLocalClockEnableExpr(
   // LCOV_EXCL_STOP
 }
 
-void validatePendingTransitionShape(const PendingTransition& pending) {
-  if (!resolvePendingPinTermID(pending, "D").has_value()) {
-    throw std::runtime_error("Unsupported sequential primitive without D input");
+std::optional<std::string> getPendingTransitionUnsupportedReason(
+    const PendingTransition& pending) {
+  const auto dIt = pending.pinTermIDs.find("D");
+  if (dIt == pending.pinTermIDs.end() || dIt->second.empty()) {
+    return "Unsupported sequential primitive without D input";
+  }
+
+  if (dIt->second.size() == 1 && pending.independentStateOutputCount > 1) {
+    return "Shared scalar D input cannot define multiple independent state outputs";
+  }
+
+  if (dIt->second.size() > 1) {
+    bool hasBitMatchedDataPin = false;
+    for (const auto& candidate : dIt->second) {
+      if (candidate.bit == pending.stateBit) {
+        hasBitMatchedDataPin = true;
+        break;
+      }
+    }
+    if (!hasBitMatchedDataPin) {
+      return "Missing bit-matched sequential pin `D` for output `" +
+             pending.statePinName + "[" + std::to_string(pending.stateBit) +
+             "]`";
+    }
   }
 
   for (const auto& [pinName, _] : pending.pinTermIDs) {
     if (!isSupportedSequentialUpdatePin(pinName)) {
-      throw std::runtime_error(
-          "Unsupported sequential primitive with update pin `" + pinName + "`");
+      return "Unsupported sequential primitive with update pin `" + pinName + "`";
     }
   }
 
   // Reset/set combinations are common in mapped cells.  They must be modeled
   // as state transitions instead of abstracted as internal SEC boundary terms,
   // because SEC may only align top-level terminals by name.
+  return std::nullopt;
 }
 
 BoolExpr* buildNextStateExpr(
@@ -3974,25 +3889,20 @@ void appendPendingTransitionsForInstance(
       complementedRelations.push_back({pending.stateKey, complementedKey});
     }
 
-    try {
-      validatePendingTransitionShape(pending);
-    } catch (const std::exception& e) {
+    if (const auto unsupportedReason =
+            getPendingTransitionUnsupportedReason(pending)) {
+      // Unsupported sequential cells are classified before cone construction.
+      // Boundary mode exposes their interface; strict mode reports a structural
+      // unsupported reason without relying on exception-to-result conversion.
       if (ctx.abstractUncomputableSequentialBoundaries) {
         abstractedUnsupportedInstance = true;
-        abstractedUnsupportedReason = e.what();
+        abstractedUnsupportedReason = *unsupportedReason;
         break;
       }
-      const auto displayIt = model.displayNameByKey.find(pending.stateKey);
+      unsupportedInstance = true;
       model.unsupportedReasons.push_back(
           "Unsupported sequential primitive for `" +
-          (displayIt == model.displayNameByKey.end() ? signalKeyToString(pending.stateKey)
-                                                     : displayIt->second) +
-          "`: " + e.what());
-      ctx.unsupportedStateBits.insert(pending.stateKey);
-      for (const auto& complementedKey : pending.complementedStateKeys) {
-        ctx.unsupportedStateBits.insert(complementedKey);  // LCOV_EXCL_LINE
-      }
-      unsupportedInstance = true;
+          signalKeyToString(pending.stateKey) + "`: " + *unsupportedReason);
       continue;
     }
 
@@ -5293,79 +5203,64 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
         continue;
       }
 
-      try {
-        const auto initialStateValue = detectInitialStateValue(pending);
-        if (initialStateValue.has_value()) {
-          model.initialStateValueByKey.emplace(pending.stateKey, *initialStateValue);
-          for (const auto& complementedKey : pending.complementedStateKeys) {
-            model.initialStateValueByKey.emplace(complementedKey, !*initialStateValue);
-          }
-        }
-
-        BoolExpr* nextStateExpr =
-            buildNextStateExpr(
-                pending,
-                termDNLID2varID,
-                pureClockCarrierTermIDs,
-                topClockCarrierVarIDs,
-                clockEventByCarrierVarID,
-                clockGateLatchDataExprByVarID,
-                outputExprByTerm,
-                transitionClockStripMemo);
-        const auto clockEvent = classifyPendingClockEvent(
-            pending,
-            termDNLID2varID,
-            outputExprByTerm,
-            clockEventByCarrierVarID);
-        // This diagnostic is intentionally after clock-carrier stripping: any
-        // remaining unpublished support would become a private proof input and
-        // can hide the real reason state matching stopped converging.
-        logUnpublishedTransitionSupport(
-            ctx,
-            // LCOV_EXCL_START
-            model,
-            pending,
-            nextStateExpr,
-            // LCOV_EXCL_STOP
-            termDNLID2varID,
-            topClockCarrierVarIDs,
-            // LCOV_EXCL_START
-            pureClockCarrierTermIDs);
-        model.nextStateExprByStateKey.emplace(pending.stateKey, nextStateExpr);
-        if (clockEvent.has_value()) {
-          model.clockEventByStateKey.emplace(pending.stateKey, *clockEvent);
-        }
-        // Liberty flops such as DFF_X1 expose both Q and QN. They share one
-        // LCOV_EXCL_STOP
-        // storage element, so complementary outputs inherit the same next-state
-        // LCOV_EXCL_START
-        // function with a logical inversion.
-        // LCOV_EXCL_STOP
+      const auto initialStateValue = detectInitialStateValue(pending);
+      if (initialStateValue.has_value()) {
+        model.initialStateValueByKey.emplace(pending.stateKey, *initialStateValue);
         for (const auto& complementedKey : pending.complementedStateKeys) {
-          model.nextStateExprByStateKey.emplace(complementedKey, BoolExpr::Not(nextStateExpr));
-          if (clockEvent.has_value()) {
-            model.clockEventByStateKey.emplace(complementedKey, *clockEvent);
-          }
-          if (artifacts.requiredStateKeys.find(complementedKey) !=
-              artifacts.requiredStateKeys.end()) {
-            stateDependencyWorkQueue.push_back(complementedKey);
-          }
+          model.initialStateValueByKey.emplace(complementedKey, !*initialStateValue);
         }
-        stateDependencyWorkQueue.push_back(pending.stateKey);
-      } catch (const std::exception& e) {
-        if (ctx.abstractUncomputableSequentialBoundaries) {  // LCOV_EXCL_LINE
-          recordLateAbstractedInstanceBoundary(pending.boundaryInfoIndex, e.what());  // LCOV_EXCL_LINE
-          continue;  // LCOV_EXCL_LINE
-        }
+      }
 
-        model.unsupportedReasons.push_back(  // LCOV_EXCL_LINE
-            "Unsupported sequential primitive for `" + signalKeyToString(pending.stateKey) +  // LCOV_EXCL_LINE
-            "`: " + e.what());  // LCOV_EXCL_LINE
-        markUnsupportedState(pending.stateKey);  // LCOV_EXCL_LINE
-        for (const auto& complementedKey : pending.complementedStateKeys) {  // LCOV_EXCL_LINE
-          markUnsupportedState(complementedKey);  // LCOV_EXCL_LINE
+      BoolExpr* nextStateExpr =
+          buildNextStateExpr(
+              pending,
+              termDNLID2varID,
+              pureClockCarrierTermIDs,
+              topClockCarrierVarIDs,
+              clockEventByCarrierVarID,
+              clockGateLatchDataExprByVarID,
+              outputExprByTerm,
+              transitionClockStripMemo);
+      const auto clockEvent = classifyPendingClockEvent(
+          pending,
+          termDNLID2varID,
+          outputExprByTerm,
+          clockEventByCarrierVarID);
+      // This diagnostic is intentionally after clock-carrier stripping: any
+      // remaining unpublished support would become a private proof input and
+      // can hide the real reason state matching stopped converging.
+      logUnpublishedTransitionSupport(
+          ctx,
+          // LCOV_EXCL_START
+          model,
+          pending,
+          nextStateExpr,
+          // LCOV_EXCL_STOP
+          termDNLID2varID,
+          topClockCarrierVarIDs,
+          // LCOV_EXCL_START
+          pureClockCarrierTermIDs);
+      model.nextStateExprByStateKey.emplace(pending.stateKey, nextStateExpr);
+      if (clockEvent.has_value()) {
+        model.clockEventByStateKey.emplace(pending.stateKey, *clockEvent);
+      }
+      // Liberty flops such as DFF_X1 expose both Q and QN. They share one
+      // LCOV_EXCL_STOP
+      // storage element, so complementary outputs inherit the same next-state
+      // LCOV_EXCL_START
+      // function with a logical inversion.
+      // LCOV_EXCL_STOP
+      for (const auto& complementedKey : pending.complementedStateKeys) {
+        model.nextStateExprByStateKey.emplace(complementedKey, BoolExpr::Not(nextStateExpr));
+        if (clockEvent.has_value()) {
+          model.clockEventByStateKey.emplace(complementedKey, *clockEvent);
         }
-      }  // LCOV_EXCL_LINE
+        if (artifacts.requiredStateKeys.find(complementedKey) !=
+            artifacts.requiredStateKeys.end()) {
+          stateDependencyWorkQueue.push_back(complementedKey);
+        }
+      }
+      stateDependencyWorkQueue.push_back(pending.stateKey);
     }
   }
 

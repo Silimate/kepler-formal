@@ -60,24 +60,41 @@ bool isConstBoolExpr(BoolExpr* expr, bool value) {
          expr->getId() == static_cast<size_t>(value ? 1 : 0);
 }
 
+bool abstractMapCoversExprSupport(BoolExpr* expr,
+                                  const LocalToAbstractVarMap& abstractMap) {
+  if (expr == nullptr) {
+    return false;
+  }
+  for (const auto var : expr->getSupportVars()) {
+    if (var >= 2 && abstractMap.find(var) == abstractMap.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool areSatEquivalentUnderAbstractMaps(
     BoolExpr* expr0,
     BoolExpr* expr1,
     const LocalToAbstractVarMap& abstractMap0,
     const LocalToAbstractVarMap& abstractMap1,
     KEPLER_FORMAL::Config::SolverType solverType) {
-  try {
-    std::unordered_map<BoolExpr*, BoolExpr*> memo0;
-    std::unordered_map<BoolExpr*, BoolExpr*> memo1;
-    BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
-    BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
-    return boolFormulaImplies(
-        BoolExpr::createTrue(),
-        makeEqualityExpr(remapped0, remapped1),
-        solverType);
-  } catch (const std::runtime_error&) {
+  // SAT recovery is an optional bootstrap precision pass.  If a cone still
+  // contains a private/unmapped symbol, leave it to the real SEC engine instead
+  // of throwing while mining helper equalities.
+  if (!abstractMapCoversExprSupport(expr0, abstractMap0) ||
+      !abstractMapCoversExprSupport(expr1, abstractMap1)) {
     return false;
   }
+
+  std::unordered_map<BoolExpr*, BoolExpr*> memo0;
+  std::unordered_map<BoolExpr*, BoolExpr*> memo1;
+  BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
+  BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
+  return boolFormulaImplies(
+      BoolExpr::createTrue(),
+      makeEqualityExpr(remapped0, remapped1),
+      solverType);
 }
 
 bool addBoundedSupportVar(
@@ -129,6 +146,65 @@ bool collectBoundedSupportVars(
     }
     if (node->getLeft() != nullptr) {
       stack.push_back(node->getLeft());
+    }
+  }
+  return true;
+}
+
+bool isSupportedForBootstrapSubstitution(BoolExpr* root) {
+  if (root == nullptr) {
+    return false;
+  }
+
+  std::vector<BoolExpr*> stack{root};
+  std::unordered_set<BoolExpr*> visited;
+  while (!stack.empty()) {
+    BoolExpr* node = stack.back();
+    stack.pop_back();
+    if (node == nullptr || !visited.insert(node).second) {
+      continue;
+    }
+
+    switch (node->getOp()) {
+      case Op::VAR:
+        break;
+      case Op::NOT:
+        stack.push_back(node->getLeft());
+        break;
+      case Op::AND:
+      case Op::OR:
+      case Op::XOR:
+        stack.push_back(node->getLeft());
+        stack.push_back(node->getRight());
+        break;
+      case Op::NONE:
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
+BoolExpr* substituteBootstrapExprIfSupported(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& assignments,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
+  if (!isSupportedForBootstrapSubstitution(expr)) {
+    return nullptr;
+  }
+  return substituteBoolExprVariables(expr, assignments, memo);
+}
+
+bool alignedSignalsHaveMappedVariables(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& aligned) {
+  for (size_t i = 0; i < aligned.names.size(); ++i) {
+    if (model0.inputVarByKey.find(aligned.keys0[i]) ==
+            model0.inputVarByKey.end() ||
+        model1.inputVarByKey.find(aligned.keys1[i]) ==
+            model1.inputVarByKey.end()) {
+      return false;
     }
   }
   return true;
@@ -1168,13 +1244,9 @@ SpecializedNextMap specializeNextStatesForReset(
     // pass below is the expensive part and already has support/node guards;
     // pre-skipping this structural substitution loses cheap reset equalities on
     // wide ASIC cones and regresses KI/IMC/PDR into deep bounded searches.
-    try {
-      specialized.emplace(
-          key,
-          substituteBoolExprVariables(nextIt->second, resetAssignments, memo));
-    } catch (const std::runtime_error&) {
-      specialized.emplace(key, nullptr);
-    }
+    specialized.emplace(
+        key,
+        substituteBootstrapExprIfSupported(nextIt->second, resetAssignments, memo));
   // LCOV_EXCL_START
   }
   // LCOV_EXCL_STOP
@@ -1268,24 +1340,26 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo0;
     std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo1;
     for (const auto& key : relevantKeys0) {
-      try {
-        specializedNext0.emplace(
-            key,
-            substituteBoolExprVariables(
-                resetNext0.at(key), stateAssignments0, stateSubMemo0));
-      } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
-        specializedNext0.emplace(key, nullptr);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      const auto resetIt = resetNext0.find(key);
+      if (resetIt == resetNext0.end() || resetIt->second == nullptr) {
+        specializedNext0.emplace(key, nullptr);
+        continue;
+      }
+      specializedNext0.emplace(
+          key,
+          substituteBootstrapExprIfSupported(
+              resetIt->second, stateAssignments0, stateSubMemo0));
     }
     for (const auto& key : relevantKeys1) {
-      try {
-        specializedNext1.emplace(
-            key,
-            substituteBoolExprVariables(
-                resetNext1.at(key), stateAssignments1, stateSubMemo1));
-      } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
-        specializedNext1.emplace(key, nullptr);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      const auto resetIt = resetNext1.find(key);
+      if (resetIt == resetNext1.end() || resetIt->second == nullptr) {
+        specializedNext1.emplace(key, nullptr);
+        continue;
+      }
+      specializedNext1.emplace(
+          key,
+          substituteBootstrapExprIfSupported(
+              resetIt->second, stateAssignments1, stateSubMemo1));
     }
 
     std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownValues0;
@@ -1321,16 +1395,16 @@ AlignedSignals deriveResetBootstrapStateEqualities(
         return abstractMapsAvailable;
       }
       abstractMapsBuilt = true;
+      if (!alignedSignalsHaveMappedVariables(model0, model1, alignedInputs)) {
+        abstractMapsAvailable = false;
+        return false;
+      }
       const auto mappedCurrentEqualities =
           keepEqualitiesWithStateVariables(model0, model1, currentEqualities);
-      try {
-        auto maps = buildAbstractTransitionMaps(
-            model0, model1, alignedInputs, mappedCurrentEqualities);
-        abstractMap0 = std::move(maps.first);
-        abstractMap1 = std::move(maps.second);
-      } catch (const std::out_of_range&) {
-        abstractMapsAvailable = false;
-      }
+      auto maps = buildAbstractTransitionMaps(
+          model0, model1, alignedInputs, mappedCurrentEqualities);
+      abstractMap0 = std::move(maps.first);
+      abstractMap1 = std::move(maps.second);
       return abstractMapsAvailable;
     };
 

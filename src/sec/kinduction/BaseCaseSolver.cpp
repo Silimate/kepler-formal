@@ -132,7 +132,7 @@ bool relaxedResetFrontierPrecheckCoiIsLocal(size_t solverSymbols,
       cubeLiterals <= kMaxTinyRelaxedResetFrontierPrecheckCubeLiterals;
   // PDR leaf repair often asks about a tiny bad cube whose exact transition COI
   // is still a few thousand symbols.  Keep broad cubes on the historical cap,
-  // but let tiny cubes try the sound relaxed UNSAT shortcut before falling into
+  // but let tiny cubes use the sound relaxed UNSAT shortcut before falling into
   // the heavier exact reset-frontier assumption solver.
   const size_t symbolLimit =
       tinyPdrCube ? kMaxTinyCubeRelaxedResetFrontierPrecheckSymbols
@@ -1870,16 +1870,22 @@ bool provesNoBaseCounterexampleAtFrontier(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
-  return !findBaseCounterexampleImpl(
-              problem,
-              baseCaseValidationSolverType(problem, solverType),
-              k,
-              // LCOV_EXCL_START
-              k,
-              // LCOV_EXCL_STOP
-              /*localizeMultiOutputFrontier=*/false,
-              BaseCaseSolverProfile::PdrValidationProofOnly)
-              .has_value();
+  SATSolverWrapper::SolveStatus solveStatus =
+      SATSolverWrapper::SolveStatus::Unknown;
+  const auto witness = findBaseCounterexampleImpl(
+      problem,
+      baseCaseValidationSolverType(problem, solverType),
+      k,
+      // LCOV_EXCL_START
+      k,
+      // LCOV_EXCL_STOP
+      /*localizeMultiOutputFrontier=*/false,
+      BaseCaseSolverProfile::PdrValidationProofOnly,
+      &solveStatus);
+  // No witness is not enough here: timeout/UNKNOWN also returns no witness, but
+  // PDR callers use this helper as a proof certificate.
+  return !witness.has_value() &&
+         solveStatus == SATSolverWrapper::SolveStatus::Unsat;
 }
 
 // LCOV_EXCL_START
@@ -3427,7 +3433,7 @@ bool isStateCubeReachableAtResetFrontier(
   }
   if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
     // Cached-assumption validation is PDR's hot reset-frontier path. Before
-    // constructing the exact assumption solver, try the same weakened
+    // constructing the exact assumption solver, use the same weakened
     // startup-equality COI used by one-shot validation. The relaxed query only
     // drops equality closure, so UNSAT remains a sound proof; SAT simply falls
     // through to the exact cached solver below. This is deliberately bounded:
@@ -3694,7 +3700,7 @@ bool isStateCubeReachableAtResetFrontierOneShot(
     return false;  // LCOV_EXCL_LINE
   }
   if (postBootstrapSteps != 0 && usePostBootstrapPrechecks) {
-    // First try a weakened COI that does not close the startup equality
+    // First use a weakened COI that does not close the startup equality
     // components.  This is safe only as an UNSAT precheck: removing equality
     // constraints can create spurious SAT witnesses, but if the relaxed query
     // is already UNSAT then the exact reset-frontier query is UNSAT too.  AES

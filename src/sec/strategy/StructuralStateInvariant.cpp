@@ -259,30 +259,32 @@ bool areSatEquivalentUnderAbstractMaps(
     const LocalToAbstractVarMap& abstractMap0,
     const LocalToAbstractVarMap& abstractMap1,
     KEPLER_FORMAL::Config::SolverType solverType) {
-  try {
-    std::unordered_map<BoolExpr*, BoolExpr*> memo0;
-    std::unordered_map<BoolExpr*, BoolExpr*> memo1;
-    BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
-    BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
-    const auto implied = boolFormulaImpliesWithConflictLimit(
-        BoolExpr::createTrue(),
-        makeEqualityExpr(remapped0, remapped1),
-        solverType,
-        // LCOV_EXCL_START
-        kSatValidatedStructuralConflictLimit);
-    return implied.value_or(false);
-    // LCOV_EXCL_STOP
-  } catch (const std::runtime_error& e) {
-    // LCOV_EXCL_START
-    if (structuralCoiDiagEnabled()) {
-      std::fprintf(  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-          stderr,  // LCOV_EXCL_LINE
-          "SEC diag: SAT abstract-map validation failed: %s\n",
-          e.what());  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    return false;
+  for (const auto var : expr0->getSupportVars()) {
+    if (var >= 2 && abstractMap0.find(var) == abstractMap0.end()) {
+      return false;
+    }
   }
+  for (const auto var : expr1->getSupportVars()) {
+    if (var >= 2 && abstractMap1.find(var) == abstractMap1.end()) {
+      return false;
+    }
+  }
+
+  // SAT validation is only a precision fallback for candidate state matching.
+  // Unknown/private support means the candidate is not proven structurally
+  // equivalent; it should not escape as a remap exception.
+  std::unordered_map<BoolExpr*, BoolExpr*> memo0;
+  std::unordered_map<BoolExpr*, BoolExpr*> memo1;
+  BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
+  BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
+  const auto implied = boolFormulaImpliesWithConflictLimit(
+      BoolExpr::createTrue(),
+      makeEqualityExpr(remapped0, remapped1),
+      solverType,
+      // LCOV_EXCL_START
+      kSatValidatedStructuralConflictLimit);
+  return implied.value_or(false);
+  // LCOV_EXCL_STOP
 }
 
 bool isWithinSatValidatedOrderedSupportBudget(BoolExpr* expr0, BoolExpr* expr1) {
