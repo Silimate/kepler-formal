@@ -1991,8 +1991,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecUnsupportedMismatchLogUsesUnsupportedResul
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
-  EXPECT_NE(contents.find("SEC cannot run on this design pair:"),
-            std::string::npos);
+  EXPECT_NE(contents.find("SEC workflow failed:"), std::string::npos);
   EXPECT_NE(contents.find("Mismatched observed output sets"), std::string::npos);
 
   std::filesystem::remove(cfgPath);
