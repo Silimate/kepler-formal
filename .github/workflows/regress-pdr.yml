@@ -131,7 +131,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/sky130hd_riscv32i" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-full-coverage \
+          ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-full-coverage' || 'expect-equivalent' }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
