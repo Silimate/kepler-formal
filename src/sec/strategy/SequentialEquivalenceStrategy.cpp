@@ -4532,6 +4532,7 @@ SequentialEquivalenceResult makeCounterexampleSecResult(
 
 std::optional<SequentialEquivalenceResult> tryDualRailSteadyFrontierGuard(
     const KInductionProblem& problem,
+    SecEngine secEngine,
     KEPLER_FORMAL::Config::SolverType solverType,
     // LCOV_EXCL_START
     const SequentialDesignModel& model0,
@@ -4620,6 +4621,13 @@ std::optional<SequentialEquivalenceResult> tryDualRailSteadyFrontierGuard(
             secDiagEnabled,
             "SEC diag: exact reset-bootstrap frontier covers dual-rail "
             "top-output surface");
+        if (!detail::shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
+                secEngine)) {
+          // A SAT steady-frontier mismatch that disappears in the exact reset
+          // prefix is not a PDR proof.  Let PDR grow frames so later input-driven
+          // top-output edits, such as the TinyRocket SEC probe, can still surface.
+          return std::nullopt;
+        }
         return makeSecResult(
             SequentialEquivalenceStatus::Equivalent,
             0,
@@ -6584,6 +6592,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   }
   if (auto steadyFrontierResult = tryDualRailSteadyFrontierGuard(
           proofProblem,
+          secEngine_,
           solverType_,
           model0,
           model1,

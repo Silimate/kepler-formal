@@ -8633,6 +8633,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDoesNotAcceptResetFrontierCoverageAsFinalDualRailResult) {
+  // A reset-prefix UNSAT check only covers the current startup frontier.  PDR
+  // must still run frames so later input-driven top-output edits can be found.
+  EXPECT_FALSE(
+      detail::shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
+          SecEngine::Pdr));
+  EXPECT_TRUE(
+      detail::shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
+          SecEngine::KInduction));
+  EXPECT_TRUE(
+      detail::shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
+          SecEngine::Imc));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsCountsSatImpliedOutputEquality) {
   const SignalKey out = makeSignalKey("out");
   const SignalKey stateA0 = makeSignalKey("stateA0");

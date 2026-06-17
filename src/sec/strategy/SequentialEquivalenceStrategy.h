@@ -105,6 +105,11 @@ inline bool shouldInferPdrInductiveStateEqualities(
          observedOutputSurface <= kMaxPdrInductiveStateEqualityOutputs;
 }
 
+inline bool shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
+    SecEngine secEngine) {
+  return secEngine != SecEngine::Pdr;
+}
+
 }  // namespace detail
 
 }  // namespace KEPLER_FORMAL::SEC
