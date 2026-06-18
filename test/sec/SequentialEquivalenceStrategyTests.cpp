@@ -1579,6 +1579,21 @@ class ScopedEnvVar {
   std::optional<std::string> previousValue_;
 };
 
+class ScopedSecSteadyFrontierGuard {
+ public:
+  explicit ScopedSecSteadyFrontierGuard(bool enabled)
+      : previousValue_(KEPLER_FORMAL::Config::getSecSteadyFrontierGuard()) {
+    KEPLER_FORMAL::Config::setSecSteadyFrontierGuard(enabled);
+  }
+
+  ~ScopedSecSteadyFrontierGuard() {
+    KEPLER_FORMAL::Config::setSecSteadyFrontierGuard(previousValue_);
+  }
+
+ private:
+  bool previousValue_;
+};
+
 class ScopedUnsetEnvVar {
  public:
   explicit ScopedUnsetEnvVar(const char* name)
@@ -9605,6 +9620,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsKiDualRailFindsProductionResidualMismatch) {
+  const ScopedSecSteadyFrontierGuard directGuard(/*enabled=*/true);
   constexpr size_t kResidualOutputs = 65;
   constexpr size_t kStateBitsPerDesign = 2049;
   const auto testCase = makeLargeDualRailResidualCaseForTest(
@@ -9917,6 +9933,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailSteadyFrontierGuardCoversResetlessOutputs) {
+  const ScopedSecSteadyFrontierGuard directGuard(/*enabled=*/true);
   const SignalKey state0 = makeSignalKey("dualRailSteadyFrontierState0");
   const SignalKey state1 = makeSignalKey("dualRailSteadyFrontierState1");
   std::vector<SignalKey> outputs;
@@ -9971,6 +9988,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailSteadyFrontierUsesExactResetBootstrap) {
+  const ScopedSecSteadyFrontierGuard directGuard(/*enabled=*/true);
   constexpr size_t kOutputCount = 65;
   const SignalKey rst = makeSignalKey("exactResetFrontierRst");
   const SignalKey state0 = makeSignalKey("exactResetFrontierState0");
@@ -10023,11 +10041,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // The cheap steady-frontier guard sees the reset-dominated state as rail-X
-  // against a constant one and is SAT. The concrete reset prefix forces the
-  // state high, so only the exact reset-bootstrap frontier may turn this into
-  // full output coverage.
+  // against a constant one and is SAT. The exact reset prefix validates the
+  // frontier coverage, but PDR still grows a frame before reporting success.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.bound, 1u);
   EXPECT_EQ(result.coveredOutputs, outputs.size());
   EXPECT_EQ(result.totalOutputs, outputs.size());
   EXPECT_TRUE(result.skippedObservedOutputs.empty());
@@ -10040,6 +10057,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailSteadyFrontierGuardReportsMismatch) {
+  const ScopedSecSteadyFrontierGuard directGuard(/*enabled=*/true);
   std::vector<SignalKey> outputs;
   for (size_t i = 0; i < 64; ++i) {
     outputs.push_back(makeSignalKey(
@@ -14328,7 +14346,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineBudgetsRepeatedDualRailProjectedBadCube) {
+       PDREngineCachedFallbackAvoidsRepeatedDualRailProjectedBadCube) {
   KInductionProblem problem;
   constexpr size_t a = 2;
   constexpr size_t b = 3;
@@ -14352,8 +14370,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   // The bad cube (a=1,b=1) is unreachable because one input drives opposite
   // next-state values.  Each single literal is reachable, so PDR must learn the
-  // two-literal blocker.  With a one-literal projected frame view, the bad
-  // query cannot see that blocker and would rediscover the same cube forever.
+  // two-literal blocker.  The cached-assumption exact fallback should now block
+  // the cube instead of letting the projected bad query rediscover it forever.
   const ScopedEnvVar literalLimit(
       "KEPLER_SEC_PDR_PROJECTED_FRAME_LITERAL_LIMIT", "1");
   const ScopedEnvVar repeatedBadCubeLimit(
@@ -14370,8 +14388,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
-  EXPECT_NE(
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_NE(stderrOutput.find("cached_assumptions=1"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
       stderrOutput.find("repeated projected bad cube exhausted"),
       std::string::npos)
       << stderrOutput;
