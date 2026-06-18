@@ -339,6 +339,7 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "sec_engine",
       "sec_encoding",
       "sec_uncomputable_seq_as_boundary",
+      "sec_steady_frontier_guard",
       "input_paths",
       "liberty_files",
       "py_tech_files",
@@ -935,11 +936,13 @@ int KeplerFormalMain(int argc, char** argv) {
   bool compactMode = false;
   bool reportSkippedPOs = false;
   bool verilogPreprocessing = false;
+  bool secSteadyFrontierGuard = true;
   std::string dumpCnfPath;
   std::string dumpPoCnfPath;
 
   KEPLER_FORMAL::Config::setReportSkippedPOs(false);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(true);
+  KEPLER_FORMAL::Config::setSecSteadyFrontierGuard(true);
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -1065,6 +1068,14 @@ int KeplerFormalMain(int argc, char** argv) {
               cfg["sec_uncomputable_seq_as_boundary"].as<bool>();
         }
         // LCOV_EXCL_STOP
+
+        if (cfg["sec_steady_frontier_guard"]) {
+          if (!cfg["sec_steady_frontier_guard"].IsScalar()) {
+            SPDLOG_CRITICAL("sec_steady_frontier_guard must be a scalar");
+            return EXIT_FAILURE;
+          }
+          secSteadyFrontierGuard = cfg["sec_steady_frontier_guard"].as<bool>();
+        }
 
         // input_paths
         if (cfg["input_paths"]) {
@@ -1659,6 +1670,7 @@ int KeplerFormalMain(int argc, char** argv) {
   KEPLER_FORMAL::Config::setReportSkippedPOs(reportSkippedPOs);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(
       secTreatUncomputableSeqAsBoundary);
+  KEPLER_FORMAL::Config::setSecSteadyFrontierGuard(secSteadyFrontierGuard);
   const char* solverName =
       solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
           ? "KISSAT"

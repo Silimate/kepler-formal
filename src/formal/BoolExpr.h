@@ -92,6 +92,13 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {  // LCOV_EXCL_L
   // Memoized, safe on DAGs.
   static BoolExpr* simplify(BoolExpr* e);
 
+  // Rebuild arithmetic truth-table shapes into XOR/majority-style expressions.
+  // This keeps the expression equivalent while avoiding large DNF carry cones.
+  static BoolExpr* normalizeArithmetic(BoolExpr* e);
+  static BoolExpr* normalizeArithmetic(
+      BoolExpr* e,
+      std::unordered_map<BoolExpr*, BoolExpr*>& memo);
+
   std::set<size_t> getSupportVars() const;
 
   bool isValid() const {

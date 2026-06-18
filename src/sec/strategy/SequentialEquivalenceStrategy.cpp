@@ -4435,7 +4435,10 @@ constexpr size_t kMinDualRailSteadyFrontierGuardOutputs = 64;
 constexpr size_t kMinWideResetUnanchoredBinarySurfaceOutputs = 64;
 
 bool shouldRunDualRailSteadyFrontierGuard(const KInductionProblem& problem) {
-  return problem.usesDualRailStateEncoding &&
+  // Keep the fast frontier certificate optional so diagnostics can force wide
+  // dual-rail designs through the normal PDR loop for apples-to-apples traces.
+  return KEPLER_FORMAL::Config::getSecSteadyFrontierGuard() &&
+         problem.usesDualRailStateEncoding &&
          problem.observedOutputExprs0.size() >=
              kMinDualRailSteadyFrontierGuardOutputs;
 }
