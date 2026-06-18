@@ -4686,11 +4686,13 @@ SequentialEquivalenceResult runPdrSecEngine(
   // LCOV_EXCL_START
   // problems, which made the output-batching fallback split every output and
   // repeat the same BMC setup hundreds of times before PDR even started.
-  // Keep this optional validation local in dual-rail SEC.  Medium CPU bus
-  // properties such as 99-output RISC-V need the exact frame-0 guard so PDR
-  // does not accept abstract empty-cube reset-bootstrap witnesses as real
-  // differences, while larger SoC surfaces still split inside PDR.
-  constexpr size_t kMaxDualRailFrameZeroValidationOutputs = 128;
+  // Keep this optional validation local in dual-rail SEC.  Medium bus
+  // properties such as 99-output RISC-V and 331-output dynamic-node need the
+  // exact frame-0 guard so PDR does not accept abstract empty-cube
+  // reset-bootstrap witnesses as real differences.  Larger SoC surfaces still
+  // split inside PDR.
+  constexpr size_t kMaxDualRailFrameZeroValidationOutputs =
+      kMaxDualRailWideLocalImplicationOutputs;
   bool broadBasePrecheckDone = false;
   if (problem.usesDualRailStateEncoding) {
     if (problem.observedOutputExprs0.size() <=
@@ -5313,6 +5315,9 @@ SequentialEquivalenceResult runPdrSecEngine(
     constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 64;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 2;  // LCOV_EXCL_LINE
+    constexpr size_t kMediumDualRailFinalExactPdrPredecessorProjectionLimit = 32;  // LCOV_EXCL_LINE
+    constexpr size_t kMediumDualRailFinalExactPdrMultiOutputRepairBudget = 4;  // LCOV_EXCL_LINE
+    constexpr size_t kMediumDualRailFinalExactPdrSingleOutputRepairBudget = 8;  // LCOV_EXCL_LINE
     if (endOutput - firstOutput > kMaxFinalExactPdrOutputBatchSize) {  // LCOV_EXCL_LINE
       if (emitPdrStageStats) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
@@ -5366,17 +5371,23 @@ SequentialEquivalenceResult runPdrSecEngine(
     // Medium CPU-style residual buses need exact reset-frontier repair even after
     // batching splits them. Larger SoC-scale surfaces remain guarded in PDREngine
     // by the rail-state and transition-source limits.
-    constexpr size_t kMaxDualRailFinalResetFrontierOriginalOutputs = 128;  // LCOV_EXCL_LINE
+    constexpr size_t kMaxDualRailFinalResetFrontierOriginalOutputs =  // LCOV_EXCL_LINE
+        kMaxDualRailWideLocalImplicationOutputs;  // LCOV_EXCL_LINE
     const size_t originalOutputCount =  // LCOV_EXCL_LINE
         problem.originalObservedOutputCount == 0  // LCOV_EXCL_LINE
             ? problem.observedOutputExprs0.size()  // LCOV_EXCL_LINE
             : problem.originalObservedOutputCount;  // LCOV_EXCL_LINE
+    const bool mediumDualRailOutputSurface =  // LCOV_EXCL_LINE
+        problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
+        originalOutputCount <= kMaxDualRailWideLocalImplicationOutputs;  // LCOV_EXCL_LINE
     const bool finalSliceUsesResetFrontier =  // LCOV_EXCL_LINE
         !problem.usesDualRailStateEncoding ||
         originalOutputCount <=
             kMaxDualRailFinalResetFrontierOriginalOutputs;  // LCOV_EXCL_LINE
     const size_t finalPdrPredecessorProjectionLimit =  // LCOV_EXCL_LINE
-        kFinalExactPdrPredecessorProjectionLimit;
+        mediumDualRailOutputSurface  // LCOV_EXCL_LINE
+            ? kMediumDualRailFinalExactPdrPredecessorProjectionLimit
+            : kFinalExactPdrPredecessorProjectionLimit;
     const size_t finalPdrBadCubeStateLimit =  // LCOV_EXCL_LINE
         kFinalExactPdrBadCubeStateLimit;
     // This is a per-leaf repair budget.  Swerv can leave many final
@@ -5428,8 +5439,12 @@ SequentialEquivalenceResult runPdrSecEngine(
         /*maxProjectedCounterexampleRefinements=*/
             problem.usesDualRailStateEncoding  // LCOV_EXCL_LINE
                 ? (endOutput - firstOutput > 1  // LCOV_EXCL_LINE
-                       ? kDualRailFinalExactPdrMultiOutputRepairBudget
-                       : kDualRailFinalExactPdrSingleOutputRepairBudget)
+                       ? (mediumDualRailOutputSurface  // LCOV_EXCL_LINE
+                              ? kMediumDualRailFinalExactPdrMultiOutputRepairBudget
+                              : kDualRailFinalExactPdrMultiOutputRepairBudget)
+                       : (mediumDualRailOutputSurface  // LCOV_EXCL_LINE
+                              ? kMediumDualRailFinalExactPdrSingleOutputRepairBudget
+                              : kDualRailFinalExactPdrSingleOutputRepairBudget))
                 : 0);
     // Dual-rail properties are intentionally batched before the reset
     // bootstrap proof, otherwise the frame-0 precheck materializes the entire

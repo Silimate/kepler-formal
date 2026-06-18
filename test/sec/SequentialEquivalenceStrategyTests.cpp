@@ -9002,6 +9002,67 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailValidatesDynamicNodeSizedFrameZeroSurface) {
+  constexpr size_t kOutputCount = 331;
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+
+  for (size_t index = 0; index < kOutputCount; ++index) {
+    const SignalKey out =
+        makeSignalKey("pdrDualRailDynamicNodeFrameZeroOut" +
+                      std::to_string(index));
+    const SignalKey state =
+        makeSignalKey("pdrDualRailDynamicNodeFrameZeroState" +
+                      std::to_string(index));
+    const size_t stateVar = 5000 + index;
+    const std::string outputName =
+        "dynamic_node_frame_zero_out[" + std::to_string(index) + "]";
+
+    model0.allObservedOutputs.push_back(out);
+    model0.observedOutputs.push_back(out);
+    model0.displayNameByKey.emplace(out, outputName);
+    addStateBitForTest(
+        model0,
+        state,
+        stateVar,
+        "dynamic_node_frame_zero_state[" + std::to_string(index) + "]",
+        BoolExpr::createFalse());
+    model0.initialStateValueByKey.emplace(state, false);
+    model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(stateVar));
+
+    model1.allObservedOutputs.push_back(out);
+    model1.observedOutputs.push_back(out);
+    model1.displayNameByKey.emplace(out, outputName);
+    model1.observedOutputExprByKey.emplace(out, BoolExpr::createFalse());
+  }
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar implicationLimit(
+      "KEPLER_SEC_DUAL_RAIL_OUTPUT_IMPLICATION_CONFLICT_LIMIT", "0");
+  const ScopedEnvVar flushDepth("KEPLER_SEC_DUAL_RAIL_FLUSH_DEPTH", "0");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Dynamic-node has 331 observed outputs. Treat it as a medium-wide PDR
+  // surface so frame-0 validation seeds the exact reset/bootstrap facts instead
+  // of falling into all-output abstract cube repair.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, kOutputCount);
+  EXPECT_EQ(result.totalOutputs, kOutputCount);
+  EXPECT_EQ(
+      stderrOutput.find("skipped dual-rail frame-0 validation"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsDualRailFlushDepthZeroDisablesCertificate) {
   const SignalKey out = makeSignalKey("pdrDualRailFlushDepthZeroOut");
 
@@ -9383,6 +9444,41 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // sky130hs_riscv32i has a medium 99-output dual-rail bus surface.  Keeping it
   // eligible for exact reset-frontier repair avoids exhausting ordinary PDR
   // bad-cube budgets on its reset-unanchored datapath buses.
+  EXPECT_EQ(
+      stderrOutput.find(
+          "exact reset-frontier checks disabled for large dual-rail problem"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailExactResetFrontierAllowsDynamicNodeSizedMediumOutputSurface) {
+  KInductionProblem problem =
+      makeDualRailResetFrontierGuardProblemForTest(
+          /*railPairs=*/9028,
+          /*transitionSources=*/18056);
+  while (problem.observedOutputExprs0.size() < 331) {
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
+    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+  }
+  problem.originalObservedOutputCount = 331;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/1,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Nangate45 dynamic-node sits inside the same medium-wide reset-frontier
+  // envelope as RISC-V by output count, but has a much larger rail surface.
   EXPECT_EQ(
       stderrOutput.find(
           "exact reset-frontier checks disabled for large dual-rail problem"),
@@ -14370,8 +14466,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   // The bad cube (a=1,b=1) is unreachable because one input drives opposite
   // next-state values.  Each single literal is reachable, so PDR must learn the
-  // two-literal blocker.  The cached-assumption exact fallback should now block
-  // the cube instead of letting the projected bad query rediscover it forever.
+  // two-literal blocker.  The cached frame-clause fallback should now block the
+  // cube instead of letting the projected bad query rediscover it forever.
   const ScopedEnvVar literalLimit(
       "KEPLER_SEC_PDR_PROJECTED_FRAME_LITERAL_LIMIT", "1");
   const ScopedEnvVar repeatedBadCubeLimit(
@@ -14389,7 +14485,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(stderrOutput.find("cached_assumptions=1"), std::string::npos)
+  EXPECT_NE(
+      stderrOutput.find("bad cube cached frame clauses added="),
+      std::string::npos)
       << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("repeated projected bad cube exhausted"),

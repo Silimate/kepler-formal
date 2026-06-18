@@ -259,19 +259,25 @@ constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
 // neighboring PDR cubes.  Nangate45 Ibex needs this repair at 15496 rail
 // symbols/transition sources to avoid abstract reset-frontier counterexamples.
 // Sky130HS RISC-V has a 99-output, 4224-rail bus surface where ordinary PDR can
-// exhaust bad-cube budgets, so allow exact repair there while still keeping
-// smaller medium surfaces and larger SoC-scale interfaces behind the guards.
+// exhaust bad-cube budgets.  Nangate45 dynamic-node exposes a similar
+// medium-wide 331-output reset-frontier surface at roughly 18k rail symbols.
+// Keep those medium surfaces eligible for exact repair while leaving larger
+// SoC-scale interfaces behind the guards.
 constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 20000;
 constexpr size_t kMaxExactResetFrontierDualRailTransitionSources = 20000;
-constexpr size_t kMaxExactResetFrontierDualRailObservedOutputs = 128;
+constexpr size_t kMaxExactResetFrontierDualRailMediumOutputs = 384;
+constexpr size_t kMaxExactResetFrontierDualRailObservedOutputs =
+    kMaxExactResetFrontierDualRailMediumOutputs;
 constexpr size_t kMaxExactResetFrontierDualRailSmallOriginalOutputs = 64;
 constexpr size_t kMinExactResetFrontierDualRailMediumStateSymbols = 4096;
-constexpr size_t kMaxExactResetFrontierDualRailOriginalOutputs = 128;
+constexpr size_t kMaxExactResetFrontierDualRailOriginalOutputs =
+    kMaxExactResetFrontierDualRailMediumOutputs;
 // The broad frame-0 reset-bootstrap BMC precheck materializes the whole output
 // slice.  Allow medium CPU interfaces such as 99-output RISC-V, but still keep
 // larger SoC-scale surfaces behind the transition/original-output guards.
 constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 8192;
-constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs = 128;
+constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs =
+    kMaxExactResetFrontierDualRailMediumOutputs;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
 constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
@@ -944,7 +950,7 @@ struct BadCubeAssumptionSolver {
   std::unique_ptr<FrameFormulaEncoder> encoder;
   std::unordered_map<BoolExpr*, int> encodedBadRoots;
   std::unordered_set<size_t> querySymbolSet;
-  size_t emittedFrameClauseCount = 0;
+  std::unordered_set<StateClause, StateClauseHash> emittedFrameClauses;
 };
 
 struct BadCubeAssumptionCache {
@@ -8966,29 +8972,51 @@ bool clauseTouchesQuerySymbols(const StateClause& clause,
   return false;
 }
 
+bool badCubeFrameClauseApplies(const BadCubeAssumptionSolver& cachedSolver,
+                               const StateClause& clause,
+                               bool exactFrameClauses) {
+    if (!exactFrameClauses &&
+        !clauseTouchesQuerySymbols(clause, cachedSolver.querySymbolSet)) {
+      return false;
+    }
+    return clauseCoveredByVariables(*cachedSolver.variables, clause);
+}
+
+void rememberBadCubeFrameClauses(BadCubeAssumptionSolver& cachedSolver,
+                                 const FrameClauses& frameClauses,
+                                 bool exactFrameClauses) {
+  for (const auto& clause : frameClauses.clauses) {
+    if (badCubeFrameClauseApplies(
+            cachedSolver, clause, exactFrameClauses)) {
+      cachedSolver.emittedFrameClauses.insert(clause);
+    }
+  }
+}
+
 void addNewBadCubeFrameClauses(BadCubeAssumptionSolver& cachedSolver,
                                const FrameClauses& frameClauses,
                                size_t frame,
                                bool exactFrameClauses) {
-  if (cachedSolver.emittedFrameClauseCount > frameClauses.clauses.size()) {
-    // Frames are monotonic within one PDR run. If this ever changes, the cache
-    // key is no longer valid and rebuilding is safer than silently weakening.
-    cachedSolver.emittedFrameClauseCount = frameClauses.clauses.size();  // LCOV_EXCL_LINE
-    return;  // LCOV_EXCL_LINE
-  }
-  for (size_t index = cachedSolver.emittedFrameClauseCount;
-       index < frameClauses.clauses.size();
-       ++index) {
-    const auto& clause = frameClauses.clauses[index];
-    if (!exactFrameClauses &&
-        !clauseTouchesQuerySymbols(clause, cachedSolver.querySymbolSet)) {
+  size_t addedClauses = 0;
+  for (const auto& clause : frameClauses.clauses) {
+    if (!badCubeFrameClauseApplies(cachedSolver, clause, exactFrameClauses) ||
+        !cachedSolver.emittedFrameClauses.insert(clause).second) {
       continue;
     }
-    if (clauseCoveredByVariables(*cachedSolver.variables, clause)) {
-      addStateClause(*cachedSolver.solver, *cachedSolver.variables, clause, frame);
-    }
+    // Frame vectors are compacted by subsumption, so a stronger learned clause
+    // can replace a weaker one without increasing the vector size. Track by
+    // clause identity instead of append index to keep cached bad-cube solvers
+    // synchronized with the logical frame.
+    addStateClause(*cachedSolver.solver, *cachedSolver.variables, clause, frame);
+    ++addedClauses;
   }
-  cachedSolver.emittedFrameClauseCount = frameClauses.clauses.size();
+  if (addedClauses != 0 && pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: bad cube cached frame clauses added=",
+        addedClauses,
+        " frame=",
+        frame);
+  }
 }
 
 std::optional<SATSolverWrapper::SolveStatus>
@@ -9089,8 +9117,9 @@ BadCubeAssumptionSolver& getOrCreateBadCubeAssumptionSolver(
       *next->solver, *next->variables, problem, 0);
   next->encoder = std::make_unique<FrameFormulaEncoder>(
       *next->solver, next->variables->makeLeafLits(0));
-  next->emittedFrameClauseCount =
-      level < frames.size() ? frames[level].clauses.size() : 0;
+  if (level < frames.size()) {
+    rememberBadCubeFrameClauses(*next, frames[level], exactFrameClauses);
+  }
   cache.solver = std::move(next);
   return *cache.solver;
 }
@@ -12895,6 +12924,11 @@ bool blockProofObligations(const KInductionProblem& problem,
           addClauseToFrames(frames, refinedClause, obligation.badFrame);
           // LCOV_EXCL_STOP
         }
+        // Concrete root validation records exact reset-predecessor cores. Drain
+        // any singleton F1 cores now, otherwise sibling projected roots can
+        // rediscover the same unreachable bus bit one model at a time.
+        learnExactResetPredecessorSingletonClauses(
+            frames, resetFrontierCache, concreteTarget, obligation.badFrame);
         if (pdrStatsEnabled()) {
           emitSecDiag(
               "SEC PDR stats: refined projected counterexample ",
