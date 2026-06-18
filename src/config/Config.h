@@ -62,7 +62,7 @@ private:
   inline static SolverType solverType_ = KISSAT;
   inline static bool reportSkippedPOs_ = false;
   inline static bool secTreatUncomputableSeqAsBoundary_ = true;
-  inline static bool secSteadyFrontierGuard_ = true;
+  inline static bool secSteadyFrontierGuard_ = false;
 };
 
 } // namespace kepler

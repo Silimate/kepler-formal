@@ -2058,7 +2058,6 @@ TEST_F(KeplerFormalCliTests, ConfigSecSteadyFrontierGuardMustBeScalar) {
       "  enabled: false\n");
 
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
-  EXPECT_TRUE(KEPLER_FORMAL::Config::getSecSteadyFrontierGuard());
   std::filesystem::remove(cfgPath);
 }
 

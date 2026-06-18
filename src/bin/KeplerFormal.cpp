@@ -936,13 +936,13 @@ int KeplerFormalMain(int argc, char** argv) {
   bool compactMode = false;
   bool reportSkippedPOs = false;
   bool verilogPreprocessing = false;
-  bool secSteadyFrontierGuard = true;
+  bool secSteadyFrontierGuard = false;
   std::string dumpCnfPath;
   std::string dumpPoCnfPath;
 
   KEPLER_FORMAL::Config::setReportSkippedPOs(false);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(true);
-  KEPLER_FORMAL::Config::setSecSteadyFrontierGuard(true);
+  KEPLER_FORMAL::Config::setSecSteadyFrontierGuard(false);
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
