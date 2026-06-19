@@ -6466,16 +6466,29 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // that tries to constant-evaluate every state bit before the first PDR query.
   const bool deriveResetBootstrapStrengthening = secEngine_ != SecEngine::Pdr;
   const bool deriveResetBootstrapEqualities =
-      secEngine_ != SecEngine::Pdr ||
-      totalStateBits <= kMaxPdrGlobalResetBootstrapEqualityStates;
-  if (secDiagEnabled && secEngine_ == SecEngine::Pdr &&
-      !deriveResetBootstrapEqualities) {
-    fprintf(  // LCOV_EXCL_LINE
-        stderr,  // LCOV_EXCL_LINE
-        "SEC diag: skipping global PDR reset-bootstrap equality mining for "
-        "%zu state bits (limit=%zu)\n",
-        totalStateBits,  // LCOV_EXCL_LINE
-        kMaxPdrGlobalResetBootstrapEqualityStates);
+      (secEngine_ != SecEngine::Pdr ||
+       totalStateBits <= kMaxPdrGlobalResetBootstrapEqualityStates) &&
+      !detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+          secEngine_, encoding_, observedOutputSurface);
+  if (secDiagEnabled && !deriveResetBootstrapEqualities) {
+    if (secEngine_ == SecEngine::Pdr) {
+      fprintf(  // LCOV_EXCL_LINE
+          stderr,  // LCOV_EXCL_LINE
+          "SEC diag: skipping global PDR reset-bootstrap equality mining for "
+          "%zu state bits (limit=%zu)\n",
+          totalStateBits,  // LCOV_EXCL_LINE
+          kMaxPdrGlobalResetBootstrapEqualityStates);
+    } else if (secEngine_ == SecEngine::KInduction) {
+      // KI still receives reset/bootstrap values and output-rooted startup
+      // candidates.  This only avoids the all-state pre-proof sweep sampled on
+      // wide dual-rail BlackParrot surfaces before KI starts.
+      fprintf(  // LCOV_EXCL_LINE
+          stderr,  // LCOV_EXCL_LINE
+          "SEC diag: skipping global k-induction reset-bootstrap equality "
+          "mining for %zu outputs (limit=%zu)\n",
+          observedOutputSurface,  // LCOV_EXCL_LINE
+          detail::kMaxKiDualRailGlobalBootstrapEqualityOutputs);
+    }
     fflush(stderr);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   // Reset-bootstrap candidates are rooted at aligned top-output cones and then

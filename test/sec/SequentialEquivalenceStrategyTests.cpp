@@ -7870,6 +7870,36 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       KiDualRailSkipsOnlyWideGlobalBootstrapEqualityMining) {
+  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady,
+      /*observedOutputSurface=*/384));
+
+  // BlackParrot-shaped dual-rail KI surfaces should not spend minutes mining
+  // global reset-bootstrap state equalities before the selected KI proof starts.
+  EXPECT_TRUE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady,
+      /*observedOutputSurface=*/598));
+
+  // Keep binary KI and the other engines on the existing path. This guard is
+  // only for the sampled dual-rail KI startup-mining wall.
+  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+      SecEngine::KInduction,
+      SecEncoding::Binary,
+      /*observedOutputSurface=*/598));
+  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady,
+      /*observedOutputSurface=*/598));
+  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      /*observedOutputSurface=*/598));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDoesNotReuseNonInductiveStrengtheningAsFrameInvariant) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
