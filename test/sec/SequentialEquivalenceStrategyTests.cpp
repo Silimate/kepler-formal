@@ -7918,6 +7918,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineProvesEquivalentExactlyAtThreeFrames) {
   const auto problem = buildLinearChainSecProblem(4);
 
+  // This is an engine-regression check for the current binary-chain model and
+  // current clause-generalization behavior.  It is not a portable "classic PDR
+  // must prove safe exactly at k=3" theorem: safe IC3/PDR proofs may converge
+  // earlier whenever a stronger inductive invariant is learned.
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
 
@@ -7931,9 +7935,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
     const auto problem =
         buildClassicPdrOneHotUnreachableBadChainProblem(proofDepth);
 
-    // Classic PDR may converge before the chain length because clause
-    // generalization can learn the whole unreachable suffix as an invariant.
-    // The theoretical contract is therefore "proved within k", not "exactly k".
+    // Do not tighten this to bound == proofDepth.  For safe properties, exact
+    // convergence depth is not a classic PDR/IC3 semantic contract: clause
+    // generalization is allowed to learn the whole unreachable suffix earlier.
+    // Exact depth is meaningful for the reachable counterexample test below.
     PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
     const auto result = engine.run(proofDepth);
 
@@ -7987,6 +7992,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
     auto strategy = makeBinarySecStrategy(impl, reference, SecEngine::Pdr);
     const auto result = strategy.run(proofDepth);
 
+    // Full-flow parsed-Verilog safe proofs have the same limitation as direct
+    // PDR safe proofs: exact proof depth is implementation-dependent because
+    // PDR may generalize to an invariant before the requested depth.
     EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
         << "proofDepth=" << proofDepth << " reason=" << result.reason;
     EXPECT_LE(result.bound, proofDepth) << "proofDepth=" << proofDepth;

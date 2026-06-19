@@ -200,13 +200,13 @@ jobs:
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
         # BP final has resetless FIFO state. Binary SEC intentionally drops
-        # that surface, so this regression always exercises dual-rail coverage.
+        # that surface, so only the dual-rail workflow can require full coverage.
         bash regress/run_sec_strategies_regress.sh \
           nangate45_black_parrot_sec_final \
           "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-full-coverage \
+          ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-full-coverage' || 'expect-equivalent' }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
