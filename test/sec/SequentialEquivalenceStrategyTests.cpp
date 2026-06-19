@@ -2038,41 +2038,49 @@ DelayedRailMismatchModels makeDelayedRailMismatchModelsForTest(
   return models;
 }
 
+size_t bitCountForPdrChainStateCount(size_t logicalStateCount) {
+  size_t bits = 0;
+  size_t encodedStates = 1;
+  while (encodedStates < logicalStateCount) {
+    encodedStates <<= 1;
+    ++bits;
+  }
+  return std::max<size_t>(bits, 1);
+}
+
+BoolExpr* makePdrChainStateExpr(const std::vector<size_t>& symbols,
+                                size_t value) {
+  BoolExpr* expr = BoolExpr::createTrue();
+  for (size_t bit = 0; bit < symbols.size(); ++bit) {
+    expr = BoolExpr::And(
+        expr,
+        (value & (size_t{1} << bit)) != 0
+            ? BoolExpr::Var(symbols[bit])
+            : BoolExpr::Not(BoolExpr::Var(symbols[bit])));
+  }
+  return BoolExpr::simplify(expr);
+}
+
+BoolExpr* makeSaturatingPdrChainNextBitExpr(
+    const std::vector<size_t>& symbols,
+    size_t logicalStateCount,
+    size_t bitIndex) {
+  BoolExpr* expr = BoolExpr::createFalse();
+  for (size_t logicalState = 0; logicalState < logicalStateCount;
+       ++logicalState) {
+    const size_t nextLogicalState =
+        logicalState + 1 < logicalStateCount ? logicalState + 1
+                                             : logicalState;
+    if ((nextLogicalState & (size_t{1} << bitIndex)) == 0) {
+      continue;
+    }
+    expr = BoolExpr::Or(expr, makePdrChainStateExpr(symbols, logicalState));
+  }
+  return BoolExpr::simplify(expr);
+}
+
 KInductionProblem buildLinearChainSecProblem(size_t logicalStateCount) {
-  const auto bitCount = [logicalStateCount]() {
-    size_t bits = 0;
-    size_t encodedStates = 1;
-    while (encodedStates < logicalStateCount) {
-      encodedStates <<= 1;
-      ++bits;
-    }
-    return std::max<size_t>(bits, 1);
-  }();
-
-  const auto buildStateExpr = [](const std::vector<size_t>& symbols, size_t value) {
-    BoolExpr* expr = BoolExpr::createTrue();
-    for (size_t bit = 0; bit < symbols.size(); ++bit) {
-      expr = BoolExpr::And(
-          expr,
-          (value & (size_t{1} << bit)) != 0 ? BoolExpr::Var(symbols[bit])
-                                            : BoolExpr::Not(BoolExpr::Var(symbols[bit])));
-    }
-    return BoolExpr::simplify(expr);
-  };
-
-  const auto buildNextBitExpr =
-      [&](const std::vector<size_t>& symbols, size_t bitIndex) {
-        BoolExpr* expr = BoolExpr::createFalse();
-        for (size_t logicalState = 0; logicalState < logicalStateCount; ++logicalState) {
-          const size_t nextLogicalState =
-              logicalState + 1 < logicalStateCount ? logicalState + 1 : logicalState;
-          if ((nextLogicalState & (size_t{1} << bitIndex)) == 0) {
-            continue;
-          }
-          expr = BoolExpr::Or(expr, buildStateExpr(symbols, logicalState));
-        }
-        return BoolExpr::simplify(expr);
-      };
+  const size_t bitCount = bitCountForPdrChainStateCount(logicalStateCount);
 
   KInductionProblem problem;
   problem.state0Symbols.reserve(bitCount);
@@ -2093,25 +2101,152 @@ KInductionProblem buildLinearChainSecProblem(size_t logicalStateCount) {
 
   for (size_t bit = 0; bit < bitCount; ++bit) {
     problem.transitions0.emplace_back(
-        problem.state0Symbols[bit], buildNextBitExpr(problem.state0Symbols, bit));
+        problem.state0Symbols[bit],
+        makeSaturatingPdrChainNextBitExpr(
+            problem.state0Symbols, logicalStateCount, bit));
     problem.transitions1.emplace_back(
-        problem.state1Symbols[bit], buildNextBitExpr(problem.state1Symbols, bit));
+        problem.state1Symbols[bit],
+        makeSaturatingPdrChainNextBitExpr(
+            problem.state1Symbols, logicalStateCount, bit));
   }
 
   problem.initialCondition = BoolExpr::And(
-      buildStateExpr(problem.state0Symbols, 0), buildStateExpr(problem.state1Symbols, 0));
+      makePdrChainStateExpr(problem.state0Symbols, 0),
+      makePdrChainStateExpr(problem.state1Symbols, 0));
   problem.initializedStateCount = problem.allSymbols.size();
   problem.totalStateCount = problem.allSymbols.size();
   problem.observedOutputExprs0 = {
-      buildStateExpr(problem.state0Symbols, logicalStateCount - 1)};
+      makePdrChainStateExpr(problem.state0Symbols, logicalStateCount - 1)};
   problem.observedOutputExprs1 = {
-      buildStateExpr(problem.state1Symbols, logicalStateCount - 1)};
+      makePdrChainStateExpr(problem.state1Symbols, logicalStateCount - 1)};
   problem.property = makeEqualityExpr(
       problem.observedOutputExprs0.front(), problem.observedOutputExprs1.front());
   problem.bad = BoolExpr::Not(problem.property);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
   return problem;
+}
+
+void addOneHotPdrStateSymbols(KInductionProblem& problem, size_t stateCount) {
+  problem.state0Symbols.clear();
+  problem.allSymbols.clear();
+  problem.state0Symbols.reserve(stateCount);
+  problem.allSymbols.reserve(stateCount);
+  size_t nextSymbol = 2;
+  for (size_t state = 0; state < stateCount; ++state) {
+    const size_t symbol = nextSymbol++;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+}
+
+BoolExpr* makeOneHotStateExpr(const std::vector<size_t>& symbols,
+                              size_t hotIndex) {
+  BoolExpr* expr = BoolExpr::createTrue();
+  for (size_t index = 0; index < symbols.size(); ++index) {
+    expr = BoolExpr::And(
+        expr,
+        index == hotIndex ? BoolExpr::Var(symbols[index])
+                          : BoolExpr::Not(BoolExpr::Var(symbols[index])));
+  }
+  return BoolExpr::simplify(expr);
+}
+
+void finishOneHotPdrProblem(KInductionProblem& problem, size_t badIndex) {
+  problem.initialCondition = makeOneHotStateExpr(problem.state0Symbols, 0);
+  problem.initializedStateCount = problem.state0Symbols.size();
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = BoolExpr::Var(problem.state0Symbols[badIndex]);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+}
+
+KInductionProblem buildClassicPdrOneHotUnreachableBadChainProblem(
+    size_t proofDepth) {
+  KInductionProblem problem;
+  addOneHotPdrStateSymbols(problem, proofDepth + 1);
+
+  for (size_t state = 0; state < problem.state0Symbols.size(); ++state) {
+    BoolExpr* nextExpr = BoolExpr::createFalse();
+    if (state == 0) {
+      nextExpr = BoolExpr::Var(problem.state0Symbols[0]);
+    } else if (state > 1) {
+      nextExpr = BoolExpr::Var(problem.state0Symbols[state - 1]);
+    }
+    problem.transitions0.emplace_back(problem.state0Symbols[state], nextExpr);
+  }
+
+  // Classic safe PDR shape: state 0 is the only reachable state, while the bad
+  // state is fed by an unreachable predecessor chain 1 -> 2 -> ... -> bad.
+  finishOneHotPdrProblem(problem, proofDepth);
+  return problem;
+}
+
+KInductionProblem buildClassicPdrOneHotReachableBadChainProblem(
+    size_t badDepth) {
+  KInductionProblem problem;
+  addOneHotPdrStateSymbols(problem, badDepth + 1);
+
+  for (size_t state = 0; state < problem.state0Symbols.size(); ++state) {
+    BoolExpr* nextExpr = BoolExpr::createFalse();
+    if (state > 0) {
+      nextExpr = BoolExpr::Var(problem.state0Symbols[state - 1]);
+    }
+    if (state + 1 == problem.state0Symbols.size()) {
+      nextExpr = BoolExpr::Or(nextExpr, BoolExpr::Var(problem.state0Symbols[state]));
+    }
+    problem.transitions0.emplace_back(
+        problem.state0Symbols[state], BoolExpr::simplify(nextExpr));
+  }
+
+  // Classic bug PDR shape: 0 -> 1 -> ... -> bad, so the first bad state appears
+  // exactly at badDepth transitions.
+  finishOneHotPdrProblem(problem, badDepth);
+  return problem;
+}
+
+std::string makeOneHotPdrFullFlowImplSource(const std::string& moduleName,
+                                            size_t depth,
+                                            bool reachableBad) {
+  const size_t stateCount = depth + 1;
+  std::ostringstream source;
+  source << "module " << moduleName
+         << "(input clk, input reset, output out);\n";
+  for (size_t index = 0; index < stateCount; ++index) {
+    source << "  reg s" << index << ";\n";
+  }
+  for (size_t index = 0; index < stateCount; ++index) {
+    source << "  always @(posedge clk) begin\n";
+    source << "    if (reset) begin\n";
+    source << "      s" << index << " <= "
+           << (index == 0 ? "1'b1" : "1'b0") << ";\n";
+    source << "    end else begin\n";
+    source << "      s" << index << " <= ";
+    if (index == 0) {
+      source << (reachableBad ? "1'b0" : "s0");
+    } else if (reachableBad || index > 1) {
+      source << "s" << (index - 1);
+    } else {
+      source << "1'b0";
+    }
+    source << ";\n";
+    source << "    end\n";
+    source << "  end\n";
+  }
+  source << "  assign out = s" << depth << ";\n";
+  source << "endmodule\n";
+  return source.str();
+}
+
+std::string makeOneHotPdrFullFlowReferenceSource(
+    const std::string& moduleName) {
+  std::ostringstream source;
+  source << "module " << moduleName
+         << "(input clk, input reset, output out);\n";
+  source << "  assign out = 1'b0;\n";
+  source << "endmodule\n";
+  return source.str();
 }
 
 KInductionProblem buildDocumentedBooleanPdrCounterexampleProblem() {
@@ -7788,6 +7923,119 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_EQ(result.bound, 3u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineProvesClassicSafeChainsWithinDepthsThreeFourFive) {
+  for (const size_t proofDepth : {size_t{3}, size_t{4}, size_t{5}}) {
+    const auto problem =
+        buildClassicPdrOneHotUnreachableBadChainProblem(proofDepth);
+
+    // Classic PDR may converge before the chain length because clause
+    // generalization can learn the whole unreachable suffix as an invariant.
+    // The theoretical contract is therefore "proved within k", not "exactly k".
+    PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+    const auto result = engine.run(proofDepth);
+
+    EXPECT_EQ(result.status, PDRStatus::Equivalent)
+        << "proofDepth=" << proofDepth;
+    EXPECT_LE(result.bound, proofDepth) << "proofDepth=" << proofDepth;
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFindsClassicCounterexamplesAtDepthsThreeFourFive) {
+  for (const size_t badDepth : {size_t{3}, size_t{4}, size_t{5}}) {
+    const auto problem =
+        buildClassicPdrOneHotReachableBadChainProblem(badDepth);
+
+    PDREngine earlyEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+    const auto earlyResult = earlyEngine.run(badDepth - 1);
+
+    EXPECT_EQ(earlyResult.status, PDRStatus::Inconclusive)
+        << "badDepth=" << badDepth;
+    EXPECT_EQ(earlyResult.bound, badDepth - 1) << "badDepth=" << badDepth;
+
+    PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+    const auto result = engine.run(badDepth);
+
+    EXPECT_EQ(result.status, PDRStatus::Different)
+        << "badDepth=" << badDepth;
+    EXPECT_EQ(result.bound, badDepth) << "badDepth=" << badDepth;
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrFullFlowProvesParsedVerilogSafeChainsWithinDepthsThreeFourFive) {
+  for (const size_t proofDepth : {size_t{3}, size_t{4}, size_t{5}}) {
+    NLUniverse::create();
+    auto* db = NLDB::create(NLUniverse::get());
+    auto* library = NLLibrary::create(db, NLName("LIB"));
+    const std::string suffix = std::to_string(proofDepth);
+    auto* impl = loadSystemVerilogTopFromSource(
+        library,
+        "pdr_full_safe_impl_k" + suffix,
+        makeOneHotPdrFullFlowImplSource(
+            "pdr_full_safe_impl_k" + suffix,
+            proofDepth,
+            /*reachableBad=*/false));
+    auto* reference = loadSystemVerilogTopFromSource(
+        library,
+        "pdr_full_safe_ref_k" + suffix,
+        makeOneHotPdrFullFlowReferenceSource("pdr_full_safe_ref_k" + suffix));
+
+    auto strategy = makeBinarySecStrategy(impl, reference, SecEngine::Pdr);
+    const auto result = strategy.run(proofDepth);
+
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
+        << "proofDepth=" << proofDepth << " reason=" << result.reason;
+    EXPECT_LE(result.bound, proofDepth) << "proofDepth=" << proofDepth;
+    EXPECT_EQ(result.coveredOutputs, 1u) << "proofDepth=" << proofDepth;
+    EXPECT_EQ(result.totalOutputs, 1u) << "proofDepth=" << proofDepth;
+
+    naja::DNL::destroy();
+    NLUniverse::get()->destroy();
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
+    KEPLER_FORMAL::BoolExprCache::destroy();
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrFullFlowFindsParsedVerilogCounterexamplesAtDepthsThreeFourFive) {
+  for (const size_t badDepth : {size_t{3}, size_t{4}, size_t{5}}) {
+    NLUniverse::create();
+    auto* db = NLDB::create(NLUniverse::get());
+    auto* library = NLLibrary::create(db, NLName("LIB"));
+    const std::string suffix = std::to_string(badDepth);
+    auto* impl = loadSystemVerilogTopFromSource(
+        library,
+        "pdr_full_diff_impl_k" + suffix,
+        makeOneHotPdrFullFlowImplSource(
+            "pdr_full_diff_impl_k" + suffix,
+            badDepth,
+            /*reachableBad=*/true));
+    auto* reference = loadSystemVerilogTopFromSource(
+        library,
+        "pdr_full_diff_ref_k" + suffix,
+        makeOneHotPdrFullFlowReferenceSource("pdr_full_diff_ref_k" + suffix));
+
+    // Exact early-depth PDR behavior is covered above by the direct PDREngine
+    // test.  This full-flow test verifies the Verilog parser, SEC miter build,
+    // and selected PDR engine agree on the reachable counterexample.
+    auto strategy = makeBinarySecStrategy(impl, reference, SecEngine::Pdr);
+    const auto result = strategy.run(badDepth);
+
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different)
+        << "badDepth=" << badDepth << " reason=" << result.reason;
+    EXPECT_EQ(result.bound, badDepth) << "badDepth=" << badDepth;
+    EXPECT_EQ(result.coveredOutputs, 1u) << "badDepth=" << badDepth;
+    EXPECT_EQ(result.totalOutputs, 1u) << "badDepth=" << badDepth;
+
+    naja::DNL::destroy();
+    NLUniverse::get()->destroy();
+    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
+    KEPLER_FORMAL::BoolExprCache::destroy();
+  }
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
