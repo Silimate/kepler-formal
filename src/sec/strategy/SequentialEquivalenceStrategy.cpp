@@ -3000,7 +3000,8 @@ bool shouldDeferWideDualRailPdrValidation(const KInductionProblem& problem) {
   const size_t outputCount = problem.originalObservedOutputCount == 0
                                  ? problem.observedOutputExprs0.size()
                                  : problem.originalObservedOutputCount;
-  return outputCount > kMaxDualRailWideLocalImplicationOutputs;
+  return detail::shouldDeferPdrDualRailFrameZeroValidation(
+      outputCount, pdrCertificateStateSymbolCount(problem));
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -4696,17 +4697,13 @@ SequentialEquivalenceResult runPdrSecEngine(
   // LCOV_EXCL_START
   // problems, which made the output-batching fallback split every output and
   // repeat the same BMC setup hundreds of times before PDR even started.
-  // Keep this optional validation local in dual-rail SEC.  Medium bus
-  // properties such as 99-output RISC-V and 331-output dynamic-node need the
-  // exact frame-0 guard so PDR does not accept abstract empty-cube
-  // reset-bootstrap witnesses as real differences.  Larger SoC surfaces still
-  // split inside PDR.
-  constexpr size_t kMaxDualRailFrameZeroValidationOutputs =
-      kMaxDualRailWideLocalImplicationOutputs;
+  // Keep this optional validation local in dual-rail SEC.  Small probe cases
+  // still need exact frame-0 localization for counterexamples, but huge
+  // rail-state SoC surfaces should enter PDR directly instead of materializing
+  // a pre-PDR dual-rail transition relation.
   bool broadBasePrecheckDone = false;
   if (problem.usesDualRailStateEncoding) {
-    if (problem.observedOutputExprs0.size() <=
-        kMaxDualRailFrameZeroValidationOutputs) {
+    if (!shouldDeferWideDualRailPdrValidation(problem)) {
       // Validate small dual-rail frame-0 SEC predicates one output at a time so
       // PDR can safely seed the batch property into F0.  Medium/wide batches use
       // the selected PDR engine directly and split on abstract traces.
@@ -4730,7 +4727,11 @@ SequentialEquivalenceResult runPdrSecEngine(
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: skipped dual-rail frame-0 validation ",
           "outputs=", problem.observedOutputExprs0.size(),
-          " limit=", kMaxDualRailFrameZeroValidationOutputs);
+          " output_limit=",
+          detail::kMaxPdrDualRailFrameZeroValidationOutputs,
+          " state_symbols=", pdrCertificateStateSymbolCount(problem),
+          " state_limit=",
+          detail::kMaxPdrDualRailFrameZeroValidationStateSymbols);
     }
   } else {
     broadBasePrecheckDone = true;

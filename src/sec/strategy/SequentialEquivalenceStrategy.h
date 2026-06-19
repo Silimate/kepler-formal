@@ -97,6 +97,9 @@ class SequentialEquivalenceStrategy {
 namespace detail {
 
 constexpr size_t kMaxPdrInductiveStateEqualityOutputs = 64;
+constexpr size_t kMinPdrDualRailFrameZeroValidationOutputs = 256;
+constexpr size_t kMaxPdrDualRailFrameZeroValidationOutputs = 384;
+constexpr size_t kMaxPdrDualRailFrameZeroValidationStateSymbols = 1000000;
 
 inline bool shouldInferPdrInductiveStateEqualities(
     SecEngine secEngine,
@@ -108,6 +111,20 @@ inline bool shouldInferPdrInductiveStateEqualities(
 inline bool shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
     SecEngine secEngine) {
   return secEngine != SecEngine::Pdr;
+}
+
+inline bool shouldDeferPdrDualRailFrameZeroValidation(
+    size_t observedOutputSurface,
+    size_t railStateSymbolSurface) {
+  if (observedOutputSurface > kMaxPdrDualRailFrameZeroValidationOutputs) {
+    return true;
+  }
+  // A mid-wide output bus can still be too expensive when compact extraction
+  // expands the rail state into a very large surface.  Keep small probe designs
+  // on the exact validation path, but let PDR own huge SoC surfaces directly.
+  return observedOutputSurface >= kMinPdrDualRailFrameZeroValidationOutputs &&
+         railStateSymbolSurface >
+             kMaxPdrDualRailFrameZeroValidationStateSymbols;
 }
 
 }  // namespace detail

@@ -7826,6 +7826,50 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailFrameZeroValidationDefersHugeRailStateSurface) {
+  // RISC-V HS has a smaller 99-output surface.  Keep it on the existing exact
+  // validation path even if the rail-state surface is large, because the
+  // Ariane runtime fix must not weaken that previous coverage fix.
+  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/99,
+      /*railStateSymbolSurface=*/2000000));
+  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/133,
+      /*railStateSymbolSurface=*/2000000));
+  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/278,
+      /*railStateSymbolSurface=*/1000000));
+
+  // Ariane136 has only a mid-wide output bus, but compact dual-rail extraction
+  // expands the rail state into a million-scale surface.  That shape should
+  // enter PDR directly instead of spending minutes in the pre-PDR frame-0
+  // validation pass.
+  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/278,
+      /*railStateSymbolSurface=*/1000001));
+
+  // Dynamic-node has a mid-wide 331-output surface.  It should keep the exact
+  // validation path unless compact extraction also creates the huge rail-state
+  // shape seen in Ariane.
+  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/331,
+      /*railStateSymbolSurface=*/1000000));
+  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/331,
+      /*railStateSymbolSurface=*/1000001));
+
+  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/385,
+      /*railStateSymbolSurface=*/1));
+
+  // BlackParrot-style wide output surfaces were already deferred by the old
+  // output-count rule.  The new state-size rule should not change that behavior.
+  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
+      /*observedOutputSurface=*/598,
+      /*railStateSymbolSurface=*/1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDoesNotReuseNonInductiveStrengtheningAsFrameInvariant) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
