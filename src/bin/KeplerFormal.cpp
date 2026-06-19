@@ -418,6 +418,13 @@ std::string formatStringList(const std::vector<std::string>& values) {
 }
 // LCOV_EXCL_STOP
 
+bool secInconclusiveStoppedBeforeMaxK(const std::string& reason) {
+  return reason.find("budget") != std::string::npos ||
+         reason.find("repair") != std::string::npos ||
+         reason.find("projection") != std::string::npos ||
+         reason.find("did not prove any observed output") != std::string::npos;
+}
+
 }  // namespace
 
 // LCOV_EXCL_START
@@ -1777,13 +1784,19 @@ int KeplerFormalMain(int argc, char** argv) {
             // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Inconclusive:
             // LCOV_EXCL_START
-            SPDLOG_CRITICAL(
-            // LCOV_EXCL_STOP
-                "SEC was inconclusive up to max_k = {}: {}",
-                secMaxK,
-                result.reason);
-            // LCOV_EXCL_START
+            if (secInconclusiveStoppedBeforeMaxK(result.reason)) {
+              SPDLOG_CRITICAL(
+                  "SEC was inconclusive before completing max_k = {}: {}",
+                  secMaxK,
+                  result.reason);
+            } else {
+              SPDLOG_CRITICAL(
+                  "SEC was inconclusive up to max_k = {}: {}",
+                  secMaxK,
+                  result.reason);
+            }
             return EXIT_FAILURE;
+            // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:
           // LCOV_EXCL_STOP
           default:

@@ -280,8 +280,13 @@ constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs =
     kMaxExactResetFrontierDualRailMediumOutputs;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
+constexpr unsigned kDefaultDualRailResidualPredecessorConflictLimit = 50000;
 constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
 constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 8192;
+constexpr size_t kMaxDualRailResidualPredecessorTargetCube = 16;
+constexpr size_t kMaxDualRailResidualPredecessorSolverSymbols = 8192;
+constexpr const char* kDualRailPredecessorConflictLimitEnv =
+    "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT";
 // Exact reset-frontier validation can batch a small state-only bad CNF into
 // one prefix query. This replaces many neighboring per-assignment frontier
 // solves with a single real bounded proof, and stays limited to local
@@ -440,6 +445,12 @@ constexpr long long kPredecessorCoreConflictLimit = 10000;
 // by deletion. These checks reuse the solver; unlike ordinary cube
 // generalization they do not rebuild transition/frame CNF per trial.
 constexpr size_t kMaxPredecessorCoreContextMinimizationChecks = 32;
+// Broad dual-rail transition cones can make predecessor-core extraction too
+// expensive, but BlackParrot shows a smaller shape where the cube support is
+// only local (dozens of symbols) and skipping the core makes PDR enumerate
+// sibling blockers. Try the core oracle for those local cones only.
+constexpr size_t kMaxLocalDualRailPredecessorCoreSupport = 128;
+constexpr size_t kMinLocalDualRailPredecessorCoreTargetSize = 4;
 // BlackParrot sampling later found the same predecessor-core need below the
 // "large cube" threshold: level-zero blockers around 37-49 literals with
 // thousands of transition-support symbols were learned verbatim and then
@@ -537,6 +548,14 @@ constexpr size_t kInitialPdrStatsQueries = 20;
 constexpr size_t kMaxStateEqualitySubsetPairs = 2048;
 constexpr size_t kMaxStateEqualitySubsetIterations = 256;
 // LCOV_EXCL_STOP
+
+bool isLocalDualRailPredecessorCoreSurface(size_t level,
+                                           size_t cubeSize,
+                                           size_t transitionSupportSize) {
+  return level <= 1 &&
+         cubeSize >= kMinLocalDualRailPredecessorCoreTargetSize &&
+         transitionSupportSize <= kMaxLocalDualRailPredecessorCoreSupport;
+}
 
 // Cubes represent a concrete bad/predecessor state, while clauses are the
 // blocked generalization of such a state stored in a PDR frame.
@@ -1258,8 +1277,30 @@ unsigned dualRailBadCubeConflictLimit() {
 
 unsigned dualRailPredecessorConflictLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
-      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT",
+      kDualRailPredecessorConflictLimitEnv,
       kDefaultDualRailPredecessorConflictLimit);
+}
+
+unsigned dualRailPredecessorConflictLimitForQuery(
+    const KInductionProblem& problem,
+    const StateCube& targetCube,
+    size_t solverSymbolCount) {
+  const unsigned configuredLimit = dualRailPredecessorConflictLimit();
+  if (std::getenv(kDualRailPredecessorConflictLimitEnv) != nullptr) {
+    return configuredLimit;
+  }
+  // BlackParrot leaves with one residual output need a deeper predecessor SAT
+  // search, but broad multi-output batches should keep the cheaper default.
+  if (problem.usesDualRailStateEncoding &&
+      problem.observedOutputExprs0.size() == 1 &&
+      !targetCube.empty() &&
+      targetCube.size() <= kMaxDualRailResidualPredecessorTargetCube &&
+      solverSymbolCount <= kMaxDualRailResidualPredecessorSolverSymbols) {
+    return std::max(
+        configuredLimit,
+        kDefaultDualRailResidualPredecessorConflictLimit);
+  }
+  return configuredLimit;
 }
 
 unsigned dualRailPredecessorDecisionLimit(unsigned defaultValue) {
@@ -8299,17 +8340,27 @@ std::optional<bool> learnValidatedBadFormulaClauses(
   // uncovered instead of spending the workflow in this CEGAR shortcut.
   const bool largeDualRailResetFrontierSurface =
       hasLargeDualRailResetFrontierSurface(problem);
+  const StateCube validationSupportCube =
+      validationSupportCubeForStateClauses(*badClauses);
+  const bool localDualRailResetCubeBadFormulaRepair =
+      problem.usesDualRailStateEncoding &&
+      problem.observedOutputExprs0.size() == 1 &&
+      targetFrame <= kMaxResetSpecializedBadFormulaValidationFrame &&
+      badClauses->size() <= kMaxExactResetCubeValidatedBadFormulaClauses &&
+      !validationSupportCube.empty() &&
+      validationSupportCube.size() <= kMaxResetCubeValidationPrimeSupport;
   bool validatedBadClauses = false;
   bool validatedBadClausesAtTargetOnly = false;
-  // Dual-rail final repairs can have small output support but a wide reset
-  // LCOV_EXCL_START
-  // frontier. Leave those leaves to ordinary PDR/whole-bad validation instead
-  // of building a reset-cube solver for every residual rail assignment.
+  // Even when the original dual-rail SEC surface is too wide for broad exact
+  // reset-frontier validation, an isolated output can still expose a tiny local
+  // bad predicate.  Let PDR consume cached/reset-specialized conflicts for that
+  // local predicate without opening broad exact reset-frontier queries.
   if (problem.observedOutputExprs0.size() == 1 &&
       badClauses->size() > kMaxExactValidatedBadFormulaClauses &&
-      !problem.usesDualRailStateEncoding &&
       !useObservationFrontier &&  // LCOV_EXCL_LINE
-      !largeDualRailResetFrontierSurface) {  // LCOV_EXCL_LINE
+      ((!problem.usesDualRailStateEncoding &&
+        !largeDualRailResetFrontierSurface) ||
+       localDualRailResetCubeBadFormulaRepair)) {  // LCOV_EXCL_LINE
     // A one-output state-only bad predicate can still enumerate to a few dozen
     // assignments. Sampling on BlackParrot showed one broad frontier proof for
     // that whole disjunction becoming the wall, while the concrete reset-cube
@@ -8319,7 +8370,8 @@ std::optional<bool> learnValidatedBadFormulaClauses(
     // one assignment that was proven unreachable at the target frame.
     // LCOV_EXCL_START
     size_t learnedResetConflictClauses = 0;  // LCOV_EXCL_LINE
-    const bool allowExactResetValidation = false;  // LCOV_EXCL_LINE
+    const bool allowExactResetValidation =
+        !localDualRailResetCubeBadFormulaRepair;  // LCOV_EXCL_LINE
     if (const auto resetCubeValidation =  // LCOV_EXCL_LINE
     // LCOV_EXCL_STOP
             validateBadFormulaClausesWithResetCubes(  // LCOV_EXCL_LINE
@@ -8373,8 +8425,6 @@ std::optional<bool> learnValidatedBadFormulaClauses(
 
 // LCOV_EXCL_START
 
-  const StateCube validationSupportCube =
-      validationSupportCubeForStateClauses(*badClauses);
   const bool allowBatchedResetFrontierValidation =
   // LCOV_EXCL_STOP
       !validatedBadClauses &&
@@ -10030,6 +10080,15 @@ std::optional<StateCube> findPredecessorCube(
       exactFrameClauses,
       extraFrameClauses,
       supportCache);
+  const unsigned predecessorConflictLimit =
+      problem.usesDualRailStateEncoding
+          ? dualRailPredecessorConflictLimitForQuery(
+                problem, targetCube, solverSymbols.size())
+          : 0;
+  const unsigned predecessorDecisionLimit =
+      problem.usesDualRailStateEncoding
+          ? dualRailPredecessorDecisionLimit(predecessorConflictLimit)
+          : std::numeric_limits<unsigned>::max();
   if (emitStatsForQuery) {
     emitSecDiag(
         "SEC PDR stats: predecessor #", statsQueryNumber,
@@ -10041,16 +10100,11 @@ std::optional<StateCube> findPredecessorCube(
         " predecessor_symbols=", predecessorSymbols.size(),
         " solver_symbols=", solverSymbols.size(),
         " projection_limit=", predecessorProjectionLimit,
+        " conflict_limit=", predecessorConflictLimit,
         " frame_clauses=",
         level < frames.size() ? frames[level].clauses.size() : 0,
         " exclude_target=", excludeTargetOnCurrentFrame ? 1 : 0);
   }
-  const unsigned predecessorConflictLimit =
-      problem.usesDualRailStateEncoding ? dualRailPredecessorConflictLimit() : 0;
-  const unsigned predecessorDecisionLimit =
-      problem.usesDualRailStateEncoding
-          ? dualRailPredecessorDecisionLimit(predecessorConflictLimit)
-          : std::numeric_limits<unsigned>::max();
   if (problem.usesDualRailStateEncoding && predecessorAssumptionCache != nullptr &&
       extraFrameClauses == nullptr && !excludeTargetOnCurrentFrame) {
     const auto cachedStatus = solvePredecessorCubeWithCachedAssumptions(
@@ -11063,6 +11117,10 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
   const bool broadDualRailTransitionSurface =
       problem.usesDualRailStateEncoding &&
       blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport;
+  const bool localDualRailTransitionSurface =
+      broadDualRailTransitionSurface &&
+      isLocalDualRailPredecessorCoreSurface(
+          level, cube.size(), blockedCubeSupportSize);
   const size_t effectiveCheckLimit =
       cheapTransitionSurface
           ? std::max(
@@ -11073,15 +11131,18 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
           : checkLimit;
   const bool shouldTryPredecessorCore =
       level <= kMaxPredecessorCoreGeneralizationLevel &&
-      !broadDualRailTransitionSurface &&
+      (!broadDualRailTransitionSurface || localDualRailTransitionSurface) &&
       !cheapTransitionSurface &&
       (cube.size() > kLargeBlockedCubeGeneralizationThreshold ||
        (cube.size() >= kMinMediumCubePredecessorCoreTargetSize &&
-        blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport));
-  const size_t dualRailCoreSkipNumber = broadDualRailTransitionSurface
+        blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport) ||
+       localDualRailTransitionSurface);
+  const bool skipDualRailPredecessorCore =
+      broadDualRailTransitionSurface && !localDualRailTransitionSurface;
+  const size_t dualRailCoreSkipNumber = skipDualRailPredecessorCore
                                             ? nextPdrDualRailPredecessorCoreSkipNumber()
                                             : 0;
-  if (broadDualRailTransitionSurface &&
+  if (skipDualRailPredecessorCore &&
       shouldEmitPdrStats(dualRailCoreSkipNumber)) {  // LCOV_EXCL_LINE
     // Predecessor-core extraction is optional clause minimization. In dual-rail
     // mode the target cube already contains rail-expanded state, and sampled

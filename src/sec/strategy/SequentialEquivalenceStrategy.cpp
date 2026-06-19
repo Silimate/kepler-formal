@@ -2993,6 +2993,16 @@ bool canReportPdrValidationCounterexample(
     const KInductionProblem& problem,
     const KInductionResult::CounterexampleWitness& witness);
 
+bool shouldDeferWideDualRailPdrValidation(const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding) {
+    return false;
+  }
+  const size_t outputCount = problem.originalObservedOutputCount == 0
+                                 ? problem.observedOutputExprs0.size()
+                                 : problem.originalObservedOutputCount;
+  return outputCount > kMaxDualRailWideLocalImplicationOutputs;
+}
+
 std::optional<KInductionResult::CounterexampleWitness>
 findPdrValidationCounterexample(const KInductionProblem& problem,
                                 KEPLER_FORMAL::Config::SolverType solverType,
@@ -5655,21 +5665,30 @@ SequentialEquivalenceResult runPdrSecEngine(
               validationCheck.unknownOutputIndices);
           provedBound = std::max(provedBound, pdrResult.bound);
           break;
-        } else if (auto concreteWitness =
-                       findPdrValidationCounterexample(
-                           batchProblem, solverType, pdrResult.bound);
-                   concreteWitness.has_value()) {
-          const KInductionResult witnessResult{  // LCOV_EXCL_LINE
-              KInductionStatus::Different,
-              concreteWitness->badFrame,  // LCOV_EXCL_LINE
-              std::move(concreteWitness)};  // LCOV_EXCL_LINE
-          return makeSecResult(  // LCOV_EXCL_LINE
-              SequentialEquivalenceStatus::Different,
-              witnessResult.bound,  // LCOV_EXCL_LINE
-              formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
-              outputCoverage,  // LCOV_EXCL_LINE
-              abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-              extractedBoundaryReports);  // LCOV_EXCL_LINE
+        } else if (!shouldDeferWideDualRailPdrValidation(batchProblem)) {
+          if (auto concreteWitness = findPdrValidationCounterexample(
+                  batchProblem, solverType, pdrResult.bound);
+              concreteWitness.has_value()) {
+            const KInductionResult witnessResult{  // LCOV_EXCL_LINE
+                KInductionStatus::Different,
+                concreteWitness->badFrame,  // LCOV_EXCL_LINE
+                std::move(concreteWitness)};  // LCOV_EXCL_LINE
+            return makeSecResult(  // LCOV_EXCL_LINE
+                SequentialEquivalenceStatus::Different,
+                witnessResult.bound,  // LCOV_EXCL_LINE
+                formatCounterexampleWitness(witnessResult, model0, model1, top0, top1),  // LCOV_EXCL_LINE
+                outputCoverage,  // LCOV_EXCL_LINE
+                abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+                extractedBoundaryReports);  // LCOV_EXCL_LINE
+          }  // LCOV_EXCL_LINE
+        } else if (emitPdrStageStats) {  // LCOV_EXCL_LINE
+          // The PDR batch itself closed.  On very wide dual-rail SoC surfaces,
+          // rebuilding a full concrete BMC checker here materializes the same
+          // million-symbol transition relation that batching was avoiding.
+          emitSecDiag(  // LCOV_EXCL_LINE
+              "SEC PDR stats: deferred wide dual-rail equivalent ",
+              "validation outputs=",  // LCOV_EXCL_LINE
+              batchProblem.originalObservedOutputCount);
         }  // LCOV_EXCL_LINE
         provedBound = std::max(provedBound, pdrResult.bound);
         markDualRailPdrOutputRangeCovered(
@@ -5680,10 +5699,18 @@ SequentialEquivalenceResult runPdrSecEngine(
         break;
       case PDRStatus::Different: {
         {
-          if (auto concreteWitness =
-                  findPdrValidationCounterexample(
-                      batchProblem, solverType, pdrResult.bound);
-              concreteWitness.has_value()) {
+          std::optional<KInductionResult::CounterexampleWitness>
+              concreteWitness;
+          if (!shouldDeferWideDualRailPdrValidation(batchProblem)) {
+            concreteWitness = findPdrValidationCounterexample(
+                batchProblem, solverType, pdrResult.bound);
+          } else if (emitPdrStageStats) {  // LCOV_EXCL_LINE
+            emitSecDiag(  // LCOV_EXCL_LINE
+                "SEC PDR stats: deferred wide dual-rail projected ",
+                "counterexample validation outputs=",  // LCOV_EXCL_LINE
+                batchProblem.originalObservedOutputCount);
+          }
+          if (concreteWitness.has_value()) {
             const KInductionResult witnessResult{
                 KInductionStatus::Different,
                 concreteWitness->badFrame,
@@ -5903,22 +5930,10 @@ SequentialEquivalenceResult runPdrSecEngine(
             splitPdrBatchAtFinalStage(batchIndex, firstOutput, endOutput);  // LCOV_EXCL_LINE
             break;  // LCOV_EXCL_LINE
           }
-        }  // LCOV_EXCL_LINE
-        const std::string outputName =
-            firstOutput < problem.observedOutputNames.size()  // LCOV_EXCL_LINE
-                ? problem.observedOutputNames[firstOutput]  // LCOV_EXCL_LINE
-                : std::to_string(firstOutput);  // LCOV_EXCL_LINE
-        return makeSecResult(  // LCOV_EXCL_LINE
-            SequentialEquivalenceStatus::Inconclusive,
-            pdrResult.bound,  // LCOV_EXCL_LINE
-            "PDR reached an abstract counterexample that concrete BMC did not "
-            "validate for output `" +  // LCOV_EXCL_LINE
-                outputName + "` at k = " + std::to_string(pdrResult.bound),  // LCOV_EXCL_LINE
-            outputCoverage,  // LCOV_EXCL_LINE
-            abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-            extractedBoundaryReports);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      case PDRStatus::Inconclusive:  // LCOV_EXCL_LINE
+        }
+        break;
+      }
+      case PDRStatus::Inconclusive:
       default:
         if (problem.usesDualRailStateEncoding) {  // LCOV_EXCL_LINE
           if (endOutput - firstOutput > 1) {  // LCOV_EXCL_LINE
@@ -5988,7 +6003,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         SequentialEquivalenceStatus::Inconclusive,
         provedBound,
         problem.usesDualRailStateEncoding
-            ? "Dual-rail PDR did not prove any observed output"
+            ? "Dual-rail PDR exhausted repair/projection before proving any observed output"
             : "PDR did not prove any observed output",
         finalCoverage,
         abstractedSequentialBoundaries,
