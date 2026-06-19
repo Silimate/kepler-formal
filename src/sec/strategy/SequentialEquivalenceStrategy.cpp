@@ -6468,7 +6468,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   const bool deriveResetBootstrapEqualities =
       (secEngine_ != SecEngine::Pdr ||
        totalStateBits <= kMaxPdrGlobalResetBootstrapEqualityStates) &&
-      !detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+      !detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
           secEngine_, encoding_, observedOutputSurface);
   if (secDiagEnabled && !deriveResetBootstrapEqualities) {
     if (secEngine_ == SecEngine::Pdr) {
@@ -6478,16 +6478,18 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
           "%zu state bits (limit=%zu)\n",
           totalStateBits,  // LCOV_EXCL_LINE
           kMaxPdrGlobalResetBootstrapEqualityStates);
-    } else if (secEngine_ == SecEngine::KInduction) {
-      // KI still receives reset/bootstrap values and output-rooted startup
+    } else if (secEngine_ == SecEngine::KInduction ||
+               secEngine_ == SecEngine::Imc) {
+      // KI/IMC still receive reset/bootstrap values and output-rooted startup
       // candidates.  This only avoids the all-state pre-proof sweep sampled on
-      // wide dual-rail BlackParrot surfaces before KI starts.
+      // wide dual-rail BlackParrot surfaces before the selected engine starts.
       fprintf(  // LCOV_EXCL_LINE
           stderr,  // LCOV_EXCL_LINE
-          "SEC diag: skipping global k-induction reset-bootstrap equality "
-          "mining for %zu outputs (limit=%zu)\n",
+          "SEC diag: skipping global %s reset-bootstrap equality mining for "
+          "%zu outputs (limit=%zu)\n",
+          secEngine_ == SecEngine::KInduction ? "k-induction" : "imc",
           observedOutputSurface,  // LCOV_EXCL_LINE
-          detail::kMaxKiDualRailGlobalBootstrapEqualityOutputs);
+          detail::kMaxDualRailGlobalBootstrapEqualityOutputs);
     }
     fflush(stderr);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE

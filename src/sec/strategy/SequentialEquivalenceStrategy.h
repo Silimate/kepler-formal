@@ -100,7 +100,7 @@ constexpr size_t kMaxPdrInductiveStateEqualityOutputs = 64;
 constexpr size_t kMinPdrDualRailFrameZeroValidationOutputs = 256;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationOutputs = 384;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationStateSymbols = 1000000;
-constexpr size_t kMaxKiDualRailGlobalBootstrapEqualityOutputs = 384;
+constexpr size_t kMaxDualRailGlobalBootstrapEqualityOutputs = 384;
 
 inline bool shouldInferPdrInductiveStateEqualities(
     SecEngine secEngine,
@@ -114,13 +114,14 @@ inline bool shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
   return secEngine != SecEngine::Pdr;
 }
 
-inline bool shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+inline bool shouldSkipDualRailGlobalBootstrapEqualityMining(
     SecEngine secEngine,
     SecEncoding encoding,
     size_t observedOutputSurface) {
-  return secEngine == SecEngine::KInduction &&
+  return (secEngine == SecEngine::KInduction ||
+          secEngine == SecEngine::Imc) &&
          encoding == SecEncoding::DualRailSteady &&
-         observedOutputSurface > kMaxKiDualRailGlobalBootstrapEqualityOutputs;
+         observedOutputSurface > kMaxDualRailGlobalBootstrapEqualityOutputs;
 }
 
 inline bool shouldDeferPdrDualRailFrameZeroValidation(

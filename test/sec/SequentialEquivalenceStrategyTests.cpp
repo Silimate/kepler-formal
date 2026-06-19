@@ -7870,30 +7870,35 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       KiDualRailSkipsOnlyWideGlobalBootstrapEqualityMining) {
-  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+       DualRailKiAndImcSkipOnlyWideGlobalBootstrapEqualityMining) {
+  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
       SecEngine::KInduction,
       SecEncoding::DualRailSteady,
       /*observedOutputSurface=*/384));
 
-  // BlackParrot-shaped dual-rail KI surfaces should not spend minutes mining
-  // global reset-bootstrap state equalities before the selected KI proof starts.
-  EXPECT_TRUE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+  // BlackParrot-shaped dual-rail KI/IMC surfaces should not spend minutes
+  // mining global reset-bootstrap state equalities before the selected proof
+  // engine starts.
+  EXPECT_TRUE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
       SecEngine::KInduction,
       SecEncoding::DualRailSteady,
       /*observedOutputSurface=*/598));
-
-  // Keep binary KI and the other engines on the existing path. This guard is
-  // only for the sampled dual-rail KI startup-mining wall.
-  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
-      SecEngine::KInduction,
-      SecEncoding::Binary,
-      /*observedOutputSurface=*/598));
-  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+  EXPECT_TRUE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
       SecEngine::Imc,
       SecEncoding::DualRailSteady,
       /*observedOutputSurface=*/598));
-  EXPECT_FALSE(detail::shouldSkipKiDualRailGlobalBootstrapEqualityMining(
+
+  // Keep binary KI/IMC and PDR on the existing paths. This guard is only for
+  // the sampled dual-rail KI/IMC startup-mining wall.
+  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
+      SecEngine::KInduction,
+      SecEncoding::Binary,
+      /*observedOutputSurface=*/598));
+  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
+      SecEngine::Imc,
+      SecEncoding::Binary,
+      /*observedOutputSurface=*/598));
+  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
       SecEngine::Pdr,
       SecEncoding::DualRailSteady,
       /*observedOutputSurface=*/598));
