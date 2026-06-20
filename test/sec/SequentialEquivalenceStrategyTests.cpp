@@ -41,6 +41,7 @@
 #include "common/PrivateProofSymbol.h"
 #include "common/ProofProblemDebug.h"
 #include "common/SecDiag.h"
+#include "imc/CraigInterpolatingModelChecker.h"
 #include "imc/ExactInterpolantSynthesizer.h"
 #include "imc/IMCEngine.h"
 #include "kinduction/KInductionEngine.h"
@@ -2127,6 +2128,43 @@ KInductionProblem buildLinearChainSecProblem(size_t logicalStateCount) {
   problem.bad = BoolExpr::Not(problem.property);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
+  return problem;
+}
+
+KInductionProblem buildCraigResetSecProblem(bool equivalent) {
+  constexpr size_t reset = 2;
+  constexpr size_t data = 3;
+  constexpr size_t state0 = 4;
+  constexpr size_t state1 = 5;
+
+  KInductionProblem problem;
+  problem.environmentInputNames = {"reset", "data"};
+  problem.observedOutputNames = {"out"};
+  problem.inputSymbols = {reset, data};
+  problem.state0Symbols = {state0};
+  problem.state1Symbols = {state1};
+  problem.allSymbols = {reset, data, state0, state1};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.observedOutputExprs0 = {BoolExpr::Var(state0)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(state1)};
+  problem.transitions0 = {{
+      state0,
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(reset)),
+                    BoolExpr::Var(data))}};
+  problem.transitions1 = {{
+      state1,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(reset)),
+          equivalent ? BoolExpr::Var(data)
+                     : BoolExpr::Not(BoolExpr::Var(data)))}};
+  problem.property =
+      makeEqualityExpr(BoolExpr::Var(state0), BoolExpr::Var(state1));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.usesDualRailStateEncoding = true;
+  problem.totalStateCount = 13;
   return problem;
 }
 
@@ -6655,6 +6693,30 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CadicalCraigInterpolationReturnsProofDerivedGlobalClause) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  solver.enableCraigInterpolation();
+  solver.setCraigVariablePartition(
+      SATSolverWrapper::CraigVariablePartition::Global);
+  const int shared = solver.newVar() + 2;
+
+  solver.setCraigClausePartition(
+      SATSolverWrapper::CraigClausePartition::A);
+  solver.addClause({-shared});
+  solver.setCraigClausePartition(
+      SATSolverWrapper::CraigClausePartition::B);
+  solver.addClause({shared});
+
+  ASSERT_EQ(
+      solver.solveStatus(), SATSolverWrapper::SolveStatus::Unsat);
+  const auto interpolant = solver.createCraigInterpolant();
+  EXPECT_EQ(
+      interpolant.type,
+      SATSolverWrapper::CraigInterpolantCnf::Type::Normal);
+  EXPECT_EQ(interpolant.clauses, std::vector<std::vector<int>>{{-shared}});
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        KissatLargeSecConeProofProfileRemainsUsable) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
   solver.configureForSecConeProof(/*coneSymbols=*/32768);
@@ -6786,6 +6848,65 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(kiCachedWitness->outputMismatches[0].signal, "out");
   EXPECT_EQ(cachedWitness->outputMismatches[0].signal,
             uncachedWitness->outputMismatches[0].signal);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LocalBaseCaseCacheProvesSafeMultiOutputFrontier) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"in"};
+  problem.observedOutputNames = {"stable", "tracked"};
+  problem.inputSymbols = {2};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.observedOutputExprs0 = {BoolExpr::createFalse(), BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse(), BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::Var(2)}};
+  problem.transitions1 = {{4, BoolExpr::Var(2)}};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(
+          problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]),
+      makeEqualityExpr(
+          problem.observedOutputExprs0[1], problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto cache = makeImcBaseCounterexampleCache(problem);
+  const auto kiCache = makeKInductionBaseCounterexampleCache(problem);
+
+  // Multi-output residual batches should prove the whole newest frontier safe
+  // before splitting into per-output witness localization.  This is the fast path
+  // equivalent IMC/KI residual runs need, and it must still agree with the
+  // ordinary uncached base validator.
+  EXPECT_FALSE(findImcBaseCounterexampleAtFrontier(
+      *cache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+  EXPECT_FALSE(findKInductionBaseCounterexampleAtFrontier(
+      *kiCache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+  EXPECT_FALSE(findBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LocalBaseCaseCacheChecksExactFrontierWithoutSafePrefixAssumption) {
+  KInductionProblem problem;
+  constexpr size_t stickyBadState = 2;
+  problem.state0Symbols = {stickyBadState};
+  problem.allSymbols = {stickyBadState};
+  problem.initialCondition = BoolExpr::Var(stickyBadState);
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.transitions0 = {{stickyBadState, BoolExpr::createTrue()}};
+  problem.bad = BoolExpr::Var(stickyBadState);
+  problem.property = BoolExpr::Not(problem.bad);
+
+  const auto cache = makeImcBaseCounterexampleCache(problem);
+  const auto witness = findImcBaseCounterexampleAtFrontier(
+      *cache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  // Newest-frontier validation must not assume earlier frames are safe.  A bad
+  // state at frame 1 is still a real counterexample even when frame 0 was also
+  // bad; the caller's monotonic sweep decides which witness to report first.
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -8969,6 +9090,63 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcDerivesRelationWithoutCrossDesignStateAssumptions) {
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+
+  CraigInterpolatingModelChecker checker(problem);
+  const CraigImcResult result = checker.run(4);
+
+  // The two state symbols are deliberately unrelated in the problem. Their
+  // equality may appear only as a consequence of the reset and transition
+  // clauses in CaDiCaL's UNSAT proof, never as an internal-name assumption.
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+  EXPECT_GE(result.iterations, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcIgnoresSuppliedCrossDesignStateCandidates) {
+  KInductionProblem problem = buildCraigResetSecProblem(false);
+  problem.bootstrapStateEqualityPairs = {{4, 5}};
+  problem.inductiveStateEqualityPairs = {{4, 5}};
+
+  CraigInterpolatingModelChecker checker(problem);
+  const CraigImcResult result = checker.run(4);
+
+  // These candidate vectors are intentionally false for the transition
+  // system. Craig IMC must ignore them and refuse to prove equivalence.
+  EXPECT_EQ(result.status, CraigImcStatus::NoProgress);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcUsesProofDerivedCraigInterpolation) {
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, IMCStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("imc Craig projection round="), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcFindsDifferenceWithoutTrustingStateCandidates) {
+  KInductionProblem problem = buildCraigResetSecProblem(false);
+  problem.bootstrapStateEqualityPairs = {{4, 5}};
+  problem.inductiveStateEqualityPairs = {{4, 5}};
+
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(4);
+
+  EXPECT_EQ(result.status, IMCStatus::Different);
+  ASSERT_TRUE(result.witness.has_value());
+  ASSERT_EQ(result.witness->outputMismatches.size(), 1u);
+  EXPECT_EQ(result.witness->outputMismatches.front().signal, "out");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        IMCEngineFindsReachableBadState) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -8992,31 +9170,127 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       IMCEngineChecksOnlyNewBaseFrontierAtEachDepth) {
+       LargeDualRailImcIgnoresFalseBootstrapStateCandidate) {
+  KInductionProblem problem = buildCraigResetSecProblem(false);
+  problem.initialStateAssignments = {{4, true}, {5, false}};
+  problem.bootstrapStateAssignments = {{4, false}, {5, true}};
+  problem.bootstrapStateEqualityPairs = {{4, 5}};
+  problem.transitions0 = {{4, BoolExpr::createFalse()}};
+  problem.transitions1 = {{5, BoolExpr::createTrue()}};
+
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(4);
+
+  // The false candidate equality contradicts the concrete bootstrap values and
+  // would make every bounded query vacuously UNSAT if IMC asserted it. The
+  // opposite pre-reset assignments also ensure the optimized post-reset
+  // frontier is not accidentally conjoined with obsolete initial-state facts.
+  EXPECT_EQ(result.status, IMCStatus::Different);
+  ASSERT_TRUE(result.witness.has_value());
+  // The witness frame is reported relative to the post-bootstrap SEC horizon.
+  EXPECT_EQ(result.witness->badFrame, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       IMCEngineFindsDelayedBadStateAfterFailedInductionStep) {
   KInductionProblem problem;
-  problem.state0Symbols = {2};
-  problem.allSymbols = {2};
-  problem.transitions0.emplace_back(2, BoolExpr::createFalse());
-  problem.usesDualRailStateEncoding = true;
-  problem.totalStateCount = 13;
-  problem.bad = BoolExpr::Var(2);
+  constexpr size_t firstState = 2;
+  constexpr size_t delayedBadState = 3;
+  problem.state0Symbols = {firstState, delayedBadState};
+  problem.allSymbols = {firstState, delayedBadState};
+  problem.transitions0 = {
+      {firstState, BoolExpr::createTrue()},
+      {delayedBadState, BoolExpr::Var(firstState)}};
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(firstState)),
+      BoolExpr::Not(BoolExpr::Var(delayedBadState)));
+  problem.initializedStateCount = 2;
+  problem.totalStateCount = 2;
+  problem.bad = BoolExpr::Var(delayedBadState);
   problem.property = BoolExpr::Not(problem.bad);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  // IMC now tries the sound induction step before frontier witness search.  If
+  // that proof does not close, it must still extend the concrete frontier and
+  // report a real delayed counterexample.
+  EXPECT_EQ(result.status, IMCStatus::Different);
+  ASSERT_TRUE(result.witness.has_value());
+  EXPECT_EQ(result.bound, 2u);
+  EXPECT_EQ(result.witness->badFrame, 2u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       IMCEngineProofOnlyFrontierStillLocalizesReachableBad) {
+  KInductionProblem problem;
+  constexpr size_t firstState = 2;
+  constexpr size_t delayedBadState = 3;
+  problem.observedOutputNames = {"stable", "delayed"};
+  problem.state0Symbols = {firstState, delayedBadState};
+  problem.allSymbols = {firstState, delayedBadState};
+  problem.observedOutputExprs0 = {
+      BoolExpr::createFalse(), BoolExpr::Var(delayedBadState)};
+  problem.observedOutputExprs1 = {
+      BoolExpr::createFalse(), BoolExpr::createFalse()};
+  problem.transitions0 = {
+      {firstState, BoolExpr::createTrue()},
+      {delayedBadState, BoolExpr::Var(firstState)}};
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(firstState)),
+      BoolExpr::Not(BoolExpr::Var(delayedBadState)));
+  problem.initializedStateCount = 2;
+  problem.totalStateCount = 13;
+  problem.usesDualRailStateEncoding = true;
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(
+          problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]),
+      makeEqualityExpr(
+          problem.observedOutputExprs0[1], problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  // The dual-rail proof-only frontier guard may skip witness localization only
+  // when it has an UNSAT certificate.  Once a delayed bad state is reachable,
+  // IMC must fall through to the exact witness path and report the mismatch.
+  EXPECT_EQ(result.status, IMCStatus::Different);
+  ASSERT_TRUE(result.witness.has_value());
+  EXPECT_EQ(result.bound, 2u);
+  EXPECT_EQ(result.witness->badFrame, 2u);
+  ASSERT_EQ(result.witness->outputMismatches.size(), 1u);
+  EXPECT_EQ(result.witness->outputMismatches[0].signal, "delayed");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       IMCEngineValidatesConcreteBaseWhenInductionCloses) {
+  KInductionProblem problem;
+  constexpr size_t badState = 2;
+  problem.state0Symbols = {badState};
+  problem.allSymbols = {badState};
+  problem.transitions0 = {{badState, BoolExpr::createTrue()}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(badState));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = BoolExpr::createTrue();
+  problem.inductionBad = BoolExpr::createFalse();
+
   IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  EXPECT_EQ(result.status, IMCStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("SEC diag: k-induction base coi k=1 first_bad_frame=1"),
-      std::string::npos);
-  EXPECT_EQ(
-      stderrOutput.find("SEC diag: k-induction base coi k=1 first_bad_frame=0"),
-      std::string::npos);
+  // A closed induction step is only a proof once the concrete SEC base horizon
+  // is also clean.  This catches accidental "step-only" equivalence results.
+  EXPECT_EQ(result.status, IMCStatus::Different);
+  ASSERT_TRUE(result.witness.has_value());
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_EQ(result.witness->badFrame, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

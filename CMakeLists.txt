@@ -123,6 +123,7 @@ set_property(TARGET cadical PROPERTY IMPORTED_LOCATION
 )
 set_property(TARGET cadical PROPERTY INTERFACE_INCLUDE_DIRECTORIES
     ${CADICAL_ROOT}/src
+    ${CADICAL_ROOT}/contrib
 )
 add_dependencies(cadical cadical_external)
 

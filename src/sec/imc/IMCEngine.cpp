@@ -3,11 +3,12 @@
 
 #include "imc/IMCEngine.h"
 
+#include <algorithm>
 #include <vector>
 
 #include "kinduction/BaseCaseSolver.h"
+#include "imc/CraigInterpolatingModelChecker.h"
 #include "imc/ExactInterpolantSynthesizer.h"
-#include "kinduction/InductionStepSolver.h"
 #include "kinduction/OutputBatching.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/ProofEngineShared.h"
@@ -194,29 +195,88 @@ std::optional<IMCResult> findImcCounterexample(const ImcBaseCounterexampleCache&
   return std::nullopt;
 }
 
-bool provesByOutputBatchedInduction(const KInductionProblem& problem,
-                                    KEPLER_FORMAL::Config::SolverType solverType,
-                                    size_t k) {
-  if (problem.observedOutputExprs0.size() <= 1) {
-    return provesByInduction(problem, solverType, k);
+void removeCrossDesignStateCandidates(KInductionProblem& problem) {
+  // IMC must derive every relation between the two designs from the encoded
+  // reset and transition formulas. Candidate correspondences mined elsewhere
+  // are intentionally unavailable to both interpolation and witness search.
+  problem.initialStateEqualityPairs.clear();
+  problem.bootstrapStateEqualityPairs.clear();
+  problem.inductiveStateEqualityPairs.clear();
+  problem.inductionPropertyAssumesInductiveStateEqualities = false;
+}
+
+IMCResult runCraigOutputRange(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK,
+    size_t firstOutput,
+    size_t endOutput) {
+  KInductionProblem batchProblem = problem;
+  configureOutputBatchProblem(
+      batchProblem, problem, firstOutput, endOutput);
+  removeCrossDesignStateCandidates(batchProblem);
+
+  CraigInterpolatingModelChecker checker(batchProblem);
+  const CraigImcResult proof = checker.run(maxK);
+  if (proof.status == CraigImcStatus::Equivalent) {
+    return {IMCStatus::Equivalent, proof.iterations};
   }
 
-  // IMC's exact-frontier construction is intentionally bounded for large ASICs.
-  // When that path is too large, the fallback induction proof must still avoid
-  // rebuilding one giant OR-of-all-bads SAT query.  Proving every output batch
-  // by the same k-induction rule is equivalent to proving the full conjunction,
-  // but each query gets a much smaller cone of influence.
-  KInductionProblem batchProblem = problem;
-  const OutputBatchingLimits batchingLimits =
-      defaultOutputBatchingLimitsForProblem(problem);
-  for (const auto& [firstOutput, endOutput] :
-       buildSupportBoundedOutputBatches(problem, batchingLimits)) {
-    configureOutputBatchProblem(batchProblem, problem, firstOutput, endOutput);
-    if (!provesByInduction(batchProblem, solverType, k)) {
-      return false;
+  if (endOutput > firstOutput + 1) {
+    const size_t midpoint = firstOutput + (endOutput - firstOutput) / 2;
+    const IMCResult left = runCraigOutputRange(
+        problem, solverType, maxK, firstOutput, midpoint);
+    const IMCResult right = runCraigOutputRange(
+        problem, solverType, maxK, midpoint, endOutput);
+    if (left.status == IMCStatus::Different) {
+      return left;
+    }
+    if (right.status == IMCStatus::Different) {
+      return right;
+    }
+    if (left.status == IMCStatus::Equivalent &&
+        right.status == IMCStatus::Equivalent) {
+      return {
+          IMCStatus::Equivalent, std::max(left.bound, right.bound)};
+    }
+    return {IMCStatus::Inconclusive, maxK};
+  }
+
+  // A SAT interpolation query can be a real mismatch rather than an abstract
+  // projection. Check the exact bounded trace for this one top-level output;
+  // no other proof engine is used as a fallback.
+  const auto cache = makeImcBaseCounterexampleCache(batchProblem);
+  for (size_t depth = 0; depth <= maxK; ++depth) {
+    if (const auto counterexample =
+            findImcCounterexample(*cache, solverType, depth);
+        counterexample.has_value()) {
+      return *counterexample;
     }
   }
-  return true;
+  return {IMCStatus::Inconclusive, maxK};
+}
+
+IMCResult runLargeDualRailCraigImc(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK) {
+  const auto batches = buildSupportBoundedOutputBatches(problem);
+  size_t proofBound = 0;
+  bool inconclusive = false;
+  for (const auto& [firstOutput, endOutput] : batches) {
+    const IMCResult batch = runCraigOutputRange(
+        problem, solverType, maxK, firstOutput, endOutput);
+    if (batch.status == IMCStatus::Different) {
+      return batch;
+    }
+    if (batch.status == IMCStatus::Inconclusive) {
+      inconclusive = true;
+    } else {
+      proofBound = std::max(proofBound, batch.bound);
+    }
+  }
+  return inconclusive ? IMCResult{IMCStatus::Inconclusive, maxK}
+                      : IMCResult{IMCStatus::Equivalent, proofBound};
 }
 
 bool shouldBuildExplicitImcInitFormula(const KInductionProblem& problem) {
@@ -224,8 +284,8 @@ bool shouldBuildExplicitImcInitFormula(const KInductionProblem& problem) {
     return true;
   }
   // Exact IMC enumerates reachable combined states only for tiny systems.
-  // Large dual-rail ASIC problems should go directly to the shared
-  // k-induction fallback instead of materializing a full rail-init formula.
+  // Large dual-rail ASIC problems use proof-derived Craig interpolation instead
+  // of materializing a full rail-init formula.
   return problem.totalStateCount <= 12;
 }
 
@@ -236,16 +296,25 @@ IMCEngine::IMCEngine(const KInductionProblem& problem,
     : problem_(problem), solverType_(solverType) {}
 
 IMCResult IMCEngine::run(size_t maxK) const {
+  if (problem_.combinedStateSymbols().empty()) {
+    return {IMCStatus::Equivalent, 0};
+  }
+
+  if (problem_.usesDualRailStateEncoding &&
+      problem_.effectiveTotalStateCount() > 12 &&
+      !problem_.observedOutputExprs0.empty() &&
+      problem_.observedOutputExprs0.size() ==
+          problem_.observedOutputExprs1.size()) {
+    return runLargeDualRailCraigImc(problem_, solverType_, maxK);
+  }
+
   const auto baseCache = makeImcBaseCounterexampleCache(problem_);
   // Keep counterexample discovery on the same bounded base-case machinery as
   // the rest of SEC so witnesses and reported cycles stay consistent.
-  if (const auto counterexample = findImcCounterexample(*baseCache, solverType_, 0);
+  if (const auto counterexample =
+          findImcCounterexample(*baseCache, solverType_, 0);
       counterexample.has_value()) {
     return *counterexample;  // LCOV_EXCL_LINE
-  }
-
-  if (problem_.combinedStateSymbols().empty()) {
-    return {IMCStatus::Equivalent, 0};
   }
 
   BoolExpr* initFormula =
@@ -262,20 +331,10 @@ IMCResult IMCEngine::run(size_t maxK) const {
   }
 
   for (size_t k = 1; k <= maxK; ++k) {
-    // IMC keeps counterexample discovery and proof growth in lockstep by depth:
-    // first rule out a real bug at k, then attempt to turn the reachable frontier
-    // up to k into an inductive invariant.
-    if (const auto counterexample = findImcCounterexample(*baseCache, solverType_, k);
+    if (const auto counterexample =
+            findImcCounterexample(*baseCache, solverType_, k);
         counterexample.has_value()) {
       return *counterexample;
-    }
-
-    // Large SEC problems can exceed the explicit exact-frontier budget, but the
-    // shared induction step may still close immediately from the same
-    // counterexample-free prefix. Reuse that sound proof before trying the more
-    // expensive explicit frontier construction.
-    if (provesByOutputBatchedInduction(problem_, solverType_, k)) {
-      return {IMCStatus::Equivalent, k};
     }
 
     if (initFormula == nullptr) {

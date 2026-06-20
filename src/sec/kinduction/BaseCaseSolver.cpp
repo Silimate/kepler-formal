@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "common/SecDiag.h"
+#include "kinduction/OutputBatching.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/TransitionExprResolver.h"
 
@@ -74,6 +75,7 @@ constexpr int64_t kFastCounterexampleSearchConflictLimit = 5000;
 // decision search before conflicts accumulate.  Bound decisions too so a hard
 // residual can be reported Unknown and skipped by localized recovery.
 constexpr int64_t kFastCounterexampleSearchDecisionLimit = 20000;
+constexpr size_t kMaxImcAssumptionFrontierBatchOutputs = 32;
 // Transition node counts are only reserve hints for FrameFormulaEncoder.
 // BlackParrot reset-frontier sampling showed exact counting across ~86k
 // transition targets dominating the whole query before any CNF was emitted.
@@ -383,6 +385,8 @@ struct ImcBaseCounterexampleCache {
   }
 
   const ImcBaseCounterexampleCache& singleOutputCache(size_t outputIndex) const;
+  const ImcBaseCounterexampleCache& outputSubsetCache(
+      size_t firstOutput, size_t endOutput) const;
 
   const KInductionProblem& problem;
   std::unordered_set<size_t> stateSymbols;
@@ -392,6 +396,10 @@ struct ImcBaseCounterexampleCache {
   EqualityIndex sameFrameEqualities1;
   mutable std::vector<std::unique_ptr<KInductionProblem>> singleOutputProblems;
   mutable std::vector<std::unique_ptr<ImcBaseCounterexampleCache>> singleOutputCaches;
+  mutable std::vector<size_t> subsetFirstOutputs;
+  mutable std::vector<size_t> subsetEndOutputs;
+  mutable std::vector<std::unique_ptr<KInductionProblem>> subsetProblems;
+  mutable std::vector<std::unique_ptr<ImcBaseCounterexampleCache>> subsetCaches;
 };
 
 namespace {
@@ -1631,7 +1639,53 @@ const ImcBaseCounterexampleCache& ImcBaseCounterexampleCache::singleOutputCache(
   return *singleOutputCaches[outputIndex];
 }
 
+const ImcBaseCounterexampleCache& ImcBaseCounterexampleCache::outputSubsetCache(
+    size_t firstOutput, size_t endOutput) const {
+  if (firstOutput == 0 && endOutput == problem.observedOutputExprs0.size()) {
+    return *this;
+  }
+  if (endOutput == firstOutput + 1) {
+    return singleOutputCache(firstOutput);
+  }
+  for (size_t i = 0; i < subsetCaches.size(); ++i) {
+    if (subsetFirstOutputs[i] == firstOutput &&
+        subsetEndOutputs[i] == endOutput) {
+      return *subsetCaches[i];
+    }
+  }
+
+  // Keep recursively split IMC residual batches alive across depths.  This
+  // preserves the existing exact single-output fallback while avoiding a full
+  // rebuild when the same hard subset is checked at the next frontier.
+  KInductionProblem subset = problem;
+  configureOutputBatchProblem(subset, problem, firstOutput, endOutput);
+  subsetProblems.push_back(
+      std::make_unique<KInductionProblem>(std::move(subset)));
+  subsetCaches.push_back(
+      std::make_unique<ImcBaseCounterexampleCache>(*subsetProblems.back()));
+  subsetFirstOutputs.push_back(firstOutput);
+  subsetEndOutputs.push_back(endOutput);
+  return *subsetCaches.back();
+}
+
 namespace {
+
+std::vector<std::pair<size_t, size_t>> buildStrictImcOutputSubsets(
+    const KInductionProblem& problem) {
+  const size_t outputCount = problem.observedOutputExprs0.size();
+  if (outputCount <= 1) {
+    return {};
+  }
+
+  auto batches = buildSupportBoundedOutputBatches(problem);
+  if (batches.size() == 1 &&
+      batches.front().first == 0 &&
+      batches.front().second == outputCount) {
+    const size_t midpoint = outputCount / 2;
+    return {{0, midpoint}, {midpoint, outputCount}};
+  }
+  return batches;
+}
 
 std::optional<KInductionResult::CounterexampleWitness>
 findPerOutputBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
@@ -1909,7 +1963,9 @@ std::optional<KInductionResult::CounterexampleWitness>
 findImcCachedBaseCounterexampleAtFrontierQuery(
     const ImcBaseCounterexampleCache& cache,
     KEPLER_FORMAL::Config::SolverType solverType,
-    size_t k) {
+    size_t k,
+    BaseCaseSolverProfile solverProfile = BaseCaseSolverProfile::SecConeProof,
+    SATSolverWrapper::SolveStatus* solveStatusOut = nullptr) {
   const auto& problem = cache.problem;
   const size_t bootstrapFrames = resetBootstrapFrames(problem);
   const bool resetBootstrapObservationFrontier =
@@ -1943,14 +1999,14 @@ findImcCachedBaseCounterexampleAtFrontierQuery(
       resetBootstrapObservationFrontier,
       firstBadFrame,
       internalK,
-      /*constrainPreviouslySafeFrames=*/true);
+      /*constrainPreviouslySafeFrames=*/false);
   emitBaseCaseCoiDiag(
       problem,
       coi,
       k,
       firstBadFrame,
       internalK,
-      /*constrainPreviouslySafeFrames=*/true);
+      /*constrainPreviouslySafeFrames=*/false);
   const FrameSymbolAliases aliasesByFrame = buildBaseCaseFrameAliases(
       problem, coi, internalK + 1, bootstrapFrames);
 
@@ -1997,26 +2053,172 @@ findImcCachedBaseCounterexampleAtFrontierQuery(
         solver, variables, problem, coi.solverSymbolSet, bootstrapFrames);
   }
 
-  for (size_t frame = bootstrapFrames; frame < firstBadFrame; ++frame) {
-    FrameFormulaEncoder encoder(
-        solver,
-        variables.makeLeafLits(
-            frame,
-            formulaSupportOrThrow(
-                problem.property, "previously-safe property formula")));
-    solver.addClause({encoder.encode(problem.property)});
-  }
-
+  // The cached newest-frontier path checks only the exact bad frame.  Earlier
+  // frames were swept by previous iterations, and any bad at this frame is a
+  // valid counterexample even if an earlier frame would also have failed.
   FrameFormulaEncoder encoder(
       solver,
       variables.makeLeafLits(
           firstBadFrame, formulaSupportOrThrow(problem.bad, "bad-state formula")));
   solver.addClause({encoder.encode(problem.bad)});
-  if (solver.solveStatus() != SATSolverWrapper::SolveStatus::Sat) {
+  SATSolverWrapper::SolveStatus status = SATSolverWrapper::SolveStatus::Unknown;
+  if (solverProfile == BaseCaseSolverProfile::FastCounterexampleSearch) {
+    // Batch-first IMC only needs a quick decisive answer.  UNSAT is still a
+    // sound proof that the whole residual batch is safe at this frontier; UNKNOWN
+    // falls back to exact per-output localization instead of being treated as
+    // covered.
+    if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+      status = solver.solveWithKissatResourceLimits(
+          static_cast<unsigned>(kFastCounterexampleSearchConflictLimit),
+          static_cast<unsigned>(kFastCounterexampleSearchDecisionLimit));
+    } else {
+      status = solver.solveWithAssumptionsStatus(
+          {},
+          kFastCounterexampleSearchConflictLimit,
+          /*propagationLimit=*/-1);
+    }
+  } else {
+    status = solver.solveStatus();
+  }
+  if (solveStatusOut != nullptr) {
+    *solveStatusOut = status;
+  }
+  if (status != SATSolverWrapper::SolveStatus::Sat) {
     return std::nullopt;
   }
   return buildCounterexampleWitness(
       solver, variables, problem, firstBadFrame, lastBadFrame, bootstrapFrames);
+}
+
+std::optional<KInductionResult::CounterexampleWitness>
+findImcAssumptionBaseCounterexampleAtFrontier(
+    const ImcBaseCounterexampleCache& cache,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  const auto& problem = cache.problem;
+  if (problem.observedOutputExprs0.empty() ||
+      problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+
+  const size_t bootstrapFrames = resetBootstrapFrames(problem);
+  const bool resetBootstrapObservationFrontier =
+      bootstrapFrames != 0 && problem.usesResetBootstrapObservationFrontier();
+  const size_t internalK = k + bootstrapFrames;
+  const InitialConstraintMode initialMode =
+      bootstrapFrames == 0 ? determineInitialConstraintMode(problem)
+                           : InitialConstraintMode::None;
+
+  size_t firstBadFrame = 0;
+  if (bootstrapFrames != 0) {
+    firstBadFrame =
+        bootstrapFrames + (resetBootstrapObservationFrontier ? 1u : 0u);
+  } else if (initialMode == InitialConstraintMode::ObservationOnly ||
+             initialMode == InitialConstraintMode::PartialInit) {
+    firstBadFrame = 1;
+  }
+  const size_t exactInternalBadFrame = k + bootstrapFrames;
+  if (firstBadFrame > internalK ||
+      exactInternalBadFrame < firstBadFrame ||
+      exactInternalBadFrame > internalK) {
+    return std::nullopt;
+  }
+  firstBadFrame = exactInternalBadFrame;
+
+  const BaseCaseCoi coi = buildImcCachedBaseCaseCoi(
+      cache,
+      initialMode,
+      bootstrapFrames,
+      resetBootstrapObservationFrontier,
+      firstBadFrame,
+      internalK,
+      /*constrainPreviouslySafeFrames=*/false);
+  emitBaseCaseCoiDiag(
+      problem,
+      coi,
+      k,
+      firstBadFrame,
+      internalK,
+      /*constrainPreviouslySafeFrames=*/false);
+  const FrameSymbolAliases aliasesByFrame = buildBaseCaseFrameAliases(
+      problem, coi, internalK + 1, bootstrapFrames);
+
+  const auto assumptionSolverType =
+      SATSolverWrapper::assumptionSolverTypeFor(solverType);
+  SATSolverWrapper solver(assumptionSolverType);
+  // IMC asks the same concrete frontier prefix for many output bad literals.
+  // Build that exact prefix once and vary only the selected top-output mismatch
+  // through solver assumptions; this keeps the engine IMC-only while avoiding a
+  // full transition rebuild per output.
+  solver.configureForSecLocalBooleanCheck(coi.solverSymbols.size());
+  FrameVariableStore variables(
+      solver, coi.solverSymbols, internalK + 1, aliasesByFrame);
+  addResetBootstrapConstraints(solver, variables, problem, internalK + 1);
+  addInitialConstraints(solver, variables, problem, coi.solverSymbolSet, initialMode);
+  if (resetBootstrapObservationFrontier) {
+    addObservationPropertyConstraint(
+        solver, variables, problem, bootstrapFrames);
+  }
+
+  addComplementedStateRelations(
+      solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet,
+      internalK + 1);
+  addComplementedStateRelations(
+      solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet,
+      internalK + 1);
+  addSameFrameStateEqualities(
+      solver, variables, problem, coi.solverSymbolSet, internalK + 1);
+  addDualRailStateValidity(
+      solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet,
+      internalK + 1);
+  addInitialStateEqualities(solver, variables, problem, coi.solverSymbolSet);
+
+  for (size_t frame = 0; frame < internalK; ++frame) {
+    addTransitionRelation(
+        solver,
+        variables,
+        cache.transitionByState,
+        coi.transitionTargetsByFrame[frame],
+        frame);
+  }
+  if (bootstrapFrames != 0) {
+    addBootstrapStateAssignments(
+        solver, variables, problem, coi.solverSymbolSet, bootstrapFrames);
+    addBootstrapStateEqualities(
+        solver, variables, problem, coi.solverSymbolSet, bootstrapFrames);
+  }
+
+  // A newest-frontier query only asks whether bad is reachable at this exact
+  // frame.  Earlier bad frames are also valid counterexamples, so constraining
+  // previous frames safe is unnecessary and can dominate wide IMC/KI residuals.
+  FrameFormulaEncoder badEncoder(
+      solver, variables.makeLeafLits(firstBadFrame));
+  std::vector<int> outputBadLits;
+  outputBadLits.reserve(problem.observedOutputExprs0.size());
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    outputBadLits.push_back(badEncoder.encode(BoolExpr::simplify(BoolExpr::Xor(
+        problem.observedOutputExprs0[output],
+        problem.observedOutputExprs1[output]))));
+  }
+
+  for (size_t output = 0; output < outputBadLits.size(); ++output) {
+    const auto status = solver.solveWithAssumptionsStatus({outputBadLits[output]});
+    if (status == SATSolverWrapper::SolveStatus::Sat) {
+      return buildCounterexampleWitness(
+          solver, variables, problem, firstBadFrame, firstBadFrame, bootstrapFrames);
+    }
+    if (status == SATSolverWrapper::SolveStatus::Unknown) {
+      // Keep UNKNOWN conservative.  The assumption path is an optimization only;
+      // fall back to the exact single-output query rather than treating a
+      // resource-limited answer as a safe frontier.
+      if (auto witness = findImcCachedBaseCounterexampleAtFrontierQuery(
+              cache.singleOutputCache(output), solverType, k);
+          witness.has_value()) {
+        return witness;
+      }
+    }
+  }
+  return std::nullopt;
 }
 
 std::optional<KInductionResult::CounterexampleWitness>
@@ -2027,12 +2229,25 @@ findImcBaseCounterexampleAtFrontierImpl(
   const auto& problem = cache.problem;
   if (problem.observedOutputExprs0.size() > 1 &&
       problem.observedOutputExprs0.size() == problem.observedOutputExprs1.size()) {
-    // Match the ordinary newest-frontier validator's per-output semantics, but
-    // keep one cache per residual output so IMC's increasing-depth sweep does
-    // not rebuild the sliced transition/equality indexes every time.
-    for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    if (problem.observedOutputExprs0.size() <=
+        kMaxImcAssumptionFrontierBatchOutputs) {
+      if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+        // Kissat does not support assumptions, and switching equivalent
+        // residual batches to CaDiCaL can dominate medium designs.  The batch
+        // bad predicate is already an exact OR over this output slice, so keep
+        // the selected solver when it can decide the whole slice directly.
+        return findImcCachedBaseCounterexampleAtFrontierQuery(
+            cache, solverType, k);
+      }
+      return findImcAssumptionBaseCounterexampleAtFrontier(cache, solverType, k);
+    }
+
+    // Wide residual batches are split before SAT.  The exact assumption solver
+    // above then amortizes each batch's transition prefix across its outputs.
+    for (const auto& [firstOutput, endOutput] :
+         buildStrictImcOutputSubsets(problem)) {
       if (auto witness = findImcBaseCounterexampleAtFrontierImpl(
-              cache.singleOutputCache(output), solverType, k);
+              cache.outputSubsetCache(firstOutput, endOutput), solverType, k);
           witness.has_value()) {
         return witness;
       }

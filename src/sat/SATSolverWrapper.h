@@ -12,6 +12,7 @@
 
 #include "simp/SimpSolver.h"
 #include "cadical.hpp"
+#include "craigtracer.hpp"
 extern "C" {
   #include "kissat.h"
 }
@@ -26,6 +27,30 @@ public:
     Sat,
     Unsat,
     Unknown,
+  };
+
+  enum class CraigVariablePartition {
+    ALocal,
+    BLocal,
+    Global,
+  };
+
+  enum class CraigClausePartition {
+    A,
+    B,
+  };
+
+  struct CraigInterpolantCnf {
+    enum class Type {
+      None,
+      ConstantFalse,
+      ConstantTrue,
+      Normal,
+    };
+
+    Type type = Type::None;
+    int firstAuxiliaryVariable = 0;
+    std::vector<std::vector<int>> clauses;
   };
 
   static KEPLER_FORMAL::Config::SolverType assumptionSolverTypeFor(
@@ -72,9 +97,79 @@ public:
   }
 
   ~SATSolverWrapper() {
+    if (cadicalCraigTracer_ != nullptr && cadicalSolver_ != nullptr) {
+      cadicalSolver_->disconnect_proof_tracer(cadicalCraigTracer_.get());
+    }
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT && kissatSolver_) {
       kissat_release(static_cast<kissat*>(kissatSolver_));
     }
+  }
+
+  void enableCraigInterpolation() {
+    if (solverType_ != KEPLER_FORMAL::Config::SolverType::CADICAL) {
+      throw std::runtime_error(
+          "Craig interpolation requires the CaDiCaL solver backend");
+    }
+    if (cadicalCraigTracer_ != nullptr) {
+      return;
+    }
+    // CaDiCaL's Craig tracer requires proof-preserving CNF construction. BVA
+    // introduces variables without a caller-visible A/B/global partition.
+    cadicalSolver_->set("factor", 0);
+    cadicalCraigTracer_ = std::make_unique<CaDiCraig::CraigTracer>();
+    cadicalSolver_->connect_proof_tracer(cadicalCraigTracer_.get(), true);
+    cadicalCraigTracer_->set_craig_construction(
+        CaDiCraig::CraigConstruction::ASYMMETRIC);
+  }
+
+  void setCraigVariablePartition(CraigVariablePartition partition) {
+    craigVariablePartition_ = partition;
+  }
+
+  void setCraigClausePartition(CraigClausePartition partition) {
+    craigClausePartition_ = partition;
+  }
+
+  CraigInterpolantCnf createCraigInterpolant() {
+    if (cadicalCraigTracer_ == nullptr) {
+      throw std::runtime_error("Craig interpolation was not enabled");
+    }
+    std::vector<std::vector<int>> cadicalClauses;
+    int nextVariable = cadicalNumVars_ + 1;
+    const auto result = cadicalCraigTracer_->create_craig_interpolant(
+        CaDiCraig::CraigInterpolant::ASYMMETRIC,
+        cadicalClauses,
+        nextVariable);
+
+    CraigInterpolantCnf interpolant;
+    interpolant.firstAuxiliaryVariable = cadicalNumVars_ + 2;
+    switch (result) {
+      case CaDiCraig::CraigCnfType::NONE:
+        interpolant.type = CraigInterpolantCnf::Type::None;
+        break;
+      case CaDiCraig::CraigCnfType::CONSTANT0:
+        interpolant.type = CraigInterpolantCnf::Type::ConstantFalse;
+        break;
+      case CaDiCraig::CraigCnfType::CONSTANT1:
+        interpolant.type = CraigInterpolantCnf::Type::ConstantTrue;
+        break;
+      case CaDiCraig::CraigCnfType::NORMAL:
+        interpolant.type = CraigInterpolantCnf::Type::Normal;
+        break;
+    }
+
+    interpolant.clauses.reserve(cadicalClauses.size());
+    for (const auto& clause : cadicalClauses) {
+      std::vector<int> externalClause;
+      externalClause.reserve(clause.size());
+      for (const int literal : clause) {
+        const int externalVariable = std::abs(literal) + 1;
+        externalClause.push_back(
+            literal > 0 ? externalVariable : -externalVariable);
+      }
+      interpolant.clauses.push_back(std::move(externalClause));
+    }
+    return interpolant;
   }
 
   // Create a new variable (returns 0-based index)
@@ -90,7 +185,12 @@ public:
       return kissatNumVars_++;
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
       reserveVars(static_cast<size_t>(cadicalNumVars_) + 1);
-      return cadicalNumVars_++;
+      const int variable = cadicalNumVars_++;
+      if (cadicalCraigTracer_ != nullptr) {
+        cadicalCraigTracer_->label_variable(
+            variable + 1, cadicalCraigVariableType(craigVariablePartition_));
+      }
+      return variable;
     }
     // LCOV_EXCL_START
     // LCOV_DISABLED_START
@@ -220,6 +320,13 @@ public:
       }
       kissat_add(static_cast<kissat*>(kissatSolver_), 0); // end of clause
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
+      if (cadicalCraigTracer_ != nullptr) {
+        cadicalCraigTracer_->label_clause(
+            ++cadicalCraigClauseId_,
+            craigClausePartition_ == CraigClausePartition::A
+                ? CaDiCraig::CraigClauseType::A_CLAUSE
+                : CaDiCraig::CraigClauseType::B_CLAUSE);
+      }
       for (int lit : lits) {
         if (lit == 0 || lit == 1) {
           // LCOV_EXCL_START
@@ -935,6 +1042,19 @@ public:
   // LCOV_EXCL_STOP
 
 private:
+  static CaDiCraig::CraigVarType cadicalCraigVariableType(
+      CraigVariablePartition partition) {
+    switch (partition) {
+      case CraigVariablePartition::ALocal:
+        return CaDiCraig::CraigVarType::A_LOCAL;
+      case CraigVariablePartition::BLocal:
+        return CaDiCraig::CraigVarType::B_LOCAL;
+      case CraigVariablePartition::Global:
+        return CaDiCraig::CraigVarType::GLOBAL;
+    }
+    return CaDiCraig::CraigVarType::A_LOCAL;
+  }
+
   static bool setKissatOptionIfSupported(kissat* solver, const char* name, int value) {
     kissat_set_option(solver, name, value);
     return kissat_get_option(solver, name) == value;
@@ -956,6 +1076,11 @@ private:
   KEPLER_FORMAL::Config::SolverType solverType_;
   std::unique_ptr<Glucose::SimpSolver> glucoseSolver_;
   std::unique_ptr<CaDiCaL::Solver> cadicalSolver_;
+  std::unique_ptr<CaDiCraig::CraigTracer> cadicalCraigTracer_;
+  CraigVariablePartition craigVariablePartition_ =
+      CraigVariablePartition::ALocal;
+  CraigClausePartition craigClausePartition_ = CraigClausePartition::A;
+  int cadicalCraigClauseId_ = 0;
   void* kissatSolver_ = nullptr;
   int kissatNumVars_ = 0;
   int kissatReservedVars_ = 0;
