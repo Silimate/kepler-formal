@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 add_library(formal_strategies STATIC
+    ${CADICAL_ROOT}/contrib/craigtracer.cpp
     miter/BuildPrimaryOutputClauses.cpp
     miter/MiterStrategy.cpp
     ${KISSAT_ROOT}/src

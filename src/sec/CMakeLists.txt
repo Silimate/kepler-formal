@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 add_library(kepler_sec STATIC
-    ${CADICAL_ROOT}/contrib/craigtracer.cpp
     common/BoolExprUtils.cpp
     common/ProofProblemDebug.cpp
     imc/CraigInterpolatingModelChecker.cpp
