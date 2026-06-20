@@ -2168,6 +2168,50 @@ KInductionProblem buildCraigResetSecProblem(bool equivalent) {
   return problem;
 }
 
+BoolExpr* buildOrOfStateSymbols(const std::vector<size_t>& symbols) {
+  BoolExpr* result = BoolExpr::createFalse();
+  for (const size_t symbol : symbols) {
+    result = BoolExpr::Or(result, BoolExpr::Var(symbol));
+  }
+  return BoolExpr::simplify(result);
+}
+
+KInductionProblem buildLargeDualRailImcValidatedInvariantProblem() {
+  constexpr size_t data = 2;
+  constexpr size_t firstState0 = 10;
+  constexpr size_t firstState1 = 40;
+  constexpr size_t statePairs = 16;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.inputSymbols = {data};
+  problem.allSymbols = {data};
+  problem.observedOutputNames = {"wide_state_output"};
+  for (size_t index = 0; index < statePairs; ++index) {
+    const size_t state0 = firstState0 + index;
+    const size_t state1 = firstState1 + index;
+    problem.state0Symbols.push_back(state0);
+    problem.state1Symbols.push_back(state1);
+    problem.allSymbols.push_back(state0);
+    problem.allSymbols.push_back(state1);
+    problem.bootstrapStateAssignments.emplace_back(state0, index % 2 == 0);
+    problem.bootstrapStateAssignments.emplace_back(state1, index % 2 == 0);
+    problem.initialStateEqualityPairs.emplace_back(state0, state1);
+    problem.transitions0.emplace_back(state0, BoolExpr::Var(data));
+    problem.transitions1.emplace_back(state1, BoolExpr::Var(data));
+  }
+  problem.totalStateCount =
+      problem.state0Symbols.size() + problem.state1Symbols.size();
+  problem.resetBootstrapCycles = 1;
+  problem.observedOutputExprs0 = {buildOrOfStateSymbols(problem.state0Symbols)};
+  problem.observedOutputExprs1 = {buildOrOfStateSymbols(problem.state1Symbols)};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0.front(),
+      problem.observedOutputExprs1.front());
+  problem.bad = BoolExpr::Not(problem.property);
+  return problem;
+}
+
 void addOneHotPdrStateSymbols(KInductionProblem& problem, size_t stateCount) {
   problem.state0Symbols.clear();
   problem.allSymbols.clear();
@@ -9132,8 +9176,28 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcValidatesResetEqualityInvariantBeforeCraig) {
+  const KInductionProblem problem =
+      buildLargeDualRailImcValidatedInvariantProblem();
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, IMCStatus::Equivalent);
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_NE(
+      stderrOutput.find("imc validated strengthening kind=initial"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig projection round="), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcFindsDifferenceWithoutTrustingStateCandidates) {
   KInductionProblem problem = buildCraigResetSecProblem(false);
+  problem.initialStateEqualityPairs = {{4, 5}};
   problem.bootstrapStateEqualityPairs = {{4, 5}};
   problem.inductiveStateEqualityPairs = {{4, 5}};
 
@@ -9305,7 +9369,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       IMCEngineBatchesFallbackInductionForMultiOutputProblems) {
+       IMCEngineBatchesMultiOutputProblemsWithoutFallbackInduction) {
   auto problem = buildLinearChainSecProblem(4);
   problem.observedOutputNames = {"terminal_state", "low_state_bit"};
   problem.observedOutputExprs0.push_back(BoolExpr::Var(problem.state0Symbols.front()));
@@ -9326,7 +9390,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(3);
 
   EXPECT_EQ(result.status, IMCStatus::Equivalent);
-  EXPECT_EQ(result.bound, 2u);
+  // Exact IMC should close on the real reachable frontier here. The old
+  // fallback-induction shortcut closed one frame earlier, but IMC must not jump
+  // into a different proof engine.
+  EXPECT_EQ(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

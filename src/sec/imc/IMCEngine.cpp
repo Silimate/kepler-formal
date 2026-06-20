@@ -4,8 +4,11 @@
 #include "imc/IMCEngine.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 
+#include "common/BoolExprUtils.h"
+#include "common/SecDiag.h"
 #include "kinduction/BaseCaseSolver.h"
 #include "imc/CraigInterpolatingModelChecker.h"
 #include "imc/ExactInterpolantSynthesizer.h"
@@ -205,6 +208,59 @@ void removeCrossDesignStateCandidates(KInductionProblem& problem) {
   problem.inductionPropertyAssumesInductiveStateEqualities = false;
 }
 
+BoolExpr* buildStateEqualityInvariant(
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
+  if (equalityPairs.empty()) {
+    return nullptr;
+  }
+
+  BoolExpr* invariant = BoolExpr::createTrue();
+  for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+    invariant = BoolExpr::And(
+        invariant,
+        makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));
+  }
+  return BoolExpr::simplify(invariant);
+}
+
+size_t countBadStateSupport(const KInductionProblem& problem) {
+  const auto states = problem.combinedStateSymbols();
+  std::unordered_set<size_t> stateSet(states.begin(), states.end());
+  size_t badStateSupport = 0;
+  for (const size_t symbol : problem.bad->getSupportVars()) {
+    badStateSupport += stateSet.contains(symbol) ? 1 : 0;
+  }
+  return badStateSupport;
+}
+
+std::optional<IMCResult> proveWithValidatedInitialEqualityInvariant(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  BoolExpr* initFormula = buildProofInitFormula(problem);
+  BoolExpr* strengthening =
+      buildStateEqualityInvariant(problem.initialStateEqualityPairs);
+  if (isSecDiagEnabled() && strengthening != nullptr) {
+    const bool initOk = initialFrontierImplies(initFormula, strengthening, solverType);
+    const bool inductiveOk = isInductiveInvariant(problem, strengthening, solverType);
+    const bool excludesBad =
+        invariantExcludesBadStates(problem, strengthening, solverType);
+    emitSecDiag(
+        "SEC diag: imc validated strengthening kind=initial",
+        " init=", initOk,
+        " inductive=", inductiveOk,
+        " excludes_bad=", excludesBad,
+        " equality_pairs=", problem.initialStateEqualityPairs.size());
+    if (!initOk || !inductiveOk || !excludesBad) {
+      return std::nullopt;
+    }
+    return IMCResult{IMCStatus::Equivalent, 1};
+  }
+  if (!provesImcInvariant(problem, solverType, initFormula, strengthening)) {
+    return std::nullopt;
+  }
+  return IMCResult{IMCStatus::Equivalent, 1};
+}
+
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -260,6 +316,18 @@ IMCResult runLargeDualRailCraigImc(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK) {
+  // Validate the reset-derived equality invariant once for the whole residual
+  // batch before Craig.  The candidate is not trusted by name: IMC must prove
+  // reset implies it, prove it is inductive, and prove it excludes this batch's
+  // bad predicate.  If any check fails, Craig runs with the candidates removed.
+  if (countBadStateSupport(problem) != 0) {
+    if (auto proof =
+            proveWithValidatedInitialEqualityInvariant(problem, solverType);
+        proof.has_value()) {
+      return *proof;
+    }
+  }
+
   // Craig IMC derives proof regions from the selected output slice. Wide
   // dual-rail bus batches quickly pull thousands of rail-state symbols into the
   // projection, so keep this large-state path local without changing the shared
@@ -303,6 +371,14 @@ IMCEngine::IMCEngine(const KInductionProblem& problem,
 
 IMCResult IMCEngine::run(size_t maxK) const {
   if (problem_.combinedStateSymbols().empty()) {
+    // Stateless SEC is still a real IMC base query: a combinational mismatch
+    // at frame 0 must be reported before declaring equivalence.
+    const auto baseCache = makeImcBaseCounterexampleCache(problem_);
+    if (const auto counterexample =
+            findImcCounterexample(*baseCache, solverType_, 0);
+        counterexample.has_value()) {
+      return *counterexample;
+    }
     return {IMCStatus::Equivalent, 0};
   }
 
