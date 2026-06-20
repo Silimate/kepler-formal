@@ -365,6 +365,37 @@ std::unordered_map<size_t, size_t> buildPrimaryByComplementSymbol(
   return primaryByComplement;
 }
 
+}  // namespace
+
+struct ImcBaseCounterexampleCache {
+  explicit ImcBaseCounterexampleCache(const KInductionProblem& problem)
+      : problem(problem),
+        stateSymbols(buildStateSymbolSet(problem)),
+        transitionByState(problem),
+        primaryByComplement(buildPrimaryByComplementSymbol(problem)),
+        sameFrameEqualities0(problem.sameFrameStateEqualityPairs0),
+        sameFrameEqualities1(problem.sameFrameStateEqualityPairs1) {}
+
+  void closeSameFrameStateEqualityDependencies(
+      std::unordered_set<size_t>& symbols) const {
+    sameFrameEqualities0.close(symbols);
+    sameFrameEqualities1.close(symbols);
+  }
+
+  const ImcBaseCounterexampleCache& singleOutputCache(size_t outputIndex) const;
+
+  const KInductionProblem& problem;
+  std::unordered_set<size_t> stateSymbols;
+  TransitionExprResolver transitionByState;
+  std::unordered_map<size_t, size_t> primaryByComplement;
+  EqualityIndex sameFrameEqualities0;
+  EqualityIndex sameFrameEqualities1;
+  mutable std::vector<std::unique_ptr<KInductionProblem>> singleOutputProblems;
+  mutable std::vector<std::unique_ptr<ImcBaseCounterexampleCache>> singleOutputCaches;
+};
+
+namespace {
+
 std::vector<size_t> sortedSymbols(const std::unordered_set<size_t>& symbols) {
   std::vector<size_t> sorted(symbols.begin(), symbols.end());
   std::sort(sorted.begin(), sorted.end());
@@ -674,6 +705,96 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
   addRelevantSameFrameStateEqualityPartners(problem, solverSymbols);
+  addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
+
+  BaseCaseCoi coi;
+  coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
+  coi.requiredStateSymbolsByFrame = sortedFrameStates(requiredStates);
+  coi.solverSymbols = sortedSymbols(solverSymbols);
+  coi.solverSymbolSet.insert(coi.solverSymbols.begin(), coi.solverSymbols.end());
+  return coi;
+}
+
+BaseCaseCoi buildImcCachedBaseCaseCoi(
+    const ImcBaseCounterexampleCache& cache,
+    InitialConstraintMode initialMode,
+    size_t bootstrapFrames,
+    bool resetBootstrapObservationFrontier,
+    size_t firstBadFrame,
+    size_t internalK,
+    bool constrainPreviouslySafeFrames) {
+  const auto& problem = cache.problem;
+  std::vector<std::unordered_set<size_t>> requiredStates(internalK + 1);
+  std::unordered_set<size_t> solverSymbols;
+  solverSymbols.reserve(1024);
+  for (const auto& [symbol, _] : problem.resetBootstrapInputs) {
+    solverSymbols.insert(symbol);
+  }
+
+  addFormulaSupport(problem.bad, solverSymbols);
+  for (size_t frame = firstBadFrame; frame <= internalK; ++frame) {
+    addFormulaStateSupport(problem.bad, cache.stateSymbols, requiredStates[frame]);
+  }
+  if (constrainPreviouslySafeFrames) {
+    addFormulaSupport(problem.property, solverSymbols);
+    for (size_t frame = bootstrapFrames; frame < firstBadFrame; ++frame) {
+      addFormulaStateSupport(
+          problem.property, cache.stateSymbols, requiredStates[frame]);
+    }
+  }
+
+  if (bootstrapFrames == 0) {
+    if (initialMode == InitialConstraintMode::CompleteInit ||
+        initialMode == InitialConstraintMode::PartialInit) {
+      if (!hasStructuredInitialAssignments(problem)) {
+        addFormulaSupport(problem.initialCondition, solverSymbols);
+        addFormulaStateSupport(
+            problem.initialCondition, cache.stateSymbols, requiredStates[0]);
+      }
+    }
+    if (initialMode == InitialConstraintMode::ObservationOnly ||
+        initialMode == InitialConstraintMode::PartialInit) {
+      addFormulaSupport(problem.property, solverSymbols);
+      addFormulaStateSupport(
+          problem.property, cache.stateSymbols, requiredStates[0]);
+    }
+  } else if (resetBootstrapObservationFrontier) {
+    addFormulaSupport(problem.property, solverSymbols);
+    addFormulaStateSupport(
+        problem.property, cache.stateSymbols, requiredStates[bootstrapFrames]);
+  }
+
+  std::vector<std::vector<size_t>> transitionTargetsByFrame(internalK);
+  for (size_t frame = internalK; frame > 0; --frame) {
+    if (bootstrapFrames != 0 && frame == bootstrapFrames) {
+      closeFrameEqualityDependencies(
+          problem.bootstrapStateEqualityPairs, requiredStates[frame]);
+    }
+    cache.closeSameFrameStateEqualityDependencies(requiredStates[frame]);
+    auto targets = expandTransitionTargets(
+        requiredStates[frame],
+        cache.transitionByState,
+        cache.primaryByComplement);
+    transitionTargetsByFrame[frame - 1] = targets;
+    cache.transitionByState.collectSupportForTargets(
+        targets, cache.stateSymbols, requiredStates[frame - 1], solverSymbols);
+  }
+
+  closeFrameEqualityDependencies(
+      problem.initialStateEqualityPairs, requiredStates[0]);
+  cache.closeSameFrameStateEqualityDependencies(requiredStates[0]);
+
+  for (const auto& frameStates : requiredStates) {
+    solverSymbols.insert(frameStates.begin(), frameStates.end());
+  }
+  for (const auto& targets : transitionTargetsByFrame) {
+    for (const auto target : targets) {
+      solverSymbols.insert(target);
+    }
+  }
+  addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
+  addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  cache.closeSameFrameStateEqualityDependencies(solverSymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
 
   BaseCaseCoi coi;
@@ -1442,10 +1563,6 @@ KInductionResult::CounterexampleWitness buildCounterexampleWitness(
   return witness;
 }
 
-}  // namespace
-
-namespace {
-
 enum class BaseCaseSolverProfile {
   SecConeProof,
   PdrValidation,
@@ -1491,6 +1608,30 @@ KInductionProblem makeSingleObservedOutputProblem(  // LCOV_EXCL_LINE
   single.inductionProperty = single.property;  // LCOV_EXCL_LINE
   return single;  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
+
+}  // namespace
+
+const ImcBaseCounterexampleCache& ImcBaseCounterexampleCache::singleOutputCache(
+    size_t outputIndex) const {
+  if (singleOutputCaches.size() < problem.observedOutputExprs0.size()) {
+    singleOutputCaches.resize(problem.observedOutputExprs0.size());
+    singleOutputProblems.resize(problem.observedOutputExprs0.size());
+  }
+  if (!singleOutputCaches[outputIndex]) {
+    // IMC checks the same residual output slice at increasing depths.  Keep the
+    // sliced problem and its immutable COI indexes alive so every depth does
+    // not rebuild transition/equality maps from the parent batch.
+    singleOutputProblems[outputIndex] =
+        std::make_unique<KInductionProblem>(
+            makeSingleObservedOutputProblem(problem, outputIndex));
+    singleOutputCaches[outputIndex] =
+        std::make_unique<ImcBaseCounterexampleCache>(
+            *singleOutputProblems[outputIndex]);
+  }
+  return *singleOutputCaches[outputIndex];
+}
+
+namespace {
 
 std::optional<KInductionResult::CounterexampleWitness>
 findPerOutputBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
@@ -1764,6 +1905,144 @@ std::optional<KInductionResult::CounterexampleWitness> findBaseCounterexampleImp
       solver, variables, problem, firstBadFrame, lastBadFrame, bootstrapFrames);
 }
 
+std::optional<KInductionResult::CounterexampleWitness>
+findImcCachedBaseCounterexampleAtFrontierQuery(
+    const ImcBaseCounterexampleCache& cache,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  const auto& problem = cache.problem;
+  const size_t bootstrapFrames = resetBootstrapFrames(problem);
+  const bool resetBootstrapObservationFrontier =
+      bootstrapFrames != 0 && problem.usesResetBootstrapObservationFrontier();
+  const size_t internalK = k + bootstrapFrames;
+  const InitialConstraintMode initialMode =
+      bootstrapFrames == 0 ? determineInitialConstraintMode(problem)
+                           : InitialConstraintMode::None;
+
+  size_t firstBadFrame = 0;
+  if (bootstrapFrames != 0) {
+    firstBadFrame =
+        bootstrapFrames + (resetBootstrapObservationFrontier ? 1u : 0u);
+  } else if (initialMode == InitialConstraintMode::ObservationOnly ||
+             initialMode == InitialConstraintMode::PartialInit) {
+    firstBadFrame = 1;
+  }
+  const size_t exactInternalBadFrame = k + bootstrapFrames;
+  if (firstBadFrame > internalK ||
+      exactInternalBadFrame < firstBadFrame ||
+      exactInternalBadFrame > internalK) {
+    return std::nullopt;
+  }
+  firstBadFrame = exactInternalBadFrame;
+  const size_t lastBadFrame = exactInternalBadFrame;
+
+  const BaseCaseCoi coi = buildImcCachedBaseCaseCoi(
+      cache,
+      initialMode,
+      bootstrapFrames,
+      resetBootstrapObservationFrontier,
+      firstBadFrame,
+      internalK,
+      /*constrainPreviouslySafeFrames=*/true);
+  emitBaseCaseCoiDiag(
+      problem,
+      coi,
+      k,
+      firstBadFrame,
+      internalK,
+      /*constrainPreviouslySafeFrames=*/true);
+  const FrameSymbolAliases aliasesByFrame = buildBaseCaseFrameAliases(
+      problem, coi, internalK + 1, bootstrapFrames);
+
+  SATSolverWrapper solver(solverType);
+  if (baseCaseValidationUsesLocalQueryProfile(solverType)) {
+    solver.configureForSecPdrQuery(coi.solverSymbols.size());
+  } else {
+    solver.configureForSecConeProof(coi.solverSymbols.size());  // LCOV_EXCL_LINE
+  }
+  FrameVariableStore variables(
+      solver, coi.solverSymbols, internalK + 1, aliasesByFrame);
+  addResetBootstrapConstraints(solver, variables, problem, internalK + 1);
+  addInitialConstraints(solver, variables, problem, coi.solverSymbolSet, initialMode);
+  if (resetBootstrapObservationFrontier) {
+    addObservationPropertyConstraint(
+        solver, variables, problem, bootstrapFrames);
+  }
+
+  addComplementedStateRelations(
+      solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet,
+      internalK + 1);
+  addComplementedStateRelations(
+      solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet,
+      internalK + 1);
+  addSameFrameStateEqualities(
+      solver, variables, problem, coi.solverSymbolSet, internalK + 1);
+  addDualRailStateValidity(
+      solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet,
+      internalK + 1);
+  addInitialStateEqualities(solver, variables, problem, coi.solverSymbolSet);
+
+  for (size_t frame = 0; frame < internalK; ++frame) {
+    addTransitionRelation(
+        solver,
+        variables,
+        cache.transitionByState,
+        coi.transitionTargetsByFrame[frame],
+        frame);
+  }
+  if (bootstrapFrames != 0) {
+    addBootstrapStateAssignments(
+        solver, variables, problem, coi.solverSymbolSet, bootstrapFrames);
+    addBootstrapStateEqualities(
+        solver, variables, problem, coi.solverSymbolSet, bootstrapFrames);
+  }
+
+  for (size_t frame = bootstrapFrames; frame < firstBadFrame; ++frame) {
+    FrameFormulaEncoder encoder(
+        solver,
+        variables.makeLeafLits(
+            frame,
+            formulaSupportOrThrow(
+                problem.property, "previously-safe property formula")));
+    solver.addClause({encoder.encode(problem.property)});
+  }
+
+  FrameFormulaEncoder encoder(
+      solver,
+      variables.makeLeafLits(
+          firstBadFrame, formulaSupportOrThrow(problem.bad, "bad-state formula")));
+  solver.addClause({encoder.encode(problem.bad)});
+  if (solver.solveStatus() != SATSolverWrapper::SolveStatus::Sat) {
+    return std::nullopt;
+  }
+  return buildCounterexampleWitness(
+      solver, variables, problem, firstBadFrame, lastBadFrame, bootstrapFrames);
+}
+
+std::optional<KInductionResult::CounterexampleWitness>
+findImcBaseCounterexampleAtFrontierImpl(
+    const ImcBaseCounterexampleCache& cache,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  const auto& problem = cache.problem;
+  if (problem.observedOutputExprs0.size() > 1 &&
+      problem.observedOutputExprs0.size() == problem.observedOutputExprs1.size()) {
+    // Match the ordinary newest-frontier validator's per-output semantics, but
+    // keep one cache per residual output so IMC's increasing-depth sweep does
+    // not rebuild the sliced transition/equality indexes every time.
+    for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+      if (auto witness = findImcBaseCounterexampleAtFrontierImpl(
+              cache.singleOutputCache(output), solverType, k);
+          witness.has_value()) {
+        return witness;
+      }
+    }
+    return std::nullopt;
+  }
+
+  return findImcCachedBaseCounterexampleAtFrontierQuery(cache, solverType, k);
+}
+
 }  // namespace
 
 struct ResetFrontierReachabilityContext {
@@ -1844,6 +2123,38 @@ findBaseCounterexampleAtFrontier(
     // LCOV_EXCL_STOP
   return findBaseCounterexampleImpl(
       problem, baseCaseValidationSolverType(problem, solverType), k, k);
+}
+
+std::shared_ptr<ImcBaseCounterexampleCache> makeImcBaseCounterexampleCache(
+    const KInductionProblem& problem) {
+  return std::make_shared<ImcBaseCounterexampleCache>(problem);
+}
+
+std::optional<KInductionResult::CounterexampleWitness>
+findImcBaseCounterexampleAtFrontier(
+    const ImcBaseCounterexampleCache& cache,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  return findImcBaseCounterexampleAtFrontierImpl(
+      cache,
+      baseCaseValidationSolverType(cache.problem, solverType),
+      k);
+}
+
+std::shared_ptr<KInductionBaseCounterexampleCache>
+makeKInductionBaseCounterexampleCache(const KInductionProblem& problem) {
+  return std::make_shared<KInductionBaseCounterexampleCache>(problem);
+}
+
+std::optional<KInductionResult::CounterexampleWitness>
+findKInductionBaseCounterexampleAtFrontier(
+    const KInductionBaseCounterexampleCache& cache,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  return findImcBaseCounterexampleAtFrontierImpl(
+      cache,
+      baseCaseValidationSolverType(cache.problem, solverType),
+      k);
 }
 
 std::optional<KInductionResult::CounterexampleWitness>

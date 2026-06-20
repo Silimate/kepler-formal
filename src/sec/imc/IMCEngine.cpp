@@ -181,13 +181,13 @@ bool provesImcInvariant(const KInductionProblem& problem,
          invariantExcludesBadStates(problem, invariant, solverType);
 }
 
-std::optional<IMCResult> findImcCounterexample(const KInductionProblem& problem,
+std::optional<IMCResult> findImcCounterexample(const ImcBaseCounterexampleCache& cache,
                                                KEPLER_FORMAL::Config::SolverType solverType,
                                                size_t depth) {
   // IMC checks depths monotonically.  Only the newly exposed frontier can hold
   // a fresh counterexample, so avoid rebuilding a cumulative BMC query that
   // re-walks already-cleared frames and all earlier output bad clauses.
-  if (auto witness = findBaseCounterexampleAtFrontier(problem, solverType, depth);
+  if (auto witness = findImcBaseCounterexampleAtFrontier(cache, solverType, depth);
       witness.has_value()) {
     return IMCResult{IMCStatus::Different, witness->badFrame, std::move(witness)};
   }
@@ -236,9 +236,10 @@ IMCEngine::IMCEngine(const KInductionProblem& problem,
     : problem_(problem), solverType_(solverType) {}
 
 IMCResult IMCEngine::run(size_t maxK) const {
+  const auto baseCache = makeImcBaseCounterexampleCache(problem_);
   // Keep counterexample discovery on the same bounded base-case machinery as
   // the rest of SEC so witnesses and reported cycles stay consistent.
-  if (const auto counterexample = findImcCounterexample(problem_, solverType_, 0);
+  if (const auto counterexample = findImcCounterexample(*baseCache, solverType_, 0);
       counterexample.has_value()) {
     return *counterexample;  // LCOV_EXCL_LINE
   }
@@ -264,7 +265,7 @@ IMCResult IMCEngine::run(size_t maxK) const {
     // IMC keeps counterexample discovery and proof growth in lockstep by depth:
     // first rule out a real bug at k, then attempt to turn the reachable frontier
     // up to k into an inductive invariant.
-    if (const auto counterexample = findImcCounterexample(problem_, solverType_, k);
+    if (const auto counterexample = findImcCounterexample(*baseCache, solverType_, k);
         counterexample.has_value()) {
       return *counterexample;
     }

@@ -6740,6 +6740,55 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LocalBaseCaseCachePreservesBatchedNewestFrontierWitness) {
+  KInductionProblem problem;
+  problem.environmentInputNames = {"in"};
+  problem.observedOutputNames = {"stable", "out"};
+  problem.inputSymbols = {2};
+  problem.state0Symbols = {3};
+  problem.state1Symbols = {4};
+  problem.allSymbols = {2, 3, 4};
+  problem.observedOutputExprs0 = {BoolExpr::createFalse(), BoolExpr::Var(3)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse(), BoolExpr::Var(4)};
+  problem.transitions0 = {{3, BoolExpr::Var(2)}};
+  problem.transitions1 = {{4, BoolExpr::createFalse()}};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(
+          problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]),
+      makeEqualityExpr(
+          problem.observedOutputExprs0[1], problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto cache = makeImcBaseCounterexampleCache(problem);
+  const auto kiCache = makeKInductionBaseCounterexampleCache(problem);
+
+  // KI and IMC reuse this cache while sweeping depths and while localizing a
+  // residual output batch. Depth 0 is still before the observation-only bad
+  // frontier, while depth 1 must match the ordinary base validator's witness.
+  EXPECT_FALSE(findImcBaseCounterexampleAtFrontier(
+      *cache, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
+  const auto cachedWitness = findImcBaseCounterexampleAtFrontier(
+      *cache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+  const auto kiCachedWitness = findKInductionBaseCounterexampleAtFrontier(
+      *kiCache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+  const auto uncachedWitness = findBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  ASSERT_TRUE(cachedWitness.has_value());
+  ASSERT_TRUE(kiCachedWitness.has_value());
+  ASSERT_TRUE(uncachedWitness.has_value());
+  EXPECT_EQ(cachedWitness->badFrame, uncachedWitness->badFrame);
+  EXPECT_EQ(kiCachedWitness->badFrame, uncachedWitness->badFrame);
+  ASSERT_EQ(cachedWitness->outputMismatches.size(), 1u);
+  ASSERT_EQ(kiCachedWitness->outputMismatches.size(), 1u);
+  ASSERT_EQ(uncachedWitness->outputMismatches.size(), 1u);
+  EXPECT_EQ(cachedWitness->outputMismatches[0].signal, "out");
+  EXPECT_EQ(kiCachedWitness->outputMismatches[0].signal, "out");
+  EXPECT_EQ(cachedWitness->outputMismatches[0].signal,
+            uncachedWitness->outputMismatches[0].signal);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverUsesFallbackWitnessNamesForUnnamedSignals) {
   KInductionProblem problem;
   constexpr size_t input = 2;

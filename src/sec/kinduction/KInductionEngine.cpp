@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -183,6 +184,11 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     return {KInductionStatus::Equivalent, 0};
   }
 
+  std::shared_ptr<KInductionBaseCounterexampleCache> baseFrontierCache;
+  if (shouldCheckLocalBaseCase(problem)) {
+    baseFrontierCache = SEC::makeKInductionBaseCounterexampleCache(problem);
+  }
+
   // At the start of iteration k, all frames < k have already been proved safe
   // by the base checks below.  That is exactly the base obligation needed for
   // the k-step induction query "P[0]..P[k-1] => P[k]"; if the step closes, the
@@ -269,8 +275,8 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
       // LCOV_EXCL_START
       if (!frontierProvedWithoutWitness) {
       // LCOV_EXCL_STOP
-        if (auto witness = SEC::findBaseCounterexampleAtFrontier(
-                problem, solverType, k);
+        if (auto witness = SEC::findKInductionBaseCounterexampleAtFrontier(
+                *baseFrontierCache, solverType, k);
             witness.has_value()) {
           if (isKInductionDiagEnabled()) {
             emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
