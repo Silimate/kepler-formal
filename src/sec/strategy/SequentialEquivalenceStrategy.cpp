@@ -1546,6 +1546,8 @@ constexpr size_t kMaxDualRailWideLocalImplicationStateRails = 20000;
 constexpr size_t kMaxDualRailResidualOutputs = 128;
 constexpr size_t kMaxDualRailResidualProofStateSymbols = 4096;
 constexpr size_t kMaxDualRailResidualStateSymbols = 20000;
+constexpr OutputBatchingLimits kMediumDualRailImcResidualBatchingLimits{
+    32, 8192};
 constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
 constexpr size_t kMaxDualRailFlushCertificateOutputs = 64;
 constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
@@ -2322,20 +2324,19 @@ OutputBatchingLimits dualRailResidualBatchingLimits(
     const KInductionProblem& problem,
     DualRailResidualEngine engine) {
   if (problem.usesDualRailStateEncoding && engine == DualRailResidualEngine::Imc) {
-    // IMC runs exact frontier/base checks before it can grow an interpolant.
-    // Keeping dual-rail residuals local from the first query avoids spending
-    // minutes materializing one wide residual bad-state cone.
+    const size_t railStateSymbols = problem.dualRailStatePairs.size() * 2;
+    if (problem.observedOutputExprs0.size() <= kMaxDualRailResidualOutputs &&
+        railStateSymbols <= kMaxDualRailResidualStateSymbols) {
+      // Medium residual buses still fit localized proof batches.  Keep them
+      // grouped so equivalent riscv32i-like designs do not repeat the same
+      // rail-state base validation once per output bit.
+      return kMediumDualRailImcResidualBatchingLimits;
+    }
+    // Very large IMC residuals stay local from the first query to avoid
+    // materializing one broad residual bad-state cone.
     return OutputBatchingLimits{1, 128};
   }
   return defaultOutputBatchingLimitsForProblem(problem);
-}
-
-bool shouldUseDeferredDualRailImcResidualProof(
-    const KInductionProblem& problem) {
-  // IMC's exact frontier machinery is intentionally reserved for tiny explicit
-  // state spaces.  Large dual-rail residuals use IMC's own localized induction
-  // shortcut after exact frontier construction becomes too large.
-  return problem.usesDualRailStateEncoding && problem.totalStateCount > 12;
 }
 
 void markDualRailResidualOutputsCovered(
@@ -2385,11 +2386,12 @@ bool shouldRunDualRailResidualCounterexampleSweep(
   }
 
   // The residual sweep is a concrete-counterexample shortcut before deferred
-  // induction.  On large dual-rail state surfaces it can dominate runtime for
-  // equivalent designs, so leave those to the selected engine's proof and final
-  // base validation instead of materializing every frontier upfront.
+  // induction.  Once the rail-state surface crosses the small-proof threshold,
+  // the base checker decomposes the sweep across many output cones and can
+  // dominate runtime for equivalent designs.  Leave those cases to the selected
+  // engine proof and its final base validation instead.
   return dualRailResidualStateSymbolCount(problem) <=
-         kMaxDualRailResidualStateSymbols;
+         kMaxDualRailResidualProofStateSymbols;
 }
 
 bool shouldSkipLargeDualRailResidualProofSurface(
@@ -2398,7 +2400,10 @@ bool shouldSkipLargeDualRailResidualProofSurface(
   if (!problem.usesDualRailStateEncoding || residualOutputCount == 0) {
     return false;  // LCOV_EXCL_LINE
   }
-  return residualOutputCount > kMaxDualRailLocalImplicationOutputs &&
+  // This guard is for truly oversized residual surfaces.  Medium all-residual
+  // designs such as riscv32i still fit the residual batching path and must not be
+  // converted into zero coverage just because local implication did not fire.
+  return residualOutputCount > kMaxDualRailResidualOutputs &&
          dualRailResidualStateSymbolCount(problem) >
              kMaxDualRailResidualProofStateSymbols;
 }
@@ -2418,6 +2423,20 @@ findDualRailResidualCounterexample(const KInductionProblem& subsetProblem,
   }
   return std::nullopt;
 }
+
+bool findAndRecordDualRailResidualCounterexample(
+    const KInductionProblem& subsetProblem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    DualRailResidualEngine engine,
+    DualRailResidualProofState& proofState);
 
 std::unordered_set<size_t> combinedStateSymbolSet(
     const KInductionProblem& problem) {
@@ -2527,6 +2546,7 @@ void proveDualRailResidualOutputSet(
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
     DualRailResidualEngine engine,
+    bool runCounterexampleSweep,
     DualRailResidualProofState& proofState) {
   if (outputIndices.empty() || proofState.terminalResult.has_value()) {
     return;  // LCOV_EXCL_LINE
@@ -2536,20 +2556,12 @@ void proveDualRailResidualOutputSet(
       makeOutputSubsetProblem(problem, outputIndices);
   const bool useDeferredInductionResidualProof =
       subsetProblem.usesDualRailStateEncoding &&
-      (engine == DualRailResidualEngine::KInduction ||
-       (engine == DualRailResidualEngine::Imc &&
-        shouldUseDeferredDualRailImcResidualProof(subsetProblem)));
-  if (useDeferredInductionResidualProof &&
-      shouldRunDualRailResidualCounterexampleSweep(subsetProblem)) {
-    if (auto witness =
-            findDualRailResidualCounterexample(subsetProblem, solverType, maxK);
-        witness.has_value()) {
-      // Deferred residual proof shortcuts still owe the selected engine's
-      // concrete top-output base search.  Check it before delaying base
-      // validation so TinyRocket-style edits become real SEC counterexamples
-      // instead of zero-coverage inconclusive residuals.
-      recordDualRailResidualCounterexample(
-          std::move(*witness),
+      engine == DualRailResidualEngine::KInduction;
+  if (useDeferredInductionResidualProof && runCounterexampleSweep &&
+      findAndRecordDualRailResidualCounterexample(
+          subsetProblem,
+          maxK,
+          solverType,
           model0,
           model1,
           top0,
@@ -2557,9 +2569,9 @@ void proveDualRailResidualOutputSet(
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports,
-          proofState);
-      return;
-    }
+          engine,
+          proofState)) {
+    return;
   }
   if (useDeferredInductionResidualProof) {
     // Localized residual proofs should not spend max_k frontier checks on a
@@ -2670,6 +2682,7 @@ void proveDualRailResidualOutputSet(
         abstractedSequentialBoundaries,
         extractedBoundaryReports,
         engine,
+        runCounterexampleSweep,
         proofState);
     proveDualRailResidualOutputSet(
         problem,
@@ -2684,12 +2697,53 @@ void proveDualRailResidualOutputSet(
         abstractedSequentialBoundaries,
         extractedBoundaryReports,
         engine,
+        runCounterexampleSweep,
         proofState);
     return;
   }
 
   markDualRailResidualOutputSkipped(
       outputIndices.front(), problem, engine, proofState, "");
+}
+
+bool findAndRecordDualRailResidualCounterexample(
+    const KInductionProblem& subsetProblem,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    naja::NL::SNLDesign* top0,
+    naja::NL::SNLDesign* top1,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports,
+    DualRailResidualEngine engine,
+    DualRailResidualProofState& proofState) {
+  if (!shouldRunDualRailResidualCounterexampleSweep(subsetProblem)) {
+    return false;
+  }
+
+  if (auto witness =
+          findDualRailResidualCounterexample(
+              subsetProblem, solverType, maxK);
+      witness.has_value()) {
+    // Deferred residual proof shortcuts still owe the selected engine's
+    // concrete top-output base search.  Check the whole residual once before
+    // batching so real edits are caught without repeating the same wide query
+    // for every bit of an equivalent bus.
+    recordDualRailResidualCounterexample(
+        std::move(*witness),
+        model0,
+        model1,
+        top0,
+        top1,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports,
+        proofState);
+    return true;
+  }
+  return false;
 }
 
 std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEngine(
@@ -2808,6 +2862,21 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
 
   const KInductionProblem residualProblem =
       makeOutputSubsetProblem(problem, residualOutputIndices);
+  if (findAndRecordDualRailResidualCounterexample(
+          residualProblem,
+          maxK,
+          solverType,
+          model0,
+          model1,
+          top0,
+          top1,
+          outputCoverage,
+          abstractedSequentialBoundaries,
+          extractedBoundaryReports,
+          engine,
+          proofState)) {
+    return proofState.terminalResult;
+  }
   for (const auto& [firstOutput, endOutput] :
        buildSupportBoundedOutputBatches(
            residualProblem,
@@ -2834,6 +2903,7 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
         abstractedSequentialBoundaries,
         extractedBoundaryReports,
         engine,
+        /*runCounterexampleSweep=*/false,
         proofState);
     if (proofState.terminalResult.has_value()) {
       return proofState.terminalResult;  // LCOV_EXCL_LINE

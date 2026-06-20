@@ -1832,7 +1832,8 @@ struct LargeDualRailResidualCase {
 LargeDualRailResidualCase makeLargeDualRailResidualCaseForTest(
     const std::string& prefix,
     size_t residualOutputs,
-    size_t stateBitsPerDesign = 1) {
+    size_t stateBitsPerDesign = 1,
+    bool includeImpliedOutput = true) {
   const SignalKey implied = makeSignalKey(prefix + "ImpliedOut");
 
   LargeDualRailResidualCase testCase;
@@ -1857,17 +1858,19 @@ LargeDualRailResidualCase makeLargeDualRailResidualCaseForTest(
         prefix + "_large_residual_state1[" + std::to_string(i) + "]",
         BoolExpr::Var(stateVar));
   }
-  testCase.model0.allObservedOutputs.push_back(implied);
-  testCase.model0.observedOutputs.push_back(implied);
-  testCase.model0.displayNameByKey.emplace(implied, "implied_out[0]");
-  testCase.model0.observedOutputExprByKey.emplace(
-      implied, BoolExpr::createTrue());
+  if (includeImpliedOutput) {
+    testCase.model0.allObservedOutputs.push_back(implied);
+    testCase.model0.observedOutputs.push_back(implied);
+    testCase.model0.displayNameByKey.emplace(implied, "implied_out[0]");
+    testCase.model0.observedOutputExprByKey.emplace(
+        implied, BoolExpr::createTrue());
 
-  testCase.model1.allObservedOutputs.push_back(implied);
-  testCase.model1.observedOutputs.push_back(implied);
-  testCase.model1.displayNameByKey.emplace(implied, "implied_out[0]");
-  testCase.model1.observedOutputExprByKey.emplace(
-      implied, BoolExpr::createTrue());
+    testCase.model1.allObservedOutputs.push_back(implied);
+    testCase.model1.observedOutputs.push_back(implied);
+    testCase.model1.displayNameByKey.emplace(implied, "implied_out[0]");
+    testCase.model1.observedOutputExprByKey.emplace(
+        implied, BoolExpr::createTrue());
+  }
 
   for (size_t i = 0; i < residualOutputs; ++i) {
     const SignalKey out =
@@ -10244,6 +10247,73 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(
       stderrOutput.find("dual-rail imc proving residual output batch"),
       std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsImcDualRailFindsMediumAllResidualMismatch) {
+  constexpr size_t kResidualOutputs = 65;
+  constexpr size_t kStateBitsPerDesign = 2049;
+  const auto testCase = makeLargeDualRailResidualCaseForTest(
+      "imcDualRailMediumAllResidual",
+      kResidualOutputs,
+      kStateBitsPerDesign,
+      /*includeImpliedOutput=*/false);
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // A medium all-residual surface is still inside the batching cap.  The old
+  // proof-surface guard skipped this shape before IMC could see a real
+  // top-output mismatch, yielding zero coverage on riscv32i-style designs.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.coveredOutputs, kResidualOutputs);
+  EXPECT_EQ(result.totalOutputs, kResidualOutputs);
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("dual-rail imc skipping large residual surface"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsImcDualRailResidualDoesNotInvokeKInductionFallback) {
+  constexpr size_t kResidualOutputs = 1;
+  constexpr size_t kStateBitsPerDesign = 2049;
+  const auto testCase = makeLargeDualRailResidualCaseForTest(
+      "imcDualRailNoKInductionFallback",
+      kResidualOutputs,
+      kStateBitsPerDesign,
+      /*includeImpliedOutput=*/false);
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The selected SEC engine must remain IMC.  This high-state residual used to
+  // cross the >12-state guard and silently instantiate KInductionEngine instead.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_NE(
+      stderrOutput.find("dual-rail imc proving residual output batch size=1"),
+      std::string::npos);
+  EXPECT_EQ(stderrOutput.find("k-induction problem"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
