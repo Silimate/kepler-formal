@@ -260,7 +260,13 @@ IMCResult runLargeDualRailCraigImc(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK) {
-  const auto batches = buildSupportBoundedOutputBatches(problem);
+  // Craig IMC derives proof regions from the selected output slice. Wide
+  // dual-rail bus batches quickly pull thousands of rail-state symbols into the
+  // projection, so keep this large-state path local without changing the shared
+  // batching policy used by KI/PDR.
+  const auto batches = buildSupportBoundedOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/1,
+                                    /*outputBatchSupportLimit=*/128});
   size_t proofBound = 0;
   bool inconclusive = false;
   for (const auto& [firstOutput, endOutput] : batches) {
