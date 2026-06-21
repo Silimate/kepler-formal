@@ -9271,10 +9271,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   testing::internal::CaptureStderr();
   CraigInterpolatingModelChecker checker(problem);
-  const CraigImcResult result = checker.run(4);
+  const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+  // max_k is the Craig lookahead. The paper's single loop may still execute
+  // several Q := Q OR I passes before that lookahead changes.
+  EXPECT_NE(
+      stderrOutput.find("lookahead=1 q_pass=2"),
+      std::string::npos)
+      << stderrOutput;
   EXPECT_NE(
       stderrOutput.find("imc Craig fixedpoint containment"),
       std::string::npos)

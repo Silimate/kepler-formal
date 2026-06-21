@@ -1133,7 +1133,7 @@ FrontierResult deriveLookaheadFrontierRegion(
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     bool sourceIncludesConcreteBootstrapCube,
     size_t lookahead,
-    size_t iteration) {
+    size_t qExpansionPass) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
   solver.enableCraigInterpolation();
 
@@ -1222,7 +1222,7 @@ FrontierResult deriveLookaheadFrontierRegion(
   const auto buildStart = SteadyClock::now();
   emitSecDiag(
       "SEC diag: imc Craig image build begin lookahead=", lookahead,
-      " iteration=", iteration,
+      " q_pass=", qExpansionPass,
       " regions=", reachableRegions.size(),
       " tracked_states=", trackedStates.size(),
       " direct_cube_source=", useDirectConcreteCube ? 1 : 0);
@@ -1240,7 +1240,7 @@ FrontierResult deriveLookaheadFrontierRegion(
   emitSecDiag(
       "SEC diag: imc Craig image build after_a_transition lookahead=",
       lookahead,
-      " iteration=", iteration,
+      " q_pass=", qExpansionPass,
       " elapsed_ms=", elapsedMilliseconds(buildStart));
 
   FrontierResult result;
@@ -1273,7 +1273,7 @@ FrontierResult deriveLookaheadFrontierRegion(
   emitSecDiag(
       "SEC diag: imc Craig image build after_b_suffix lookahead=",
       lookahead,
-      " iteration=", iteration,
+      " q_pass=", qExpansionPass,
       " suffix_frames=", lookahead > 0 ? lookahead - 1 : 0,
       " elapsed_ms=", elapsedMilliseconds(buildStart));
   closeSameDesignStateSemantics(problem, result.transitionStateSupport);
@@ -1291,20 +1291,20 @@ FrontierResult deriveLookaheadFrontierRegion(
       solver, problem, frameLits, /*firstFrame=*/1, /*lastFrame=*/lookahead);
   emitSecDiag(
       "SEC diag: imc Craig image build end lookahead=", lookahead,
-      " iteration=", iteration,
+      " q_pass=", qExpansionPass,
       " transition_states=", result.transitionStateSupport.size(),
       " elapsed_ms=", elapsedMilliseconds(buildStart));
 
   emitSecDiag(
       "SEC diag: imc Craig image solve begin lookahead=", lookahead,
-      " iteration=", iteration,
+      " q_pass=", qExpansionPass,
       " regions=", reachableRegions.size(),
       " tracked_states=", trackedStates.size());
   const auto solveStart = SteadyClock::now();
   result.solveStatus = solver.solveStatus();
   emitSecDiag(
       "SEC diag: imc Craig image solve end lookahead=", lookahead,
-      " iteration=", iteration,
+      " q_pass=", qExpansionPass,
       " status=", static_cast<int>(result.solveStatus),
       " elapsed_ms=", elapsedMilliseconds(solveStart));
   if (result.solveStatus != SATSolverWrapper::SolveStatus::Unsat) {
@@ -1316,7 +1316,7 @@ FrontierResult deriveLookaheadFrontierRegion(
       convertInterpolant(solver.createCraigInterpolant(), stateByVariable);
   emitSecDiag(
       "SEC diag: imc Craig image interpolant built lookahead=", lookahead,
-      " iteration=", iteration,
+      " q_pass=", qExpansionPass,
       " type=", static_cast<int>(result.region->type),
       " clauses=", regionClauseCount(*result.region),
       " literals=", regionLiteralCount(*result.region),
@@ -1388,7 +1388,7 @@ CraigImcResult runWithProjection(
     std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
-    size_t maxIterations) {
+    size_t maxLookahead) {
   FrontierResult frontier;
   std::optional<InterpolantRegion> initialRegion =
       buildConcreteAssignmentRegion(
@@ -1423,71 +1423,70 @@ CraigImcResult runWithProjection(
                                : CraigImcStatus::NoProgress,
         hasConcreteInitialCube ? 0u : 1u};
   }
-  for (size_t lookahead = 1; lookahead <= maxIterations; ++lookahead) {
-    std::vector<InterpolantRegion> reachableRegions{concreteInitialRegion};
-
-    for (size_t iteration = 1; iteration <= maxIterations; ++iteration) {
-      frontier = deriveLookaheadFrontierRegion(
-          problem,
-          trackedStates,
-          reachableRegions,
-          helperInvariantRegions,
-          auxiliaryInvariants,
-          hasConcreteInitialCube,
-          lookahead,
-          iteration);
-      if (!frontier.region.has_value()) {
-        const size_t oldSize = trackedStates.size();
-        trackedStates.insert(
-            frontier.transitionStateSupport.begin(),
-            frontier.transitionStateSupport.end());
-        closeSameDesignStateSemantics(problem, trackedStates);
-        if (trackedStates.size() != oldSize) {
-          emitSecDiag(
-              "SEC diag: imc Craig refines transition projection states=",
-              oldSize, "->", trackedStates.size());
-          return {CraigImcStatus::NoProgress, 0};
-        }
-        if (hasConcreteInitialCube &&
-            iteration == 1 &&
-            frontier.solveStatus == SATSolverWrapper::SolveStatus::Sat) {
-          // At the first iteration the source region is the exact concrete
-          // post-reset cube, so this SAT path is a real bounded candidate at
-          // this lookahead. Later iterations start from over-approximations and
-          // remain refinement signals only.
-          return {
-              CraigImcStatus::CounterexampleCandidate,
-              lookahead};
-        }
-        // The current approximation reaches B's suffix. Increase the bounded
-        // lookahead and restart from the concrete initial interpolant.
-        break;
+  size_t lookahead = 1;
+  size_t qExpansionPass = 1;
+  std::vector<InterpolantRegion> reachableRegions{concreteInitialRegion};
+  while (lookahead <= maxLookahead) {
+    frontier = deriveLookaheadFrontierRegion(
+        problem,
+        trackedStates,
+        reachableRegions,
+        helperInvariantRegions,
+        auxiliaryInvariants,
+        hasConcreteInitialCube,
+        lookahead,
+        qExpansionPass);
+    if (!frontier.region.has_value()) {
+      const size_t oldSize = trackedStates.size();
+      trackedStates.insert(
+          frontier.transitionStateSupport.begin(),
+          frontier.transitionStateSupport.end());
+      closeSameDesignStateSemantics(problem, trackedStates);
+      if (trackedStates.size() != oldSize) {
+        emitSecDiag(
+            "SEC diag: imc Craig refines transition projection states=",
+            oldSize, "->", trackedStates.size());
+        return {CraigImcStatus::NoProgress, 0};
       }
-      const InterpolantRegion nextRegion = std::move(*frontier.region);
-      if (regionContainedInReachableUnion(
-              problem,
-              trackedStates,
-              reachableRegions,
-              helperInvariantRegions,
-              auxiliaryInvariants,
-              nextRegion)) {
+      if (hasConcreteInitialCube &&
+          qExpansionPass == 1 &&
+          frontier.solveStatus == SATSolverWrapper::SolveStatus::Sat) {
+        // With Q == S0, SAT is a concrete bounded candidate. After Q grows,
+        // SAT only means the over-approximation was too coarse.
         return {
-            CraigImcStatus::Equivalent,
-            lookahead,
-            reachableRegions,
-            trackedStates};
+            CraigImcStatus::CounterexampleCandidate,
+            lookahead};
       }
-
-      // McMillan's update is Q := Q OR I. Keep Q as a region vector so later
-      // SAT calls can instantiate each interpolant without rebuilding one huge
-      // disjunction formula.
-      reachableRegions.push_back(nextRegion);
+      // McMillan SAT branch: increase k and restart from Q := S0.
+      ++lookahead;
+      qExpansionPass = 1;
+      reachableRegions = {concreteInitialRegion};
+      continue;
     }
+    const InterpolantRegion nextRegion = std::move(*frontier.region);
+    if (regionContainedInReachableUnion(
+            problem,
+            trackedStates,
+            reachableRegions,
+            helperInvariantRegions,
+            auxiliaryInvariants,
+            nextRegion)) {
+      return {
+          CraigImcStatus::Equivalent,
+          lookahead,
+          reachableRegions,
+          trackedStates};
+    }
+
+    // McMillan UNSAT branch: Q := Q OR I, then repeat the same loop without
+    // increasing k.
+    reachableRegions.push_back(nextRegion);
+    ++qExpansionPass;
   }
   return {
       hasConcreteInitialCube ? CraigImcStatus::ConcreteNoProgress
                              : CraigImcStatus::NoProgress,
-      maxIterations};
+      maxLookahead};
 }
 
 }  // namespace
@@ -1505,7 +1504,7 @@ CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(
       initialTrackedStates_(initialTrackedStates) {}
 
 CraigImcResult CraigInterpolatingModelChecker::run(
-    size_t maxIterations) const {
+    size_t maxLookahead) const {
   std::unordered_set<size_t> trackedStates = initialTrackedStates(problem_);
   if (initialTrackedStates_ != nullptr) {
     const auto states = stateSymbolSet(problem_);
@@ -1540,7 +1539,7 @@ CraigImcResult CraigInterpolatingModelChecker::run(
             trackedStates,
             helperRegions,
             auxiliaryInvariants,
-            maxIterations);
+            maxLookahead);
     if (result.status == CraigImcStatus::Equivalent ||
         result.iterations != 0 ||
         trackedStates.size() == projectionSize) {

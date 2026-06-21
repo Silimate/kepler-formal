@@ -67,7 +67,7 @@ class CraigInterpolatingModelChecker {
       const std::vector<InterpolantRegion>* helperInvariantRegions = nullptr,
       const std::unordered_set<size_t>* initialTrackedStates = nullptr);
 
-  CraigImcResult run(size_t maxIterations) const;
+  CraigImcResult run(size_t maxLookahead) const;
 
  private:
   const KInductionProblem& problem_;
