@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <unordered_set>
 #include <vector>
 
@@ -40,7 +41,25 @@ enum class CraigImcStatus {
   Equivalent,
   CounterexampleCandidate,
   ConcreteNoProgress,
+  BudgetExceeded,
   NoProgress,
+};
+
+struct CraigImcGrowthBudget {
+  bool enabled = false;
+  size_t maxQExpansionPass = 0;
+  size_t maxInterpolantClauses = 0;
+  size_t maxInterpolantLiterals = 0;
+  size_t maxInterpolantAuxiliaries = 0;
+  std::int64_t maxImageSolveMilliseconds = 0;
+};
+
+struct CraigImcOptions {
+  // Large dual-rail IMC may derive transition-proven constants from the
+  // bootstrap cube to prune Craig image queries. The environment switch still
+  // enables the same path for direct checker experiments.
+  bool enableAuxiliaryInvariants = false;
+  CraigImcGrowthBudget growthBudget;
 };
 
 struct CraigImcResult {
@@ -65,7 +84,8 @@ class CraigInterpolatingModelChecker {
   explicit CraigInterpolatingModelChecker(
       const KInductionProblem& problem,
       const std::vector<InterpolantRegion>* helperInvariantRegions = nullptr,
-      const std::unordered_set<size_t>* initialTrackedStates = nullptr);
+      const std::unordered_set<size_t>* initialTrackedStates = nullptr,
+      CraigImcOptions options = {});
 
   CraigImcResult run(size_t maxLookahead) const;
 
@@ -73,6 +93,7 @@ class CraigInterpolatingModelChecker {
   const KInductionProblem& problem_;
   const std::vector<InterpolantRegion>* helperInvariantRegions_;
   const std::unordered_set<size_t>* initialTrackedStates_;
+  CraigImcOptions options_;
 };
 
 bool craigInvariantExcludesBad(

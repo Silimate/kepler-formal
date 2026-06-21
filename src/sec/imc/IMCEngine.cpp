@@ -35,10 +35,22 @@ constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
     /*maxOutputBatchSize=*/8,
     /*outputBatchSupportLimit=*/8192};
 
+constexpr CraigImcGrowthBudget kLargeDualRailCraigGrowthBudget{
+    /*enabled=*/true,
+    /*maxQExpansionPass=*/4,
+    /*maxInterpolantClauses=*/100000,
+    /*maxInterpolantLiterals=*/250000,
+    /*maxInterpolantAuxiliaries=*/50000,
+    /*maxImageSolveMilliseconds=*/25000};
+
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
 constexpr size_t kCraigBatchMinMarginalSupportLimit = 64;
 constexpr size_t kCraigBatchMarginalSupportDivisor = 10;
 constexpr size_t kCraigBatchSingleOutputSupportLimit = 1024;
+constexpr size_t kCraigBatchProjectionSoftLimit = 1024;
+constexpr size_t kCraigBatchProjectionHardLimit = 2048;
+constexpr size_t kCraigBatchProjectionSoftMaxOutputs = 4;
+constexpr size_t kCraigBatchProjectionHardMaxOutputs = 2;
 constexpr size_t kCraigReusableProjectionMinSupport = 256;
 constexpr size_t kReusableCraigInvariantMinTrackedStates = 128;
 struct CraigOutputSupport {
@@ -127,6 +139,24 @@ size_t marginalSupportLimit(size_t batchSupportSize) {
       batchSupportSize / kCraigBatchMarginalSupportDivisor);
 }
 
+size_t adaptiveCraigBatchMaxOutputCount(
+    const CraigOutputSupport& batchSupport,
+    const CraigOutputSupport& outputSupport,
+    const OutputBatchingLimits& limits) {
+  const size_t projectionSize = std::max(
+      batchingSupport(batchSupport).size(),
+      batchingSupport(outputSupport).size());
+  size_t maxOutputCount = limits.maxOutputBatchSize;
+  if (projectionSize >= kCraigBatchProjectionHardLimit) {
+    maxOutputCount =
+        std::min(maxOutputCount, kCraigBatchProjectionHardMaxOutputs);
+  } else if (projectionSize >= kCraigBatchProjectionSoftLimit) {
+    maxOutputCount =
+        std::min(maxOutputCount, kCraigBatchProjectionSoftMaxOutputs);
+  }
+  return maxOutputCount;
+}
+
 bool canAddOutputToCraigBatch(
     const CraigOutputSupport& batchSupport,
     const CraigOutputSupport& outputSupport,
@@ -134,12 +164,19 @@ bool canAddOutputToCraigBatch(
     size_t batchOutputCount,
     const char** rejectReason,
     size_t* marginalSupport,
-    size_t* overlapPercent) {
+    size_t* overlapPercent,
+    size_t* effectiveMaxOutputCount) {
   if (batchOutputCount == 0) {
     return true;
   }
-  if (batchOutputCount + 1 > limits.maxOutputBatchSize) {
-    *rejectReason = "count_limit";
+  // Large projection surfaces usually mean each additional output widens the
+  // Craig bad predicate on top of an already expensive transition image.
+  *effectiveMaxOutputCount =
+      adaptiveCraigBatchMaxOutputCount(batchSupport, outputSupport, limits);
+  if (batchOutputCount + 1 > *effectiveMaxOutputCount) {
+    *rejectReason = *effectiveMaxOutputCount < limits.maxOutputBatchSize
+                        ? "adaptive_count_limit"
+                        : "count_limit";
     return false;
   }
   // Large frontiers make Craig interpolants grow with the OR'ed bad predicate;
@@ -399,11 +436,21 @@ IMCResult runCraigOutputRange(
     mergeSupport(initialTrackedStates, reusableInvariant.trackedStates);
   }
 
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  if (endOutput > firstOutput + 1) {
+    // The growth budget is a batch-control heuristic only. Single-output Craig
+    // IMC still gets the full strict algorithm because there is nothing left
+    // to split.
+    options.growthBudget = kLargeDualRailCraigGrowthBudget;
+  }
+
   CraigInterpolatingModelChecker checker(
       batchProblem,
       reusableInvariant.regions.empty() ? nullptr
                                         : &reusableInvariant.regions,
-      initialTrackedStates.empty() ? nullptr : &initialTrackedStates);
+      initialTrackedStates.empty() ? nullptr : &initialTrackedStates,
+      options);
   const CraigImcResult proof = checker.run(maxK);
   if (proof.status == CraigImcStatus::Equivalent) {
     if (!proof.invariantRegions.empty() &&
@@ -426,6 +473,12 @@ IMCResult runCraigOutputRange(
       return *counterexample;
     }
     return {IMCStatus::Inconclusive, maxK};
+  }
+  if (proof.status == CraigImcStatus::BudgetExceeded) {
+    emitSecDiag(
+        "SEC diag: imc Craig splitting output batch after growth budget "
+        "first=",
+        firstOutput, " end=", endOutput);
   }
 
   if (endOutput > firstOutput + 1) {
@@ -465,6 +518,9 @@ IMCResult runCraigOutputRange(
     // concrete post-reset cube. Repeating all bounded SAT queries here would
     // rebuild the same transition prefixes without adding proof information.
     return {IMCStatus::Inconclusive, maxK};
+  }
+  if (proof.status == CraigImcStatus::BudgetExceeded) {
+    return {IMCStatus::Inconclusive, proof.iterations};
   }
 
   // Partial or implicit initial frontiers are over-approximations. Preserve the
@@ -550,6 +606,7 @@ std::vector<CraigOutputBatchPlan> buildLargeDualRailCraigImcOutputBatchPlans(
       const char* rejectReason = nullptr;
       size_t marginalSupport = 0;
       size_t overlapPercent = 100;
+      size_t effectiveMaxOutputCount = limits.maxOutputBatchSize;
       const size_t batchOutputCount = endOutput - firstOutput;
       if (!canAddOutputToCraigBatch(
               batchSupport,
@@ -558,11 +615,13 @@ std::vector<CraigOutputBatchPlan> buildLargeDualRailCraigImcOutputBatchPlans(
               batchOutputCount,
               &rejectReason,
               &marginalSupport,
-              &overlapPercent)) {
+              &overlapPercent,
+              &effectiveMaxOutputCount)) {
         emitSecDiag(
             "SEC diag: imc Craig batch closes before output=", endOutput,
             " reason=", rejectReason,
             " batch_first=", firstOutput,
+            " adaptive_max_outputs=", effectiveMaxOutputCount,
             " batch_support=", batchingSupport(batchSupport).size(),
             " output_support=", batchingSupport(outputSupports[endOutput]).size(),
             " batch_raw_support=", batchSupport.raw.size(),

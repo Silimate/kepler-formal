@@ -505,8 +505,9 @@ bool transitionPreservesStateConstant(
 }
 
 AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
-    const KInductionProblem& problem) {
-  if (!imcAuxiliaryInvariantsEnabled() ||
+    const KInductionProblem& problem,
+    bool forceEnabled) {
+  if ((!forceEnabled && !imcAuxiliaryInvariantsEnabled()) ||
       problem.bootstrapStateAssignments.empty()) {
     return {};
   }
@@ -931,7 +932,77 @@ struct FrontierResult {
   std::unordered_set<size_t> transitionStateSupport;
   SATSolverWrapper::SolveStatus solveStatus =
       SATSolverWrapper::SolveStatus::Unknown;
+  std::int64_t solveElapsedMilliseconds = 0;
+  std::int64_t interpolationElapsedMilliseconds = 0;
 };
+
+size_t frontierRegionClauseCount(const FrontierResult& frontier) {
+  return frontier.region.has_value() ? regionClauseCount(*frontier.region) : 0;
+}
+
+size_t frontierRegionLiteralCount(const FrontierResult& frontier) {
+  return frontier.region.has_value() ? regionLiteralCount(*frontier.region) : 0;
+}
+
+size_t frontierRegionAuxiliaryCount(const FrontierResult& frontier) {
+  return frontier.region.has_value() ? frontier.region->auxiliaryCount : 0;
+}
+
+bool craigGrowthBudgetExceeded(
+    const CraigImcGrowthBudget& budget,
+    size_t qExpansionPass,
+    const FrontierResult& frontier,
+    const char** reason) {
+  if (!budget.enabled) {
+    return false;
+  }
+  if (budget.maxImageSolveMilliseconds > 0 &&
+      frontier.solveElapsedMilliseconds > budget.maxImageSolveMilliseconds) {
+    *reason = "solve_time";
+    return true;
+  }
+  if (budget.maxQExpansionPass > 0 &&
+      qExpansionPass >= budget.maxQExpansionPass) {
+    *reason = "q_pass";
+    return true;
+  }
+  if (budget.maxInterpolantClauses > 0 &&
+      frontierRegionClauseCount(frontier) > budget.maxInterpolantClauses) {
+    *reason = "clauses";
+    return true;
+  }
+  if (budget.maxInterpolantLiterals > 0 &&
+      frontierRegionLiteralCount(frontier) > budget.maxInterpolantLiterals) {
+    *reason = "literals";
+    return true;
+  }
+  if (budget.maxInterpolantAuxiliaries > 0 &&
+      frontierRegionAuxiliaryCount(frontier) >
+          budget.maxInterpolantAuxiliaries) {
+    *reason = "auxiliaries";
+    return true;
+  }
+  return false;
+}
+
+void emitCraigGrowthBudgetExceeded(
+    size_t lookahead,
+    size_t qExpansionPass,
+    const FrontierResult& frontier,
+    const char* reason) {
+  // A budget trip is not a proof result. It only tells the large dual-rail
+  // caller to bisect the current output batch and retry strict Craig IMC on
+  // narrower bad predicates.
+  emitSecDiag(
+      "SEC diag: imc Craig growth budget exceeded reason=", reason,
+      " lookahead=", lookahead,
+      " q_pass=", qExpansionPass,
+      " solve_ms=", frontier.solveElapsedMilliseconds,
+      " interpolant_ms=", frontier.interpolationElapsedMilliseconds,
+      " clauses=", frontierRegionClauseCount(frontier),
+      " literals=", frontierRegionLiteralCount(frontier),
+      " auxiliaries=", frontierRegionAuxiliaryCount(frontier));
+}
 
 void addStateAssignments(
     SATSolverWrapper& solver,
@@ -1105,23 +1176,26 @@ FrontierResult deriveBoundedFrontierRegion(
       " transition_states=", result.transitionStateSupport.size());
   const auto solveStart = SteadyClock::now();
   result.solveStatus = solver.solveStatus();
+  result.solveElapsedMilliseconds = elapsedMilliseconds(solveStart);
   emitSecDiag(
       "SEC diag: imc Craig bounded solve end depth=", proofDepth,
       " status=", static_cast<int>(result.solveStatus),
-      " elapsed_ms=", elapsedMilliseconds(solveStart));
+      " elapsed_ms=", result.solveElapsedMilliseconds);
   if (result.solveStatus != SATSolverWrapper::SolveStatus::Unsat) {
     return result;
   }
   const auto interpolationStart = SteadyClock::now();
   result.region =
       convertInterpolant(solver.createCraigInterpolant(), stateByVariable);
+  result.interpolationElapsedMilliseconds =
+      elapsedMilliseconds(interpolationStart);
   emitSecDiag(
       "SEC diag: imc Craig interpolant built depth=", proofDepth,
       " type=", static_cast<int>(result.region->type),
       " clauses=", regionClauseCount(*result.region),
       " literals=", regionLiteralCount(*result.region),
       " auxiliaries=", result.region->auxiliaryCount,
-      " elapsed_ms=", elapsedMilliseconds(interpolationStart));
+      " elapsed_ms=", result.interpolationElapsedMilliseconds);
   return result;
 }
 
@@ -1302,11 +1376,12 @@ FrontierResult deriveLookaheadFrontierRegion(
       " tracked_states=", trackedStates.size());
   const auto solveStart = SteadyClock::now();
   result.solveStatus = solver.solveStatus();
+  result.solveElapsedMilliseconds = elapsedMilliseconds(solveStart);
   emitSecDiag(
       "SEC diag: imc Craig image solve end lookahead=", lookahead,
       " q_pass=", qExpansionPass,
       " status=", static_cast<int>(result.solveStatus),
-      " elapsed_ms=", elapsedMilliseconds(solveStart));
+      " elapsed_ms=", result.solveElapsedMilliseconds);
   if (result.solveStatus != SATSolverWrapper::SolveStatus::Unsat) {
     return result;
   }
@@ -1314,6 +1389,8 @@ FrontierResult deriveLookaheadFrontierRegion(
   const auto interpolationStart = SteadyClock::now();
   result.region =
       convertInterpolant(solver.createCraigInterpolant(), stateByVariable);
+  result.interpolationElapsedMilliseconds =
+      elapsedMilliseconds(interpolationStart);
   emitSecDiag(
       "SEC diag: imc Craig image interpolant built lookahead=", lookahead,
       " q_pass=", qExpansionPass,
@@ -1321,7 +1398,7 @@ FrontierResult deriveLookaheadFrontierRegion(
       " clauses=", regionClauseCount(*result.region),
       " literals=", regionLiteralCount(*result.region),
       " auxiliaries=", result.region->auxiliaryCount,
-      " elapsed_ms=", elapsedMilliseconds(interpolationStart));
+      " elapsed_ms=", result.interpolationElapsedMilliseconds);
   return result;
 }
 
@@ -1388,6 +1465,7 @@ CraigImcResult runWithProjection(
     std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
+    const CraigImcGrowthBudget& growthBudget,
     size_t maxLookahead) {
   FrontierResult frontier;
   std::optional<InterpolantRegion> initialRegion =
@@ -1457,11 +1535,25 @@ CraigImcResult runWithProjection(
             CraigImcStatus::CounterexampleCandidate,
             lookahead};
       }
+      const char* budgetReason = nullptr;
+      if (craigGrowthBudgetExceeded(
+              growthBudget, qExpansionPass, frontier, &budgetReason)) {
+        emitCraigGrowthBudgetExceeded(
+            lookahead, qExpansionPass, frontier, budgetReason);
+        return {CraigImcStatus::BudgetExceeded, lookahead};
+      }
       // McMillan SAT branch: increase k and restart from Q := S0.
       ++lookahead;
       qExpansionPass = 1;
       reachableRegions = {concreteInitialRegion};
       continue;
+    }
+    const char* budgetReason = nullptr;
+    if (craigGrowthBudgetExceeded(
+            growthBudget, qExpansionPass, frontier, &budgetReason)) {
+      emitCraigGrowthBudgetExceeded(
+          lookahead, qExpansionPass, frontier, budgetReason);
+      return {CraigImcStatus::BudgetExceeded, lookahead};
     }
     const InterpolantRegion nextRegion = std::move(*frontier.region);
     if (regionContainedInReachableUnion(
@@ -1498,10 +1590,12 @@ InterpolantRegion simplifyCraigInterpolantRegion(InterpolantRegion region) {
 CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(
     const KInductionProblem& problem,
     const std::vector<InterpolantRegion>* helperInvariantRegions,
-    const std::unordered_set<size_t>* initialTrackedStates)
+    const std::unordered_set<size_t>* initialTrackedStates,
+    CraigImcOptions options)
     : problem_(problem),
       helperInvariantRegions_(helperInvariantRegions),
-      initialTrackedStates_(initialTrackedStates) {}
+      initialTrackedStates_(initialTrackedStates),
+      options_(options) {}
 
 CraigImcResult CraigInterpolatingModelChecker::run(
     size_t maxLookahead) const {
@@ -1523,7 +1617,8 @@ CraigImcResult CraigInterpolatingModelChecker::run(
       helperInvariantRegions_ == nullptr ? emptyHelperRegions
                                          : *helperInvariantRegions_;
   const AuxiliaryStateInvariants auxiliaryInvariants =
-      deriveAuxiliaryStateInvariants(problem_);
+      deriveAuxiliaryStateInvariants(
+          problem_, options_.enableAuxiliaryInvariants);
 
   for (size_t projectionRound = 0;
        projectionRound <= problem_.state0Symbols.size() +
@@ -1539,6 +1634,7 @@ CraigImcResult CraigInterpolatingModelChecker::run(
             trackedStates,
             helperRegions,
             auxiliaryInvariants,
+            options_.growthBudget,
             maxLookahead);
     if (result.status == CraigImcStatus::Equivalent ||
         result.iterations != 0 ||

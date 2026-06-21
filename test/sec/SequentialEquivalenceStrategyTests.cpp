@@ -2259,19 +2259,20 @@ KInductionProblem buildDisjointWideConeImcBatchProblem() {
   return problem;
 }
 
-KInductionProblem buildProjectionSharedImcBatchProblem() {
-  constexpr size_t kSharedTransitionStates = 24;
+KInductionProblem buildProjectionSharedImcBatchProblem(
+    size_t sharedTransitionStates = 24,
+    size_t outputCount = 2) {
   constexpr size_t firstSymbol = 2;
-  const size_t firstOutputState = firstSymbol + kSharedTransitionStates;
+  const size_t firstOutputState = firstSymbol + sharedTransitionStates;
 
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols.reserve(kSharedTransitionStates + 2);
-  problem.allSymbols.reserve(kSharedTransitionStates + 2);
+  problem.state0Symbols.reserve(sharedTransitionStates + outputCount);
+  problem.allSymbols.reserve(sharedTransitionStates + outputCount);
 
   std::vector<size_t> sharedStates;
-  sharedStates.reserve(kSharedTransitionStates);
-  for (size_t index = 0; index < kSharedTransitionStates; ++index) {
+  sharedStates.reserve(sharedTransitionStates);
+  for (size_t index = 0; index < sharedTransitionStates; ++index) {
     const size_t symbol = firstSymbol + index;
     sharedStates.push_back(symbol);
     problem.state0Symbols.push_back(symbol);
@@ -2280,7 +2281,7 @@ KInductionProblem buildProjectionSharedImcBatchProblem() {
   }
 
   BoolExpr* sharedCone = makeConjunctionOfVars(sharedStates);
-  for (size_t output = 0; output < 2; ++output) {
+  for (size_t output = 0; output < outputCount; ++output) {
     const size_t outputState = firstOutputState + output;
     problem.state0Symbols.push_back(outputState);
     problem.allSymbols.push_back(outputState);
@@ -9292,6 +9293,32 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcReportsGrowthBudgetBeforeFixedpointContainment) {
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+  CraigImcOptions options;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxQExpansionPass = 1;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The budget is not an equivalence result. It is a caller-visible signal that
+  // a large dual-rail output batch should be split and retried as strict IMC.
+  EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
+  EXPECT_NE(
+      stderrOutput.find("imc Craig growth budget exceeded reason=q_pass"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcIgnoresSuppliedCrossDesignStateCandidates) {
   KInductionProblem problem = buildCraigResetSecProblem(false);
   problem.bootstrapStateEqualityPairs = {{4, 5}};
@@ -9305,8 +9332,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, CraigImcStatus::NoProgress);
 }
 
-TEST_F(SequentialEquivalenceStrategyTests,
-       CraigImcAuxiliaryConstantsRequireTransitionProof) {
+KInductionProblem buildCraigAuxiliaryConstantProblemForTest() {
   constexpr size_t stableState = 2;
   constexpr size_t unstableState = 3;
   constexpr size_t input = 4;
@@ -9327,6 +9353,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
   problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcAuxiliaryConstantsRequireTransitionProof) {
+  const KInductionProblem problem = buildCraigAuxiliaryConstantProblemForTest();
 
   const ScopedEnvVar enableAux("KEPLER_SEC_IMC_AUX_INVARIANTS", "1");
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -9338,6 +9370,31 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Reset/bootstrap constants are not trusted blindly. Only stableState is
   // kept because its transition proves the same value; unstableState can follow
   // an unconstrained input and must not become an auxiliary invariant.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig auxiliary constants=1 candidates=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcOptionsPromoteAuxiliaryConstantsWithoutEnv) {
+  const KInductionProblem problem = buildCraigAuxiliaryConstantProblemForTest();
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Large dual-rail IMC uses this option instead of relying on a process-wide
+  // env var. The constant still has to be transition-preserved before use.
   EXPECT_NE(
       stderrOutput.find("imc Craig auxiliary constants=1 candidates=2"),
       std::string::npos)
@@ -9407,6 +9464,23 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // rediscover that projection one bit at a time.
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_EQ(batches[0], std::make_pair(0u, 2u));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcAdaptsBatchSizeForHugeProjectionSurface) {
+  const KInductionProblem problem = buildProjectionSharedImcBatchProblem(
+      /*sharedTransitionStates=*/2050,
+      /*outputCount=*/3);
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/8,
+                                    /*outputBatchSupportLimit=*/8192});
+
+  // Each output has tiny raw support, but its Craig projection pulls a wide
+  // same-design transition surface. Keep the batch small before the first
+  // interpolating SAT query creates a wide OR'ed bad predicate.
+  ASSERT_EQ(batches.size(), 2u);
+  EXPECT_EQ(batches[0], std::make_pair(0u, 2u));
+  EXPECT_EQ(batches[1], std::make_pair(2u, 3u));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
