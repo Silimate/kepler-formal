@@ -50,6 +50,11 @@ struct CraigImcResult {
   std::unordered_set<size_t> trackedStates;
 };
 
+// IMC stores proof interpolants in a compact CNF-like region form. This cleanup
+// is intentionally IMC-local: it removes redundant interpolant clauses before
+// later Craig reachability iterations re-instantiate them.
+InterpolantRegion simplifyCraigInterpolantRegion(InterpolantRegion region);
+
 // Large-state IMC based on proof-derived Craig interpolants. Internal state in
 // the two designs remains independent; the only relational clauses retained by
 // this checker are clauses emitted by CaDiCaL's UNSAT proof. A SAT result is

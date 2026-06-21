@@ -28,6 +28,24 @@ using SteadyClock = std::chrono::steady_clock;
 using AuxiliaryStateInvariants = std::vector<std::pair<size_t, bool>>;
 
 constexpr size_t kAuxiliaryInvariantSupportLimit = 256;
+constexpr size_t kCraigSemanticSimplifyClauseLimit = 256;
+constexpr size_t kCraigSemanticSimplifyVariableLimit = 128;
+constexpr size_t kCraigSubsumptionClauseLimit = 4096;
+
+struct RegionVariableKey {
+  bool isState = false;
+  size_t index = 0;
+
+  bool operator==(const RegionVariableKey& other) const {
+    return isState == other.isState && index == other.index;
+  }
+};
+
+struct RegionVariableKeyHash {
+  size_t operator()(const RegionVariableKey& key) const {
+    return std::hash<size_t>{}((key.index << 1) ^ (key.isState ? 1u : 0u));
+  }
+};
 
 bool imcAuxiliaryInvariantsEnabled() {
   const char* enabled = std::getenv("KEPLER_SEC_IMC_AUX_INVARIANTS");
@@ -55,6 +73,234 @@ size_t regionClauseCount(const InterpolantRegion& region) {
 
 size_t regionLiteralCount(const InterpolantRegion& region) {
   return region.definitionLiterals.size();
+}
+
+bool sameRegionVariable(const RegionLiteral& lhs, const RegionLiteral& rhs) {
+  return lhs.isState == rhs.isState && lhs.index == rhs.index;
+}
+
+bool sameRegionLiteral(const RegionLiteral& lhs, const RegionLiteral& rhs) {
+  return sameRegionVariable(lhs, rhs) && lhs.positive == rhs.positive;
+}
+
+bool regionLiteralLess(const RegionLiteral& lhs, const RegionLiteral& rhs) {
+  if (lhs.isState != rhs.isState) {
+    return lhs.isState < rhs.isState;
+  }
+  if (lhs.index != rhs.index) {
+    return lhs.index < rhs.index;
+  }
+  return lhs.positive < rhs.positive;
+}
+
+bool regionClauseSubsumes(const std::vector<RegionLiteral>& lhs,
+                          const std::vector<RegionLiteral>& rhs) {
+  return std::includes(
+      rhs.begin(), rhs.end(), lhs.begin(), lhs.end(), regionLiteralLess);
+}
+
+bool regionClauseLess(const std::vector<RegionLiteral>& lhs,
+                      const std::vector<RegionLiteral>& rhs) {
+  return std::lexicographical_compare(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), regionLiteralLess);
+}
+
+bool sameRegionClause(const std::vector<RegionLiteral>& lhs,
+                      const std::vector<RegionLiteral>& rhs) {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin(), sameRegionLiteral);
+}
+
+int localRegionLiteral(
+    SATSolverWrapper& solver,
+    const RegionLiteral& literal,
+    std::unordered_map<RegionVariableKey, int, RegionVariableKeyHash>& literals) {
+  const RegionVariableKey key{literal.isState != 0, literal.index};
+  auto [it, inserted] = literals.emplace(key, 0);
+  if (inserted) {
+    it->second = solver.newVar() + 2;
+  }
+  return literal.positive ? it->second : -it->second;
+}
+
+std::vector<std::vector<RegionLiteral>> normalizedRegionClauses(
+    const InterpolantRegion& region) {
+  std::vector<std::vector<RegionLiteral>> clauses;
+  clauses.reserve(region.definitionClauseEnds.size());
+
+  size_t clauseBegin = 0;
+  for (const size_t clauseEnd : region.definitionClauseEnds) {
+    std::vector<RegionLiteral> clause(
+        region.definitionLiterals.begin() + clauseBegin,
+        region.definitionLiterals.begin() + clauseEnd);
+    clauseBegin = clauseEnd;
+    std::sort(clause.begin(), clause.end(), regionLiteralLess);
+    clause.erase(
+        std::unique(clause.begin(), clause.end(), sameRegionLiteral),
+        clause.end());
+
+    bool tautology = false;
+    for (size_t i = 1; i < clause.size(); ++i) {
+      if (sameRegionVariable(clause[i - 1], clause[i]) &&
+          clause[i - 1].positive != clause[i].positive) {
+        tautology = true;
+        break;
+      }
+    }
+    if (!tautology) {
+      clauses.push_back(std::move(clause));
+    }
+  }
+
+  std::sort(clauses.begin(), clauses.end(), regionClauseLess);
+  clauses.erase(
+      std::unique(clauses.begin(), clauses.end(), sameRegionClause),
+      clauses.end());
+  return clauses;
+}
+
+void removeSubsumedRegionClauses(
+    std::vector<std::vector<RegionLiteral>>& clauses) {
+  if (clauses.size() > kCraigSubsumptionClauseLimit) {
+    return;
+  }
+
+  std::vector<bool> removed(clauses.size(), false);
+  for (size_t i = 0; i < clauses.size(); ++i) {
+    if (removed[i]) {
+      continue;
+    }
+    for (size_t j = 0; j < clauses.size(); ++j) {
+      if (i == j || removed[j]) {
+        continue;
+      }
+      if (regionClauseSubsumes(clauses[i], clauses[j])) {
+        removed[j] = true;
+      }
+    }
+  }
+
+  size_t write = 0;
+  for (size_t read = 0; read < clauses.size(); ++read) {
+    if (!removed[read]) {
+      if (write != read) {
+        clauses[write] = std::move(clauses[read]);
+      }
+      ++write;
+    }
+  }
+  clauses.resize(write);
+}
+
+size_t regionVariableCount(
+    const std::vector<std::vector<RegionLiteral>>& clauses) {
+  std::unordered_set<RegionVariableKey, RegionVariableKeyHash> variables;
+  for (const auto& clause : clauses) {
+    for (const RegionLiteral& literal : clause) {
+      variables.insert({literal.isState != 0, literal.index});
+    }
+  }
+  return variables.size();
+}
+
+void removeSemanticallyRedundantRegionClauses(
+    std::vector<std::vector<RegionLiteral>>& clauses) {
+  if (clauses.size() > kCraigSemanticSimplifyClauseLimit ||
+      regionVariableCount(clauses) > kCraigSemanticSimplifyVariableLimit) {
+    return;
+  }
+
+  std::vector<bool> removed(clauses.size(), false);
+  for (size_t candidate = 0; candidate < clauses.size(); ++candidate) {
+    if (removed[candidate]) {
+      continue;
+    }
+
+    SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+    std::unordered_map<RegionVariableKey, int, RegionVariableKeyHash> literals;
+    for (size_t clauseIndex = 0; clauseIndex < clauses.size(); ++clauseIndex) {
+      if (clauseIndex == candidate || removed[clauseIndex]) {
+        continue;
+      }
+      std::vector<int> clause;
+      clause.reserve(clauses[clauseIndex].size());
+      for (const RegionLiteral& literal : clauses[clauseIndex]) {
+        clause.push_back(localRegionLiteral(solver, literal, literals));
+      }
+      solver.addClause(clause);
+    }
+    for (const RegionLiteral& literal : clauses[candidate]) {
+      solver.addClause({-localRegionLiteral(solver, literal, literals)});
+    }
+    if (solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat) {
+      removed[candidate] = true;
+    }
+  }
+
+  size_t write = 0;
+  for (size_t read = 0; read < clauses.size(); ++read) {
+    if (!removed[read]) {
+      if (write != read) {
+        clauses[write] = std::move(clauses[read]);
+      }
+      ++write;
+    }
+  }
+  clauses.resize(write);
+}
+
+void rebuildRegionClauses(
+    InterpolantRegion& region,
+    const std::vector<std::vector<RegionLiteral>>& clauses) {
+  region.definitionLiterals.clear();
+  region.definitionClauseEnds.clear();
+  size_t literalCount = 0;
+  for (const auto& clause : clauses) {
+    literalCount += clause.size();
+  }
+  region.definitionLiterals.reserve(literalCount);
+  region.definitionClauseEnds.reserve(clauses.size());
+  for (const auto& clause : clauses) {
+    region.definitionLiterals.insert(
+        region.definitionLiterals.end(), clause.begin(), clause.end());
+    region.definitionClauseEnds.push_back(region.definitionLiterals.size());
+  }
+}
+
+InterpolantRegion simplifyCraigInterpolantRegionImpl(InterpolantRegion region) {
+  if (region.type != InterpolantRegion::Type::Normal) {
+    return region;
+  }
+
+  const size_t oldClauses = regionClauseCount(region);
+  const size_t oldLiterals = regionLiteralCount(region);
+  auto clauses = normalizedRegionClauses(region);
+  if (std::any_of(clauses.begin(), clauses.end(),
+                  [](const auto& clause) { return clause.empty(); })) {
+    return {InterpolantRegion::Type::False};
+  }
+
+  // McMillan's original IMC implementation reduced redundant interpolant logic
+  // with small BDDs. Keep the same role local to Craig IMC: first remove cheap
+  // syntactic redundancy, then run a bounded exact SAT implication cleanup for
+  // small interpolants where the extra solver calls are predictable.
+  removeSubsumedRegionClauses(clauses);
+  removeSemanticallyRedundantRegionClauses(clauses);
+  if (clauses.empty() && !region.root.isState) {
+    return {InterpolantRegion::Type::True};
+  }
+  rebuildRegionClauses(region, clauses);
+
+  emitSecDiag(
+      "SEC diag: imc Craig interpolant simplified clauses=",
+      oldClauses,
+      "->",
+      regionClauseCount(region),
+      " literals=",
+      oldLiterals,
+      "->",
+      regionLiteralCount(region));
+  return region;
 }
 
 int instantiateRegionLiteral(
@@ -487,7 +733,7 @@ InterpolantRegion convertInterpolant(
       " literals=", regionLiteralCount(region),
       " input_literals=", inputLiteralCount,
       " auxiliaries=", region.auxiliaryCount);
-  return region;
+  return simplifyCraigInterpolantRegion(std::move(region));
 }
 
 int instantiateRegion(
@@ -601,7 +847,7 @@ std::optional<InterpolantRegion> buildConcreteAssignmentRegion(
   return region;
 }
 
-void addBadFormula(
+int encodeBadFormulaRoot(
     SATSolverWrapper& solver,
     const KInductionProblem& problem,
     std::unordered_map<size_t, int> nextLeaves) {
@@ -621,9 +867,32 @@ void addBadFormula(
   FrameFormulaEncoder encoder(
       solver, std::move(nextLeaves), /*createMissingLeaves=*/true);
   solver.setCraigVariablePartition(VariablePartition::BLocal);
-  const int bad = encoder.encode(problem.bad);
+  return encoder.encode(problem.bad);
+}
+
+void addBadFormula(
+    SATSolverWrapper& solver,
+    const KInductionProblem& problem,
+    std::unordered_map<size_t, int> nextLeaves) {
+  const int bad = encodeBadFormulaRoot(solver, problem, std::move(nextLeaves));
   solver.setCraigClausePartition(ClausePartition::B);
   solver.addClause({bad});
+}
+
+void addSuffixBadFormula(
+    SATSolverWrapper& solver,
+    const KInductionProblem& problem,
+    const std::vector<std::unordered_map<size_t, int>>& frameLits,
+    size_t firstFrame,
+    size_t lastFrame) {
+  std::vector<int> badRoots;
+  badRoots.reserve(lastFrame - firstFrame + 1);
+  for (size_t frame = firstFrame; frame <= lastFrame; ++frame) {
+    badRoots.push_back(
+        encodeBadFormulaRoot(solver, problem, frameLits[frame]));
+  }
+  solver.setCraigClausePartition(ClausePartition::B);
+  solver.addClause(badRoots);
 }
 
 void addInitialFrontierConstraint(
@@ -1015,7 +1284,11 @@ FrontierResult deriveLookaheadFrontierRegion(
       solver, problem, frameLits[lookahead], ClausePartition::B);
   addAuxiliaryStateInvariants(
       solver, frameLits[lookahead], auxiliaryInvariants, ClausePartition::B);
-  addBadFormula(solver, problem, frameLits[lookahead]);
+  // McMillan's suffix checks whether the bad set appears at any suffix frame,
+  // not only at the last unrolled frame. This keeps each interpolant itself
+  // outside Bad, which is required for the R' => R fixed-point test below.
+  addSuffixBadFormula(
+      solver, problem, frameLits, /*firstFrame=*/1, /*lastFrame=*/lookahead);
   emitSecDiag(
       "SEC diag: imc Craig image build end lookahead=", lookahead,
       " iteration=", iteration,
@@ -1052,149 +1325,63 @@ FrontierResult deriveLookaheadFrontierRegion(
   return result;
 }
 
-class IncrementalInductivenessChecker {
- public:
-  IncrementalInductivenessChecker(
-      const KInductionProblem& problem,
-      const std::unordered_set<size_t>& trackedStates,
-      const std::vector<InterpolantRegion>& helperInvariantRegions,
-      const AuxiliaryStateInvariants& auxiliaryInvariants)
-      : problem_(problem),
-        solver_(KEPLER_FORMAL::Config::SolverType::CADICAL),
-        trackedStates_(trackedStates),
-        helperInvariantRegions_(helperInvariantRegions),
-        auxiliaryInvariants_(auxiliaryInvariants) {
-    // This solver keeps growing after assumption solves. Disable CaDiCaL
-    // variable-introducing preprocessing so later interpolant auxiliaries do
-    // not collide with solver-internal extension variables.
-    solver_.configureForSecLocalBooleanCheck(trackedStates_.size());
-    const std::vector<size_t> tracked = sortedSymbols(trackedStates);
-    currentLits_ = allocateLeafLits(
-        solver_, tracked, VariablePartition::ALocal);
-    nextLits_ = allocateLeafLits(
-        solver_, tracked, VariablePartition::ALocal);
-    addRegionUnionConstraint(
-        solver_,
-        helperInvariantRegions_,
-        currentLits_,
-        VariablePartition::ALocal,
-        ClausePartition::A);
-    addRegionUnionConstraint(
-        solver_,
-        helperInvariantRegions_,
-        nextLits_,
-        VariablePartition::ALocal,
-        ClausePartition::A);
-    addStateSemantics(
-        solver_, problem_, currentLits_, ClausePartition::A);
-    addAuxiliaryStateInvariants(
-        solver_, currentLits_, auxiliaryInvariants_, ClausePartition::A);
-    const TransitionExprResolver resolver(problem_);
-    const TransitionEncodingResult transition = addProjectedTransition(
-        solver_,
-        problem_,
-        resolver,
-        primaryByComplement(problem_),
-        trackedStates_,
-        auxiliaryInvariants_,
-        currentLits_,
-        nextLits_,
-        VariablePartition::ALocal,
-        ClausePartition::A);
-    currentLits_ = transition.currentLits;
-
-    const auto stateSymbols = stateSymbolSet(problem_);
-    for (const auto& [symbol, literal] : currentLits_) {
-      (void)literal;
-      if (stateSymbols.contains(symbol)) {
-        transitionStateSupport_.insert(symbol);
-      }
-    }
-    closeSameDesignStateSemantics(problem_, transitionStateSupport_);
-    addStateSemantics(solver_, problem_, nextLits_, ClausePartition::A);
-    addAuxiliaryStateInvariants(
-        solver_, nextLits_, auxiliaryInvariants_, ClausePartition::A);
-  }
-
-  void addRegion(const InterpolantRegion& region) {
-    const auto addStart = SteadyClock::now();
-    currentRegionRoots_.push_back(instantiateRegion(
-        solver_,
-        region,
-        currentLits_,
-        VariablePartition::ALocal,
-        ClausePartition::A));
-    const int nextRoot = instantiateRegion(
-        solver_,
-        region,
-        nextLits_,
-        VariablePartition::ALocal,
-        ClausePartition::A);
-    // The reachable approximation only grows. Its successor complement
-    // therefore strengthens monotonically and can remain in the solver.
-    solver_.addClause({-nextRoot});
-    emitSecDiag(
-        "SEC diag: imc Craig incremental add_region regions=",
-        currentRegionRoots_.size(),
-        " clauses=", regionClauseCount(region),
-        " literals=", regionLiteralCount(region),
-        " auxiliaries=", region.auxiliaryCount,
-        " elapsed_ms=", elapsedMilliseconds(addStart));
-  }
-
-  bool isInductive() {
-    emitSecDiag(
-        "SEC diag: imc Craig incremental inductiveness begin regions=",
-        currentRegionRoots_.size(),
-        " tracked_states=", trackedStates_.size());
-    const auto solveStart = SteadyClock::now();
-    size_t sourceChecks = 0;
-    // The newest interpolant is the only source added since the previous
-    // closure check. Test it first so a non-inductive region returns after one
-    // SAT query instead of re-proving every older source region UNSAT.
-    for (auto root = currentRegionRoots_.rbegin();
-         root != currentRegionRoots_.rend();
-         ++root) {
-      ++sourceChecks;
-      const auto status =
-          solver_.solveWithAssumptionsStatus({*root});
-      if (status != SATSolverWrapper::SolveStatus::Unsat) {
-        emitSecDiag(
-            "SEC diag: imc Craig incremental inductiveness end status=",
-            static_cast<int>(status),
-            " source_checks=", sourceChecks,
-            " elapsed_ms=", elapsedMilliseconds(solveStart));
-        return false;
-      }
-    }
-    emitSecDiag(
-        "SEC diag: imc Craig incremental inductiveness end status=",
-        static_cast<int>(SATSolverWrapper::SolveStatus::Unsat),
-        " source_checks=", sourceChecks,
-        " elapsed_ms=", elapsedMilliseconds(solveStart));
+bool regionContainedInReachableUnion(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& reachableRegions,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
+    const AuxiliaryStateInvariants& auxiliaryInvariants,
+    const InterpolantRegion& candidateRegion) {
+  if (candidateRegion.type == InterpolantRegion::Type::False) {
     return true;
   }
-
-  bool addRegionAndCheck(const InterpolantRegion& region) {
-    addRegion(region);
-    return isInductive();
+  if (reachableRegions.empty()) {
+    return false;
   }
 
-  const std::unordered_set<size_t>& transitionStateSupport() const {
-    return transitionStateSupport_;
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  auto stateLits = allocateLeafLits(
+      solver, sortedSymbols(trackedStates), VariablePartition::ALocal);
+  addRegionUnionConstraint(
+      solver,
+      helperInvariantRegions,
+      stateLits,
+      VariablePartition::ALocal,
+      ClausePartition::A);
+  addStateSemantics(solver, problem, stateLits, ClausePartition::A);
+  addAuxiliaryStateInvariants(
+      solver, stateLits, auxiliaryInvariants, ClausePartition::A);
+
+  const int candidateRoot = instantiateRegion(
+      solver,
+      candidateRegion,
+      stateLits,
+      VariablePartition::ALocal,
+      ClausePartition::A);
+  solver.setCraigClausePartition(ClausePartition::A);
+  solver.addClause({candidateRoot});
+  for (const InterpolantRegion& region : reachableRegions) {
+    const int root = instantiateRegion(
+        solver,
+        region,
+        stateLits,
+        VariablePartition::ALocal,
+        ClausePartition::A);
+    solver.addClause({-root});
   }
 
- private:
-  const KInductionProblem& problem_;
-  SATSolverWrapper solver_;
-  const std::unordered_set<size_t>& trackedStates_;
-  const std::vector<InterpolantRegion>& helperInvariantRegions_;
-  const AuxiliaryStateInvariants& auxiliaryInvariants_;
-  std::unordered_map<size_t, int> currentLits_;
-  std::unordered_map<size_t, int> nextLits_;
-  std::unordered_set<size_t> transitionStateSupport_;
-  std::vector<int> currentRegionRoots_;
-};
+  const auto solveStart = SteadyClock::now();
+  emitSecDiag(
+      "SEC diag: imc Craig fixedpoint containment begin regions=",
+      reachableRegions.size(),
+      " tracked_states=", trackedStates.size());
+  const auto status = solver.solveStatus();
+  emitSecDiag(
+      "SEC diag: imc Craig fixedpoint containment end status=",
+      static_cast<int>(status),
+      " elapsed_ms=", elapsedMilliseconds(solveStart));
+  return status == SATSolverWrapper::SolveStatus::Unsat;
+}
 
 CraigImcResult runWithProjection(
     const KInductionProblem& problem,
@@ -1236,33 +1423,8 @@ CraigImcResult runWithProjection(
                                : CraigImcStatus::NoProgress,
         hasConcreteInitialCube ? 0u : 1u};
   }
-  IncrementalInductivenessChecker initialInductivenessChecker(
-      problem, trackedStates, helperInvariantRegions, auxiliaryInvariants);
-  if (initialInductivenessChecker.addRegionAndCheck(concreteInitialRegion)) {
-    return {
-        CraigImcStatus::Equivalent,
-        1,
-        {concreteInitialRegion},
-        trackedStates};
-  }
-
-  size_t oldSize = trackedStates.size();
-  trackedStates.insert(
-      initialInductivenessChecker.transitionStateSupport().begin(),
-      initialInductivenessChecker.transitionStateSupport().end());
-  closeSameDesignStateSemantics(problem, trackedStates);
-  if (trackedStates.size() != oldSize) {
-    emitSecDiag(
-        "SEC diag: imc Craig refines transition projection states=",
-        oldSize, "->", trackedStates.size());
-    return {CraigImcStatus::NoProgress, 0};
-  }
-
   for (size_t lookahead = 1; lookahead <= maxIterations; ++lookahead) {
     std::vector<InterpolantRegion> reachableRegions{concreteInitialRegion};
-    IncrementalInductivenessChecker inductivenessChecker(
-        problem, trackedStates, helperInvariantRegions, auxiliaryInvariants);
-    inductivenessChecker.addRegion(concreteInitialRegion);
 
     for (size_t iteration = 1; iteration <= maxIterations; ++iteration) {
       frontier = deriveLookaheadFrontierRegion(
@@ -1275,7 +1437,7 @@ CraigImcResult runWithProjection(
           lookahead,
           iteration);
       if (!frontier.region.has_value()) {
-        oldSize = trackedStates.size();
+        const size_t oldSize = trackedStates.size();
         trackedStates.insert(
             frontier.transitionStateSupport.begin(),
             frontier.transitionStateSupport.end());
@@ -1301,8 +1463,14 @@ CraigImcResult runWithProjection(
         // lookahead and restart from the concrete initial interpolant.
         break;
       }
-      reachableRegions.push_back(std::move(*frontier.region));
-      if (inductivenessChecker.addRegionAndCheck(reachableRegions.back())) {
+      const InterpolantRegion nextRegion = std::move(*frontier.region);
+      if (regionContainedInReachableUnion(
+              problem,
+              trackedStates,
+              reachableRegions,
+              helperInvariantRegions,
+              auxiliaryInvariants,
+              nextRegion)) {
         return {
             CraigImcStatus::Equivalent,
             lookahead,
@@ -1310,20 +1478,10 @@ CraigImcResult runWithProjection(
             trackedStates};
       }
 
-      // A SAT inductiveness query may be caused only by state variables omitted
-      // from the projection. Refine with same-design transition support before
-      // continuing the interpolation sequence.
-      oldSize = trackedStates.size();
-      trackedStates.insert(
-          inductivenessChecker.transitionStateSupport().begin(),
-          inductivenessChecker.transitionStateSupport().end());
-      closeSameDesignStateSemantics(problem, trackedStates);
-      if (trackedStates.size() != oldSize) {
-        emitSecDiag(
-            "SEC diag: imc Craig refines transition projection states=",
-            oldSize, "->", trackedStates.size());
-        return {CraigImcStatus::NoProgress, 0};
-      }
+      // McMillan's update is Q := Q OR I. Keep Q as a region vector so later
+      // SAT calls can instantiate each interpolant without rebuilding one huge
+      // disjunction formula.
+      reachableRegions.push_back(nextRegion);
     }
   }
   return {
@@ -1333,6 +1491,10 @@ CraigImcResult runWithProjection(
 }
 
 }  // namespace
+
+InterpolantRegion simplifyCraigInterpolantRegion(InterpolantRegion region) {
+  return simplifyCraigInterpolantRegionImpl(std::move(region));
+}
 
 CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(
     const KInductionProblem& problem,

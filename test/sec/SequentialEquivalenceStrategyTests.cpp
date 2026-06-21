@@ -9238,6 +9238,54 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSimplifiesRedundantInterpolantClauses) {
+  InterpolantRegion region;
+  region.type = InterpolantRegion::Type::Normal;
+  region.root = {true, 10, true};
+  region.definitionLiterals = {
+      {true, 10, true},
+      {true, 11, true},
+      {true, 10, true},
+      {true, 10, true},
+      {true, 12, true},
+      {true, 12, false}};
+  region.definitionClauseEnds = {2, 3, 4, 6};
+
+  const InterpolantRegion simplified =
+      simplifyCraigInterpolantRegion(std::move(region));
+
+  // This is the IMC-local version of McMillan's redundant-interpolant cleanup:
+  // remove duplicate clauses, tautologies, and clauses subsumed by a smaller
+  // clause before future Craig iterations keep re-instantiating them.
+  ASSERT_EQ(simplified.type, InterpolantRegion::Type::Normal);
+  EXPECT_EQ(simplified.definitionClauseEnds.size(), 1u);
+  ASSERT_EQ(simplified.definitionLiterals.size(), 1u);
+  EXPECT_TRUE(simplified.definitionLiterals.front().isState);
+  EXPECT_EQ(simplified.definitionLiterals.front().index, 10u);
+  EXPECT_TRUE(simplified.definitionLiterals.front().positive);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcUsesMcMillanFixedpointContainment) {
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(problem);
+  const CraigImcResult result = checker.run(4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("imc Craig fixedpoint containment"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig incremental inductiveness"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcIgnoresSuppliedCrossDesignStateCandidates) {
   KInductionProblem problem = buildCraigResetSecProblem(false);
   problem.bootstrapStateEqualityPairs = {{4, 5}};
@@ -9377,12 +9425,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   testing::internal::CaptureStderr();
   IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const IMCResult result = engine.run(0);
+  const IMCResult result = engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The first eight outputs produce an inductive Craig invariant. Later
-  // outputs have the same reachable-state surface, so IMC can prove them by
-  // checking that saved invariant against the new bad predicate.
+  // The first eight outputs reach the McMillan fixed point with one Craig
+  // step. Later outputs have the same reachable-state surface, so IMC can
+  // reuse the saved region against the new bad predicate.
   EXPECT_NE(
       stderrOutput.find("imc Craig output batch first=0 end=8"),
       std::string::npos)
@@ -11872,7 +11920,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto dualRailImcResult =
       dualRailImcStrategy.runExtractedModels(model0, model1, 1);
   EXPECT_EQ(dualRailImcResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(dualRailImcResult.bound, 0u);
+  // Craig IMC now follows the paper-style loop, so the first valid fixed-point
+  // proof is the k=1 interpolant containment check rather than the removed
+  // immediate transition-closure shortcut.
+  EXPECT_EQ(dualRailImcResult.bound, 1u);
   EXPECT_EQ(dualRailImcResult.coveredOutputs, kWideStartupCertificateOutputs);
   EXPECT_EQ(dualRailImcResult.totalOutputs, kWideStartupCertificateOutputs);
   EXPECT_TRUE(dualRailImcResult.skippedObservedOutputs.empty());
