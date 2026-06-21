@@ -4,10 +4,13 @@
 #pragma once
 
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include "../../config/Config.h"
 #include "kinduction/KInductionEngine.h"
 #include "kinduction/KInductionProblem.h"
+#include "kinduction/OutputBatching.h"
 
 namespace KEPLER_FORMAL::SEC {
 
@@ -22,6 +25,13 @@ struct IMCResult {
   size_t bound = 0;
   std::optional<KInductionResult::CounterexampleWitness> witness;
 };
+
+// IMC-specific batching for large dual-rail Craig proofs. Unlike the shared
+// KI batcher, this also checks marginal support growth so wide unrelated cones
+// are split before launching an expensive interpolation query.
+std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
+    const KInductionProblem& problem,
+    const OutputBatchingLimits& limits);
 
 // Interpolation-Based Model Checking over the extracted SEC problem. It keeps
 // counterexample discovery on the shared BMC path, then grows a proof frontier

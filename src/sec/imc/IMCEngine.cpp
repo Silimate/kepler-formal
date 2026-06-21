@@ -4,6 +4,7 @@
 #include "imc/IMCEngine.h"
 
 #include <algorithm>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -30,8 +31,96 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
-    /*maxOutputBatchSize=*/8,
+    /*maxOutputBatchSize=*/4,
     /*outputBatchSupportLimit=*/8192};
+
+constexpr size_t kCraigBatchMinOverlapPercent = 90;
+constexpr size_t kCraigBatchMinMarginalSupportLimit = 64;
+constexpr size_t kCraigBatchMarginalSupportDivisor = 10;
+constexpr size_t kCraigBatchSingleOutputSupportLimit = 1024;
+
+std::unordered_set<size_t> observedOutputSupport(
+    const KInductionProblem& problem,
+    size_t outputIndex) {
+  std::unordered_set<size_t> support;
+  const auto support0 =
+      problem.observedOutputExprs0[outputIndex]->getSupportVars();
+  const auto support1 =
+      problem.observedOutputExprs1[outputIndex]->getSupportVars();
+  support.reserve(support0.size() + support1.size());
+  support.insert(support0.begin(), support0.end());
+  support.insert(support1.begin(), support1.end());
+  return support;
+}
+
+size_t supportIntersectionSize(const std::unordered_set<size_t>& lhs,
+                               const std::unordered_set<size_t>& rhs) {
+  const auto& smaller = lhs.size() <= rhs.size() ? lhs : rhs;
+  const auto& larger = lhs.size() <= rhs.size() ? rhs : lhs;
+  size_t count = 0;
+  for (const size_t symbol : smaller) {
+    if (larger.find(symbol) != larger.end()) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+void mergeSupport(std::unordered_set<size_t>& batchSupport,
+                  const std::unordered_set<size_t>& outputSupport) {
+  batchSupport.insert(outputSupport.begin(), outputSupport.end());
+}
+
+size_t marginalSupportLimit(size_t batchSupportSize) {
+  return std::max(
+      kCraigBatchMinMarginalSupportLimit,
+      batchSupportSize / kCraigBatchMarginalSupportDivisor);
+}
+
+bool canAddOutputToCraigBatch(
+    const std::unordered_set<size_t>& batchSupport,
+    const std::unordered_set<size_t>& outputSupport,
+    const OutputBatchingLimits& limits,
+    size_t batchOutputCount,
+    const char** rejectReason,
+    size_t* marginalSupport,
+    size_t* overlapPercent) {
+  if (batchOutputCount == 0) {
+    return true;
+  }
+  if (batchOutputCount + 1 > limits.maxOutputBatchSize) {
+    *rejectReason = "count_limit";
+    return false;
+  }
+  // Large frontiers make Craig interpolants grow with the OR'ed bad predicate;
+  // keep those outputs single even when their raw supports overlap heavily.
+  if (batchSupport.size() > kCraigBatchSingleOutputSupportLimit ||
+      outputSupport.size() > kCraigBatchSingleOutputSupportLimit) {
+    *rejectReason = "large_support";
+    return false;
+  }
+
+  const size_t overlap = supportIntersectionSize(batchSupport, outputSupport);
+  const size_t marginal = outputSupport.size() - overlap;
+  const size_t unionSupport = batchSupport.size() + marginal;
+  *marginalSupport = marginal;
+  *overlapPercent =
+      outputSupport.empty() ? 100 : (overlap * 100) / outputSupport.size();
+
+  if (unionSupport > limits.outputBatchSupportLimit) {
+    *rejectReason = "support_limit";
+    return false;
+  }
+  if (*overlapPercent < kCraigBatchMinOverlapPercent) {
+    *rejectReason = "low_overlap";
+    return false;
+  }
+  if (marginal > marginalSupportLimit(batchSupport.size())) {
+    *rejectReason = "marginal_support";
+    return false;
+  }
+  return true;
+}
 
 void addComplementedStateRelations(
     SATSolverWrapper& solver,
@@ -258,6 +347,18 @@ IMCResult runCraigOutputRange(
     }
     return {IMCStatus::Equivalent, proof.iterations};
   }
+  if (proof.status == CraigImcStatus::CounterexampleCandidate) {
+    // Craig found SAT from the exact concrete post-reset frontier. Reconstruct
+    // only that lookahead with the exact bounded witness encoder; this is
+    // counterexample validation inside IMC, not a different proof engine.
+    const auto cache = makeImcBaseCounterexampleCache(batchProblem);
+    if (const auto counterexample =
+            findImcCounterexample(*cache, solverType, proof.iterations);
+        counterexample.has_value()) {
+      return *counterexample;
+    }
+    return {IMCStatus::Inconclusive, maxK};
+  }
 
   if (endOutput > firstOutput + 1) {
     const size_t midpoint = firstOutput + (endOutput - firstOutput) / 2;
@@ -279,9 +380,16 @@ IMCResult runCraigOutputRange(
     return {IMCStatus::Inconclusive, maxK};
   }
 
-  // A SAT interpolation query can be a real mismatch rather than an abstract
-  // projection. Check the exact bounded trace for this one top-level output;
-  // no other proof engine is used as a fallback.
+  if (proof.status == CraigImcStatus::ConcreteNoProgress) {
+    // Every first-iteration lookahead already started from the complete
+    // concrete post-reset cube. Repeating all bounded SAT queries here would
+    // rebuild the same transition prefixes without adding proof information.
+    return {IMCStatus::Inconclusive, maxK};
+  }
+
+  // Partial or implicit initial frontiers are over-approximations. Preserve the
+  // exact bounded localization sweep for those cases so a reachable mismatch
+  // is never hidden by an abstract Craig SAT result.
   const auto cache = makeImcBaseCounterexampleCache(batchProblem);
   for (size_t depth = 0; depth <= maxK; ++depth) {
     if (const auto counterexample =
@@ -302,7 +410,7 @@ IMCResult runLargeDualRailCraigImc(
   // same transition surface. Batch those bits here so classic IMC proves one
   // conjunction instead of rebuilding the same Craig query per bit. This limit
   // is IMC-local and does not change KI/PDR batching.
-  const auto batches = buildSupportBoundedOutputBatches(
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
       problem, kLargeDualRailCraigBatchingLimits);
   size_t proofBound = 0;
   bool inconclusive = false;
@@ -334,6 +442,58 @@ bool shouldBuildExplicitImcInitFormula(const KInductionProblem& problem) {
 }
 
 }  // namespace
+
+std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
+    const KInductionProblem& problem,
+    const OutputBatchingLimits& limits) {
+  std::vector<std::unordered_set<size_t>> outputSupports;
+  outputSupports.reserve(problem.observedOutputExprs0.size());
+  for (size_t output = 0; output < problem.observedOutputExprs0.size();
+       ++output) {
+    outputSupports.push_back(observedOutputSupport(problem, output));
+  }
+
+  std::vector<std::pair<size_t, size_t>> batches;
+  size_t firstOutput = 0;
+  while (firstOutput < outputSupports.size()) {
+    size_t endOutput = firstOutput;
+    std::unordered_set<size_t> batchSupport;
+    while (endOutput < outputSupports.size()) {
+      const char* rejectReason = nullptr;
+      size_t marginalSupport = 0;
+      size_t overlapPercent = 100;
+      const size_t batchOutputCount = endOutput - firstOutput;
+      if (!canAddOutputToCraigBatch(
+              batchSupport,
+              outputSupports[endOutput],
+              limits,
+              batchOutputCount,
+              &rejectReason,
+              &marginalSupport,
+              &overlapPercent)) {
+        emitSecDiag(
+            "SEC diag: imc Craig batch closes before output=", endOutput,
+            " reason=", rejectReason,
+            " batch_first=", firstOutput,
+            " batch_support=", batchSupport.size(),
+            " output_support=", outputSupports[endOutput].size(),
+            " marginal_support=", marginalSupport,
+            " overlap_percent=", overlapPercent);
+        break;
+      }
+      mergeSupport(batchSupport, outputSupports[endOutput]);
+      ++endOutput;
+    }
+    if (endOutput == firstOutput) {
+      // Always make progress: an oversized single output still deserves one
+      // exact IMC attempt rather than being silently skipped by the scheduler.
+      ++endOutput;  // LCOV_EXCL_LINE
+    }
+    batches.emplace_back(firstOutput, endOutput);
+    firstOutput = endOutput;
+  }
+  return batches;
+}
 
 IMCEngine::IMCEngine(const KInductionProblem& problem,
                      KEPLER_FORMAL::Config::SolverType solverType)

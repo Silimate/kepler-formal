@@ -2176,25 +2176,25 @@ BoolExpr* makeConjunctionOfVars(const std::vector<size_t>& symbols) {
   return BoolExpr::simplify(expr);
 }
 
-KInductionProblem buildWideSharedConeImcProblem(size_t outputCount) {
-  constexpr size_t kSharedSupportCount = 129;
+KInductionProblem buildWideSharedConeImcProblem(size_t outputCount,
+                                               size_t sharedSupportCount) {
   constexpr size_t firstSharedSymbol = 2;
-  const size_t firstOutputSymbol = firstSharedSymbol + kSharedSupportCount;
+  const size_t firstOutputSymbol = firstSharedSymbol + sharedSupportCount;
 
   KInductionProblem problem;
   std::vector<size_t> sharedSupport;
-  sharedSupport.reserve(kSharedSupportCount);
-  problem.state0Symbols.reserve(kSharedSupportCount + outputCount);
-  problem.allSymbols.reserve(kSharedSupportCount + outputCount);
+  sharedSupport.reserve(sharedSupportCount);
+  problem.state0Symbols.reserve(sharedSupportCount + outputCount);
+  problem.allSymbols.reserve(sharedSupportCount + outputCount);
   BoolExpr* init = BoolExpr::createTrue();
-  for (size_t index = 0; index < kSharedSupportCount + outputCount; ++index) {
+  for (size_t index = 0; index < sharedSupportCount + outputCount; ++index) {
     const size_t symbol = firstSharedSymbol + index;
     problem.state0Symbols.push_back(symbol);
     problem.allSymbols.push_back(symbol);
     init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
     problem.initialStateAssignments.push_back({symbol, false});
     problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
-    if (index < kSharedSupportCount) {
+    if (index < sharedSupportCount) {
       sharedSupport.push_back(symbol);
     }
   }
@@ -2223,6 +2223,39 @@ KInductionProblem buildWideSharedConeImcProblem(size_t outputCount) {
   problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
+  return problem;
+}
+
+KInductionProblem buildWideSharedConeImcProblem(size_t outputCount) {
+  return buildWideSharedConeImcProblem(outputCount, 129);
+}
+
+KInductionProblem buildDisjointWideConeImcBatchProblem() {
+  constexpr size_t kSupportPerOutput = 129;
+  constexpr size_t firstSymbol = 2;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.totalStateCount = kSupportPerOutput * 2;
+  problem.state0Symbols.reserve(kSupportPerOutput * 2);
+  problem.allSymbols.reserve(kSupportPerOutput * 2);
+
+  for (size_t output = 0; output < 2; ++output) {
+    std::vector<size_t> support;
+    support.reserve(kSupportPerOutput);
+    for (size_t index = 0; index < kSupportPerOutput; ++index) {
+      const size_t symbol =
+          firstSymbol + output * kSupportPerOutput + index;
+      support.push_back(symbol);
+      problem.state0Symbols.push_back(symbol);
+      problem.allSymbols.push_back(symbol);
+    }
+    problem.observedOutputNames.push_back(
+        "disjoint_wide_out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(makeConjunctionOfVars(support));
+    problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
+  }
+
   return problem;
 }
 
@@ -9180,6 +9213,67 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcCanUseSwappedInterpolantComplement) {
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+  const ScopedEnvVar enableSwapped(
+      "KEPLER_SEC_IMC_SWAPPED_INTERPOLANT", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+
+  CraigInterpolatingModelChecker checker(problem);
+  const CraigImcResult result = checker.run(4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Swapping A/B makes the raw interpolant describe the bad-predecessor side;
+  // IMC must use its complement as the reachable over-approximation.
+  EXPECT_NE(
+      stderrOutput.find("swapped_interpolant=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcAuxiliaryConstantsRequireTransitionProof) {
+  constexpr size_t stableState = 2;
+  constexpr size_t unstableState = 3;
+  constexpr size_t input = 4;
+
+  KInductionProblem problem;
+  problem.inputSymbols = {input};
+  problem.state0Symbols = {stableState, unstableState};
+  problem.allSymbols = {stableState, unstableState, input};
+  problem.resetBootstrapCycles = 1;
+  problem.bootstrapStateAssignments = {
+      {stableState, false},
+      {unstableState, false}};
+  problem.transitions0 = {
+      {stableState, BoolExpr::createFalse()},
+      {unstableState, BoolExpr::Var(input)}};
+  problem.bad = BoolExpr::Var(stableState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+
+  const ScopedEnvVar enableAux("KEPLER_SEC_IMC_AUX_INVARIANTS", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(problem);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Reset/bootstrap constants are not trusted blindly. Only stableState is
+  // kept because its transition proves the same value; unstableState can follow
+  // an unconstrained input and must not become an auxiliary invariant.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig auxiliary constants=1 candidates=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcUsesProofDerivedCraigInterpolation) {
   const KInductionProblem problem = buildCraigResetSecProblem(true);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -9213,6 +9307,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcPreSplitsDisjointWideOutputCones) {
+  const KInductionProblem problem = buildDisjointWideConeImcBatchProblem();
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/8,
+                                    /*outputBatchSupportLimit=*/8192});
+
+  // The two outputs are adjacent but share no support. IMC must split them
+  // before SAT instead of spending minutes learning that the combined Craig
+  // proof is too broad.
+  ASSERT_EQ(batches.size(), 2u);
+  EXPECT_EQ(batches[0], std::make_pair(0u, 1u));
+  EXPECT_EQ(batches[1], std::make_pair(1u, 2u));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcPreSplitsHugeSharedOutputCones) {
+  const KInductionProblem problem =
+      buildWideSharedConeImcProblem(/*outputCount=*/2,
+                                    /*sharedSupportCount=*/1100);
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/8,
+                                    /*outputBatchSupportLimit=*/8192});
+
+  // Huge shared cones look batch-friendly by overlap alone, but the combined
+  // bad predicate creates much larger Craig interpolants. Keep them single.
+  ASSERT_EQ(batches.size(), 2u);
+  EXPECT_EQ(batches[0], std::make_pair(0u, 1u));
+  EXPECT_EQ(batches[1], std::make_pair(1u, 2u));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcReusesCraigInvariantAcrossWideBatches) {
   const KInductionProblem problem = buildWideSharedConeImcProblem(9);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -9221,15 +9346,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const IMCResult result = engine.run(0);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The first eight outputs produce an inductive Craig invariant.  The ninth
-  // output has the same reachable-state surface, so IMC can prove it by
+  // The first four outputs produce an inductive Craig invariant.  Later
+  // outputs have the same reachable-state surface, so IMC can prove them by
   // checking that saved invariant against the new bad predicate.
   EXPECT_NE(
-      stderrOutput.find("imc Craig output batch first=0 end=8"),
+      stderrOutput.find("imc Craig output batch first=0 end=4"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("imc Craig reused invariant for output batch first=8 end=9"),
+      stderrOutput.find("imc Craig reused invariant for output batch first=4 end=8"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, IMCStatus::Equivalent);
