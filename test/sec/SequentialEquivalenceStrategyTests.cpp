@@ -9213,27 +9213,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       CraigImcCanUseSwappedInterpolantComplement) {
-  const KInductionProblem problem = buildCraigResetSecProblem(true);
-  const ScopedEnvVar enableSwapped(
-      "KEPLER_SEC_IMC_SWAPPED_INTERPOLANT", "1");
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStderr();
-
-  CraigInterpolatingModelChecker checker(problem);
-  const CraigImcResult result = checker.run(4);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // Swapping A/B makes the raw interpolant describe the bad-predecessor side;
-  // IMC must use its complement as the reachable over-approximation.
-  EXPECT_NE(
-      stderrOutput.find("swapped_interpolant=1"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcAuxiliaryConstantsRequireTransitionProof) {
   constexpr size_t stableState = 2;
   constexpr size_t unstableState = 3;
