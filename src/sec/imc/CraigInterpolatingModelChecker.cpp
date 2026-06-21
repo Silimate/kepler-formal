@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/BoolExprUtils.h"
 #include "common/SecDiag.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/TransitionExprResolver.h"
@@ -30,25 +31,6 @@ int64_t elapsedMilliseconds(SteadyClock::time_point start) {
              SteadyClock::now() - start)
       .count();
 }
-
-struct RegionLiteral {
-  bool isState = false;
-  size_t index = 0;
-  bool positive = true;
-};
-
-struct InterpolantRegion {
-  enum class Type {
-    False,
-    True,
-    Normal,
-  };
-
-  Type type = Type::False;
-  size_t auxiliaryCount = 0;
-  std::vector<std::vector<RegionLiteral>> definitionClauses;
-  RegionLiteral root;
-};
 
 struct TransitionEncodingResult {
   std::unordered_map<size_t, int> currentLits;
@@ -123,6 +105,59 @@ std::unordered_set<size_t> initialTrackedStates(
   }
   closeSameDesignStateSemantics(problem, tracked);
   return tracked;
+}
+
+std::unordered_map<size_t, bool> assignmentMap(
+    const std::vector<std::pair<size_t, bool>>& assignments) {
+  std::unordered_map<size_t, bool> values;
+  values.reserve(assignments.size());
+  for (const auto& [symbol, value] : assignments) {
+    values.emplace(symbol, value);
+  }
+  return values;
+}
+
+bool supportsBoolExprSubstitution(BoolExpr* root) {
+  std::vector<BoolExpr*> stack{root};
+  std::unordered_set<BoolExpr*> visited;
+  while (!stack.empty()) {
+    BoolExpr* node = stack.back();
+    stack.pop_back();
+    if (node == nullptr || !visited.insert(node).second) {
+      continue;
+    }
+
+    switch (node->getOp()) {
+      case Op::VAR:
+        break;
+      case Op::NOT:
+        stack.push_back(node->getLeft());
+        break;
+      case Op::AND:
+      case Op::OR:
+      case Op::XOR:
+        stack.push_back(node->getLeft());
+        stack.push_back(node->getRight());
+        break;
+      case Op::NONE:
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
+BoolExpr* specializeBootstrapTransitionExpr(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& bootstrapAssignments,
+    std::unordered_map<BoolExpr*, BoolExpr*>& substitutionMemo) {
+  if (bootstrapAssignments.empty() || !supportsBoolExprSubstitution(expr)) {
+    return expr;
+  }
+
+  BoolExpr* specialized =
+      substituteBoolExprVariables(expr, bootstrapAssignments, substitutionMemo);
+  return specialized == expr ? expr : BoolExpr::simplify(specialized);
 }
 
 std::unordered_map<size_t, int> allocateLeafLits(
@@ -481,6 +516,11 @@ FrontierResult deriveBoundedFrontierRegion(
   const size_t bootstrapDepth =
       startsAtConcreteBootstrapFrontier ? 0 : problem.resetBootstrapCycles;
   const size_t depth = bootstrapDepth + proofDepth;
+  const auto bootstrapAssignments =
+      startsAtConcreteBootstrapFrontier
+          ? assignmentMap(problem.bootstrapStateAssignments)
+          : std::unordered_map<size_t, bool>{};
+  std::unordered_map<BoolExpr*, BoolExpr*> bootstrapSubstitutionMemo;
 
   std::vector<std::unordered_map<size_t, int>> frameLits(depth + 1);
   frameLits[depth] = allocateLeafLits(
@@ -514,7 +554,18 @@ FrontierResult deriveBoundedFrontierRegion(
         continue;
       }
       solver.setCraigVariablePartition(VariablePartition::ALocal);
-      const int transition = encoder.encode(resolver.at(target));
+      BoolExpr* transitionExpr = resolver.at(target);
+      if (frame == 0 && startsAtConcreteBootstrapFrontier) {
+        // This is still the same concrete reset/bootstrap frontier query.  The
+        // substitution only applies already-known per-design state constants
+        // before Tseitin encoding, avoiding CNF for logic that unit clauses
+        // would immediately erase.
+        transitionExpr = specializeBootstrapTransitionExpr(
+            transitionExpr,
+            bootstrapAssignments,
+            bootstrapSubstitutionMemo);
+      }
+      const int transition = encoder.encode(transitionExpr);
       addLiteralEquivalenceForPartition(
           solver, next->second, transition, ClausePartition::A);
     }
@@ -696,7 +747,11 @@ CraigImcResult runWithProjection(
     const InductivenessResult inductiveness =
         reachableSetIsInductive(problem, trackedStates, reachableRegions);
     if (inductiveness.isInductive) {
-      return {CraigImcStatus::Equivalent, depth + 1};
+      return {
+          CraigImcStatus::Equivalent,
+          depth + 1,
+          reachableRegions,
+          trackedStates};
     }
 
     // A SAT inductiveness query may be caused only by state variables omitted
@@ -747,6 +802,40 @@ CraigImcResult CraigInterpolatingModelChecker::run(
     }
   }
   return {};
+}
+
+bool craigInvariantExcludesBad(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& invariantRegions) {
+  if (trackedStates.empty() || invariantRegions.empty()) {
+    return false;
+  }
+
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  auto stateLits = allocateLeafLits(
+      solver, sortedSymbols(trackedStates), VariablePartition::ALocal);
+  addStateSemantics(solver, problem, stateLits, ClausePartition::A);
+
+  std::vector<int> regionRoots;
+  regionRoots.reserve(invariantRegions.size());
+  for (const auto& region : invariantRegions) {
+    regionRoots.push_back(instantiateRegion(
+        solver,
+        region,
+        stateLits,
+        VariablePartition::ALocal,
+        ClausePartition::A));
+  }
+  solver.setCraigClausePartition(ClausePartition::A);
+  solver.addClause(regionRoots);
+  addBadFormula(solver, problem, stateLits);
+
+  // Reusing a Craig IMC invariant is sound because it is already proven
+  // reachable-frontier inductive for the concrete transition system.  This
+  // query only asks whether the new top-level bad predicate intersects that
+  // invariant; it does not add cross-design state assumptions.
+  return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
 }
 
 }  // namespace KEPLER_FORMAL::SEC

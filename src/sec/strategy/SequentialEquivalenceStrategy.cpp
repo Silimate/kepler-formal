@@ -1546,8 +1546,6 @@ constexpr size_t kMaxDualRailWideLocalImplicationStateRails = 20000;
 constexpr size_t kMaxDualRailResidualOutputs = 128;
 constexpr size_t kMaxDualRailResidualProofStateSymbols = 4096;
 constexpr size_t kMaxDualRailResidualStateSymbols = 20000;
-constexpr OutputBatchingLimits kMediumDualRailImcResidualBatchingLimits{
-    32, 8192};
 constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
 constexpr size_t kMaxDualRailFlushCertificateOutputs = 64;
 constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
@@ -2298,7 +2296,6 @@ SequentialEquivalenceResult keepDualRailImpliedCoverageOnEngineInconclusive(  //
 
 enum class DualRailResidualEngine {
   KInduction,
-  Imc,
 };
 
 struct DualRailResidualProofState {
@@ -2312,31 +2309,8 @@ const char* dualRailResidualEngineName(DualRailResidualEngine engine) {
   switch (engine) {
     case DualRailResidualEngine::KInduction:
       return "k-induction";
-    case DualRailResidualEngine::Imc:
-      return "imc";
   }
   return "selected engine";  // LCOV_EXCL_LINE
-}
-
-// LCOV_EXCL_START
-OutputBatchingLimits dualRailResidualBatchingLimits(
-// LCOV_EXCL_STOP
-    const KInductionProblem& problem,
-    DualRailResidualEngine engine) {
-  if (problem.usesDualRailStateEncoding && engine == DualRailResidualEngine::Imc) {
-    const size_t railStateSymbols = problem.dualRailStatePairs.size() * 2;
-    if (problem.observedOutputExprs0.size() <= kMaxDualRailResidualOutputs &&
-        railStateSymbols <= kMaxDualRailResidualStateSymbols) {
-      // Medium residual buses still fit localized proof batches.  Keep them
-      // grouped so equivalent riscv32i-like designs do not repeat the same
-      // rail-state base validation once per output bit.
-      return kMediumDualRailImcResidualBatchingLimits;
-    }
-    // Very large IMC residuals stay local from the first query to avoid
-    // materializing one broad residual bad-state cone.
-    return OutputBatchingLimits{1, 128};
-  }
-  return defaultOutputBatchingLimitsForProblem(problem);
 }
 
 void markDualRailResidualOutputsCovered(
@@ -2555,8 +2529,7 @@ void proveDualRailResidualOutputSet(
   KInductionProblem subsetProblem =
       makeOutputSubsetProblem(problem, outputIndices);
   const bool useDeferredInductionResidualProof =
-      subsetProblem.usesDualRailStateEncoding &&
-      engine == DualRailResidualEngine::KInduction;
+      subsetProblem.usesDualRailStateEncoding;
   if (useDeferredInductionResidualProof && runCounterexampleSweep &&
       findAndRecordDualRailResidualCounterexample(
           subsetProblem,
@@ -2576,9 +2549,7 @@ void proveDualRailResidualOutputSet(
   if (useDeferredInductionResidualProof) {
     // Localized residual proofs should not spend max_k frontier checks on a
     // single hard rail output.  First ask whether the induction step closes; if
-    // it does, validate the required concrete base prefix once below.  IMC uses
-    // this same induction rule for large localized residuals, so this keeps the
-    // selected engine sound without invoking PDR.
+    // it does, validate the required concrete base prefix once below.
     subsetProblem.deferBaseCaseChecks = true;
   }
   if (isSecDiagEnabled() || secSummaryStatsEnabled()) {
@@ -2639,30 +2610,6 @@ void proveDualRailResidualOutputSet(
           extractedBoundaryReports);  // LCOV_EXCL_LINE
       return;  // LCOV_EXCL_LINE
     }
-  } else {
-    IMCEngine residualEngine(subsetProblem, solverType);
-    IMCResult result = residualEngine.run(maxK);
-    proofState.provedBound = std::max(proofState.provedBound, result.bound);
-    if (result.status == IMCStatus::Equivalent) {
-      markDualRailResidualOutputsCovered(outputIndices, proofState);
-      return;
-    }
-    if (result.status == IMCStatus::Different) {  // LCOV_EXCL_LINE
-      KInductionResult witnessResult{  // LCOV_EXCL_LINE
-          KInductionStatus::Different, result.bound, result.witness};  // LCOV_EXCL_LINE
-      proofState.terminalResult = makeSecResult(  // LCOV_EXCL_LINE
-          SequentialEquivalenceStatus::Different,
-          result.bound,  // LCOV_EXCL_LINE
-          result.witness.has_value()  // LCOV_EXCL_LINE
-              ? formatCounterexampleWitness(  // LCOV_EXCL_LINE
-                    witnessResult, model0, model1, top0, top1)  // LCOV_EXCL_LINE
-              : "IMC found a counterexample at k = " +  // LCOV_EXCL_LINE
-                    std::to_string(result.bound),  // LCOV_EXCL_LINE
-          outputCoverage,  // LCOV_EXCL_LINE
-          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-          extractedBoundaryReports);  // LCOV_EXCL_LINE
-      return;
-    }  // LCOV_EXCL_LINE
   }
 
   if (outputIndices.size() > 1) {
@@ -2880,7 +2827,7 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
   for (const auto& [firstOutput, endOutput] :
        buildSupportBoundedOutputBatches(
            residualProblem,
-           dualRailResidualBatchingLimits(residualProblem, engine))) {
+           defaultOutputBatchingLimitsForProblem(residualProblem))) {
     std::vector<size_t> batchOutputIndices;
     batchOutputIndices.reserve(endOutput - firstOutput);
     for (size_t i = firstOutput; i < endOutput; ++i) {
@@ -6169,22 +6116,8 @@ SequentialEquivalenceResult runImcSecEngine(
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
-  if (auto dualRailResult = proveDualRailResidualsWithSelectedEngine(
-          problem,
-          maxK,
-          solverType,
-          model0,
-          model1,
-          top0,
-          top1,
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports,
-          DualRailResidualEngine::Imc);
-      dualRailResult.has_value()) {
-    return *dualRailResult;
-  }
-
+  // IMC must remain an interpolation-based engine.  Do not route dual-rail
+  // residuals through the KI residual helper before the IMC engine runs.
   IMCEngine engine(problem, solverType);
   const auto result = engine.run(maxK);
   switch (result.status) {
@@ -6474,10 +6407,13 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   const bool inferInductiveStateEqualities =
       detail::shouldInferPdrInductiveStateEqualities(
           secEngine_, observedOutputSurface);
+  // IMC owns reachability through interpolation.  Do not spend pre-engine SAT
+  // effort mining cross-design internal state candidates for that engine.
   const bool inferResetBootstrapCandidateEqualities =
-      secEngine_ != SecEngine::Pdr ||
-      observedOutputSurface >= kMinPdrStartupCertificateOutputs ||
-      totalStateBits <= kMaxPdrResetBootstrapCandidateStates;
+      secEngine_ != SecEngine::Imc &&
+      (secEngine_ != SecEngine::Pdr ||
+       observedOutputSurface >= kMinPdrStartupCertificateOutputs ||
+       totalStateBits <= kMaxPdrResetBootstrapCandidateStates);
   AlignedSecInterface aligned = alignSecInterface(
       model0,
       model1,

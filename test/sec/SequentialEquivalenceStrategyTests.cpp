@@ -2168,6 +2168,64 @@ KInductionProblem buildCraigResetSecProblem(bool equivalent) {
   return problem;
 }
 
+BoolExpr* makeConjunctionOfVars(const std::vector<size_t>& symbols) {
+  BoolExpr* expr = BoolExpr::createTrue();
+  for (const size_t symbol : symbols) {
+    expr = BoolExpr::And(expr, BoolExpr::Var(symbol));
+  }
+  return BoolExpr::simplify(expr);
+}
+
+KInductionProblem buildWideSharedConeImcProblem(size_t outputCount) {
+  constexpr size_t kSharedSupportCount = 129;
+  constexpr size_t firstSharedSymbol = 2;
+  const size_t firstOutputSymbol = firstSharedSymbol + kSharedSupportCount;
+
+  KInductionProblem problem;
+  std::vector<size_t> sharedSupport;
+  sharedSupport.reserve(kSharedSupportCount);
+  problem.state0Symbols.reserve(kSharedSupportCount + outputCount);
+  problem.allSymbols.reserve(kSharedSupportCount + outputCount);
+  BoolExpr* init = BoolExpr::createTrue();
+  for (size_t index = 0; index < kSharedSupportCount + outputCount; ++index) {
+    const size_t symbol = firstSharedSymbol + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
+    problem.initialStateAssignments.push_back({symbol, false});
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+    if (index < kSharedSupportCount) {
+      sharedSupport.push_back(symbol);
+    }
+  }
+
+  BoolExpr* sharedCone = makeConjunctionOfVars(sharedSupport);
+  BoolExpr* property = BoolExpr::createTrue();
+  for (size_t output = 0; output < outputCount; ++output) {
+    const size_t outputSymbol = firstOutputSymbol + output;
+    problem.observedOutputNames.push_back("wide_out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(
+        BoolExpr::And(sharedCone, BoolExpr::Var(outputSymbol)));
+    problem.observedOutputExprs1.push_back(
+        BoolExpr::And(sharedCone, BoolExpr::Not(BoolExpr::Var(outputSymbol))));
+    property = BoolExpr::And(
+        property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0.back(),
+            problem.observedOutputExprs1.back()));
+  }
+
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.allSymbols.size();
+  problem.totalStateCount = problem.allSymbols.size();
+  problem.usesDualRailStateEncoding = true;
+  problem.property = BoolExpr::simplify(property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  return problem;
+}
+
 void addOneHotPdrStateSymbols(KInductionProblem& problem, size_t stateCount) {
   problem.state0Symbols.clear();
   problem.allSymbols.clear();
@@ -7996,6 +8054,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
       SecEngine::KInduction,
       /*observedOutputSurface=*/99));
+
+  EXPECT_FALSE(detail::shouldInferPdrInductiveStateEqualities(
+      SecEngine::Imc,
+      /*observedOutputSurface=*/1));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9129,6 +9191,48 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, IMCStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find("imc Craig projection round="), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcBatchesWideSharedOutputCones) {
+  const KInductionProblem problem = buildWideSharedConeImcProblem(3);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Each output individually exceeds the old 128-symbol IMC Craig support
+  // limit.  Since the support is almost identical, one classic IMC query over
+  // the three-output conjunction avoids rebuilding the same wide cone per bit.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig output batch first=0 end=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(result.status, IMCStatus::Different);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcReusesCraigInvariantAcrossWideBatches) {
+  const KInductionProblem problem = buildWideSharedConeImcProblem(9);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The first eight outputs produce an inductive Craig invariant.  The ninth
+  // output has the same reachable-state surface, so IMC can prove it by
+  // checking that saved invariant against the new bad predicate.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig output batch first=0 end=8"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig reused invariant for output batch first=8 end=9"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, IMCStatus::Equivalent);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -10537,86 +10641,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsImcDualRailSkipsLargeResidualSurfaceAfterCertificates) {
-  constexpr size_t kResidualOutputs = 6;
-  const auto testCase =
-      makeLargeDualRailResidualCaseForTest("imcDualRailLargeResidual",
-                                           kResidualOutputs);
-
-  const ScopedEnvVar residualOutputLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_OUTPUT_LIMIT", "4");
-  const ScopedEnvVar residualStateLimit(
-      "KEPLER_SEC_DUAL_RAIL_RESIDUAL_STATE_SYMBOL_LIMIT", "1");
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Imc,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // IMC uses the same residual policy so a different selected engine cannot
-  // regress swerv into the same giant per-output proof sweep.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
-  ASSERT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs);
-  EXPECT_NE(
-      result.skippedObservedOutputs.front().find("large rail-state surface"),
-      std::string::npos);
-  EXPECT_NE(
-      stderrOutput.find("dual-rail imc skipping large residual surface"),
-      std::string::npos);
-  EXPECT_EQ(
-      stderrOutput.find("dual-rail imc proving residual output batch"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsImcDualRailFindsMediumAllResidualMismatch) {
-  constexpr size_t kResidualOutputs = 65;
-  constexpr size_t kStateBitsPerDesign = 2049;
-  const auto testCase = makeLargeDualRailResidualCaseForTest(
-      "imcDualRailMediumAllResidual",
-      kResidualOutputs,
-      kStateBitsPerDesign,
-      /*includeImpliedOutput=*/false);
-
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Imc,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // A medium all-residual surface is still inside the batching cap.  The old
-  // proof-surface guard skipped this shape before IMC could see a real
-  // top-output mismatch, yielding zero coverage on riscv32i-style designs.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.coveredOutputs, kResidualOutputs);
-  EXPECT_EQ(result.totalOutputs, kResidualOutputs);
-  EXPECT_TRUE(result.skippedObservedOutputs.empty());
-  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
-  EXPECT_EQ(
-      stderrOutput.find("dual-rail imc skipping large residual surface"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsImcDualRailResidualDoesNotInvokeKInductionFallback) {
+       RunExtractedModelsImcDualRailRunsSelectedEngineDirectly) {
   constexpr size_t kResidualOutputs = 1;
   constexpr size_t kStateBitsPerDesign = 2049;
   const auto testCase = makeLargeDualRailResidualCaseForTest(
-      "imcDualRailNoKInductionFallback",
+      "imcDualRailDirectEngine",
       kResidualOutputs,
       kStateBitsPerDesign,
       /*includeImpliedOutput=*/false);
@@ -10634,12 +10663,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The selected SEC engine must remain IMC.  This high-state residual used to
-  // cross the >12-state guard and silently instantiate KInductionEngine instead.
+  // IMC must enter its own interpolation engine directly.  The old dual-rail
+  // residual helper batched/skipped outputs before IMCEngine saw the problem.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
   EXPECT_NE(
-      stderrOutput.find("dual-rail imc proving residual output batch size=1"),
+      stderrOutput.find("SEC diag: entering imc engine"),
       std::string::npos);
+  EXPECT_EQ(stderrOutput.find("dual-rail imc"), std::string::npos);
   EXPECT_EQ(stderrOutput.find("k-induction problem"), std::string::npos);
 }
 
@@ -11401,6 +11431,61 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(
       stderrOutput.find(
           "SEC diag: skipping inductive state equality mining for selected engine"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsImcSkipsPreEngineStateMining) {
+  const SignalKey out = makeSignalKey("imcNoPreMiningOut");
+  const SignalKey state0 = makeSignalKey("imcNoPreMiningState0");
+  const SignalKey state1 = makeSignalKey("imcNoPreMiningState1");
+
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model0.displayNameByKey.emplace(out, "imc_no_pre_mining_out[0]");
+  model1.displayNameByKey.emplace(out, "imc_no_pre_mining_out[0]");
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  addStateBitForTest(
+      model0,
+      state0,
+      /*symbol=*/2,
+      "imc_no_pre_mining_q0[0]",
+      BoolExpr::Var(2));
+  addStateBitForTest(
+      model1,
+      state1,
+      /*symbol=*/3,
+      "imc_no_pre_mining_q1[0]",
+      BoolExpr::Var(3));
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Classic IMC should start from interpolation/reachability, not from
+  // optional cross-design internal-state mining before the engine runs.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find(
+          "SEC diag: skipping inductive state equality mining for selected engine"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: skipping reset-bootstrap candidate equality mining"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("SEC diag: inferring inductive state equalities"),
       std::string::npos);
 }
 

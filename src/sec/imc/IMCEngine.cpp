@@ -4,8 +4,10 @@
 #include "imc/IMCEngine.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 
+#include "common/SecDiag.h"
 #include "kinduction/BaseCaseSolver.h"
 #include "imc/CraigInterpolatingModelChecker.h"
 #include "imc/ExactInterpolantSynthesizer.h"
@@ -26,6 +28,10 @@ namespace KEPLER_FORMAL::SEC {
 // 6. Return the first counterexample, the first proof depth, or inconclusive.
 
 namespace {
+
+constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
+    /*maxOutputBatchSize=*/8,
+    /*outputBatchSupportLimit=*/8192};
 
 void addComplementedStateRelations(
     SATSolverWrapper& solver,
@@ -205,29 +211,60 @@ void removeCrossDesignStateCandidates(KInductionProblem& problem) {
   problem.inductionPropertyAssumesInductiveStateEqualities = false;
 }
 
+struct ReusableCraigInvariant {
+  std::vector<InterpolantRegion> regions;
+  std::unordered_set<size_t> trackedStates;
+  size_t proofBound = 0;
+};
+
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK,
     size_t firstOutput,
-    size_t endOutput) {
+    size_t endOutput,
+    ReusableCraigInvariant& reusableInvariant) {
   KInductionProblem batchProblem = problem;
   configureOutputBatchProblem(
       batchProblem, problem, firstOutput, endOutput);
   removeCrossDesignStateCandidates(batchProblem);
+  emitSecDiag(
+      "SEC diag: imc Craig output batch first=", firstOutput,
+      " end=", endOutput,
+      " first_name=",
+      firstOutput < problem.observedOutputNames.size()
+          ? problem.observedOutputNames[firstOutput]
+          : std::string("<unknown>"),
+      " bad_support=", batchProblem.bad->getSupportVars().size());
+
+  if (!reusableInvariant.regions.empty() &&
+      craigInvariantExcludesBad(
+          batchProblem,
+          reusableInvariant.trackedStates,
+          reusableInvariant.regions)) {
+    emitSecDiag(
+        "SEC diag: imc Craig reused invariant for output batch first=",
+        firstOutput, " end=", endOutput);
+    return {IMCStatus::Equivalent, reusableInvariant.proofBound};
+  }
 
   CraigInterpolatingModelChecker checker(batchProblem);
   const CraigImcResult proof = checker.run(maxK);
   if (proof.status == CraigImcStatus::Equivalent) {
+    if (!proof.invariantRegions.empty()) {
+      reusableInvariant.regions = proof.invariantRegions;
+      reusableInvariant.trackedStates = proof.trackedStates;
+      reusableInvariant.proofBound = proof.iterations;
+    }
     return {IMCStatus::Equivalent, proof.iterations};
   }
 
   if (endOutput > firstOutput + 1) {
     const size_t midpoint = firstOutput + (endOutput - firstOutput) / 2;
     const IMCResult left = runCraigOutputRange(
-        problem, solverType, maxK, firstOutput, midpoint);
+        problem, solverType, maxK, firstOutput, midpoint, reusableInvariant);
     const IMCResult right = runCraigOutputRange(
-        problem, solverType, maxK, midpoint, endOutput);
+        problem, solverType, maxK, midpoint, endOutput, reusableInvariant);
     if (left.status == IMCStatus::Different) {
       return left;
     }
@@ -260,18 +297,19 @@ IMCResult runLargeDualRailCraigImc(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK) {
-  // Craig IMC derives proof regions from the selected output slice. Wide
-  // dual-rail bus batches quickly pull thousands of rail-state symbols into the
-  // projection, so keep this large-state path local without changing the shared
-  // batching policy used by KI/PDR.
+  // Craig IMC derives proof regions from the selected output slice. When one
+  // bus bit already pulls a wide rail-state cone, nearby bits usually reuse the
+  // same transition surface. Batch those bits here so classic IMC proves one
+  // conjunction instead of rebuilding the same Craig query per bit. This limit
+  // is IMC-local and does not change KI/PDR batching.
   const auto batches = buildSupportBoundedOutputBatches(
-      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/1,
-                                    /*outputBatchSupportLimit=*/128});
+      problem, kLargeDualRailCraigBatchingLimits);
   size_t proofBound = 0;
   bool inconclusive = false;
+  ReusableCraigInvariant reusableInvariant;
   for (const auto& [firstOutput, endOutput] : batches) {
     const IMCResult batch = runCraigOutputRange(
-        problem, solverType, maxK, firstOutput, endOutput);
+        problem, solverType, maxK, firstOutput, endOutput, reusableInvariant);
     if (batch.status == IMCStatus::Different) {
       return batch;
     }
