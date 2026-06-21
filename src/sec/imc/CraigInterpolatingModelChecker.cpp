@@ -388,7 +388,10 @@ TransitionEncodingResult addProjectedTransition(
   FrameFormulaEncoder encoder(
       solver, std::move(currentLits), /*createMissingLeaves=*/true);
   std::unordered_set<size_t> encodedTargets;
-  for (const size_t requested : trackedStates) {
+  // SAT search and Craig interpolation are sensitive to clause order. Keep the
+  // projected transition deterministic so repeated IMC batches do not depend on
+  // unordered_set insertion history.
+  for (const size_t requested : sortedSymbols(trackedStates)) {
     const size_t target =
         transitionTargetFor(requested, resolver, complementPrimary);
     if (!resolver.contains(target) || !encodedTargets.insert(target).second) {

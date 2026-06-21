@@ -9380,12 +9380,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const IMCResult result = engine.run(0);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The first sixteen-output window is limited by the caller-provided test
-  // cap below, so it proves all nine outputs in one Craig batch.
+  // The first eight outputs produce an inductive Craig invariant. Later
   // outputs have the same reachable-state surface, so IMC can prove them by
   // checking that saved invariant against the new bad predicate.
   EXPECT_NE(
-      stderrOutput.find("imc Craig output batch first=0 end=9"),
+      stderrOutput.find("imc Craig output batch first=0 end=8"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig reused invariant for output batch first=8 end=9"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, IMCStatus::Equivalent);

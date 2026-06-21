@@ -32,7 +32,7 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
-    /*maxOutputBatchSize=*/16,
+    /*maxOutputBatchSize=*/8,
     /*outputBatchSupportLimit=*/8192};
 
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
