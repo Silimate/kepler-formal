@@ -2168,6 +2168,34 @@ KInductionProblem buildCraigResetSecProblem(bool equivalent) {
   return problem;
 }
 
+InterpolantRegion makeStateLiteralCraigRegion(size_t symbol, bool positive) {
+  InterpolantRegion region;
+  region.type = InterpolantRegion::Type::Normal;
+  region.root = {true, symbol, positive};
+  return region;
+}
+
+InterpolantRegion makeStateEqualityCraigRegion(size_t lhs, size_t rhs) {
+  const RegionLiteral root = {false, 0, true};
+  const RegionLiteral notRoot = {false, 0, false};
+  const RegionLiteral lhsPositive = {true, lhs, true};
+  const RegionLiteral lhsNegative = {true, lhs, false};
+  const RegionLiteral rhsPositive = {true, rhs, true};
+  const RegionLiteral rhsNegative = {true, rhs, false};
+
+  InterpolantRegion region;
+  region.type = InterpolantRegion::Type::Normal;
+  region.auxiliaryCount = 1;
+  region.root = root;
+  region.definitionLiterals = {
+      notRoot, lhsNegative, rhsPositive,
+      notRoot, rhsNegative, lhsPositive,
+      root, lhsPositive, rhsPositive,
+      root, lhsNegative, rhsNegative};
+  region.definitionClauseEnds = {3, 6, 9, 12};
+  return region;
+}
+
 BoolExpr* makeConjunctionOfVars(const std::vector<size_t>& symbols) {
   BoolExpr* expr = BoolExpr::createTrue();
   for (const size_t symbol : symbols) {
@@ -9264,6 +9292,77 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_TRUE(simplified.definitionLiterals.front().isState);
   EXPECT_EQ(simplified.definitionLiterals.front().index, 10u);
   EXPECT_TRUE(simplified.definitionLiterals.front().positive);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcCompactsRedundantReachableRegions) {
+  constexpr size_t state = 10;
+  KInductionProblem problem;
+  problem.state0Symbols = {state};
+  problem.allSymbols = {state};
+  const std::unordered_set<size_t> trackedStates = {state};
+  const std::vector<InterpolantRegion> helperRegions;
+  std::vector<InterpolantRegion> reachableRegions = {
+      makeStateLiteralCraigRegion(state, true),
+      makeStateLiteralCraigRegion(state, true),
+      makeStateLiteralCraigRegion(state, false)};
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  const size_t removed = compactCraigReachableRegions(
+      problem,
+      trackedStates,
+      helperRegions,
+      reachableRegions,
+      /*compactionStart=*/1,
+      /*candidateLimit=*/4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The first x region is contained in the union of the duplicate x and !x.
+  // Removing only one region per pass keeps duplicate regions from justifying
+  // each other's deletion in the same compaction sweep.
+  EXPECT_EQ(removed, 1u);
+  ASSERT_EQ(reachableRegions.size(), 2u);
+  EXPECT_NE(
+      stderrOutput.find("imc Craig compacted reachable regions 3->2"),
+      std::string::npos)
+      << stderrOutput;
+  testing::internal::CaptureStderr();
+  EXPECT_EQ(
+      compactCraigReachableRegions(
+          problem,
+          trackedStates,
+          helperRegions,
+          reachableRegions,
+          /*compactionStart=*/1,
+          /*candidateLimit=*/4),
+      0u);
+  testing::internal::GetCapturedStderr();
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcStrengthensInterpolantsWithHelperInvariant) {
+  constexpr size_t state0 = 4;
+  constexpr size_t state1 = 5;
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+  const std::vector<InterpolantRegion> helperRegions = {
+      makeStateEqualityCraigRegion(state0, state1)};
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(problem, &helperRegions);
+  const CraigImcResult result = checker.run(4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // This exercises the IMC-local auxiliary-invariant injection path: a helper
+  // invariant that was already proven elsewhere is conjoined to new Craig
+  // interpolants so later Q-image queries do less work.
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig strengthened interpolant with helper invariant"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

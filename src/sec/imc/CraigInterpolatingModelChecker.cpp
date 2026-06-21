@@ -31,6 +31,10 @@ constexpr size_t kAuxiliaryInvariantSupportLimit = 256;
 constexpr size_t kCraigSemanticSimplifyClauseLimit = 256;
 constexpr size_t kCraigSemanticSimplifyVariableLimit = 128;
 constexpr size_t kCraigSubsumptionClauseLimit = 4096;
+constexpr size_t kCraigRegionCompactionStart = 8;
+constexpr size_t kCraigRegionCompactionCandidateLimit = 4;
+constexpr size_t kCraigHelperStrengthenClauseLimit = 512;
+constexpr size_t kCraigHelperStrengthenLiteralLimit = 4096;
 
 struct RegionVariableKey {
   bool isState = false;
@@ -76,6 +80,210 @@ size_t regionClauseCount(const InterpolantRegion& region) {
 
 size_t regionLiteralCount(const InterpolantRegion& region) {
   return region.definitionLiterals.size();
+}
+
+RegionLiteral auxiliaryRegionLiteral(size_t index, bool positive = true) {
+  RegionLiteral literal;
+  literal.isState = false;
+  literal.index = index;
+  literal.positive = positive;
+  return literal;
+}
+
+RegionLiteral invertedRegionLiteral(RegionLiteral literal) {
+  literal.positive = !literal.positive;
+  return literal;
+}
+
+RegionLiteral shiftedRegionLiteral(RegionLiteral literal, size_t auxiliaryOffset) {
+  if (!literal.isState) {
+    literal.index += auxiliaryOffset;
+  }
+  return literal;
+}
+
+void appendRegionClause(
+    InterpolantRegion& region,
+    const std::vector<RegionLiteral>& clause) {
+  region.definitionLiterals.insert(
+      region.definitionLiterals.end(), clause.begin(), clause.end());
+  region.definitionClauseEnds.push_back(region.definitionLiterals.size());
+}
+
+void appendBinaryRegionClause(
+    InterpolantRegion& region,
+    RegionLiteral lhs,
+    RegionLiteral rhs) {
+  region.definitionLiterals.push_back(lhs);
+  region.definitionLiterals.push_back(rhs);
+  region.definitionClauseEnds.push_back(region.definitionLiterals.size());
+}
+
+RegionLiteral appendAuxiliaryRegionRoot(InterpolantRegion& region) {
+  const RegionLiteral root =
+      auxiliaryRegionLiteral(region.auxiliaryCount, true);
+  ++region.auxiliaryCount;
+  return root;
+}
+
+RegionLiteral appendShiftedRegionDefinition(
+    InterpolantRegion& target,
+    const InterpolantRegion& source) {
+  const size_t auxiliaryOffset = target.auxiliaryCount;
+  size_t clauseBegin = 0;
+  for (const size_t clauseEnd : source.definitionClauseEnds) {
+    std::vector<RegionLiteral> clause;
+    clause.reserve(clauseEnd - clauseBegin);
+    for (size_t index = clauseBegin; index < clauseEnd; ++index) {
+      clause.push_back(
+          shiftedRegionLiteral(source.definitionLiterals[index],
+                               auxiliaryOffset));
+    }
+    appendRegionClause(target, clause);
+    clauseBegin = clauseEnd;
+  }
+  target.auxiliaryCount += source.auxiliaryCount;
+  return shiftedRegionLiteral(source.root, auxiliaryOffset);
+}
+
+bool helperInvariantStrengtheningWithinBudget(
+    const std::vector<InterpolantRegion>& helperInvariantRegions) {
+  size_t clauses = 0;
+  size_t literals = 0;
+  for (const InterpolantRegion& region : helperInvariantRegions) {
+    if (region.type != InterpolantRegion::Type::Normal) {
+      continue;
+    }
+    clauses += regionClauseCount(region);
+    literals += regionLiteralCount(region);
+    if (clauses > kCraigHelperStrengthenClauseLimit ||
+        literals > kCraigHelperStrengthenLiteralLimit) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<RegionLiteral> appendHelperInvariantUnionRoot(
+    InterpolantRegion& target,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
+    bool& unionIsFalse) {
+  std::vector<RegionLiteral> helperRoots;
+  helperRoots.reserve(helperInvariantRegions.size());
+  for (const InterpolantRegion& helper : helperInvariantRegions) {
+    if (helper.type == InterpolantRegion::Type::True) {
+      unionIsFalse = false;
+      return std::nullopt;
+    }
+    if (helper.type == InterpolantRegion::Type::False) {
+      continue;
+    }
+    helperRoots.push_back(appendShiftedRegionDefinition(target, helper));
+  }
+  if (helperRoots.empty()) {
+    unionIsFalse = true;
+    return std::nullopt;
+  }
+  unionIsFalse = false;
+  if (helperRoots.size() == 1) {
+    return helperRoots.front();
+  }
+
+  const RegionLiteral unionRoot = appendAuxiliaryRegionRoot(target);
+  std::vector<RegionLiteral> unionImpliesAnyHelper;
+  unionImpliesAnyHelper.reserve(helperRoots.size() + 1);
+  unionImpliesAnyHelper.push_back(invertedRegionLiteral(unionRoot));
+  for (const RegionLiteral& helperRoot : helperRoots) {
+    appendBinaryRegionClause(
+        target, invertedRegionLiteral(helperRoot), unionRoot);
+    unionImpliesAnyHelper.push_back(helperRoot);
+  }
+  appendRegionClause(target, unionImpliesAnyHelper);
+  return unionRoot;
+}
+
+InterpolantRegion conjoinRegionRoots(
+    InterpolantRegion region,
+    const std::vector<RegionLiteral>& roots) {
+  if (roots.empty()) {
+    return {InterpolantRegion::Type::True};
+  }
+  if (roots.size() == 1) {
+    region.root = roots.front();
+    region.type = InterpolantRegion::Type::Normal;
+    return region;
+  }
+
+  const RegionLiteral conjunctionRoot = appendAuxiliaryRegionRoot(region);
+  std::vector<RegionLiteral> childrenImplyConjunction;
+  childrenImplyConjunction.reserve(roots.size() + 1);
+  childrenImplyConjunction.push_back(conjunctionRoot);
+  for (const RegionLiteral& root : roots) {
+    appendBinaryRegionClause(
+        region, invertedRegionLiteral(conjunctionRoot), root);
+    childrenImplyConjunction.push_back(invertedRegionLiteral(root));
+  }
+  appendRegionClause(region, childrenImplyConjunction);
+  region.root = conjunctionRoot;
+  region.type = InterpolantRegion::Type::Normal;
+  return region;
+}
+
+InterpolantRegion strengthenRegionWithHelperInvariants(
+    InterpolantRegion region,
+    const std::vector<InterpolantRegion>& helperInvariantRegions) {
+  if (helperInvariantRegions.empty() ||
+      region.type == InterpolantRegion::Type::False) {
+    return region;
+  }
+  if (!helperInvariantStrengtheningWithinBudget(helperInvariantRegions)) {
+    emitSecDiag(
+        "SEC diag: imc Craig skipped helper strengthening over budget");
+    return region;
+  }
+
+  const size_t oldClauses = regionClauseCount(region);
+  const size_t oldLiterals = regionLiteralCount(region);
+  const bool sourceRegionWasTrue =
+      region.type == InterpolantRegion::Type::True;
+  std::vector<RegionLiteral> conjunctionRoots;
+  if (region.type == InterpolantRegion::Type::Normal) {
+    conjunctionRoots.push_back(region.root);
+  } else {
+    region = {InterpolantRegion::Type::Normal};
+  }
+
+  bool helperUnionIsFalse = false;
+  std::optional<RegionLiteral> helperUnionRoot =
+      appendHelperInvariantUnionRoot(
+          region, helperInvariantRegions, helperUnionIsFalse);
+  if (helperUnionIsFalse) {
+    return {InterpolantRegion::Type::False};
+  }
+  if (!helperUnionRoot.has_value()) {
+    if (sourceRegionWasTrue) {
+      return {InterpolantRegion::Type::True};
+    }
+    return region;
+  }
+  conjunctionRoots.push_back(*helperUnionRoot);
+
+  // This is the IMC analogue of auxiliary-invariant strengthening: after the
+  // Craig interpolant is derived, keep future Q-image queries inside the helper
+  // invariant that was already proved by an earlier Craig batch.
+  InterpolantRegion strengthened =
+      conjoinRegionRoots(std::move(region), conjunctionRoots);
+  emitSecDiag(
+      "SEC diag: imc Craig strengthened interpolant with helper invariant "
+      "clauses=",
+      oldClauses,
+      "->",
+      regionClauseCount(strengthened),
+      " literals=",
+      oldLiterals,
+      "->",
+      regionLiteralCount(strengthened));
+  return strengthened;
 }
 
 bool sameRegionVariable(const RegionLiteral& lhs, const RegionLiteral& rhs) {
@@ -1392,8 +1600,9 @@ FrontierResult deriveLookaheadFrontierRegion(
   }
 
   const auto interpolationStart = SteadyClock::now();
-  result.region =
-      convertInterpolant(solver.createCraigInterpolant(), stateByVariable);
+  result.region = strengthenRegionWithHelperInvariants(
+      convertInterpolant(solver.createCraigInterpolant(), stateByVariable),
+      helperInvariantRegions);
   result.interpolationElapsedMilliseconds =
       elapsedMilliseconds(interpolationStart);
   emitSecDiag(
@@ -1407,13 +1616,14 @@ FrontierResult deriveLookaheadFrontierRegion(
   return result;
 }
 
-bool regionContainedInReachableUnion(
+bool regionContainedInReachableUnionSkipping(
     const KInductionProblem& problem,
     const std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& reachableRegions,
     const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
-    const InterpolantRegion& candidateRegion) {
+    const InterpolantRegion& candidateRegion,
+    std::optional<size_t> skippedReachableRegion) {
   if (candidateRegion.type == InterpolantRegion::Type::False) {
     return true;
   }
@@ -1442,7 +1652,14 @@ bool regionContainedInReachableUnion(
       ClausePartition::A);
   solver.setCraigClausePartition(ClausePartition::A);
   solver.addClause({candidateRoot});
-  for (const InterpolantRegion& region : reachableRegions) {
+  size_t unionRegionCount = 0;
+  for (size_t regionIndex = 0; regionIndex < reachableRegions.size();
+       ++regionIndex) {
+    if (skippedReachableRegion.has_value() &&
+        *skippedReachableRegion == regionIndex) {
+      continue;
+    }
+    const InterpolantRegion& region = reachableRegions[regionIndex];
     const int root = instantiateRegion(
         solver,
         region,
@@ -1450,12 +1667,16 @@ bool regionContainedInReachableUnion(
         VariablePartition::ALocal,
         ClausePartition::A);
     solver.addClause({-root});
+    ++unionRegionCount;
+  }
+  if (unionRegionCount == 0) {
+    return false;
   }
 
   const auto solveStart = SteadyClock::now();
   emitSecDiag(
       "SEC diag: imc Craig fixedpoint containment begin regions=",
-      reachableRegions.size(),
+      unionRegionCount,
       " tracked_states=", trackedStates.size());
   const auto status = solver.solveStatus();
   emitSecDiag(
@@ -1463,6 +1684,78 @@ bool regionContainedInReachableUnion(
       static_cast<int>(status),
       " elapsed_ms=", elapsedMilliseconds(solveStart));
   return status == SATSolverWrapper::SolveStatus::Unsat;
+}
+
+bool regionContainedInReachableUnion(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& reachableRegions,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
+    const AuxiliaryStateInvariants& auxiliaryInvariants,
+    const InterpolantRegion& candidateRegion) {
+  return regionContainedInReachableUnionSkipping(
+      problem,
+      trackedStates,
+      reachableRegions,
+      helperInvariantRegions,
+      auxiliaryInvariants,
+      candidateRegion,
+      std::nullopt);
+}
+
+size_t compactReachableRegionsImpl(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
+    const AuxiliaryStateInvariants& auxiliaryInvariants,
+    std::vector<InterpolantRegion>& reachableRegions,
+    size_t compactionStart,
+    size_t candidateLimit) {
+  if (reachableRegions.size() < compactionStart || candidateLimit == 0) {
+    return 0;
+  }
+
+  size_t checked = 0;
+  std::optional<size_t> removedRegionIndex;
+  for (size_t regionIndex = 0;
+       regionIndex < reachableRegions.size() &&
+           checked < candidateLimit;
+       ++regionIndex) {
+    ++checked;
+    if (regionContainedInReachableUnionSkipping(
+            problem,
+            trackedStates,
+            reachableRegions,
+            helperInvariantRegions,
+            auxiliaryInvariants,
+            reachableRegions[regionIndex],
+            regionIndex)) {
+      removedRegionIndex = regionIndex;
+      break;
+    }
+  }
+  if (!removedRegionIndex.has_value()) {
+    return 0;
+  }
+
+  const size_t oldRegionCount = reachableRegions.size();
+  std::vector<InterpolantRegion> compactedRegions;
+  compactedRegions.reserve(oldRegionCount - 1);
+  for (size_t regionIndex = 0; regionIndex < reachableRegions.size();
+       ++regionIndex) {
+    if (regionIndex != *removedRegionIndex) {
+      compactedRegions.push_back(std::move(reachableRegions[regionIndex]));
+    }
+  }
+  reachableRegions = std::move(compactedRegions);
+  // Craig IMC's Q is a union of regions.  Removing a region already contained
+  // in the remaining union preserves Q while keeping later image queries from
+  // carrying stale roots indefinitely.
+  emitSecDiag(
+      "SEC diag: imc Craig compacted reachable regions ",
+      oldRegionCount, "->", reachableRegions.size(),
+      " checked=", checked);
+  return 1;
 }
 
 CraigImcResult runWithProjection(
@@ -1580,6 +1873,14 @@ CraigImcResult runWithProjection(
     // McMillan UNSAT branch: Q := Q OR I, then repeat the same loop without
     // increasing k.
     reachableRegions.push_back(nextRegion);
+    compactReachableRegionsImpl(
+        problem,
+        trackedStates,
+        helperInvariantRegions,
+        auxiliaryInvariants,
+        reachableRegions,
+        kCraigRegionCompactionStart,
+        kCraigRegionCompactionCandidateLimit);
     ++qExpansionPass;
   }
   return {
@@ -1592,6 +1893,23 @@ CraigImcResult runWithProjection(
 
 InterpolantRegion simplifyCraigInterpolantRegion(InterpolantRegion region) {
   return simplifyCraigInterpolantRegionImpl(std::move(region));
+}
+
+size_t compactCraigReachableRegions(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
+    std::vector<InterpolantRegion>& reachableRegions,
+    size_t compactionStart,
+    size_t candidateLimit) {
+  return compactReachableRegionsImpl(
+      problem,
+      trackedStates,
+      helperInvariantRegions,
+      /*auxiliaryInvariants=*/{},
+      reachableRegions,
+      compactionStart,
+      candidateLimit);
 }
 
 CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(

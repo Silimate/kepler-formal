@@ -77,6 +77,16 @@ struct CraigImcResult {
 // later Craig reachability iterations re-instantiate them.
 InterpolantRegion simplifyCraigInterpolantRegion(InterpolantRegion region);
 
+// Drops at most one reachable Craig region already contained in the remaining
+// union.  This preserves Q exactly while bounding later image queries.
+size_t compactCraigReachableRegions(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
+    std::vector<InterpolantRegion>& reachableRegions,
+    size_t compactionStart,
+    size_t candidateLimit);
+
 // Large-state IMC based on proof-derived Craig interpolants. Internal state in
 // the two designs remains independent; the only relational clauses retained by
 // this checker are clauses emitted by CaDiCaL's UNSAT proof. A SAT result is
