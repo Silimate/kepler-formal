@@ -32,7 +32,7 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
-    /*maxOutputBatchSize=*/8,
+    /*maxOutputBatchSize=*/16,
     /*outputBatchSupportLimit=*/8192};
 
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
@@ -360,11 +360,6 @@ struct ReusableCraigInvariant {
   size_t proofBound = 0;
 };
 
-CraigInvariantRegionSet reusableInvariantSet(
-    const ReusableCraigInvariant& invariant) {
-  return {invariant.trackedStates, invariant.regions};
-}
-
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -372,7 +367,6 @@ IMCResult runCraigOutputRange(
     size_t firstOutput,
     size_t endOutput,
     const std::unordered_set<size_t>& trackedStateSeeds,
-    std::vector<CraigInvariantRegionSet>& provenInvariants,
     ReusableCraigInvariant& reusableInvariant) {
   KInductionProblem batchProblem = problem;
   configureOutputBatchProblem(
@@ -399,16 +393,6 @@ IMCResult runCraigOutputRange(
         firstOutput, " end=", endOutput);
     return {IMCStatus::Equivalent, reusableInvariant.proofBound};
   }
-  if (craigInvariantConjunctionExcludesBad(
-          batchProblem,
-          provenInvariants)) {
-    emitSecDiag(
-        "SEC diag: imc Craig reused invariant intersection for output batch "
-        "first=",
-        firstOutput, " end=", endOutput,
-        " invariant_sets=", provenInvariants.size());
-    return {IMCStatus::Equivalent, reusableInvariant.proofBound};
-  }
 
   std::unordered_set<size_t> initialTrackedStates = trackedStateSeeds;
   if (!reusableInvariant.regions.empty()) {
@@ -428,7 +412,6 @@ IMCResult runCraigOutputRange(
       reusableInvariant.trackedStates = proof.trackedStates;
       reusableInvariant.proofBound =
           std::max(reusableInvariant.proofBound, proof.iterations);
-      provenInvariants.push_back(reusableInvariantSet(reusableInvariant));
     }
     return {IMCStatus::Equivalent, proof.iterations};
   }
@@ -454,7 +437,6 @@ IMCResult runCraigOutputRange(
         firstOutput,
         midpoint,
         trackedStateSeeds,
-        provenInvariants,
         reusableInvariant);
     const IMCResult right = runCraigOutputRange(
         problem,
@@ -463,7 +445,6 @@ IMCResult runCraigOutputRange(
         midpoint,
         endOutput,
         trackedStateSeeds,
-        provenInvariants,
         reusableInvariant);
     if (left.status == IMCStatus::Different) {
       return left;
@@ -514,7 +495,6 @@ IMCResult runLargeDualRailCraigImc(
   size_t proofBound = 0;
   bool inconclusive = false;
   ReusableCraigInvariant reusableInvariant;
-  std::vector<CraigInvariantRegionSet> provenInvariants;
   for (const CraigOutputBatchPlan& batchPlan : batches) {
     const IMCResult batchResult = runCraigOutputRange(
         problem,
@@ -523,7 +503,6 @@ IMCResult runLargeDualRailCraigImc(
         batchPlan.firstOutput,
         batchPlan.endOutput,
         batchPlan.trackedStateSeeds,
-        provenInvariants,
         reusableInvariant);
     if (batchResult.status == IMCStatus::Different) {
       return batchResult;

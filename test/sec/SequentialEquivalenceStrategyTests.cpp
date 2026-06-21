@@ -2298,25 +2298,6 @@ KInductionProblem buildProjectionSharedImcBatchProblem() {
   return problem;
 }
 
-InterpolantRegion makeStateLiteralRegion(size_t symbol, bool positive) {
-  InterpolantRegion region;
-  region.type = InterpolantRegion::Type::Normal;
-  region.root = RegionLiteral{/*isState=*/true, symbol, positive};
-  return region;
-}
-
-KInductionProblem buildTwoStateCraigInvariantReuseProblem() {
-  constexpr size_t stateA = 2;
-  constexpr size_t stateB = 3;
-
-  KInductionProblem problem;
-  problem.state0Symbols = {stateA, stateB};
-  problem.allSymbols = {stateA, stateB};
-  problem.totalStateCount = problem.state0Symbols.size();
-  problem.bad = BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB));
-  return problem;
-}
-
 void addOneHotPdrStateSymbols(KInductionProblem& problem, size_t stateCount) {
   problem.state0Symbols.clear();
   problem.allSymbols.clear();
@@ -9399,36 +9380,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const IMCResult result = engine.run(0);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The first eight outputs produce an inductive Craig invariant.  Later
+  // The first sixteen-output window is limited by the caller-provided test
+  // cap below, so it proves all nine outputs in one Craig batch.
   // outputs have the same reachable-state surface, so IMC can prove them by
   // checking that saved invariant against the new bad predicate.
   EXPECT_NE(
-      stderrOutput.find("imc Craig output batch first=0 end=8"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("imc Craig reused invariant for output batch first=8 end=9"),
+      stderrOutput.find("imc Craig output batch first=0 end=9"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, IMCStatus::Equivalent);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       CraigInvariantConjunctionCanExcludeSiblingBadPredicate) {
-  const KInductionProblem problem = buildTwoStateCraigInvariantReuseProblem();
-  CraigInvariantRegionSet excludesA;
-  excludesA.trackedStates = {2};
-  excludesA.regions = {makeStateLiteralRegion(2, false)};
-  CraigInvariantRegionSet excludesB;
-  excludesB.trackedStates = {3};
-  excludesB.regions = {makeStateLiteralRegion(3, false)};
-
-  // Neither proved invariant alone excludes bad = a || b. Their intersection
-  // does, which is exactly the safe reuse case for sibling output batches.
-  EXPECT_FALSE(craigInvariantConjunctionExcludesBad(problem, {excludesA}));
-  EXPECT_FALSE(craigInvariantConjunctionExcludesBad(problem, {excludesB}));
-  EXPECT_TRUE(
-      craigInvariantConjunctionExcludesBad(problem, {excludesA, excludesB}));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -1422,62 +1422,6 @@ bool craigInvariantExcludesBad(
   return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
 }
 
-bool craigInvariantConjunctionExcludesBad(
-    const KInductionProblem& problem,
-    const std::vector<CraigInvariantRegionSet>& invariantSets,
-    const AuxiliaryStateInvariants& auxiliaryStateInvariants) {
-  if (invariantSets.empty()) {
-    return false;
-  }
-
-  std::unordered_set<size_t> trackedStates;
-  for (const CraigInvariantRegionSet& invariantSet : invariantSets) {
-    if (invariantSet.regions.empty()) {
-      return false;
-    }
-    trackedStates.insert(
-        invariantSet.trackedStates.begin(), invariantSet.trackedStates.end());
-  }
-  const auto states = stateSymbolSet(problem);
-  for (const size_t symbol : problem.bad->getSupportVars()) {
-    if (states.contains(symbol)) {
-      trackedStates.insert(symbol);
-    }
-  }
-  closeSameDesignStateSemantics(problem, trackedStates);
-  if (trackedStates.empty()) {
-    return false;
-  }
-
-  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
-  auto stateLits = allocateLeafLits(
-      solver, sortedSymbols(trackedStates), VariablePartition::ALocal);
-  addStateSemantics(solver, problem, stateLits, ClausePartition::A);
-  addAuxiliaryStateInvariants(
-      solver, stateLits, auxiliaryStateInvariants, ClausePartition::A);
-
-  // Each set is one proved Craig invariant encoded as OR(regions).  Adding one
-  // clause per set conjoins those proved invariants; the intersection is still
-  // inductive and contains the reset frontier, but is often strong enough to
-  // rule out later sibling outputs without another image computation.
-  for (const CraigInvariantRegionSet& invariantSet : invariantSets) {
-    std::vector<int> regionRoots;
-    regionRoots.reserve(invariantSet.regions.size());
-    for (const InterpolantRegion& region : invariantSet.regions) {
-      regionRoots.push_back(instantiateRegion(
-          solver,
-          region,
-          stateLits,
-          VariablePartition::ALocal,
-          ClausePartition::A));
-    }
-    solver.setCraigClausePartition(ClausePartition::A);
-    solver.addClause(regionRoots);
-  }
-  addBadFormula(solver, problem, stateLits);
-  return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
-}
-
 std::unordered_set<size_t> computeCraigImcProjectionClosure(
     const KInductionProblem& problem,
     const std::unordered_set<size_t>& seedSupport) {

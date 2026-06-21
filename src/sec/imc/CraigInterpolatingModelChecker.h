@@ -50,11 +50,6 @@ struct CraigImcResult {
   std::unordered_set<size_t> trackedStates;
 };
 
-struct CraigInvariantRegionSet {
-  std::unordered_set<size_t> trackedStates;
-  std::vector<InterpolantRegion> regions;
-};
-
 // Large-state IMC based on proof-derived Craig interpolants. Internal state in
 // the two designs remains independent; the only relational clauses retained by
 // this checker are clauses emitted by CaDiCaL's UNSAT proof. A SAT result is
@@ -79,11 +74,6 @@ bool craigInvariantExcludesBad(
     const KInductionProblem& problem,
     const std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& invariantRegions,
-    const std::vector<std::pair<size_t, bool>>& auxiliaryStateInvariants = {});
-
-bool craigInvariantConjunctionExcludesBad(
-    const KInductionProblem& problem,
-    const std::vector<CraigInvariantRegionSet>& invariantSets,
     const std::vector<std::pair<size_t, bool>>& auxiliaryStateInvariants = {});
 
 // Computes the same state projection closure that Craig IMC will discover
