@@ -9403,6 +9403,31 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcOptionsUseDirectConcreteCubeSourceWithoutEnv) {
+  const KInductionProblem problem = buildCraigAuxiliaryConstantProblemForTest();
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Large dual-rail IMC turns this on through options so the exact bootstrap
+  // cube does not need to be synthesized as another Craig source region.
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("direct_cube_source=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcUsesProofDerivedCraigInterpolation) {
   const KInductionProblem problem = buildCraigResetSecProblem(true);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -9446,8 +9471,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // before SAT instead of spending minutes learning that the combined Craig
   // proof is too broad.
   ASSERT_EQ(batches.size(), 2u);
-  EXPECT_EQ(batches[0], std::make_pair(0u, 1u));
-  EXPECT_EQ(batches[1], std::make_pair(1u, 2u));
+  EXPECT_EQ(batches[0], std::make_pair(size_t{0}, size_t{1}));
+  EXPECT_EQ(batches[1], std::make_pair(size_t{1}, size_t{2}));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9463,7 +9488,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // same-design state surface. Batch them so future AES-like cases do not
   // rediscover that projection one bit at a time.
   ASSERT_EQ(batches.size(), 1u);
-  EXPECT_EQ(batches[0], std::make_pair(0u, 2u));
+  EXPECT_EQ(batches[0], std::make_pair(size_t{0}, size_t{2}));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9479,8 +9504,43 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // same-design transition surface. Keep the batch small before the first
   // interpolating SAT query creates a wide OR'ed bad predicate.
   ASSERT_EQ(batches.size(), 2u);
-  EXPECT_EQ(batches[0], std::make_pair(0u, 2u));
-  EXPECT_EQ(batches[1], std::make_pair(2u, 3u));
+  EXPECT_EQ(batches[0], std::make_pair(size_t{0}, size_t{2}));
+  EXPECT_EQ(batches[1], std::make_pair(size_t{2}, size_t{3}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcBudgetSplitUsesLocalChildSeeds) {
+  const KInductionProblem problem =
+      buildWideSharedConeImcProblem(/*outputCount=*/3,
+                                    /*sharedSupportCount=*/300);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  const ScopedEnvVar maxQPass("KEPLER_SEC_IMC_CRAIG_MAX_Q_PASS", "1");
+
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The scheduled parent may seed the shared sibling surface, but after a
+  // budget split each child must restart from only its own output range.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig output batch first=0 end=3 first_name=wide_out0 "
+          "bad_support=303 tracked_seed_states=303"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig splitting output batch after growth budget first=0 end=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig output batch first=0 end=1 first_name=wide_out0 "
+          "bad_support=301 tracked_seed_states=301"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(result.status, IMCStatus::Different);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9495,8 +9555,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Huge shared cones look batch-friendly by overlap alone, but the combined
   // bad predicate creates much larger Craig interpolants. Keep them single.
   ASSERT_EQ(batches.size(), 2u);
-  EXPECT_EQ(batches[0], std::make_pair(0u, 1u));
-  EXPECT_EQ(batches[1], std::make_pair(1u, 2u));
+  EXPECT_EQ(batches[0], std::make_pair(size_t{0}, size_t{1}));
+  EXPECT_EQ(batches[1], std::make_pair(size_t{1}, size_t{2}));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9513,6 +9573,35 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // reuse the saved region against the new bad predicate.
   EXPECT_NE(
       stderrOutput.find("imc Craig output batch first=0 end=8"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig reused invariant for output batch first=8 end=9"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, IMCStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcReusesSmallCraigInvariantAcrossBatches) {
+  const KInductionProblem problem =
+      buildWideSharedConeImcProblem(/*outputCount=*/9,
+                                    /*sharedSupportCount=*/8);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // AES proves a small control output before the text bus. Keep such Craig
+  // invariants available as helpers even when they track far fewer than the
+  // wide datapath-state threshold.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig output batch first=0 end=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig reused invariant for output batch first=1 end=2"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(

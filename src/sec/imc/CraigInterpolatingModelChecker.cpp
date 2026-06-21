@@ -52,7 +52,10 @@ bool imcAuxiliaryInvariantsEnabled() {
   return enabled != nullptr && std::strcmp(enabled, "1") == 0;
 }
 
-bool imcDirectCubeSourceEnabled() {
+bool imcDirectCubeSourceEnabled(bool forceEnabled) {
+  if (forceEnabled) {
+    return true;
+  }
   const char* enabled = std::getenv("KEPLER_SEC_IMC_DIRECT_CUBE_SOURCE");
   return enabled != nullptr && std::strcmp(enabled, "1") == 0;
 }
@@ -1206,6 +1209,7 @@ FrontierResult deriveLookaheadFrontierRegion(
     const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     bool sourceIncludesConcreteBootstrapCube,
+    bool directConcreteCubeSourceEnabled,
     size_t lookahead,
     size_t qExpansionPass) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
@@ -1255,7 +1259,8 @@ FrontierResult deriveLookaheadFrontierRegion(
   }
 
   const bool useDirectConcreteCube =
-      sourceIncludesConcreteBootstrapCube && imcDirectCubeSourceEnabled();
+      sourceIncludesConcreteBootstrapCube &&
+      imcDirectCubeSourceEnabled(directConcreteCubeSourceEnabled);
   if (useDirectConcreteCube) {
     std::vector<int> regionRoots;
     regionRoots.reserve(
@@ -1466,6 +1471,7 @@ CraigImcResult runWithProjection(
     const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     const CraigImcGrowthBudget& growthBudget,
+    bool directConcreteCubeSourceEnabled,
     size_t maxLookahead) {
   FrontierResult frontier;
   std::optional<InterpolantRegion> initialRegion =
@@ -1512,6 +1518,7 @@ CraigImcResult runWithProjection(
         helperInvariantRegions,
         auxiliaryInvariants,
         hasConcreteInitialCube,
+        directConcreteCubeSourceEnabled,
         lookahead,
         qExpansionPass);
     if (!frontier.region.has_value()) {
@@ -1635,6 +1642,7 @@ CraigImcResult CraigInterpolatingModelChecker::run(
             helperRegions,
             auxiliaryInvariants,
             options_.growthBudget,
+            options_.enableDirectConcreteCubeSource,
             maxLookahead);
     if (result.status == CraigImcStatus::Equivalent ||
         result.iterations != 0 ||

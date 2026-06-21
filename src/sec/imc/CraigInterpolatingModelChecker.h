@@ -59,6 +59,9 @@ struct CraigImcOptions {
   // bootstrap cube to prune Craig image queries. The environment switch still
   // enables the same path for direct checker experiments.
   bool enableAuxiliaryInvariants = false;
+  // Avoid reifying the concrete post-reset cube as an ordinary region when the
+  // caller already has an exact bootstrap assignment.
+  bool enableDirectConcreteCubeSource = false;
   CraigImcGrowthBudget growthBudget;
 };
 
