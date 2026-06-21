@@ -2259,6 +2259,64 @@ KInductionProblem buildDisjointWideConeImcBatchProblem() {
   return problem;
 }
 
+KInductionProblem buildProjectionSharedImcBatchProblem() {
+  constexpr size_t kSharedTransitionStates = 24;
+  constexpr size_t firstSymbol = 2;
+  const size_t firstOutputState = firstSymbol + kSharedTransitionStates;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols.reserve(kSharedTransitionStates + 2);
+  problem.allSymbols.reserve(kSharedTransitionStates + 2);
+
+  std::vector<size_t> sharedStates;
+  sharedStates.reserve(kSharedTransitionStates);
+  for (size_t index = 0; index < kSharedTransitionStates; ++index) {
+    const size_t symbol = firstSymbol + index;
+    sharedStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+
+  BoolExpr* sharedCone = makeConjunctionOfVars(sharedStates);
+  for (size_t output = 0; output < 2; ++output) {
+    const size_t outputState = firstOutputState + output;
+    problem.state0Symbols.push_back(outputState);
+    problem.allSymbols.push_back(outputState);
+    // Raw output supports are disjoint, but both next-state functions pull in
+    // the same transition cone. This mirrors AES text_out bits, where a
+    // one-bit bad predicate expands to a much larger shared Craig projection.
+    problem.transitions0.emplace_back(
+        outputState, sharedCone);
+    problem.observedOutputNames.push_back(
+        "projection_shared_out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(outputState));
+    problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
+  }
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+InterpolantRegion makeStateLiteralRegion(size_t symbol, bool positive) {
+  InterpolantRegion region;
+  region.type = InterpolantRegion::Type::Normal;
+  region.root = RegionLiteral{/*isState=*/true, symbol, positive};
+  return region;
+}
+
+KInductionProblem buildTwoStateCraigInvariantReuseProblem() {
+  constexpr size_t stateA = 2;
+  constexpr size_t stateB = 3;
+
+  KInductionProblem problem;
+  problem.state0Symbols = {stateA, stateB};
+  problem.allSymbols = {stateA, stateB};
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.bad = BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB));
+  return problem;
+}
+
 void addOneHotPdrStateSymbols(KInductionProblem& problem, size_t stateCount) {
   problem.state0Symbols.clear();
   problem.allSymbols.clear();
@@ -9301,6 +9359,22 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcBatchesOutputsWithSharedProjectionSurface) {
+  const KInductionProblem problem = buildProjectionSharedImcBatchProblem();
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/8,
+                                    /*outputBatchSupportLimit=*/8192});
+
+  // Raw output support alone would split these outputs because the bad
+  // predicates touch different output registers. Craig IMC pays for the
+  // transition projection, though, and both outputs expand to the same
+  // same-design state surface. Batch them so future AES-like cases do not
+  // rediscover that projection one bit at a time.
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_EQ(batches[0], std::make_pair(0u, 2u));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcPreSplitsHugeSharedOutputCones) {
   const KInductionProblem problem =
       buildWideSharedConeImcProblem(/*outputCount=*/2,
@@ -9325,18 +9399,36 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const IMCResult result = engine.run(0);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The first four outputs produce an inductive Craig invariant.  Later
+  // The first eight outputs produce an inductive Craig invariant.  Later
   // outputs have the same reachable-state surface, so IMC can prove them by
   // checking that saved invariant against the new bad predicate.
   EXPECT_NE(
-      stderrOutput.find("imc Craig output batch first=0 end=4"),
+      stderrOutput.find("imc Craig output batch first=0 end=8"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("imc Craig reused invariant for output batch first=4 end=8"),
+      stderrOutput.find("imc Craig reused invariant for output batch first=8 end=9"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, IMCStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigInvariantConjunctionCanExcludeSiblingBadPredicate) {
+  const KInductionProblem problem = buildTwoStateCraigInvariantReuseProblem();
+  CraigInvariantRegionSet excludesA;
+  excludesA.trackedStates = {2};
+  excludesA.regions = {makeStateLiteralRegion(2, false)};
+  CraigInvariantRegionSet excludesB;
+  excludesB.trackedStates = {3};
+  excludesB.regions = {makeStateLiteralRegion(3, false)};
+
+  // Neither proved invariant alone excludes bad = a || b. Their intersection
+  // does, which is exactly the safe reuse case for sibling output batches.
+  EXPECT_FALSE(craigInvariantConjunctionExcludesBad(problem, {excludesA}));
+  EXPECT_FALSE(craigInvariantConjunctionExcludesBad(problem, {excludesB}));
+  EXPECT_TRUE(
+      craigInvariantConjunctionExcludesBad(problem, {excludesA, excludesB}));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

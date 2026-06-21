@@ -337,6 +337,32 @@ size_t transitionTargetFor(
   return symbol;
 }
 
+std::unordered_set<size_t> transitionProjectionSupport(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& trackedStates) {
+  const auto states = stateSymbolSet(problem);
+  std::unordered_set<size_t> support = trackedStates;
+  for (const size_t requested : sortedSymbols(trackedStates)) {
+    const size_t target =
+        transitionTargetFor(requested, resolver, complementPrimary);
+    // addProjectedTransition only encodes targets that also have a next-state
+    // leaf in the current projection. Match that behavior here so batching
+    // sees the same closure Craig IMC will later refine toward.
+    if (!trackedStates.contains(target) || !resolver.contains(target)) {
+      continue;
+    }
+    for (const size_t symbol : resolver.support(target)) {
+      if (states.contains(symbol)) {
+        support.insert(symbol);
+      }
+    }
+  }
+  closeSameDesignStateSemantics(problem, support);
+  return support;
+}
+
 TransitionEncodingResult addProjectedTransition(
     SATSolverWrapper& solver,
     const KInductionProblem& problem,
@@ -503,6 +529,25 @@ int instantiateRegion(
     clauseBegin = clauseEnd;
   }
   return instantiateRegionLiteral(region.root, stateLits, auxiliaryLits);
+}
+
+void addRegionUnionConstraint(
+    SATSolverWrapper& solver,
+    const std::vector<InterpolantRegion>& regions,
+    const std::unordered_map<size_t, int>& stateLits,
+    VariablePartition auxiliaryVariablePartition,
+    ClausePartition clausePartition) {
+  if (regions.empty()) {
+    return;
+  }
+  std::vector<int> roots;
+  roots.reserve(regions.size());
+  for (const InterpolantRegion& region : regions) {
+    roots.push_back(instantiateRegion(
+        solver, region, stateLits, auxiliaryVariablePartition, clausePartition));
+  }
+  solver.setCraigClausePartition(clausePartition);
+  solver.addClause(roots);
 }
 
 std::optional<InterpolantRegion> buildConcreteAssignmentRegion(
@@ -812,6 +857,7 @@ FrontierResult deriveLookaheadFrontierRegion(
     const KInductionProblem& problem,
     const std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& reachableRegions,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     bool sourceIncludesConcreteBootstrapCube,
     size_t lookahead,
@@ -828,6 +874,26 @@ FrontierResult deriveLookaheadFrontierRegion(
   for (size_t frame = 2; frame <= lookahead; ++frame) {
     frameLits[frame] = allocateLeafLits(
         solver, tracked, VariablePartition::BLocal);
+  }
+  addRegionUnionConstraint(
+      solver,
+      helperInvariantRegions,
+      frameLits[0],
+      VariablePartition::ALocal,
+      ClausePartition::A);
+  addRegionUnionConstraint(
+      solver,
+      helperInvariantRegions,
+      frameLits[1],
+      VariablePartition::ALocal,
+      ClausePartition::A);
+  for (size_t frame = 2; frame <= lookahead; ++frame) {
+    addRegionUnionConstraint(
+        solver,
+        helperInvariantRegions,
+        frameLits[frame],
+        VariablePartition::BLocal,
+        ClausePartition::B);
   }
   addAuxiliaryStateInvariants(
       solver, frameLits[0], auxiliaryInvariants, ClausePartition::A);
@@ -988,15 +1054,34 @@ class IncrementalInductivenessChecker {
   IncrementalInductivenessChecker(
       const KInductionProblem& problem,
       const std::unordered_set<size_t>& trackedStates,
+      const std::vector<InterpolantRegion>& helperInvariantRegions,
       const AuxiliaryStateInvariants& auxiliaryInvariants)
       : problem_(problem),
         solver_(KEPLER_FORMAL::Config::SolverType::CADICAL),
         trackedStates_(trackedStates),
-        auxiliaryInvariants_(auxiliaryInvariants),
-        currentLits_(allocateLeafLits(
-            solver_, sortedSymbols(trackedStates), VariablePartition::ALocal)),
-        nextLits_(allocateLeafLits(
-            solver_, sortedSymbols(trackedStates), VariablePartition::ALocal)) {
+        helperInvariantRegions_(helperInvariantRegions),
+        auxiliaryInvariants_(auxiliaryInvariants) {
+    // This solver keeps growing after assumption solves. Disable CaDiCaL
+    // variable-introducing preprocessing so later interpolant auxiliaries do
+    // not collide with solver-internal extension variables.
+    solver_.configureForSecLocalBooleanCheck(trackedStates_.size());
+    const std::vector<size_t> tracked = sortedSymbols(trackedStates);
+    currentLits_ = allocateLeafLits(
+        solver_, tracked, VariablePartition::ALocal);
+    nextLits_ = allocateLeafLits(
+        solver_, tracked, VariablePartition::ALocal);
+    addRegionUnionConstraint(
+        solver_,
+        helperInvariantRegions_,
+        currentLits_,
+        VariablePartition::ALocal,
+        ClausePartition::A);
+    addRegionUnionConstraint(
+        solver_,
+        helperInvariantRegions_,
+        nextLits_,
+        VariablePartition::ALocal,
+        ClausePartition::A);
     addStateSemantics(
         solver_, problem_, currentLits_, ClausePartition::A);
     addAuxiliaryStateInvariants(
@@ -1100,6 +1185,7 @@ class IncrementalInductivenessChecker {
   const KInductionProblem& problem_;
   SATSolverWrapper solver_;
   const std::unordered_set<size_t>& trackedStates_;
+  const std::vector<InterpolantRegion>& helperInvariantRegions_;
   const AuxiliaryStateInvariants& auxiliaryInvariants_;
   std::unordered_map<size_t, int> currentLits_;
   std::unordered_map<size_t, int> nextLits_;
@@ -1110,6 +1196,7 @@ class IncrementalInductivenessChecker {
 CraigImcResult runWithProjection(
     const KInductionProblem& problem,
     std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     size_t maxIterations) {
   FrontierResult frontier;
@@ -1147,7 +1234,7 @@ CraigImcResult runWithProjection(
         hasConcreteInitialCube ? 0u : 1u};
   }
   IncrementalInductivenessChecker initialInductivenessChecker(
-      problem, trackedStates, auxiliaryInvariants);
+      problem, trackedStates, helperInvariantRegions, auxiliaryInvariants);
   if (initialInductivenessChecker.addRegionAndCheck(concreteInitialRegion)) {
     return {
         CraigImcStatus::Equivalent,
@@ -1171,7 +1258,7 @@ CraigImcResult runWithProjection(
   for (size_t lookahead = 1; lookahead <= maxIterations; ++lookahead) {
     std::vector<InterpolantRegion> reachableRegions{concreteInitialRegion};
     IncrementalInductivenessChecker inductivenessChecker(
-        problem, trackedStates, auxiliaryInvariants);
+        problem, trackedStates, helperInvariantRegions, auxiliaryInvariants);
     inductivenessChecker.addRegion(concreteInitialRegion);
 
     for (size_t iteration = 1; iteration <= maxIterations; ++iteration) {
@@ -1179,6 +1266,7 @@ CraigImcResult runWithProjection(
           problem,
           trackedStates,
           reachableRegions,
+          helperInvariantRegions,
           auxiliaryInvariants,
           hasConcreteInitialCube,
           lookahead,
@@ -1244,15 +1332,32 @@ CraigImcResult runWithProjection(
 }  // namespace
 
 CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(
-    const KInductionProblem& problem)
-    : problem_(problem) {}
+    const KInductionProblem& problem,
+    const std::vector<InterpolantRegion>* helperInvariantRegions,
+    const std::unordered_set<size_t>* initialTrackedStates)
+    : problem_(problem),
+      helperInvariantRegions_(helperInvariantRegions),
+      initialTrackedStates_(initialTrackedStates) {}
 
 CraigImcResult CraigInterpolatingModelChecker::run(
     size_t maxIterations) const {
   std::unordered_set<size_t> trackedStates = initialTrackedStates(problem_);
+  if (initialTrackedStates_ != nullptr) {
+    const auto states = stateSymbolSet(problem_);
+    for (const size_t symbol : *initialTrackedStates_) {
+      if (states.contains(symbol)) {
+        trackedStates.insert(symbol);
+      }
+    }
+    closeSameDesignStateSemantics(problem_, trackedStates);
+  }
   if (trackedStates.empty()) {
     return {CraigImcStatus::Equivalent, 0};
   }
+  const std::vector<InterpolantRegion> emptyHelperRegions;
+  const std::vector<InterpolantRegion>& helperRegions =
+      helperInvariantRegions_ == nullptr ? emptyHelperRegions
+                                         : *helperInvariantRegions_;
   const AuxiliaryStateInvariants auxiliaryInvariants =
       deriveAuxiliaryStateInvariants(problem_);
 
@@ -1266,7 +1371,11 @@ CraigImcResult CraigInterpolatingModelChecker::run(
         " states=", projectionSize);
     const CraigImcResult result =
         runWithProjection(
-            problem_, trackedStates, auxiliaryInvariants, maxIterations);
+            problem_,
+            trackedStates,
+            helperRegions,
+            auxiliaryInvariants,
+            maxIterations);
     if (result.status == CraigImcStatus::Equivalent ||
         result.iterations != 0 ||
         trackedStates.size() == projectionSize) {
@@ -1311,6 +1420,92 @@ bool craigInvariantExcludesBad(
   // query only asks whether the new top-level bad predicate intersects that
   // invariant; it does not add cross-design state assumptions.
   return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
+}
+
+bool craigInvariantConjunctionExcludesBad(
+    const KInductionProblem& problem,
+    const std::vector<CraigInvariantRegionSet>& invariantSets,
+    const AuxiliaryStateInvariants& auxiliaryStateInvariants) {
+  if (invariantSets.empty()) {
+    return false;
+  }
+
+  std::unordered_set<size_t> trackedStates;
+  for (const CraigInvariantRegionSet& invariantSet : invariantSets) {
+    if (invariantSet.regions.empty()) {
+      return false;
+    }
+    trackedStates.insert(
+        invariantSet.trackedStates.begin(), invariantSet.trackedStates.end());
+  }
+  const auto states = stateSymbolSet(problem);
+  for (const size_t symbol : problem.bad->getSupportVars()) {
+    if (states.contains(symbol)) {
+      trackedStates.insert(symbol);
+    }
+  }
+  closeSameDesignStateSemantics(problem, trackedStates);
+  if (trackedStates.empty()) {
+    return false;
+  }
+
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  auto stateLits = allocateLeafLits(
+      solver, sortedSymbols(trackedStates), VariablePartition::ALocal);
+  addStateSemantics(solver, problem, stateLits, ClausePartition::A);
+  addAuxiliaryStateInvariants(
+      solver, stateLits, auxiliaryStateInvariants, ClausePartition::A);
+
+  // Each set is one proved Craig invariant encoded as OR(regions).  Adding one
+  // clause per set conjoins those proved invariants; the intersection is still
+  // inductive and contains the reset frontier, but is often strong enough to
+  // rule out later sibling outputs without another image computation.
+  for (const CraigInvariantRegionSet& invariantSet : invariantSets) {
+    std::vector<int> regionRoots;
+    regionRoots.reserve(invariantSet.regions.size());
+    for (const InterpolantRegion& region : invariantSet.regions) {
+      regionRoots.push_back(instantiateRegion(
+          solver,
+          region,
+          stateLits,
+          VariablePartition::ALocal,
+          ClausePartition::A));
+    }
+    solver.setCraigClausePartition(ClausePartition::A);
+    solver.addClause(regionRoots);
+  }
+  addBadFormula(solver, problem, stateLits);
+  return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
+}
+
+std::unordered_set<size_t> computeCraigImcProjectionClosure(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& seedSupport) {
+  const auto states = stateSymbolSet(problem);
+  std::unordered_set<size_t> trackedStates;
+  for (const size_t symbol : seedSupport) {
+    if (states.contains(symbol)) {
+      trackedStates.insert(symbol);
+    }
+  }
+  closeSameDesignStateSemantics(problem, trackedStates);
+  if (trackedStates.empty()) {
+    return trackedStates;
+  }
+
+  const TransitionExprResolver resolver(problem);
+  const auto complementPrimary = primaryByComplement(problem);
+  for (size_t round = 0; round <= states.size(); ++round) {
+    const size_t oldSize = trackedStates.size();
+    const auto support = transitionProjectionSupport(
+        problem, resolver, complementPrimary, trackedStates);
+    trackedStates.insert(support.begin(), support.end());
+    closeSameDesignStateSemantics(problem, trackedStates);
+    if (trackedStates.size() == oldSize) {
+      break;
+    }
+  }
+  return trackedStates;
 }
 
 }  // namespace KEPLER_FORMAL::SEC

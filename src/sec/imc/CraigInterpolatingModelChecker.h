@@ -50,6 +50,11 @@ struct CraigImcResult {
   std::unordered_set<size_t> trackedStates;
 };
 
+struct CraigInvariantRegionSet {
+  std::unordered_set<size_t> trackedStates;
+  std::vector<InterpolantRegion> regions;
+};
+
 // Large-state IMC based on proof-derived Craig interpolants. Internal state in
 // the two designs remains independent; the only relational clauses retained by
 // this checker are clauses emitted by CaDiCaL's UNSAT proof. A SAT result is
@@ -57,12 +62,17 @@ struct CraigImcResult {
 // that counterexample instead of repeating the complete bounded sweep.
 class CraigInterpolatingModelChecker {
  public:
-  explicit CraigInterpolatingModelChecker(const KInductionProblem& problem);
+  explicit CraigInterpolatingModelChecker(
+      const KInductionProblem& problem,
+      const std::vector<InterpolantRegion>* helperInvariantRegions = nullptr,
+      const std::unordered_set<size_t>* initialTrackedStates = nullptr);
 
   CraigImcResult run(size_t maxIterations) const;
 
  private:
   const KInductionProblem& problem_;
+  const std::vector<InterpolantRegion>* helperInvariantRegions_;
+  const std::unordered_set<size_t>* initialTrackedStates_;
 };
 
 bool craigInvariantExcludesBad(
@@ -70,5 +80,18 @@ bool craigInvariantExcludesBad(
     const std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& invariantRegions,
     const std::vector<std::pair<size_t, bool>>& auxiliaryStateInvariants = {});
+
+bool craigInvariantConjunctionExcludesBad(
+    const KInductionProblem& problem,
+    const std::vector<CraigInvariantRegionSet>& invariantSets,
+    const std::vector<std::pair<size_t, bool>>& auxiliaryStateInvariants = {});
+
+// Computes the same state projection closure that Craig IMC will discover
+// before SAT solving. This is an IMC batching aid only: it follows each
+// design's own transition support and never relates internal state across
+// designs.
+std::unordered_set<size_t> computeCraigImcProjectionClosure(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& seedSupport);
 
 }  // namespace KEPLER_FORMAL::SEC

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "common/SecDiag.h"
@@ -31,13 +32,29 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
-    /*maxOutputBatchSize=*/4,
+    /*maxOutputBatchSize=*/8,
     /*outputBatchSupportLimit=*/8192};
 
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
 constexpr size_t kCraigBatchMinMarginalSupportLimit = 64;
 constexpr size_t kCraigBatchMarginalSupportDivisor = 10;
 constexpr size_t kCraigBatchSingleOutputSupportLimit = 1024;
+constexpr size_t kCraigReusableProjectionMinSupport = 256;
+constexpr size_t kReusableCraigInvariantMinTrackedStates = 128;
+struct CraigOutputSupport {
+  std::unordered_set<size_t> raw;
+  std::unordered_set<size_t> projection;
+};
+
+struct CraigOutputBatchPlan {
+  size_t firstOutput = 0;
+  size_t endOutput = 0;
+  std::unordered_set<size_t> trackedStateSeeds;
+};
+
+std::vector<CraigOutputBatchPlan> buildLargeDualRailCraigImcOutputBatchPlans(
+    const KInductionProblem& problem,
+    const OutputBatchingLimits& limits);
 
 std::unordered_set<size_t> observedOutputSupport(
     const KInductionProblem& problem,
@@ -51,6 +68,11 @@ std::unordered_set<size_t> observedOutputSupport(
   support.insert(support0.begin(), support0.end());
   support.insert(support1.begin(), support1.end());
   return support;
+}
+
+const std::unordered_set<size_t>& batchingSupport(
+    const CraigOutputSupport& support) {
+  return support.projection.empty() ? support.raw : support.projection;
 }
 
 size_t supportIntersectionSize(const std::unordered_set<size_t>& lhs,
@@ -71,6 +93,34 @@ void mergeSupport(std::unordered_set<size_t>& batchSupport,
   batchSupport.insert(outputSupport.begin(), outputSupport.end());
 }
 
+void mergeCraigOutputSupport(CraigOutputSupport& batchSupport,
+                             const CraigOutputSupport& outputSupport) {
+  mergeSupport(batchSupport.raw, outputSupport.raw);
+  mergeSupport(batchSupport.projection, outputSupport.projection);
+}
+
+bool supportCoversMostOf(const std::unordered_set<size_t>& reference,
+                         const std::unordered_set<size_t>& candidate) {
+  if (candidate.empty()) {
+    return reference.empty();
+  }
+  return (supportIntersectionSize(reference, candidate) * 100) /
+             candidate.size() >=
+         kCraigBatchMinOverlapPercent;
+}
+
+bool hasReusableProjectionSurface(const CraigOutputSupport& batchSupport,
+                                  const CraigOutputSupport& outputSupport) {
+  const auto& batchComparison = batchingSupport(batchSupport);
+  const auto& outputComparison = batchingSupport(outputSupport);
+  if (batchComparison.size() < kCraigReusableProjectionMinSupport ||
+      outputComparison.size() < kCraigReusableProjectionMinSupport) {
+    return false;
+  }
+  return supportCoversMostOf(batchComparison, outputComparison) &&
+         supportCoversMostOf(outputComparison, batchComparison);
+}
+
 size_t marginalSupportLimit(size_t batchSupportSize) {
   return std::max(
       kCraigBatchMinMarginalSupportLimit,
@@ -78,8 +128,8 @@ size_t marginalSupportLimit(size_t batchSupportSize) {
 }
 
 bool canAddOutputToCraigBatch(
-    const std::unordered_set<size_t>& batchSupport,
-    const std::unordered_set<size_t>& outputSupport,
+    const CraigOutputSupport& batchSupport,
+    const CraigOutputSupport& outputSupport,
     const OutputBatchingLimits& limits,
     size_t batchOutputCount,
     const char** rejectReason,
@@ -93,19 +143,23 @@ bool canAddOutputToCraigBatch(
     return false;
   }
   // Large frontiers make Craig interpolants grow with the OR'ed bad predicate;
-  // keep those outputs single even when their raw supports overlap heavily.
-  if (batchSupport.size() > kCraigBatchSingleOutputSupportLimit ||
-      outputSupport.size() > kCraigBatchSingleOutputSupportLimit) {
-    *rejectReason = "large_support";
+  // keep those raw-wide outputs single even when supports overlap heavily.
+  if (batchSupport.raw.size() > kCraigBatchSingleOutputSupportLimit ||
+      outputSupport.raw.size() > kCraigBatchSingleOutputSupportLimit) {
+    *rejectReason = "large_raw_support";
     return false;
   }
 
-  const size_t overlap = supportIntersectionSize(batchSupport, outputSupport);
-  const size_t marginal = outputSupport.size() - overlap;
-  const size_t unionSupport = batchSupport.size() + marginal;
+  const auto& batchComparison = batchingSupport(batchSupport);
+  const auto& outputComparison = batchingSupport(outputSupport);
+  const size_t overlap =
+      supportIntersectionSize(batchComparison, outputComparison);
+  const size_t marginal = outputComparison.size() - overlap;
+  const size_t unionSupport = batchComparison.size() + marginal;
   *marginalSupport = marginal;
-  *overlapPercent =
-      outputSupport.empty() ? 100 : (overlap * 100) / outputSupport.size();
+  *overlapPercent = outputComparison.empty()
+                        ? 100
+                        : (overlap * 100) / outputComparison.size();
 
   if (unionSupport > limits.outputBatchSupportLimit) {
     *rejectReason = "support_limit";
@@ -115,7 +169,7 @@ bool canAddOutputToCraigBatch(
     *rejectReason = "low_overlap";
     return false;
   }
-  if (marginal > marginalSupportLimit(batchSupport.size())) {
+  if (marginal > marginalSupportLimit(batchComparison.size())) {
     *rejectReason = "marginal_support";
     return false;
   }
@@ -306,12 +360,19 @@ struct ReusableCraigInvariant {
   size_t proofBound = 0;
 };
 
+CraigInvariantRegionSet reusableInvariantSet(
+    const ReusableCraigInvariant& invariant) {
+  return {invariant.trackedStates, invariant.regions};
+}
+
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK,
     size_t firstOutput,
     size_t endOutput,
+    const std::unordered_set<size_t>& trackedStateSeeds,
+    std::vector<CraigInvariantRegionSet>& provenInvariants,
     ReusableCraigInvariant& reusableInvariant) {
   KInductionProblem batchProblem = problem;
   configureOutputBatchProblem(
@@ -324,7 +385,9 @@ IMCResult runCraigOutputRange(
       firstOutput < problem.observedOutputNames.size()
           ? problem.observedOutputNames[firstOutput]
           : std::string("<unknown>"),
-      " bad_support=", batchProblem.bad->getSupportVars().size());
+      " bad_support=", batchProblem.bad->getSupportVars().size(),
+      " tracked_seed_states=", trackedStateSeeds.size(),
+      " helper_regions=", reusableInvariant.regions.size());
 
   if (!reusableInvariant.regions.empty() &&
       craigInvariantExcludesBad(
@@ -336,14 +399,36 @@ IMCResult runCraigOutputRange(
         firstOutput, " end=", endOutput);
     return {IMCStatus::Equivalent, reusableInvariant.proofBound};
   }
+  if (craigInvariantConjunctionExcludesBad(
+          batchProblem,
+          provenInvariants)) {
+    emitSecDiag(
+        "SEC diag: imc Craig reused invariant intersection for output batch "
+        "first=",
+        firstOutput, " end=", endOutput,
+        " invariant_sets=", provenInvariants.size());
+    return {IMCStatus::Equivalent, reusableInvariant.proofBound};
+  }
 
-  CraigInterpolatingModelChecker checker(batchProblem);
+  std::unordered_set<size_t> initialTrackedStates = trackedStateSeeds;
+  if (!reusableInvariant.regions.empty()) {
+    mergeSupport(initialTrackedStates, reusableInvariant.trackedStates);
+  }
+
+  CraigInterpolatingModelChecker checker(
+      batchProblem,
+      reusableInvariant.regions.empty() ? nullptr
+                                        : &reusableInvariant.regions,
+      initialTrackedStates.empty() ? nullptr : &initialTrackedStates);
   const CraigImcResult proof = checker.run(maxK);
   if (proof.status == CraigImcStatus::Equivalent) {
-    if (!proof.invariantRegions.empty()) {
+    if (!proof.invariantRegions.empty() &&
+        proof.trackedStates.size() >= kReusableCraigInvariantMinTrackedStates) {
       reusableInvariant.regions = proof.invariantRegions;
       reusableInvariant.trackedStates = proof.trackedStates;
-      reusableInvariant.proofBound = proof.iterations;
+      reusableInvariant.proofBound =
+          std::max(reusableInvariant.proofBound, proof.iterations);
+      provenInvariants.push_back(reusableInvariantSet(reusableInvariant));
     }
     return {IMCStatus::Equivalent, proof.iterations};
   }
@@ -363,9 +448,23 @@ IMCResult runCraigOutputRange(
   if (endOutput > firstOutput + 1) {
     const size_t midpoint = firstOutput + (endOutput - firstOutput) / 2;
     const IMCResult left = runCraigOutputRange(
-        problem, solverType, maxK, firstOutput, midpoint, reusableInvariant);
+        problem,
+        solverType,
+        maxK,
+        firstOutput,
+        midpoint,
+        trackedStateSeeds,
+        provenInvariants,
+        reusableInvariant);
     const IMCResult right = runCraigOutputRange(
-        problem, solverType, maxK, midpoint, endOutput, reusableInvariant);
+        problem,
+        solverType,
+        maxK,
+        midpoint,
+        endOutput,
+        trackedStateSeeds,
+        provenInvariants,
+        reusableInvariant);
     if (left.status == IMCStatus::Different) {
       return left;
     }
@@ -410,21 +509,29 @@ IMCResult runLargeDualRailCraigImc(
   // same transition surface. Batch those bits here so classic IMC proves one
   // conjunction instead of rebuilding the same Craig query per bit. This limit
   // is IMC-local and does not change KI/PDR batching.
-  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+  const auto batches = buildLargeDualRailCraigImcOutputBatchPlans(
       problem, kLargeDualRailCraigBatchingLimits);
   size_t proofBound = 0;
   bool inconclusive = false;
   ReusableCraigInvariant reusableInvariant;
-  for (const auto& [firstOutput, endOutput] : batches) {
-    const IMCResult batch = runCraigOutputRange(
-        problem, solverType, maxK, firstOutput, endOutput, reusableInvariant);
-    if (batch.status == IMCStatus::Different) {
-      return batch;
+  std::vector<CraigInvariantRegionSet> provenInvariants;
+  for (const CraigOutputBatchPlan& batchPlan : batches) {
+    const IMCResult batchResult = runCraigOutputRange(
+        problem,
+        solverType,
+        maxK,
+        batchPlan.firstOutput,
+        batchPlan.endOutput,
+        batchPlan.trackedStateSeeds,
+        provenInvariants,
+        reusableInvariant);
+    if (batchResult.status == IMCStatus::Different) {
+      return batchResult;
     }
-    if (batch.status == IMCStatus::Inconclusive) {
+    if (batchResult.status == IMCStatus::Inconclusive) {
       inconclusive = true;
     } else {
-      proofBound = std::max(proofBound, batch.bound);
+      proofBound = std::max(proofBound, batchResult.bound);
     }
   }
   return inconclusive ? IMCResult{IMCStatus::Inconclusive, maxK}
@@ -441,23 +548,25 @@ bool shouldBuildExplicitImcInitFormula(const KInductionProblem& problem) {
   return problem.totalStateCount <= 12;
 }
 
-}  // namespace
-
-std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
+std::vector<CraigOutputBatchPlan> buildLargeDualRailCraigImcOutputBatchPlans(
     const KInductionProblem& problem,
     const OutputBatchingLimits& limits) {
-  std::vector<std::unordered_set<size_t>> outputSupports;
+  std::vector<CraigOutputSupport> outputSupports;
   outputSupports.reserve(problem.observedOutputExprs0.size());
   for (size_t output = 0; output < problem.observedOutputExprs0.size();
        ++output) {
-    outputSupports.push_back(observedOutputSupport(problem, output));
+    CraigOutputSupport support;
+    support.raw = observedOutputSupport(problem, output);
+    support.projection =
+        computeCraigImcProjectionClosure(problem, support.raw);
+    outputSupports.push_back(std::move(support));
   }
 
-  std::vector<std::pair<size_t, size_t>> batches;
+  std::vector<CraigOutputBatchPlan> batches;
   size_t firstOutput = 0;
   while (firstOutput < outputSupports.size()) {
     size_t endOutput = firstOutput;
-    std::unordered_set<size_t> batchSupport;
+    CraigOutputSupport batchSupport;
     while (endOutput < outputSupports.size()) {
       const char* rejectReason = nullptr;
       size_t marginalSupport = 0;
@@ -475,22 +584,56 @@ std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
             "SEC diag: imc Craig batch closes before output=", endOutput,
             " reason=", rejectReason,
             " batch_first=", firstOutput,
-            " batch_support=", batchSupport.size(),
-            " output_support=", outputSupports[endOutput].size(),
+            " batch_support=", batchingSupport(batchSupport).size(),
+            " output_support=", batchingSupport(outputSupports[endOutput]).size(),
+            " batch_raw_support=", batchSupport.raw.size(),
+            " output_raw_support=", outputSupports[endOutput].raw.size(),
+            " batch_projection_support=", batchSupport.projection.size(),
+            " output_projection_support=",
+            outputSupports[endOutput].projection.size(),
             " marginal_support=", marginalSupport,
             " overlap_percent=", overlapPercent);
         break;
       }
-      mergeSupport(batchSupport, outputSupports[endOutput]);
+      mergeCraigOutputSupport(batchSupport, outputSupports[endOutput]);
       ++endOutput;
     }
     if (endOutput == firstOutput) {
       // Always make progress: an oversized single output still deserves one
       // exact IMC attempt rather than being silently skipped by the scheduler.
       ++endOutput;  // LCOV_EXCL_LINE
+      mergeCraigOutputSupport(batchSupport, outputSupports[firstOutput]);
     }
-    batches.emplace_back(firstOutput, endOutput);
+    CraigOutputBatchPlan plan;
+    plan.firstOutput = firstOutput;
+    plan.endOutput = endOutput;
+    for (const CraigOutputSupport& outputSupport : outputSupports) {
+      if (!hasReusableProjectionSurface(batchSupport, outputSupport)) {
+        continue;
+      }
+      // Seed the batch with the same-design state surface shared by sibling
+      // outputs. This avoids rediscovering the AES datapath projection through
+      // repeated SAT refinements; it does not relate internals across designs.
+      mergeSupport(plan.trackedStateSeeds, outputSupport.raw);
+      mergeSupport(plan.trackedStateSeeds, outputSupport.projection);
+    }
+    batches.push_back(std::move(plan));
     firstOutput = endOutput;
+  }
+  return batches;
+}
+
+}  // namespace
+
+std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
+    const KInductionProblem& problem,
+    const OutputBatchingLimits& limits) {
+  const auto plans = buildLargeDualRailCraigImcOutputBatchPlans(
+      problem, limits);
+  std::vector<std::pair<size_t, size_t>> batches;
+  batches.reserve(plans.size());
+  for (const CraigOutputBatchPlan& plan : plans) {
+    batches.emplace_back(plan.firstOutput, plan.endOutput);
   }
   return batches;
 }
