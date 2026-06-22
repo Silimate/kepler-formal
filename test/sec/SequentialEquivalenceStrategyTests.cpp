@@ -9500,6 +9500,58 @@ KInductionProblem buildCraigAuxiliaryConstantProblemForTest() {
   return problem;
 }
 
+KInductionProblem buildCraigAuxiliaryEqualityProblemForTest() {
+  constexpr size_t lhsState = 2;
+  constexpr size_t rhsState = 3;
+  constexpr size_t unrelatedState = 4;
+  constexpr size_t input = 5;
+
+  KInductionProblem problem;
+  problem.inputSymbols = {input};
+  problem.state0Symbols = {lhsState, rhsState, unrelatedState};
+  problem.allSymbols = {lhsState, rhsState, unrelatedState, input};
+  problem.resetBootstrapCycles = 1;
+  problem.bootstrapStateAssignments = {
+      {lhsState, false},
+      {rhsState, false},
+      {unrelatedState, false}};
+  problem.transitions0 = {
+      {lhsState, BoolExpr::Var(input)},
+      {rhsState, BoolExpr::Var(input)},
+      {unrelatedState, BoolExpr::Not(BoolExpr::Var(input))}};
+  problem.property =
+      makeEqualityExpr(BoolExpr::Var(lhsState), BoolExpr::Var(rhsState));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigCrossDesignAuxiliaryEqualityProblemForTest() {
+  constexpr size_t state0 = 2;
+  constexpr size_t state1 = 3;
+  constexpr size_t input = 4;
+
+  KInductionProblem problem;
+  problem.inputSymbols = {input};
+  problem.state0Symbols = {state0};
+  problem.state1Symbols = {state1};
+  problem.allSymbols = {state0, state1, input};
+  problem.resetBootstrapCycles = 1;
+  problem.bootstrapStateAssignments = {{state0, false}, {state1, false}};
+  problem.transitions0 = {{state0, BoolExpr::Var(input)}};
+  problem.transitions1 = {{state1, BoolExpr::Var(input)}};
+  problem.property =
+      makeEqualityExpr(BoolExpr::Var(state0), BoolExpr::Var(state1));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount =
+      problem.state0Symbols.size() + problem.state1Symbols.size();
+  return problem;
+}
+
 TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcAuxiliaryConstantsRequireTransitionProof) {
   const KInductionProblem problem = buildCraigAuxiliaryConstantProblemForTest();
@@ -9516,6 +9568,64 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // an unconstrained input and must not become an auxiliary invariant.
   EXPECT_NE(
       stderrOutput.find("imc Craig auxiliary constants=1 candidates=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcAuxiliaryEqualitiesStayWithinOneDesign) {
+  const KInductionProblem problem =
+      buildCraigCrossDesignAuxiliaryEqualityProblemForTest();
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The two states have the same reset value and next expression, but they are
+  // in different designs. Craig IMC must not promote that into a relation.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig auxiliary constants=0 candidates=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("equalities=0 equality_candidates=0"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcPromotesTransitionProvenSameDesignEqualities) {
+  const KInductionProblem problem = buildCraigAuxiliaryEqualityProblemForTest();
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // lhsState and rhsState are not constants, but their equality is inductive.
+  // unrelatedState shares the reset value but not the next function.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig auxiliary constants=0 candidates=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("equalities=1 equality_candidates=1"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, CraigImcStatus::Equivalent);

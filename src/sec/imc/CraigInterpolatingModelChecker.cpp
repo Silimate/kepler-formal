@@ -25,15 +25,24 @@ namespace {
 using VariablePartition = SATSolverWrapper::CraigVariablePartition;
 using ClausePartition = SATSolverWrapper::CraigClausePartition;
 using SteadyClock = std::chrono::steady_clock;
-using AuxiliaryStateInvariants = std::vector<std::pair<size_t, bool>>;
 
 constexpr size_t kAuxiliaryInvariantSupportLimit = 256;
+constexpr size_t kAuxiliaryEqualityCandidateLimit = 1024;
 constexpr size_t kCraigSemanticSimplifyClauseLimit = 256;
 constexpr size_t kCraigSemanticSimplifyVariableLimit = 128;
 constexpr size_t kCraigSubsumptionClauseLimit = 4096;
 constexpr size_t kCraigRegionCompactionStart = 8;
 constexpr size_t kCraigRegionCompactionCandidateLimit = 4;
 constexpr size_t kCraigModelGuidedProjectionRefinementLimit = 64;
+
+struct AuxiliaryStateInvariants {
+  std::vector<std::pair<size_t, bool>> constants;
+  std::vector<std::pair<size_t, size_t>> equalities;
+
+  bool empty() const {
+    return constants.empty() && equalities.empty();
+  }
+};
 
 struct RegionVariableKey {
   bool isState = false;
@@ -47,6 +56,22 @@ struct RegionVariableKey {
 struct RegionVariableKeyHash {
   size_t operator()(const RegionVariableKey& key) const {
     return std::hash<size_t>{}((key.index << 1) ^ (key.isState ? 1u : 0u));
+  }
+};
+
+struct ExprBootstrapValueKey {
+  BoolExpr* expr = nullptr;
+  bool value = false;
+
+  bool operator==(const ExprBootstrapValueKey& other) const {
+    return expr == other.expr && value == other.value;
+  }
+};
+
+struct ExprBootstrapValueKeyHash {
+  size_t operator()(const ExprBootstrapValueKey& key) const {
+    return std::hash<BoolExpr*>{}(key.expr) ^
+           (key.value ? 0x9e3779b97f4a7c15ULL : 0ULL);
   }
 };
 
@@ -454,10 +479,19 @@ void addAuxiliaryStateInvariants(
     return;
   }
   solver.setCraigClausePartition(partition);
-  for (const auto& [symbol, value] : invariants) {
+  for (const auto& [symbol, value] : invariants.constants) {
     if (const auto leaf = leaves.find(symbol); leaf != leaves.end()) {
       solver.addClause({value ? leaf->second : -leaf->second});
     }
+  }
+  for (const auto& [lhsSymbol, rhsSymbol] : invariants.equalities) {
+    const auto lhs = leaves.find(lhsSymbol);
+    const auto rhs = leaves.find(rhsSymbol);
+    if (lhs == leaves.end() || rhs == leaves.end()) {
+      continue;
+    }
+    addLiteralEquivalenceForPartition(
+        solver, lhs->second, rhs->second, partition);
   }
 }
 
@@ -475,11 +509,15 @@ std::unordered_map<size_t, bool> bootstrapStateConstants(
 }
 
 bool transitionPreservesStateConstant(
+    const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
     size_t symbol,
     bool value,
     const std::unordered_map<size_t, bool>& constants) {
   if (!resolver.contains(symbol)) {
+    return false;
+  }
+  if (resolver.at(symbol) == nullptr) {
     return false;
   }
   const auto& support = resolver.support(symbol);
@@ -496,17 +534,160 @@ bool transitionPreservesStateConstant(
     }
   }
 
-  for (const auto& [constantSymbol, constantValue] : constants) {
-    const auto leaf = leaves.find(constantSymbol);
-    if (leaf != leaves.end()) {
-      solver.addClause({constantValue ? leaf->second : -leaf->second});
-    }
-  }
+  AuxiliaryStateInvariants assumptions;
+  assumptions.constants.assign(constants.begin(), constants.end());
+  addStateSemantics(solver, problem, leaves, ClausePartition::A);
+  addAuxiliaryStateInvariants(
+      solver, leaves, assumptions, ClausePartition::A);
 
   FrameFormulaEncoder encoder(
       solver, std::move(leaves), /*createMissingLeaves=*/true);
   const int nextValue = encoder.encode(resolver.at(symbol));
   solver.addClause({value ? -nextValue : nextValue});
+  return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
+}
+
+bool addTransitionSupportWithinLimit(
+    const TransitionExprResolver& resolver,
+    size_t symbol,
+    std::unordered_set<size_t>& support) {
+  if (!resolver.contains(symbol)) {
+    return false;
+  }
+  for (const size_t supportSymbol : resolver.support(symbol)) {
+    if (supportSymbol < 2) {
+      continue;
+    }
+    support.insert(supportSymbol);
+    if (support.size() > kAuxiliaryInvariantSupportLimit) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::pair<size_t, size_t> canonicalStateEqualityPair(size_t lhs, size_t rhs) {
+  return lhs < rhs ? std::make_pair(lhs, rhs) : std::make_pair(rhs, lhs);
+}
+
+bool bothStatesHaveSameConstant(
+    const std::unordered_map<size_t, bool>& constants,
+    size_t lhs,
+    size_t rhs) {
+  const auto lhsIt = constants.find(lhs);
+  const auto rhsIt = constants.find(rhs);
+  return lhsIt != constants.end() && rhsIt != constants.end() &&
+         lhsIt->second == rhsIt->second;
+}
+
+size_t appendAuxiliaryEqualityCandidatesForDesign(
+    const TransitionExprResolver& resolver,
+    const std::vector<size_t>& designStates,
+    const std::unordered_map<size_t, bool>& bootstrapValues,
+    const std::unordered_map<size_t, bool>& constants,
+    std::vector<std::pair<size_t, size_t>>& candidates) {
+  std::unordered_map<
+      ExprBootstrapValueKey,
+      std::vector<size_t>,
+      ExprBootstrapValueKeyHash>
+      buckets;
+  for (const size_t symbol : designStates) {
+    const auto value = bootstrapValues.find(symbol);
+    if (value == bootstrapValues.end() || !resolver.contains(symbol)) {
+      continue;
+    }
+    if (resolver.support(symbol).size() > kAuxiliaryInvariantSupportLimit) {
+      continue;
+    }
+    BoolExpr* expr = resolver.at(symbol);
+    if (expr == nullptr) {
+      continue;
+    }
+    buckets[{expr, value->second}].push_back(symbol);
+  }
+
+  size_t candidateCount = 0;
+  for (auto& [key, bucket] : buckets) {
+    (void)key;
+    if (bucket.size() < 2) {
+      continue;
+    }
+    std::sort(bucket.begin(), bucket.end());
+    const size_t anchor = bucket.front();
+    for (size_t index = 1; index < bucket.size(); ++index) {
+      if (bothStatesHaveSameConstant(constants, anchor, bucket[index])) {
+        continue;
+      }
+      ++candidateCount;
+      if (candidates.size() < kAuxiliaryEqualityCandidateLimit) {
+        candidates.push_back(
+            canonicalStateEqualityPair(anchor, bucket[index]));
+      }
+    }
+  }
+  return candidateCount;
+}
+
+size_t appendAuxiliaryEqualityCandidates(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, bool>& bootstrapValues,
+    const std::unordered_map<size_t, bool>& constants,
+    std::vector<std::pair<size_t, size_t>>& candidates) {
+  size_t candidateCount = appendAuxiliaryEqualityCandidatesForDesign(
+      resolver, problem.state0Symbols, bootstrapValues, constants, candidates);
+  candidateCount += appendAuxiliaryEqualityCandidatesForDesign(
+      resolver, problem.state1Symbols, bootstrapValues, constants, candidates);
+  std::sort(candidates.begin(), candidates.end());
+  candidates.erase(
+      std::unique(candidates.begin(), candidates.end()), candidates.end());
+  return candidateCount;
+}
+
+bool transitionPreservesStateEquality(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    size_t lhsSymbol,
+    size_t rhsSymbol,
+    const std::unordered_map<size_t, bool>& constants,
+    const std::vector<std::pair<size_t, size_t>>& equalities) {
+  if (lhsSymbol == rhsSymbol) {
+    return true;
+  }
+  if (!resolver.contains(lhsSymbol) || !resolver.contains(rhsSymbol)) {
+    return false;
+  }
+  BoolExpr* lhsExpr = resolver.at(lhsSymbol);
+  BoolExpr* rhsExpr = resolver.at(rhsSymbol);
+  if (lhsExpr == nullptr || rhsExpr == nullptr) {
+    return false;
+  }
+  std::unordered_set<size_t> support;
+  if (!addTransitionSupportWithinLimit(resolver, lhsSymbol, support) ||
+      !addTransitionSupportWithinLimit(resolver, rhsSymbol, support)) {
+    return false;
+  }
+
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto leaves = allocateLeafLits(
+      solver, sortedSymbols(support), VariablePartition::ALocal);
+
+  AuxiliaryStateInvariants assumptions;
+  assumptions.constants.assign(constants.begin(), constants.end());
+  assumptions.equalities = equalities;
+  // Auxiliary equalities are only trusted after this local induction check.
+  // Same-design rail semantics are unconditional, so the proof may rely on
+  // them just like every Craig image/fixed-point query does.
+  addStateSemantics(solver, problem, leaves, ClausePartition::A);
+  addAuxiliaryStateInvariants(
+      solver, leaves, assumptions, ClausePartition::A);
+
+  FrameFormulaEncoder encoder(
+      solver, std::move(leaves), /*createMissingLeaves=*/true);
+  const int lhsNext = encoder.encode(lhsExpr);
+  const int rhsNext = encoder.encode(rhsExpr);
+  solver.addClause({lhsNext, rhsNext});
+  solver.addClause({-lhsNext, -rhsNext});
   return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
 }
 
@@ -526,7 +707,7 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
     changed = false;
     for (auto it = constants.begin(); it != constants.end();) {
       if (transitionPreservesStateConstant(
-              resolver, it->first, it->second, constants)) {
+              problem, resolver, it->first, it->second, constants)) {
         ++it;
         continue;
       }
@@ -535,12 +716,41 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
     }
   }
 
-  AuxiliaryStateInvariants invariants(
-      constants.begin(), constants.end());
-  std::sort(invariants.begin(), invariants.end());
+  std::vector<std::pair<size_t, size_t>> equalityCandidates;
+  const size_t equalityCandidateCount = appendAuxiliaryEqualityCandidates(
+      problem, resolver, bootstrapStateConstants(problem), constants,
+      equalityCandidates);
+  std::vector<std::pair<size_t, size_t>> equalities = equalityCandidates;
+  changed = true;
+  while (changed) {
+    changed = false;
+    for (auto it = equalities.begin(); it != equalities.end();) {
+      if (transitionPreservesStateEquality(
+              problem,
+              resolver,
+              it->first,
+              it->second,
+              constants,
+              equalities)) {
+        ++it;
+        continue;
+      }
+      it = equalities.erase(it);
+      changed = true;
+    }
+  }
+
+  AuxiliaryStateInvariants invariants;
+  invariants.constants.assign(constants.begin(), constants.end());
+  std::sort(invariants.constants.begin(), invariants.constants.end());
+  invariants.equalities = std::move(equalities);
+  std::sort(invariants.equalities.begin(), invariants.equalities.end());
   emitSecDiag(
-      "SEC diag: imc Craig auxiliary constants=", invariants.size(),
+      "SEC diag: imc Craig auxiliary constants=", invariants.constants.size(),
       " candidates=", candidateCount,
+      " equalities=", invariants.equalities.size(),
+      " equality_candidates=", equalityCandidateCount,
+      " equality_candidate_limit=", kAuxiliaryEqualityCandidateLimit,
       " support_limit=", kAuxiliaryInvariantSupportLimit);
   return invariants;
 }
@@ -1645,6 +1855,43 @@ size_t compactReachableRegionsImpl(
   return 1;
 }
 
+bool craigInvariantExcludesBadInternal(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<InterpolantRegion>& invariantRegions,
+    const AuxiliaryStateInvariants& auxiliaryStateInvariants) {
+  if (trackedStates.empty() || invariantRegions.empty()) {
+    return false;
+  }
+
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  auto stateLits = allocateLeafLits(
+      solver, sortedSymbols(trackedStates), VariablePartition::ALocal);
+  addStateSemantics(solver, problem, stateLits, ClausePartition::A);
+  addAuxiliaryStateInvariants(
+      solver, stateLits, auxiliaryStateInvariants, ClausePartition::A);
+
+  std::vector<int> regionRoots;
+  regionRoots.reserve(invariantRegions.size());
+  for (const auto& region : invariantRegions) {
+    regionRoots.push_back(instantiateRegion(
+        solver,
+        region,
+        stateLits,
+        VariablePartition::ALocal,
+        ClausePartition::A));
+  }
+  solver.setCraigClausePartition(ClausePartition::A);
+  solver.addClause(regionRoots);
+  addBadFormula(solver, problem, stateLits);
+
+  // Reusing a Craig IMC invariant is sound because it is already proven
+  // reachable-frontier inductive for the concrete transition system.  This
+  // query only asks whether the new top-level bad predicate intersects that
+  // invariant; it does not add cross-design state assumptions.
+  return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
+}
+
 CraigImcResult runWithProjection(
     const KInductionProblem& problem,
     std::unordered_set<size_t>& trackedStates,
@@ -1679,7 +1926,7 @@ CraigImcResult runWithProjection(
         " reset_cycles=", problem.resetBootstrapCycles);
   }
   const InterpolantRegion concreteInitialRegion = std::move(*initialRegion);
-  if (!craigInvariantExcludesBad(
+  if (!craigInvariantExcludesBadInternal(
           problem, trackedStates, {concreteInitialRegion},
           auxiliaryInvariants)) {
     return {
@@ -1892,37 +2139,11 @@ bool craigInvariantExcludesBad(
     const KInductionProblem& problem,
     const std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& invariantRegions,
-    const AuxiliaryStateInvariants& auxiliaryStateInvariants) {
-  if (trackedStates.empty() || invariantRegions.empty()) {
-    return false;
-  }
-
-  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
-  auto stateLits = allocateLeafLits(
-      solver, sortedSymbols(trackedStates), VariablePartition::ALocal);
-  addStateSemantics(solver, problem, stateLits, ClausePartition::A);
-  addAuxiliaryStateInvariants(
-      solver, stateLits, auxiliaryStateInvariants, ClausePartition::A);
-
-  std::vector<int> regionRoots;
-  regionRoots.reserve(invariantRegions.size());
-  for (const auto& region : invariantRegions) {
-    regionRoots.push_back(instantiateRegion(
-        solver,
-        region,
-        stateLits,
-        VariablePartition::ALocal,
-        ClausePartition::A));
-  }
-  solver.setCraigClausePartition(ClausePartition::A);
-  solver.addClause(regionRoots);
-  addBadFormula(solver, problem, stateLits);
-
-  // Reusing a Craig IMC invariant is sound because it is already proven
-  // reachable-frontier inductive for the concrete transition system.  This
-  // query only asks whether the new top-level bad predicate intersects that
-  // invariant; it does not add cross-design state assumptions.
-  return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
+    const std::vector<std::pair<size_t, bool>>& auxiliaryStateInvariants) {
+  AuxiliaryStateInvariants auxiliaryInvariants;
+  auxiliaryInvariants.constants = auxiliaryStateInvariants;
+  return craigInvariantExcludesBadInternal(
+      problem, trackedStates, invariantRegions, auxiliaryInvariants);
 }
 
 std::unordered_set<size_t> computeCraigImcProjectionClosure(
