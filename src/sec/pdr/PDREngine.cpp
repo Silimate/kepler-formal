@@ -55,6 +55,36 @@ bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
          fullOutputSurface > outputLimit;
 }
 
+std::vector<size_t> makeDeterministicPdrWorklist(
+    const std::unordered_set<size_t>& symbols) {
+  std::vector<size_t> worklist(symbols.begin(), symbols.end());
+  std::sort(worklist.begin(), worklist.end());
+  return worklist;
+}
+
+bool pdrCubeLiteralOrderLess(size_t lhsSymbol,
+                             bool lhsValue,
+                             size_t rhsSymbol,
+                             bool rhsValue) {
+  if (lhsSymbol != rhsSymbol) {
+    return lhsSymbol < rhsSymbol;
+  }
+  return lhsValue < rhsValue;
+}
+
+bool pdrCubeAssignmentOrderLess(
+    const std::vector<std::pair<size_t, bool>>& lhs,
+    const std::vector<std::pair<size_t, bool>>& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return lhs.size() < rhs.size();
+  }
+  return std::lexicographical_compare(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), [](const auto& a,
+                                                         const auto& b) {
+        return pdrCubeLiteralOrderLess(a.first, a.second, b.first, b.second);
+      });
+}
+
 }  // namespace detail
 
 // Overall PDR algorithm:
@@ -280,7 +310,7 @@ constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs =
     kMaxExactResetFrontierDualRailMediumOutputs;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
-constexpr unsigned kDefaultDualRailResidualPredecessorConflictLimit = 50000;
+constexpr unsigned kDefaultDualRailResidualPredecessorConflictLimit = 200000;
 constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
 constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 8192;
 constexpr size_t kMaxDualRailResidualPredecessorTargetCube = 16;
@@ -612,6 +642,42 @@ struct StateClauseHash {
   }
 // LCOV_EXCL_START
 };
+
+bool cubeLiteralLess(const CubeLiteral& lhs, const CubeLiteral& rhs) {
+  return detail::pdrCubeLiteralOrderLess(
+      lhs.symbol, lhs.value, rhs.symbol, rhs.value);
+}
+
+bool clauseLiteralLess(const ClauseLiteral& lhs, const ClauseLiteral& rhs) {
+  if (lhs.symbol != rhs.symbol) {
+    return lhs.symbol < rhs.symbol;
+  }
+  return lhs.positive < rhs.positive;
+}
+
+bool stateCubeLess(const StateCube& lhs, const StateCube& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return lhs.size() < rhs.size();
+  }
+  return std::lexicographical_compare(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), cubeLiteralLess);
+}
+
+bool stateClauseLess(const StateClause& lhs, const StateClause& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return lhs.size() < rhs.size();
+  }
+  return std::lexicographical_compare(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), clauseLiteralLess);
+}
+
+void sortStateCubesDeterministically(std::vector<StateCube>& cubes) {
+  std::sort(cubes.begin(), cubes.end(), stateCubeLess);
+}
+
+void sortStateClausesDeterministically(std::vector<StateClause>& clauses) {
+  std::sort(clauses.begin(), clauses.end(), stateClauseLess);
+}
 
 struct StateClauseSetKey {  // LCOV_EXCL_LINE
 // LCOV_EXCL_STOP
@@ -1065,6 +1131,7 @@ enum class PdrBudgetExhaustion {
 
 thread_local PdrBudgetExhaustion pdrBudgetExhaustion =
     PdrBudgetExhaustion::None;
+thread_local size_t pdrPredecessorQueryLimit = 0;
 thread_local size_t pdrProjectedCounterexampleRefinementLimit = 0;
 
 bool pdrStatsEnabled();
@@ -1075,6 +1142,10 @@ void resetPdrBudgetExhaustion() {
 
 void setPdrProjectedCounterexampleRefinementLimit(size_t limit) {
   pdrProjectedCounterexampleRefinementLimit = limit;
+}
+
+void setPdrPredecessorQueryLimit(size_t limit) {
+  pdrPredecessorQueryLimit = limit;
 }
 
 void markPdrBudgetExhausted(PdrBudgetExhaustion reason) {
@@ -1099,6 +1170,11 @@ bool consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
     return true;
   }
   if (*remainingQueries == 0) {
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: predecessor query-count budget exhausted limit=",
+          pdrPredecessorQueryLimit);
+    }  // LCOV_EXCL_LINE
     markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
     return false;  // LCOV_EXCL_LINE
   }
@@ -1291,6 +1367,8 @@ unsigned dualRailPredecessorConflictLimitForQuery(
   }
   // BlackParrot leaves with one residual output need a deeper predecessor SAT
   // search, but broad multi-output batches should keep the cheaper default.
+  // Keep this scoped to small target cubes and local solver cones so it repairs
+  // isolated handshake leaves without opening whole-SoC predecessor searches.
   if (problem.usesDualRailStateEncoding &&
       problem.observedOutputExprs0.size() == 1 &&
       !targetCube.empty() &&
@@ -1433,7 +1511,8 @@ class PdrFormulaSupportCache {
     if (dualRailPartnerBySymbol_.empty() || symbols.empty()) {
       return;
     }
-    std::vector<size_t> worklist(symbols.begin(), symbols.end());
+    std::vector<size_t> worklist =
+        detail::makeDeterministicPdrWorklist(symbols);
     for (size_t cursor = 0; cursor < worklist.size(); ++cursor) {
       const auto partnerIt = dualRailPartnerBySymbol_.find(worklist[cursor]);
       if (partnerIt == dualRailPartnerBySymbol_.end()) {
@@ -1978,11 +2057,12 @@ void rememberPdrResetUnreachableCore(
           }),
           // LCOV_EXCL_STOP
       cores.end());
-  if (cores.size() >= kMaxPdrResetUnreachableCoresPerStep) {
-    // LCOV_EXCL_START
-    cores.erase(cores.begin());  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
   cores.push_back(std::move(core));
+  sortStateCubesDeterministically(cores);
+  if (cores.size() > kMaxPdrResetUnreachableCoresPerStep) {
+    // LCOV_EXCL_START
+    cores.pop_back();  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
 }
 
 
@@ -2016,6 +2096,7 @@ void rememberTransitionImpossibleResetCore(  // LCOV_EXCL_LINE
           }),
       cache.transitionImpossibleResetCores.end());  // LCOV_EXCL_LINE
   cache.transitionImpossibleResetCores.push_back(std::move(core));  // LCOV_EXCL_LINE
+  sortStateCubesDeterministically(cache.transitionImpossibleResetCores);  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
 std::optional<StateCube> findPdrResetUnreachableCoreForCube(
@@ -2053,6 +2134,7 @@ std::vector<StateCube> findPdrResetUnreachableSingletonCoresForCube(
       cores.push_back(core);
     }
   }
+  sortStateCubesDeterministically(cores);
   return cores;
 }
 
@@ -5391,7 +5473,8 @@ void addFormulaStateSupport(BoolExpr* formula,
 void addRelevantComplementedStatePartners(
     const ComplementPartnerIndex& complementPartners,
     std::unordered_set<size_t>& symbols) {
-  std::vector<size_t> worklist(symbols.begin(), symbols.end());
+  std::vector<size_t> worklist =
+      detail::makeDeterministicPdrWorklist(symbols);
   for (size_t cursor = 0; cursor < worklist.size(); ++cursor) {
     const auto partnerIt =
         complementPartners.partnersBySymbol.find(worklist[cursor]);
@@ -5553,7 +5636,8 @@ void addRelevantFrameClauseSymbols(const KInductionProblem& problem,
   (void)problem;
   ensureFrameClauseIndex(frame);
   const uint64_t emitEpoch = nextClauseEmitEpoch(frame);
-  std::vector<size_t> worklist(symbols.begin(), symbols.end());
+  std::vector<size_t> worklist =
+      detail::makeDeterministicPdrWorklist(symbols);
   size_t includedClauses = 0;
   size_t includedLiterals = 0;
   const size_t maxProjectedFrameClauses = maxProjectedFrameClausesPerQuery();
@@ -6211,6 +6295,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
   }
 
   std::vector<StateCube> candidates;
+  std::vector<StateCube> cachedCores;
   // LCOV_EXCL_START
   std::unordered_set<StateCube, StateCubeHash> candidateKeys;
   // LCOV_EXCL_STOP
@@ -6226,7 +6311,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
       const auto memoIt = cache.transitionImpossibleResetCoreByKey.find(key);
       if (memoIt != cache.transitionImpossibleResetCoreByKey.end()) {
         if (memoIt->second) {
-          return core;  // LCOV_EXCL_LINE
+          cachedCores.push_back(core);  // LCOV_EXCL_LINE
         }
         continue;
       // LCOV_EXCL_START
@@ -6239,21 +6324,15 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
     }
   }
   // LCOV_EXCL_STOP
+  if (!cachedCores.empty()) {
+    sortStateCubesDeterministically(cachedCores);
+    return cachedCores.front();  // LCOV_EXCL_LINE
+  }
   if (candidates.empty()) {
     return std::nullopt;
   }
 
-  std::sort(
-      candidates.begin(),
-      candidates.end(),
-      // LCOV_EXCL_START
-      [](const StateCube& lhs, const StateCube& rhs) {  // LCOV_EXCL_LINE
-        if (lhs.size() != rhs.size()) {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-          return lhs.size() < rhs.size();  // LCOV_EXCL_LINE
-        }
-        return cubeFingerprint(lhs) < cubeFingerprint(rhs);  // LCOV_EXCL_LINE
-      });  // LCOV_EXCL_LINE
+  sortStateCubesDeterministically(candidates);
 
   // LCOV_EXCL_START
   for (const StateCube& candidate : candidates) {
@@ -6417,17 +6496,7 @@ std::optional<StateCube> resetSpecializedPriorCoreConflictAtStep(
     return std::nullopt;
   }
 
-  std::sort(
-  // LCOV_EXCL_STOP
-      candidates.begin(),  // LCOV_EXCL_LINE
-      candidates.end(),  // LCOV_EXCL_LINE
-      [](const StateCube& lhs, const StateCube& rhs) {  // LCOV_EXCL_LINE
-        if (lhs.size() != rhs.size()) {  // LCOV_EXCL_LINE
-          return lhs.size() < rhs.size();  // LCOV_EXCL_LINE
-        }
-        // LCOV_EXCL_START
-        return cubeFingerprint(lhs) < cubeFingerprint(rhs);  // LCOV_EXCL_LINE
-      });  // LCOV_EXCL_LINE
+  sortStateCubesDeterministically(candidates);  // LCOV_EXCL_LINE
 
   size_t probes = 0;
   for (const StateCube& candidate : candidates) {
@@ -6517,6 +6586,7 @@ std::optional<StateCube> memoizedPriorResetCoreConflictAtStep(  // LCOV_EXCL_LIN
     return std::nullopt;  // LCOV_EXCL_LINE
   }
 
+  std::vector<StateCube> conflicts;  // LCOV_EXCL_LINE
   for (const auto& [knownStep, cores] :  // LCOV_EXCL_LINE
        cache.resetUnreachableCoresByPostBootstrapStep) {  // LCOV_EXCL_LINE
        // LCOV_EXCL_STOP
@@ -6534,9 +6604,13 @@ std::optional<StateCube> memoizedPriorResetCoreConflictAtStep(  // LCOV_EXCL_LIN
               memoizedResetSpecializedConflictCubeAtStep(  // LCOV_EXCL_LINE
                   cache, core, targetStep, frameInvariant);  // LCOV_EXCL_LINE
           conflict.has_value() && cubeContainsCube(cube, *conflict)) {  // LCOV_EXCL_LINE
-        return *conflict;  // LCOV_EXCL_LINE
+        conflicts.push_back(*conflict);  // LCOV_EXCL_LINE
       }
     }
+  }
+  if (!conflicts.empty()) {  // LCOV_EXCL_LINE
+    sortStateCubesDeterministically(conflicts);  // LCOV_EXCL_LINE
+    return conflicts.front();  // LCOV_EXCL_LINE
   }
   return std::nullopt;  // LCOV_EXCL_LINE
 // LCOV_EXCL_START
@@ -6658,14 +6732,7 @@ void addDualRailStateValidity(SATSolverWrapper& solver,
 void normalizeCube(StateCube& cube) {
   // Canonical ordering lets us compare cubes structurally and avoid learning
   // the same obligation more than once with a different literal order.
-  std::sort(cube.begin(), cube.end(), [](const CubeLiteral& lhs, const CubeLiteral& rhs) {
-    if (lhs.symbol != rhs.symbol) {
-      return lhs.symbol < rhs.symbol;
-    }
-    // LCOV_EXCL_START
-    return lhs.value < rhs.value;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
-  });
+  std::sort(cube.begin(), cube.end(), cubeLiteralLess);
   cube.erase(std::unique(cube.begin(), cube.end()), cube.end());
 }
 
@@ -6673,14 +6740,8 @@ void normalizeClause(StateClause& clause) {
   // Clauses are canonicalized for the same reason: later subsumption and
   // LCOV_EXCL_START
   // convergence checks depend on stable ordering and deduplication.
-  std::sort(
+  std::sort(clause.begin(), clause.end(), clauseLiteralLess);
   // LCOV_EXCL_STOP
-      clause.begin(), clause.end(), [](const ClauseLiteral& lhs, const ClauseLiteral& rhs) {
-        if (lhs.symbol != rhs.symbol) {
-          return lhs.symbol < rhs.symbol;
-        }
-        return lhs.positive < rhs.positive;  // LCOV_EXCL_LINE
-      });
   clause.erase(std::unique(clause.begin(), clause.end()), clause.end());
 }
 
@@ -6737,7 +6798,10 @@ InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
     index.relations.addComplement(primarySymbol, complementedSymbol);
   }
   index.rootAssignments.reserve(index.assignments.size());
-  for (const auto& [symbol, value] : index.assignments) {
+  std::vector<std::pair<size_t, bool>> orderedAssignments(
+      index.assignments.begin(), index.assignments.end());
+  std::sort(orderedAssignments.begin(), orderedAssignments.end());
+  for (const auto& [symbol, value] : orderedAssignments) {
     const auto root = index.relations.findWithParity(symbol);
     if (!root.has_value()) {
       continue;  // LCOV_EXCL_LINE
@@ -6905,7 +6969,9 @@ bool addClauseToFrame(FrameClauses& frame, StateClause clause) {
   // LCOV_EXCL_START
   frame.clauses.push_back(std::move(clause));
   // LCOV_EXCL_STOP
+  sortStateClausesDeterministically(frame.clauses);
   frame.clauseIndexDirty = true;
+  frame.clauseEmitEpochByIndex.clear();
   return true;
 }
 
@@ -7032,7 +7098,7 @@ std::optional<std::vector<StateClause>> stateOnlyBadFormulaClauses(
 
     StateClause clause;
     clause.reserve(support.size());
-    for (const auto symbol : support) {
+  for (const auto symbol : support) {
       const bool value = env.at(symbol);
       // Forbid exactly this bad assignment.
       clause.push_back({symbol, !value});
@@ -7042,6 +7108,7 @@ std::optional<std::vector<StateClause>> stateOnlyBadFormulaClauses(
     clauses.push_back(std::move(clause));
     // LCOV_EXCL_STOP
   }
+  sortStateClausesDeterministically(clauses);
   return clauses;
 // LCOV_EXCL_START
 }
@@ -7122,6 +7189,7 @@ std::optional<std::vector<StateClause>> observedOutputBadFormulaClausesFromGroup
   if (clauses.empty()) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
+  sortStateClausesDeterministically(clauses);
   return clauses;
 }
 
@@ -8425,13 +8493,22 @@ std::optional<bool> learnValidatedBadFormulaClauses(
 
 // LCOV_EXCL_START
 
+  const bool allowLocalDualRailTargetFrameRepair =
+      problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
+      problem.observedOutputExprs0.size() == 1 &&
+      problem.resetBootstrapCycles != 0 &&
+      targetFrame > 1 &&
+      targetFrame <= kMaxPartialTargetResetFrontierBadFormulaFrame &&
+      badClauses->size() <= singleOutputBadFormulaClauseLimit(problem) &&  // LCOV_EXCL_LINE
+      !validationSupportCube.empty() &&  // LCOV_EXCL_LINE
+      validationSupportCube.size() <= kMaxResetFrontierBatchedBadFormulaSupport;
   const bool allowBatchedResetFrontierValidation =
   // LCOV_EXCL_STOP
       !validatedBadClauses &&
       !useObservationFrontier &&
-      // LCOV_EXCL_START
-      !largeDualRailResetFrontierSurface &&
-      !problem.usesDualRailStateEncoding &&
+      (allowLocalDualRailTargetFrameRepair ||  // LCOV_EXCL_LINE
+       (!largeDualRailResetFrontierSurface &&
+        !problem.usesDualRailStateEncoding)) &&
       problem.resetBootstrapCycles != 0 &&
       problem.observedOutputExprs0.size() == 1 &&
       targetFrame <=  // LCOV_EXCL_LINE
@@ -9252,9 +9329,9 @@ void addComplementedPartnerAssignments(
     (void)value;
     worklist.push_back(symbol);
   }
+  std::sort(worklist.begin(), worklist.end());
 
-
-// LCOV_EXCL_STOP
+  // LCOV_EXCL_STOP
   for (size_t index = 0; index < worklist.size(); ++index) {
     // LCOV_EXCL_START
     const size_t symbol = worklist[index];
@@ -12434,14 +12511,29 @@ StateCube generalizeBoundedUnreachableRootCube(
   return candidate;
 }
 
+bool proofObligationLess(const ProofObligation& lhs, const ProofObligation& rhs) {
+  if (lhs.level != rhs.level) {
+    return lhs.level < rhs.level;
+  }
+  if (lhs.cube.size() != rhs.cube.size()) {
+    return lhs.cube.size() < rhs.cube.size();
+  }
+  if (lhs.badFrame != rhs.badFrame) {
+    return lhs.badFrame < rhs.badFrame;
+  }
+  if (stateCubeLess(lhs.cube, rhs.cube)) {
+    return true;
+  }
+  if (stateCubeLess(rhs.cube, lhs.cube)) {
+    return false;
+  }
+  return stateCubeLess(lhs.rootCube, rhs.rootCube);
+}
+
 size_t popNextObligationIndex(const std::vector<ProofObligation>& queue) {
   size_t bestIndex = 0;
   for (size_t i = 1; i < queue.size(); ++i) {
-    if (queue[i].level < queue[bestIndex].level ||
-        (queue[i].level == queue[bestIndex].level &&
-         (queue[i].cube.size() < queue[bestIndex].cube.size() ||
-          (queue[i].cube.size() == queue[bestIndex].cube.size() &&
-           queue[i].badFrame < queue[bestIndex].badFrame)))) {
+    if (proofObligationLess(queue[i], queue[bestIndex])) {
       bestIndex = i;
     }
   }
@@ -14097,6 +14189,7 @@ PDRResult PDREngine::run(size_t maxFrames,
   // Build the SEC startup frontier once so every frame query shares the same
   // interpretation of reset/bootstrap and frame-0 equality constraints.
   resetPdrBudgetExhaustion();
+  setPdrPredecessorQueryLimit(maxPredecessorQueries_);
   setPdrProjectedCounterexampleRefinementLimit(
       maxProjectedCounterexampleRefinements_);
   emitPdrTraceProblem(problem_);
@@ -14326,6 +14419,11 @@ PDRResult PDREngine::run(size_t maxFrames,
       }
     }
   }
+  if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+    emitSecDiag(  // LCOV_EXCL_LINE
+        "SEC PDR stats: max frame budget exhausted max_frames=",
+        maxFrames);
+  }  // LCOV_EXCL_LINE
   return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
 }
 

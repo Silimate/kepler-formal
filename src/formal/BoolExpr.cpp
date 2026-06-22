@@ -129,7 +129,7 @@ BoolExpr* rewriteArithmeticPattern(BoolExpr* expr) {
         return expr;
     }
 
-    std::set<BoolExpr*> uniqueAtoms;
+    std::vector<BoolExpr*> uniqueAtoms;
     std::vector<std::vector<ArithmeticLiteral>> termLiterals;
     termLiterals.reserve(terms.size());
     for (BoolExpr* term : terms) {
@@ -141,13 +141,20 @@ BoolExpr* rewriteArithmeticPattern(BoolExpr* expr) {
             return expr;
         }
         for (const auto& literal : literals) {
-            uniqueAtoms.insert(literal.atom);
+            if (std::find(uniqueAtoms.begin(), uniqueAtoms.end(), literal.atom) ==
+                uniqueAtoms.end()) {
+                uniqueAtoms.push_back(literal.atom);
+            }
         }
         termLiterals.push_back(std::move(literals));
     }
     if (uniqueAtoms.size() != 3) {
         return expr;
     }
+
+    std::sort(uniqueAtoms.begin(), uniqueAtoms.end(), [](BoolExpr* lhs, BoolExpr* rhs) {
+        return *lhs < *rhs;
+    });
 
     std::array<BoolExpr*, 3> atoms{};
     size_t atomIndex = 0;
@@ -253,6 +260,20 @@ BoolExpr::BoolExpr(Op op, size_t id,
         left_  = a;
         right_ = b;
     }
+
+    auto mix = [](uint64_t seed, uint64_t value) {
+        seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+        return BoolExpr::splitmix64(seed);
+    };
+    structuralHash_ =
+        BoolExpr::splitmix64(static_cast<uint64_t>(op_) ^ HASH_SEED);
+    structuralHash_ = mix(structuralHash_, static_cast<uint64_t>(varID_));
+    structuralHash_ = mix(
+        structuralHash_,
+        left_ == nullptr ? 0x6a09e667f3bcc909ULL : left_->structuralHash_);
+    structuralHash_ = mix(
+        structuralHash_,
+        right_ == nullptr ? 0xbb67ae8584caa73bULL : right_->structuralHash_);
 }
 
 /// Intern+construct a new node if needed

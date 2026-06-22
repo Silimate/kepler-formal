@@ -6,6 +6,10 @@
 #include "../../config/Config.h"
 #include "kinduction/KInductionProblem.h"
 
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 namespace KEPLER_FORMAL::SEC {
 
 enum class PDRStatus {
@@ -35,6 +39,18 @@ bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
                                        size_t transitionSources,
                                        size_t transitionSourceLimit,
                                        size_t outputLimit = 128);
+
+std::vector<size_t> makeDeterministicPdrWorklist(
+    const std::unordered_set<size_t>& symbols);
+
+bool pdrCubeLiteralOrderLess(size_t lhsSymbol,
+                             bool lhsValue,
+                             size_t rhsSymbol,
+                             bool rhsValue);
+
+bool pdrCubeAssignmentOrderLess(
+    const std::vector<std::pair<size_t, bool>>& lhs,
+    const std::vector<std::pair<size_t, bool>>& rhs);
 
 }  // namespace detail
 

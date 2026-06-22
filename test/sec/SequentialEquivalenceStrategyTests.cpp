@@ -8140,6 +8140,56 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDeterministicWorklistSortsHashSetSymbols) {
+  std::unordered_set<size_t> symbols;
+  std::vector<size_t> rawIteration;
+  std::vector<size_t> expected;
+
+  for (const size_t symbol : {
+           2u, 3u, 5u, 7u, 11u, 17u, 31u, 64u, 127u, 257u, 1025u}) {
+    symbols.insert(symbol);
+    rawIteration.assign(symbols.begin(), symbols.end());
+    expected = rawIteration;
+    std::sort(expected.begin(), expected.end());
+    if (rawIteration != expected) {
+      break;
+    }
+  }
+  ASSERT_NE(rawIteration, expected)
+      << "test data must expose non-sorted unordered_set traversal";
+
+  EXPECT_EQ(detail::makeDeterministicPdrWorklist(symbols), expected);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDeterministicCubeOrderingSortsResetCoreCandidates) {
+  using CubeKey = std::vector<std::pair<size_t, bool>>;
+  std::vector<CubeKey> cubes = {
+      {{5, true}, {8, false}},
+      {{3, true}},
+      {{5, false}, {9, true}},
+      {{5, false}, {8, true}},
+      {{5, false}, {8, false}},
+  };
+
+  std::sort(
+      cubes.begin(),
+      cubes.end(),
+      [](const CubeKey& lhs, const CubeKey& rhs) {
+        return detail::pdrCubeAssignmentOrderLess(lhs, rhs);
+      });
+
+  const std::vector<CubeKey> expected = {
+      {{3, true}},
+      {{5, false}, {8, false}},
+      {{5, false}, {8, true}},
+      {{5, false}, {9, true}},
+      {{5, true}, {8, false}},
+  };
+  EXPECT_EQ(cubes, expected);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PdrStateEqualityMiningSkipsRiscvSizedOutputSurface) {
   EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
       SecEngine::Pdr,
@@ -15769,6 +15819,78 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(3);
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineProjectedFrameClosureIsStableUnderClauseCap) {
+  auto makeProblem = [](bool reverseSeeds) {
+    KInductionProblem problem;
+    constexpr size_t a = 2;
+    constexpr size_t b = 3;
+    constexpr size_t y = 4;
+    constexpr size_t reset = 5;
+    problem.state0Symbols = reverseSeeds ? std::vector<size_t>{y, b, a}
+                                         : std::vector<size_t>{a, b, y};
+    problem.inputSymbols = {reset};
+    problem.allSymbols = reverseSeeds ? std::vector<size_t>{reset, y, b, a}
+                                      : std::vector<size_t>{a, b, y, reset};
+    problem.resetBootstrapCycles = 1;
+    problem.resetBootstrapInputs = {{reset, true}};
+
+    BoolExpr* resetDeasserted = BoolExpr::Not(BoolExpr::Var(reset));
+    const auto addA = [&]() {
+      problem.transitions0.emplace_back(
+          a, BoolExpr::And(resetDeasserted, BoolExpr::Var(a)));
+    };
+    const auto addB = [&]() {
+      problem.transitions0.emplace_back(
+          b, BoolExpr::And(resetDeasserted, BoolExpr::Var(b)));
+    };
+    const auto addY = [&]() {
+      problem.transitions0.emplace_back(
+          y,
+          BoolExpr::And(
+              resetDeasserted,
+              BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Var(b))));
+    };
+    if (reverseSeeds) {
+      addY();
+      addB();
+      addA();
+    } else {
+      addA();
+      addB();
+      addY();
+    }
+    problem.bad = BoolExpr::Var(y);
+    problem.property = BoolExpr::Not(problem.bad);
+    problem.inductionProperty = problem.property;
+    problem.inductionBad = problem.bad;
+    return problem;
+  };
+
+  const ScopedEnvVar clauseLimit(
+      "KEPLER_SEC_PDR_PROJECTED_FRAME_CLAUSE_LIMIT", "1");
+  constexpr size_t kDeterministicQueryBudget = 19;
+
+  for (const bool reverseSeeds : {false, true}) {
+    KInductionProblem problem = makeProblem(reverseSeeds);
+    ASSERT_FALSE(
+        findBaseCounterexample(
+            problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+            .has_value());
+    PDREngine engine(
+        problem,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
+        /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
+        /*useExactFrameClauses=*/false,
+        /*maxPredecessorQueries=*/kDeterministicQueryBudget);
+    const auto result = engine.run(3);
+
+    EXPECT_EQ(result.status, PDRStatus::Equivalent)
+        << "reverseSeeds=" << reverseSeeds;
+  }
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

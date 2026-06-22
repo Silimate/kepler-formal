@@ -5340,9 +5340,10 @@ SequentialEquivalenceResult runPdrSecEngine(
     // Multi-output slices still split quickly; isolated hard leaves are skipped
     // as uncovered instead of consuming the whole workflow.
     constexpr size_t kDualRailFinalExactPdrRootGeneralizationAttempts = 4;  // LCOV_EXCL_LINE
-    constexpr size_t kDualRailFinalExactPdrPredecessorQueryBudget = 64;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrMultiOutputQueryBudget = 64;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrSingleOutputQueryBudget = 1024;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
-    constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 2;  // LCOV_EXCL_LINE
+    constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 8;  // LCOV_EXCL_LINE
     constexpr size_t kMediumDualRailFinalExactPdrPredecessorProjectionLimit = 32;  // LCOV_EXCL_LINE
     constexpr size_t kMediumDualRailFinalExactPdrMultiOutputRepairBudget = 4;  // LCOV_EXCL_LINE
     constexpr size_t kMediumDualRailFinalExactPdrSingleOutputRepairBudget = 8;  // LCOV_EXCL_LINE
@@ -5418,14 +5419,19 @@ SequentialEquivalenceResult runPdrSecEngine(
             : kFinalExactPdrPredecessorProjectionLimit;
     const size_t finalPdrBadCubeStateLimit =  // LCOV_EXCL_LINE
         kFinalExactPdrBadCubeStateLimit;
-    // This is a per-leaf repair budget.  Swerv can leave many final
-    // single-output dual-rail slices, so a large value multiplies into
-    // thousands of transition-cone predecessor encodings before the workflow
-    // can split or skip the hard leaf.
+    // These are per-leaf repair budgets. Keep them modest: wide SoC surfaces
+    // can leave many final single-output dual-rail slices, but isolated memory
+    // handshake leaves may need the ordinary PDR loop to run to frame/max-K
+    // convergence after deterministic reset-conflict repairs. Multi-output
+    // slices keep a finite query cap so broad abstract failures still split.
+    const size_t defaultFinalDualRailPredecessorQueryBudget =  // LCOV_EXCL_LINE
+        endOutput - firstOutput == 1
+            ? kDualRailFinalExactPdrSingleOutputQueryBudget
+            : kDualRailFinalExactPdrMultiOutputQueryBudget;
     const size_t finalDualRailPredecessorQueryBudget =  // LCOV_EXCL_LINE
         secStrategySizeLimitFromEnv(  // LCOV_EXCL_LINE
             "KEPLER_SEC_PDR_DUAL_RAIL_FINAL_QUERY_BUDGET",
-            kDualRailFinalExactPdrPredecessorQueryBudget);
+            defaultFinalDualRailPredecessorQueryBudget);
     emitPdrStrategyStageStats(  // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         emitPdrStageStats,  // LCOV_EXCL_LINE

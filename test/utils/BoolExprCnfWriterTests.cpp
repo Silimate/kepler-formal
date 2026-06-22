@@ -74,6 +74,22 @@ void expectEquivalentForThreeInputs(BoolExpr* actual, BoolExpr* expected) {
   }
 }
 
+std::string makeAllocationOrderSensitiveExprText(bool reverseOrder) {
+  BoolExprCache::destroy();
+  BoolExpr* lowVars = nullptr;
+  BoolExpr* highVars = nullptr;
+  if (reverseOrder) {
+    highVars = BoolExpr::And(BoolExpr::Var(4), BoolExpr::Var(5));
+    lowVars = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+  } else {
+    lowVars = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+    highVars = BoolExpr::And(BoolExpr::Var(4), BoolExpr::Var(5));
+  }
+  const std::string text = BoolExpr::Or(lowVars, highVars)->toString();
+  BoolExprCache::destroy();
+  return text;
+}
+
 }  // namespace
 
 TEST_F(BoolExprCnfWriterTests, EncodeAndWriteAndExpression) {
@@ -135,6 +151,13 @@ TEST_F(BoolExprCnfWriterTests, BoolExprCacheDestroyKeepsCacheReusable) {
   ASSERT_NE(afterDestroy, nullptr);
   EXPECT_EQ(afterDestroy->getOp(), Op::AND);
   EXPECT_EQ(afterDestroy, BoolExpr::And(BoolExpr::Var(55), BoolExpr::Var(56)));
+}
+
+TEST_F(BoolExprCnfWriterTests,
+       CommutativeExprOrderingIgnoresAllocationOrder) {
+  EXPECT_EQ(
+      makeAllocationOrderSensitiveExprText(/*reverseOrder=*/false),
+      makeAllocationOrderSensitiveExprText(/*reverseOrder=*/true));
 }
 
 TEST_F(BoolExprCnfWriterTests, NormalizeArithmeticRewritesFullAdderSumDnf) {
