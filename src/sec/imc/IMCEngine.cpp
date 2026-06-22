@@ -53,6 +53,7 @@ constexpr size_t kCraigBatchProjectionHardLimit = 2048;
 constexpr size_t kCraigBatchProjectionSoftMaxOutputs = 4;
 constexpr size_t kCraigBatchProjectionHardMaxOutputs = 2;
 constexpr size_t kCraigReusableProjectionMinSupport = 256;
+constexpr size_t kCraigSingleOutputSelfProjectionSeedLimit = 1024;
 struct CraigOutputSupport {
   std::unordered_set<size_t> raw;
   std::unordered_set<size_t> projection;
@@ -492,6 +493,62 @@ struct ReusableCraigInvariant {
   size_t proofBound = 0;
 };
 
+bool isSingleCraigOutputRange(size_t firstOutput, size_t endOutput) {
+  return endOutput == firstOutput + 1;
+}
+
+bool shouldRetrySingleOutputWithSelfProjection(
+    size_t firstOutput,
+    size_t endOutput,
+    const std::unordered_set<size_t>& trackedStateSeeds) {
+  return isSingleCraigOutputRange(firstOutput, endOutput) &&
+         trackedStateSeeds.size() >= kCraigSingleOutputSelfProjectionSeedLimit;
+}
+
+std::unordered_set<size_t> buildCraigInitialTrackedStatesForAttempt(
+    const std::unordered_set<size_t>& trackedStateSeeds,
+    const ReusableCraigInvariant& reusableInvariant,
+    bool includeRangeSeeds) {
+  std::unordered_set<size_t> initialTrackedStates;
+  if (includeRangeSeeds) {
+    initialTrackedStates = trackedStateSeeds;
+  }
+  if (!reusableInvariant.regions.empty()) {
+    mergeSupport(initialTrackedStates, reusableInvariant.trackedStates);
+  }
+  return initialTrackedStates;
+}
+
+CraigImcOptions makeCraigImcOptions(bool enableGrowthBudget) {
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  if (enableGrowthBudget) {
+    options.growthBudget = largeDualRailCraigGrowthBudget();
+  }
+  return options;
+}
+
+CraigImcResult runCraigCheckerAttempt(
+    const KInductionProblem& batchProblem,
+    const ReusableCraigInvariant& reusableInvariant,
+    const std::unordered_set<size_t>& trackedStateSeeds,
+    bool includeRangeSeeds,
+    bool enableGrowthBudget,
+    size_t maxK) {
+  const std::unordered_set<size_t> initialTrackedStates =
+      buildCraigInitialTrackedStatesForAttempt(
+          trackedStateSeeds, reusableInvariant, includeRangeSeeds);
+  const CraigImcOptions options = makeCraigImcOptions(enableGrowthBudget);
+  CraigInterpolatingModelChecker checker(
+      batchProblem,
+      reusableInvariant.regions.empty() ? nullptr
+                                        : &reusableInvariant.regions,
+      initialTrackedStates.empty() ? nullptr : &initialTrackedStates,
+      options);
+  return checker.run(maxK);
+}
+
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -530,28 +587,41 @@ IMCResult runCraigOutputRange(
     return {IMCStatus::Equivalent, reusableInvariant.proofBound};
   }
 
-  std::unordered_set<size_t> initialTrackedStates = trackedStateSeeds;
-  if (!reusableInvariant.regions.empty()) {
-    mergeSupport(initialTrackedStates, reusableInvariant.trackedStates);
-  }
+  const bool multiOutputRange = !isSingleCraigOutputRange(
+      firstOutput, endOutput);
+  const bool retrySingleOutputWithSelfProjection =
+      shouldRetrySingleOutputWithSelfProjection(
+          firstOutput, endOutput, trackedStateSeeds);
+  const bool enableGrowthBudget =
+      multiOutputRange || retrySingleOutputWithSelfProjection;
 
-  CraigImcOptions options;
-  options.enableAuxiliaryInvariants = true;
-  options.enableDirectConcreteCubeSource = true;
-  if (endOutput > firstOutput + 1) {
-    // The growth budget is a batch-control heuristic only. Single-output Craig
-    // IMC still gets the full strict algorithm because there is nothing left
-    // to split.
-    options.growthBudget = largeDualRailCraigGrowthBudget();
-  }
-
-  CraigInterpolatingModelChecker checker(
+  // A single AES text bit can arrive with a huge precomputed transition
+  // surface. If that seeded attempt blows the Craig budget, retry the same
+  // strict IMC proof from the property's own support and let projection
+  // refinement add only states the proof actually touches.
+  CraigImcResult proof = runCraigCheckerAttempt(
       batchProblem,
-      reusableInvariant.regions.empty() ? nullptr
-                                        : &reusableInvariant.regions,
-      initialTrackedStates.empty() ? nullptr : &initialTrackedStates,
-      options);
-  const CraigImcResult proof = checker.run(maxK);
+      reusableInvariant,
+      trackedStateSeeds,
+      /*includeRangeSeeds=*/true,
+      enableGrowthBudget,
+      maxK);
+  if (proof.status == CraigImcStatus::BudgetExceeded &&
+      retrySingleOutputWithSelfProjection) {
+    emitSecDiag(
+        "SEC diag: imc Craig retrying single output with self projection "
+        "first=",
+        firstOutput, " end=", endOutput,
+        " dropped_seed_states=", trackedStateSeeds.size(),
+        " helper_seed_states=", reusableInvariant.trackedStates.size());
+    proof = runCraigCheckerAttempt(
+        batchProblem,
+        reusableInvariant,
+        trackedStateSeeds,
+        /*includeRangeSeeds=*/false,
+        /*enableGrowthBudget=*/true,
+        maxK);
+  }
   if (proof.status == CraigImcStatus::Equivalent) {
     if (!proof.invariantRegions.empty() &&
         !proof.trackedStates.empty()) {
@@ -578,13 +648,19 @@ IMCResult runCraigOutputRange(
     return {IMCStatus::Inconclusive, maxK};
   }
   if (proof.status == CraigImcStatus::BudgetExceeded) {
-    emitSecDiag(
-        "SEC diag: imc Craig splitting output batch after growth budget "
-        "first=",
-        firstOutput, " end=", endOutput);
+    if (multiOutputRange) {
+      emitSecDiag(
+          "SEC diag: imc Craig splitting output batch after growth budget "
+          "first=",
+          firstOutput, " end=", endOutput);
+    } else {
+      emitSecDiag(
+          "SEC diag: imc Craig single output exhausted growth budget first=",
+          firstOutput, " end=", endOutput);
+    }
   }
 
-  if (endOutput > firstOutput + 1) {
+  if (multiOutputRange) {
     const size_t midpoint = firstOutput + (endOutput - firstOutput) / 2;
     const IMCResult left = runCraigOutputRange(
         problem,

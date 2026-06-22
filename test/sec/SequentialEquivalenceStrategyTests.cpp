@@ -2175,27 +2175,6 @@ InterpolantRegion makeStateLiteralCraigRegion(size_t symbol, bool positive) {
   return region;
 }
 
-InterpolantRegion makeStateEqualityCraigRegion(size_t lhs, size_t rhs) {
-  const RegionLiteral root = {false, 0, true};
-  const RegionLiteral notRoot = {false, 0, false};
-  const RegionLiteral lhsPositive = {true, lhs, true};
-  const RegionLiteral lhsNegative = {true, lhs, false};
-  const RegionLiteral rhsPositive = {true, rhs, true};
-  const RegionLiteral rhsNegative = {true, rhs, false};
-
-  InterpolantRegion region;
-  region.type = InterpolantRegion::Type::Normal;
-  region.auxiliaryCount = 1;
-  region.root = root;
-  region.definitionLiterals = {
-      notRoot, lhsNegative, rhsPositive,
-      notRoot, rhsNegative, lhsPositive,
-      root, lhsPositive, rhsPositive,
-      root, lhsNegative, rhsNegative};
-  region.definitionClauseEnds = {3, 6, 9, 12};
-  return region;
-}
-
 BoolExpr* makeConjunctionOfVars(const std::vector<size_t>& symbols) {
   BoolExpr* expr = BoolExpr::createTrue();
   for (const size_t symbol : symbols) {
@@ -2323,6 +2302,44 @@ KInductionProblem buildProjectionSharedImcBatchProblem(
     problem.observedOutputExprs0.push_back(BoolExpr::Var(outputState));
     problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
   }
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildBootstrapModelGuidedCraigProjectionProblem(
+    size_t supportCount = 96,
+    bool assignSupportBootstrap = true) {
+  constexpr size_t outputState = 2;
+  constexpr size_t firstSupportState = 3;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols.push_back(outputState);
+  problem.allSymbols.push_back(outputState);
+  problem.bootstrapStateAssignments.push_back({outputState, false});
+
+  std::vector<size_t> supportStates;
+  supportStates.reserve(supportCount);
+  for (size_t index = 0; index < supportCount; ++index) {
+    const size_t symbol = firstSupportState + index;
+    supportStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    if (assignSupportBootstrap) {
+      problem.bootstrapStateAssignments.push_back({symbol, false});
+    }
+  }
+
+  problem.transitions0.emplace_back(
+      outputState, makeConjunctionOfVars(supportStates));
+  problem.observedOutputNames = {"model_guided_out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(outputState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.property = BoolExpr::Not(BoolExpr::Var(outputState));
+  problem.bad = BoolExpr::Var(outputState);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
   problem.totalStateCount = problem.state0Symbols.size();
   return problem;
 }
@@ -9394,31 +9411,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       CraigImcStrengthensInterpolantsWithHelperInvariant) {
-  constexpr size_t state0 = 4;
-  constexpr size_t state1 = 5;
-  const KInductionProblem problem = buildCraigResetSecProblem(true);
-  const std::vector<InterpolantRegion> helperRegions = {
-      makeStateEqualityCraigRegion(state0, state1)};
-
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStderr();
-  CraigInterpolatingModelChecker checker(problem, &helperRegions);
-  const CraigImcResult result = checker.run(4);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // This exercises the IMC-local auxiliary-invariant injection path: a helper
-  // invariant that was already proven elsewhere is conjoined to new Craig
-  // interpolants so later Q-image queries do less work.
-  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find(
-          "imc Craig strengthened interpolant with helper invariant"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcUsesMcMillanFixedpointContainment) {
   const KInductionProblem problem = buildCraigResetSecProblem(true);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -9690,6 +9682,121 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find(
           "imc Craig output batch first=0 end=1 first_name=wide_out0 "
           "bad_support=301 tracked_seed_states=301"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(result.status, IMCStatus::Different);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcUsesModelGuidedBootstrapProjectionRefinement) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildBootstrapModelGuidedCraigProjectionProblem();
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The first projected SAT model contradicts all 96 reset-known support
+  // states, but Craig IMC should refine by a bounded model-guided slice rather
+  // than immediately expanding to the full transition cone.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig projection round=0 states=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig model-guided projection refinement "
+          "candidates=96 selected=64 full=97"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig refines transition projection states=1->65"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(result.status, CraigImcStatus::CounterexampleCandidate);
+  EXPECT_NE(result.status, CraigImcStatus::BudgetExceeded);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcBoundsLargeProjectionRefinementWithoutModelHint) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildBootstrapModelGuidedCraigProjectionProblem(
+          /*supportCount=*/96,
+          /*assignSupportBootstrap=*/false);
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // When the SAT model does not contradict reset-known support states, Craig
+  // still refines the projection incrementally instead of importing a large
+  // support cone in one step.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig bounded projection refinement "
+          "candidates=96 selected=64 full=97"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig refines transition projection states=1->65"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(result.status, CraigImcStatus::CounterexampleCandidate);
+  EXPECT_NE(result.status, CraigImcStatus::BudgetExceeded);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcBudgetRetrySingleOutputWithSelfProjection) {
+  const KInductionProblem problem = buildProjectionSharedImcBatchProblem(
+      /*sharedTransitionStates=*/1100,
+      /*outputCount=*/1);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  const ScopedEnvVar maxQPass("KEPLER_SEC_IMC_CRAIG_MAX_Q_PASS", "1");
+
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // AES-like single-output slices can have tiny bad support but a huge
+  // precomputed transition seed. After the first seeded Craig attempt exceeds
+  // budget, retry strict IMC from the property's own support instead of
+  // spending the rest of the run on the same oversized seed.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig output batch first=0 end=1 "
+          "first_name=projection_shared_out0 bad_support=1 "
+          "tracked_seed_states=1102"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig retrying single output with self projection first=0 "
+          "end=1 dropped_seed_states=1102"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig projection round=0 states=1"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(result.status, IMCStatus::Different);

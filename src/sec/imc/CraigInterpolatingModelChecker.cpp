@@ -33,8 +33,7 @@ constexpr size_t kCraigSemanticSimplifyVariableLimit = 128;
 constexpr size_t kCraigSubsumptionClauseLimit = 4096;
 constexpr size_t kCraigRegionCompactionStart = 8;
 constexpr size_t kCraigRegionCompactionCandidateLimit = 4;
-constexpr size_t kCraigHelperStrengthenClauseLimit = 512;
-constexpr size_t kCraigHelperStrengthenLiteralLimit = 4096;
+constexpr size_t kCraigModelGuidedProjectionRefinementLimit = 64;
 
 struct RegionVariableKey {
   bool isState = false;
@@ -80,210 +79,6 @@ size_t regionClauseCount(const InterpolantRegion& region) {
 
 size_t regionLiteralCount(const InterpolantRegion& region) {
   return region.definitionLiterals.size();
-}
-
-RegionLiteral auxiliaryRegionLiteral(size_t index, bool positive = true) {
-  RegionLiteral literal;
-  literal.isState = false;
-  literal.index = index;
-  literal.positive = positive;
-  return literal;
-}
-
-RegionLiteral invertedRegionLiteral(RegionLiteral literal) {
-  literal.positive = !literal.positive;
-  return literal;
-}
-
-RegionLiteral shiftedRegionLiteral(RegionLiteral literal, size_t auxiliaryOffset) {
-  if (!literal.isState) {
-    literal.index += auxiliaryOffset;
-  }
-  return literal;
-}
-
-void appendRegionClause(
-    InterpolantRegion& region,
-    const std::vector<RegionLiteral>& clause) {
-  region.definitionLiterals.insert(
-      region.definitionLiterals.end(), clause.begin(), clause.end());
-  region.definitionClauseEnds.push_back(region.definitionLiterals.size());
-}
-
-void appendBinaryRegionClause(
-    InterpolantRegion& region,
-    RegionLiteral lhs,
-    RegionLiteral rhs) {
-  region.definitionLiterals.push_back(lhs);
-  region.definitionLiterals.push_back(rhs);
-  region.definitionClauseEnds.push_back(region.definitionLiterals.size());
-}
-
-RegionLiteral appendAuxiliaryRegionRoot(InterpolantRegion& region) {
-  const RegionLiteral root =
-      auxiliaryRegionLiteral(region.auxiliaryCount, true);
-  ++region.auxiliaryCount;
-  return root;
-}
-
-RegionLiteral appendShiftedRegionDefinition(
-    InterpolantRegion& target,
-    const InterpolantRegion& source) {
-  const size_t auxiliaryOffset = target.auxiliaryCount;
-  size_t clauseBegin = 0;
-  for (const size_t clauseEnd : source.definitionClauseEnds) {
-    std::vector<RegionLiteral> clause;
-    clause.reserve(clauseEnd - clauseBegin);
-    for (size_t index = clauseBegin; index < clauseEnd; ++index) {
-      clause.push_back(
-          shiftedRegionLiteral(source.definitionLiterals[index],
-                               auxiliaryOffset));
-    }
-    appendRegionClause(target, clause);
-    clauseBegin = clauseEnd;
-  }
-  target.auxiliaryCount += source.auxiliaryCount;
-  return shiftedRegionLiteral(source.root, auxiliaryOffset);
-}
-
-bool helperInvariantStrengtheningWithinBudget(
-    const std::vector<InterpolantRegion>& helperInvariantRegions) {
-  size_t clauses = 0;
-  size_t literals = 0;
-  for (const InterpolantRegion& region : helperInvariantRegions) {
-    if (region.type != InterpolantRegion::Type::Normal) {
-      continue;
-    }
-    clauses += regionClauseCount(region);
-    literals += regionLiteralCount(region);
-    if (clauses > kCraigHelperStrengthenClauseLimit ||
-        literals > kCraigHelperStrengthenLiteralLimit) {
-      return false;
-    }
-  }
-  return true;
-}
-
-std::optional<RegionLiteral> appendHelperInvariantUnionRoot(
-    InterpolantRegion& target,
-    const std::vector<InterpolantRegion>& helperInvariantRegions,
-    bool& unionIsFalse) {
-  std::vector<RegionLiteral> helperRoots;
-  helperRoots.reserve(helperInvariantRegions.size());
-  for (const InterpolantRegion& helper : helperInvariantRegions) {
-    if (helper.type == InterpolantRegion::Type::True) {
-      unionIsFalse = false;
-      return std::nullopt;
-    }
-    if (helper.type == InterpolantRegion::Type::False) {
-      continue;
-    }
-    helperRoots.push_back(appendShiftedRegionDefinition(target, helper));
-  }
-  if (helperRoots.empty()) {
-    unionIsFalse = true;
-    return std::nullopt;
-  }
-  unionIsFalse = false;
-  if (helperRoots.size() == 1) {
-    return helperRoots.front();
-  }
-
-  const RegionLiteral unionRoot = appendAuxiliaryRegionRoot(target);
-  std::vector<RegionLiteral> unionImpliesAnyHelper;
-  unionImpliesAnyHelper.reserve(helperRoots.size() + 1);
-  unionImpliesAnyHelper.push_back(invertedRegionLiteral(unionRoot));
-  for (const RegionLiteral& helperRoot : helperRoots) {
-    appendBinaryRegionClause(
-        target, invertedRegionLiteral(helperRoot), unionRoot);
-    unionImpliesAnyHelper.push_back(helperRoot);
-  }
-  appendRegionClause(target, unionImpliesAnyHelper);
-  return unionRoot;
-}
-
-InterpolantRegion conjoinRegionRoots(
-    InterpolantRegion region,
-    const std::vector<RegionLiteral>& roots) {
-  if (roots.empty()) {
-    return {InterpolantRegion::Type::True};
-  }
-  if (roots.size() == 1) {
-    region.root = roots.front();
-    region.type = InterpolantRegion::Type::Normal;
-    return region;
-  }
-
-  const RegionLiteral conjunctionRoot = appendAuxiliaryRegionRoot(region);
-  std::vector<RegionLiteral> childrenImplyConjunction;
-  childrenImplyConjunction.reserve(roots.size() + 1);
-  childrenImplyConjunction.push_back(conjunctionRoot);
-  for (const RegionLiteral& root : roots) {
-    appendBinaryRegionClause(
-        region, invertedRegionLiteral(conjunctionRoot), root);
-    childrenImplyConjunction.push_back(invertedRegionLiteral(root));
-  }
-  appendRegionClause(region, childrenImplyConjunction);
-  region.root = conjunctionRoot;
-  region.type = InterpolantRegion::Type::Normal;
-  return region;
-}
-
-InterpolantRegion strengthenRegionWithHelperInvariants(
-    InterpolantRegion region,
-    const std::vector<InterpolantRegion>& helperInvariantRegions) {
-  if (helperInvariantRegions.empty() ||
-      region.type == InterpolantRegion::Type::False) {
-    return region;
-  }
-  if (!helperInvariantStrengtheningWithinBudget(helperInvariantRegions)) {
-    emitSecDiag(
-        "SEC diag: imc Craig skipped helper strengthening over budget");
-    return region;
-  }
-
-  const size_t oldClauses = regionClauseCount(region);
-  const size_t oldLiterals = regionLiteralCount(region);
-  const bool sourceRegionWasTrue =
-      region.type == InterpolantRegion::Type::True;
-  std::vector<RegionLiteral> conjunctionRoots;
-  if (region.type == InterpolantRegion::Type::Normal) {
-    conjunctionRoots.push_back(region.root);
-  } else {
-    region = {InterpolantRegion::Type::Normal};
-  }
-
-  bool helperUnionIsFalse = false;
-  std::optional<RegionLiteral> helperUnionRoot =
-      appendHelperInvariantUnionRoot(
-          region, helperInvariantRegions, helperUnionIsFalse);
-  if (helperUnionIsFalse) {
-    return {InterpolantRegion::Type::False};
-  }
-  if (!helperUnionRoot.has_value()) {
-    if (sourceRegionWasTrue) {
-      return {InterpolantRegion::Type::True};
-    }
-    return region;
-  }
-  conjunctionRoots.push_back(*helperUnionRoot);
-
-  // This is the IMC analogue of auxiliary-invariant strengthening: after the
-  // Craig interpolant is derived, keep future Q-image queries inside the helper
-  // invariant that was already proved by an earlier Craig batch.
-  InterpolantRegion strengthened =
-      conjoinRegionRoots(std::move(region), conjunctionRoots);
-  emitSecDiag(
-      "SEC diag: imc Craig strengthened interpolant with helper invariant "
-      "clauses=",
-      oldClauses,
-      "->",
-      regionClauseCount(strengthened),
-      " literals=",
-      oldLiterals,
-      "->",
-      regionLiteralCount(strengthened));
-  return strengthened;
 }
 
 bool sameRegionVariable(const RegionLiteral& lhs, const RegionLiteral& rhs) {
@@ -1141,11 +936,90 @@ void addInitialFrontierConstraint(
 struct FrontierResult {
   std::optional<InterpolantRegion> region;
   std::unordered_set<size_t> transitionStateSupport;
+  std::unordered_set<size_t> modelGuidedTransitionStateSupport;
+  size_t modelGuidedTransitionStateCandidates = 0;
   SATSolverWrapper::SolveStatus solveStatus =
       SATSolverWrapper::SolveStatus::Unknown;
   std::int64_t solveElapsedMilliseconds = 0;
   std::int64_t interpolationElapsedMilliseconds = 0;
 };
+
+std::unordered_map<size_t, bool> assignmentMap(
+    const std::vector<std::pair<size_t, bool>>& assignments) {
+  std::unordered_map<size_t, bool> result;
+  result.reserve(assignments.size());
+  for (const auto& [symbol, value] : assignments) {
+    result.emplace(symbol, value);
+  }
+  return result;
+}
+
+std::unordered_set<size_t> modelGuidedBootstrapProjectionSupport(
+    const KInductionProblem& problem,
+    const SATSolverWrapper& solver,
+    const std::unordered_map<size_t, int>& currentLits,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::unordered_set<size_t>& transitionStateSupport,
+    size_t& candidateCount) {
+  candidateCount = 0;
+  if (problem.bootstrapStateAssignments.empty()) {
+    return {};
+  }
+
+  const std::unordered_map<size_t, bool> bootstrapAssignments =
+      assignmentMap(problem.bootstrapStateAssignments);
+  std::unordered_set<size_t> selectedSupport;
+  for (const size_t symbol : sortedSymbols(transitionStateSupport)) {
+    if (trackedStates.contains(symbol)) {
+      continue;
+    }
+    const auto expected = bootstrapAssignments.find(symbol);
+    const auto literal = currentLits.find(symbol);
+    if (expected == bootstrapAssignments.end() ||
+        literal == currentLits.end()) {
+      continue;
+    }
+    if (solver.getLiteralValue(literal->second) == expected->second) {
+      continue;
+    }
+    ++candidateCount;
+    if (selectedSupport.size() < kCraigModelGuidedProjectionRefinementLimit) {
+      selectedSupport.insert(symbol);
+    }
+  }
+  closeSameDesignStateSemantics(problem, selectedSupport);
+  return selectedSupport;
+}
+
+const std::unordered_set<size_t>& projectionRefinementSupport(
+    const FrontierResult& frontier) {
+  return frontier.modelGuidedTransitionStateSupport.empty()
+             ? frontier.transitionStateSupport
+             : frontier.modelGuidedTransitionStateSupport;
+}
+
+std::unordered_set<size_t> boundedProjectionRefinementSupport(
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::unordered_set<size_t>& transitionStateSupport,
+    size_t& candidateCount) {
+  candidateCount = 0;
+  std::unordered_set<size_t> selectedSupport;
+  for (const size_t symbol : sortedSymbols(transitionStateSupport)) {
+    if (trackedStates.contains(symbol)) {
+      continue;
+    }
+    ++candidateCount;
+    if (selectedSupport.size() < kCraigModelGuidedProjectionRefinementLimit) {
+      selectedSupport.insert(symbol);
+    }
+  }
+  if (candidateCount <= kCraigModelGuidedProjectionRefinementLimit) {
+    return {};
+  }
+  closeSameDesignStateSemantics(problem, selectedSupport);
+  return selectedSupport;
+}
 
 size_t frontierRegionClauseCount(const FrontierResult& frontier) {
   return frontier.region.has_value() ? regionClauseCount(*frontier.region) : 0;
@@ -1596,13 +1470,26 @@ FrontierResult deriveLookaheadFrontierRegion(
       " status=", static_cast<int>(result.solveStatus),
       " elapsed_ms=", result.solveElapsedMilliseconds);
   if (result.solveStatus != SATSolverWrapper::SolveStatus::Unsat) {
+    if (result.solveStatus == SATSolverWrapper::SolveStatus::Sat &&
+        sourceIncludesConcreteBootstrapCube) {
+      // A SAT result under a projected transition is often spurious because
+      // untracked source states are unconstrained. Prefer the reset-known
+      // state bits contradicted by this model before pulling the whole cone.
+      result.modelGuidedTransitionStateSupport =
+          modelGuidedBootstrapProjectionSupport(
+              problem,
+              solver,
+              transition.currentLits,
+              trackedStates,
+              result.transitionStateSupport,
+              result.modelGuidedTransitionStateCandidates);
+    }
     return result;
   }
 
   const auto interpolationStart = SteadyClock::now();
-  result.region = strengthenRegionWithHelperInvariants(
-      convertInterpolant(solver.createCraigInterpolant(), stateByVariable),
-      helperInvariantRegions);
+  result.region =
+      convertInterpolant(solver.createCraigInterpolant(), stateByVariable);
   result.interpolationElapsedMilliseconds =
       elapsedMilliseconds(interpolationStart);
   emitSecDiag(
@@ -1816,11 +1703,41 @@ CraigImcResult runWithProjection(
         qExpansionPass);
     if (!frontier.region.has_value()) {
       const size_t oldSize = trackedStates.size();
+      size_t boundedCandidateCount = 0;
+      const bool hasModelGuidedRefinement =
+          !frontier.modelGuidedTransitionStateSupport.empty();
+      std::unordered_set<size_t> boundedRefinementSupport;
+      if (!hasModelGuidedRefinement) {
+        boundedRefinementSupport = boundedProjectionRefinementSupport(
+            problem,
+            trackedStates,
+            frontier.transitionStateSupport,
+            boundedCandidateCount);
+      }
+      const std::unordered_set<size_t>& refinementSupport =
+          !boundedRefinementSupport.empty()
+              ? boundedRefinementSupport
+              : projectionRefinementSupport(frontier);
       trackedStates.insert(
-          frontier.transitionStateSupport.begin(),
-          frontier.transitionStateSupport.end());
+          refinementSupport.begin(),
+          refinementSupport.end());
       closeSameDesignStateSemantics(problem, trackedStates);
       if (trackedStates.size() != oldSize) {
+        if (hasModelGuidedRefinement) {
+          emitSecDiag(
+              "SEC diag: imc Craig model-guided projection refinement "
+              "candidates=",
+              frontier.modelGuidedTransitionStateCandidates,
+              " selected=",
+              frontier.modelGuidedTransitionStateSupport.size(),
+              " full=", frontier.transitionStateSupport.size());
+        } else if (!boundedRefinementSupport.empty()) {
+          emitSecDiag(
+              "SEC diag: imc Craig bounded projection refinement candidates=",
+              boundedCandidateCount,
+              " selected=", boundedRefinementSupport.size(),
+              " full=", frontier.transitionStateSupport.size());
+        }
         emitSecDiag(
             "SEC diag: imc Craig refines transition projection states=",
             oldSize, "->", trackedStates.size());
