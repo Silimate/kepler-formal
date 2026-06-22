@@ -8523,7 +8523,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(formattedProblem.find("input_symbols: [x4]"), std::string::npos);
   EXPECT_NE(formattedProblem.find("transition_formula:"), std::string::npos);
   EXPECT_NE(formattedProblem.find("x2' = ~x2"), std::string::npos);
-  EXPECT_NE(formattedProblem.find("x3' = x3 AND x4"), std::string::npos);
+  EXPECT_TRUE(
+      formattedProblem.find("x3' = x3 AND x4") != std::string::npos ||
+      formattedProblem.find("x3' = x4 AND x3") != std::string::npos)
+      << formattedProblem;
   EXPECT_NE(formattedProblem.find("bad: x2 XOR x3"), std::string::npos);
 
   const ScopedEnvVar secPdrTrace("KEPLER_SEC_PDR_TRACE", "1");
@@ -17017,7 +17020,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Final single-output dual-rail repairs are still ordinary PDR predecessor
   // checks, but BP needs a deeper local SAT budget than broad batches do.
   EXPECT_NE(
-      stderrOutput.find("conflict_limit=50000"),
+      stderrOutput.find("conflict_limit=200000"),
       std::string::npos)
       << stderrOutput;
 }

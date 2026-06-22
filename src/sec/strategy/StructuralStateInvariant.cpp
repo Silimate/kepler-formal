@@ -50,6 +50,10 @@ constexpr unsigned kSatValidatedStructuralConflictLimit = 4096;
 using KEPLER_FORMAL::BoolExpr;
 using FingerprintMemo = std::pmr::unordered_map<BoolExpr*, uint64_t>;
 
+bool isCommutativeBoolOp(Op op) {
+  return op == Op::AND || op == Op::OR || op == Op::XOR;
+}
+
 struct RefinementSignatureHash {
   size_t operator()(const std::pair<size_t, uint64_t>& signature) const noexcept {
     size_t seed = std::hash<size_t>()(signature.first);
@@ -1803,7 +1807,35 @@ bool areEquivalentUnderAbstractMaps(
         memo.at(std::make_pair(current.lhs->getLeft(), current.rhs->getLeft()));
     const bool rightEquivalent =
         memo.at(std::make_pair(current.lhs->getRight(), current.rhs->getRight()));
-    cacheAbstractEquivalence(memo, key, leftEquivalent && rightEquivalent);
+    bool equivalent = leftEquivalent && rightEquivalent;
+    if (!equivalent && isCommutativeBoolOp(lhsOp)) {
+      const auto crossLeftKey =
+          std::make_pair(current.lhs->getLeft(), current.rhs->getRight());
+      const auto crossRightKey =
+          std::make_pair(current.lhs->getRight(), current.rhs->getLeft());
+      bool deferred = false;
+      if (memo.find(crossRightKey) == memo.end()) {
+        if (!deferred) {
+          stack.push_back({current.lhs, current.rhs, true});
+          deferred = true;
+        }
+        stack.push_back(
+            {current.lhs->getRight(), current.rhs->getLeft(), false});
+      }
+      if (memo.find(crossLeftKey) == memo.end()) {
+        if (!deferred) {
+          stack.push_back({current.lhs, current.rhs, true});
+          deferred = true;
+        }
+        stack.push_back(
+            {current.lhs->getLeft(), current.rhs->getRight(), false});
+      }
+      if (deferred) {
+        continue;
+      }
+      equivalent = memo.at(crossLeftKey) && memo.at(crossRightKey);
+    }
+    cacheAbstractEquivalence(memo, key, equivalent);
   }
 
   return memo.at(std::make_pair(expr0, expr1));
