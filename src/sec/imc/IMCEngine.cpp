@@ -42,7 +42,12 @@ constexpr CraigImcGrowthBudget kDefaultLargeDualRailCraigGrowthBudget{
     /*maxInterpolantClauses=*/100000,
     /*maxInterpolantLiterals=*/250000,
     /*maxInterpolantAuxiliaries=*/50000,
-    /*maxImageSolveMilliseconds=*/25000};
+    /*maxImageSolveMilliseconds=*/25000,
+    // BP's hard retained-helper tail needs a little more than 49K tracked
+    // states after the focused request cap exposes the final strict projection
+    // surface. Keep the guard well below the full 84K support so projection
+    // cannot silently grow into the old all-support Craig query.
+    /*maxProjectionStates=*/65536};
 
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
 constexpr size_t kCraigBatchMinMarginalSupportLimit = 64;
@@ -54,6 +59,11 @@ constexpr size_t kCraigBatchProjectionSoftMaxOutputs = 4;
 constexpr size_t kCraigBatchProjectionHardMaxOutputs = 2;
 constexpr size_t kCraigReusableProjectionMinSupport = 256;
 constexpr size_t kCraigSingleOutputSelfProjectionSeedLimit = 1024;
+constexpr size_t kCraigProjectionCacheWorkLimit = 500000;
+constexpr size_t kCraigIndexedVectorOutputRawSupportLimit = 64;
+constexpr size_t kCraigIndexedVectorUnionRawSupportLimit = 128;
+constexpr size_t kCraigHelperReuseMinOverlapPercent = 80;
+constexpr size_t kCraigSingletonRawHelperSourceLimit = 32;
 struct CraigOutputSupport {
   std::unordered_set<size_t> raw;
   std::unordered_set<size_t> projection;
@@ -61,6 +71,7 @@ struct CraigOutputSupport {
 
 struct CraigOutputSupportCache {
   std::vector<CraigOutputSupport> outputSupports;
+  std::vector<std::string> outputNames;
 };
 
 struct CraigOutputBatchPlan {
@@ -91,16 +102,43 @@ std::unordered_set<size_t> observedOutputSupport(
   return support;
 }
 
+bool shouldBuildCraigProjectionSupportCache(
+    const KInductionProblem& problem) {
+  const size_t outputCount = problem.observedOutputExprs0.size();
+  const size_t stateCount = problem.effectiveTotalStateCount();
+  if (outputCount == 0 || stateCount == 0) {
+    return true;
+  }
+  // The cache expands each output support through the transition relation.
+  // That is useful on AES-sized surfaces, but BP-sized dual-rail problems can
+  // spend tens of GB before the first Craig query.  When the estimated cache
+  // work is too large, keep raw support batching and let Craig's bounded
+  // projection refinement grow one proof slice at a time.
+  return stateCount <= kCraigProjectionCacheWorkLimit / outputCount;
+}
+
 CraigOutputSupportCache buildCraigOutputSupportCache(
     const KInductionProblem& problem) {
   CraigOutputSupportCache cache;
   cache.outputSupports.reserve(problem.observedOutputExprs0.size());
+  cache.outputNames = problem.observedOutputNames;
+  const bool buildProjectionCache =
+      shouldBuildCraigProjectionSupportCache(problem);
+  if (!buildProjectionCache) {
+    emitSecDiag(
+        "SEC diag: imc Craig skips projection support cache states=",
+        problem.effectiveTotalStateCount(),
+        " outputs=", problem.observedOutputExprs0.size(),
+        " work_limit=", kCraigProjectionCacheWorkLimit);
+  }
   for (size_t output = 0; output < problem.observedOutputExprs0.size();
        ++output) {
     CraigOutputSupport support;
     support.raw = observedOutputSupport(problem, output);
-    support.projection =
-        computeCraigImcProjectionClosure(problem, support.raw);
+    if (buildProjectionCache) {
+      support.projection =
+          computeCraigImcProjectionClosure(problem, support.raw);
+    }
     cache.outputSupports.push_back(std::move(support));
   }
   return cache;
@@ -177,6 +215,58 @@ bool hasReusableProjectionSurface(const CraigOutputSupport& batchSupport,
          supportCoversMostOf(outputComparison, batchComparison);
 }
 
+bool supportOverlapAtLeast(const std::unordered_set<size_t>& lhs,
+                           const std::unordered_set<size_t>& rhs,
+                           size_t minPercent) {
+  if (lhs.empty() || rhs.empty()) {
+    return lhs.empty() && rhs.empty();
+  }
+  const size_t overlap = supportIntersectionSize(lhs, rhs);
+  return (overlap * 100) / lhs.size() >= minPercent &&
+         (overlap * 100) / rhs.size() >= minPercent;
+}
+
+bool hasStrongReusableSupportOverlap(
+    const CraigOutputSupport& sourceSupport,
+    const CraigOutputSupport& targetSupport) {
+  // Projection support is the best compatibility signal when it is available.
+  // BP-sized runs skip that cache, so fall back to raw output support.  Require
+  // bidirectional overlap to avoid carrying a tiny control-bit invariant into a
+  // mostly unrelated datapath bus.
+  const auto& sourceComparison = batchingSupport(sourceSupport);
+  const auto& targetComparison = batchingSupport(targetSupport);
+  return supportOverlapAtLeast(
+      sourceComparison,
+      targetComparison,
+      kCraigHelperReuseMinOverlapPercent);
+}
+
+bool canUseSmallRawHelperForSingleton(
+    const CraigOutputSupport& sourceSupport,
+    const CraigOutputSupport& rangeSupport) {
+  // When BP skips the projection cache, a tiny control helper can be valuable
+  // for the next valid bit even though raw overlap is low.  Do not extend that
+  // exception to wide datapath helpers; they can drag a large bus surface into
+  // an unrelated singleton and spend the remaining budget rediscovering Craig
+  // projection states.
+  return sourceSupport.projection.empty() &&
+         rangeSupport.projection.empty() &&
+         sourceSupport.raw.size() <= kCraigSingletonRawHelperSourceLimit;
+}
+
+bool shouldRetainSmallRawSingletonCraigInvariant(
+    const CraigOutputSupport& rangeSupport,
+    size_t firstOutput,
+    size_t endOutput) {
+  // Keep one small control-style helper around after the normal reusable slot
+  // moves on to a wide bus proof.  BP valid/ready outputs can need that helper
+  // late in the output list, but wide data batches should still see only the
+  // compatibility-checked primary helper.
+  return endOutput == firstOutput + 1 &&
+         rangeSupport.projection.empty() &&
+         rangeSupport.raw.size() <= kCraigSingletonRawHelperSourceLimit;
+}
+
 size_t marginalSupportLimit(size_t batchSupportSize) {
   return std::max(
       kCraigBatchMinMarginalSupportLimit,
@@ -199,6 +289,65 @@ size_t adaptiveCraigBatchMaxOutputCount(
         std::min(maxOutputCount, kCraigBatchProjectionSoftMaxOutputs);
   }
   return maxOutputCount;
+}
+
+bool indexedOutputVectorBase(
+    const std::string& outputName,
+    std::string* baseName) {
+  if (outputName.empty() || outputName.back() != ']') {
+    return false;
+  }
+  const size_t openBracket = outputName.rfind('[');
+  if (openBracket == std::string::npos ||
+      openBracket == 0 ||
+      openBracket + 1 == outputName.size() - 1) {
+    return false;
+  }
+  for (size_t index = openBracket + 1; index + 1 < outputName.size();
+       ++index) {
+    if (outputName[index] < '0' || outputName[index] > '9') {
+      return false;
+    }
+  }
+  *baseName = outputName.substr(0, openBracket);
+  return true;
+}
+
+bool sameIndexedOutputVector(
+    const CraigOutputSupportCache& supportCache,
+    size_t lhsOutput,
+    size_t rhsOutput) {
+  if (lhsOutput >= supportCache.outputNames.size() ||
+      rhsOutput >= supportCache.outputNames.size()) {
+    return false;
+  }
+  std::string lhsBase;
+  std::string rhsBase;
+  return indexedOutputVectorBase(
+             supportCache.outputNames[lhsOutput], &lhsBase) &&
+         indexedOutputVectorBase(
+             supportCache.outputNames[rhsOutput], &rhsBase) &&
+         lhsBase == rhsBase;
+}
+
+bool canUseIndexedVectorRawBatch(
+    const CraigOutputSupportCache& supportCache,
+    const CraigOutputSupport& batchSupport,
+    const CraigOutputSupport& outputSupport,
+    size_t firstOutput,
+    size_t output,
+    size_t unionSupport) {
+  // BP-sized problems skip the per-output projection cache to stay under the
+  // memory target. In that mode, neighboring bits of the same observed vector
+  // have low immediate support overlap even though Craig later discovers the
+  // same transition surface. Batch only small same-vector raw cones so unrelated
+  // wide outputs still split before interpolation.
+  return batchSupport.projection.empty() &&
+         outputSupport.projection.empty() &&
+         outputSupport.raw.size() <=
+             kCraigIndexedVectorOutputRawSupportLimit &&
+         unionSupport <= kCraigIndexedVectorUnionRawSupportLimit &&
+         sameIndexedOutputVector(supportCache, firstOutput, output);
 }
 
 size_t envSizeOrDefault(const char* name, size_t fallback) {
@@ -254,9 +403,12 @@ std::unordered_set<size_t> buildCraigTrackedStateSeedsForRange(
 }
 
 bool canAddOutputToCraigBatch(
+    const CraigOutputSupportCache& supportCache,
     const CraigOutputSupport& batchSupport,
     const CraigOutputSupport& outputSupport,
     const OutputBatchingLimits& limits,
+    size_t firstOutput,
+    size_t output,
     size_t batchOutputCount,
     const char** rejectReason,
     size_t* marginalSupport,
@@ -299,6 +451,15 @@ bool canAddOutputToCraigBatch(
     return false;
   }
   if (*overlapPercent < kCraigBatchMinOverlapPercent) {
+    if (canUseIndexedVectorRawBatch(
+            supportCache,
+            batchSupport,
+            outputSupport,
+            firstOutput,
+            output,
+            unionSupport)) {
+      return true;
+    }
     *rejectReason = "low_overlap";
     return false;
   }
@@ -490,7 +651,13 @@ void removeCrossDesignStateCandidates(KInductionProblem& problem) {
 struct ReusableCraigInvariant {
   std::vector<InterpolantRegion> regions;
   std::unordered_set<size_t> trackedStates;
+  std::vector<std::pair<size_t, bool>> auxiliaryConstants;
+  std::vector<std::pair<size_t, size_t>> auxiliaryEqualities;
+  CraigOutputSupport sourceSupport;
+  size_t sourceFirstOutput = 0;
+  size_t sourceEndOutput = 0;
   size_t proofBound = 0;
+  bool hasSource = false;
 };
 
 bool isSingleCraigOutputRange(size_t firstOutput, size_t endOutput) {
@@ -503,6 +670,53 @@ bool shouldRetrySingleOutputWithSelfProjection(
     const std::unordered_set<size_t>& trackedStateSeeds) {
   return isSingleCraigOutputRange(firstOutput, endOutput) &&
          trackedStateSeeds.size() >= kCraigSingleOutputSelfProjectionSeedLimit;
+}
+
+bool reusableCraigInvariantMatchesOutputRange(
+    const CraigOutputSupportCache& supportCache,
+    const ReusableCraigInvariant& reusableInvariant,
+    const CraigOutputSupport& rangeSupport,
+    size_t firstOutput,
+    size_t endOutput) {
+  if (reusableInvariant.regions.empty()) {
+    return false;
+  }
+  if (!reusableInvariant.hasSource) {
+    return true;
+  }
+  if (isSingleCraigOutputRange(firstOutput, endOutput) &&
+      canUseSmallRawHelperForSingleton(
+          reusableInvariant.sourceSupport, rangeSupport)) {
+    return true;
+  }
+  // Same indexed buses, such as BP mem_data_cmd_o[*], often have low raw
+  // overlap before projection but converge to the same Craig surface.
+  if (sameIndexedOutputVector(
+          supportCache, reusableInvariant.sourceFirstOutput, firstOutput)) {
+    return true;
+  }
+  return hasReusableProjectionSurface(
+             reusableInvariant.sourceSupport, rangeSupport) ||
+         hasStrongReusableSupportOverlap(
+             reusableInvariant.sourceSupport, rangeSupport);
+}
+
+void saveReusableCraigInvariant(
+    const CraigImcResult& proof,
+    const CraigOutputSupport& rangeSupport,
+    size_t firstOutput,
+    size_t endOutput,
+    ReusableCraigInvariant& reusableInvariant) {
+  reusableInvariant.regions = proof.invariantRegions;
+  reusableInvariant.trackedStates = proof.trackedStates;
+  reusableInvariant.auxiliaryConstants = proof.auxiliaryStateInvariants;
+  reusableInvariant.auxiliaryEqualities = proof.auxiliaryStateEqualities;
+  reusableInvariant.sourceSupport = rangeSupport;
+  reusableInvariant.sourceFirstOutput = firstOutput;
+  reusableInvariant.sourceEndOutput = endOutput;
+  reusableInvariant.proofBound =
+      std::max(reusableInvariant.proofBound, proof.iterations);
+  reusableInvariant.hasSource = true;
 }
 
 std::unordered_set<size_t> buildCraigInitialTrackedStatesForAttempt(
@@ -519,10 +733,16 @@ std::unordered_set<size_t> buildCraigInitialTrackedStatesForAttempt(
   return initialTrackedStates;
 }
 
-CraigImcOptions makeCraigImcOptions(bool enableGrowthBudget) {
+CraigImcOptions makeCraigImcOptions(
+    bool enableGrowthBudget,
+    const ReusableCraigInvariant& reusableInvariant) {
   CraigImcOptions options;
   options.enableAuxiliaryInvariants = true;
   options.enableDirectConcreteCubeSource = true;
+  options.helperAuxiliaryStateInvariants =
+      reusableInvariant.auxiliaryConstants;
+  options.helperAuxiliaryStateEqualities =
+      reusableInvariant.auxiliaryEqualities;
   if (enableGrowthBudget) {
     options.growthBudget = largeDualRailCraigGrowthBudget();
   }
@@ -539,7 +759,8 @@ CraigImcResult runCraigCheckerAttempt(
   const std::unordered_set<size_t> initialTrackedStates =
       buildCraigInitialTrackedStatesForAttempt(
           trackedStateSeeds, reusableInvariant, includeRangeSeeds);
-  const CraigImcOptions options = makeCraigImcOptions(enableGrowthBudget);
+  const CraigImcOptions options = makeCraigImcOptions(
+      enableGrowthBudget, reusableInvariant);
   CraigInterpolatingModelChecker checker(
       batchProblem,
       reusableInvariant.regions.empty() ? nullptr
@@ -557,7 +778,8 @@ IMCResult runCraigOutputRange(
     size_t endOutput,
     const CraigOutputSupportCache& supportCache,
     CraigTrackedSeedScope seedScope,
-    ReusableCraigInvariant& reusableInvariant) {
+    ReusableCraigInvariant& reusableInvariant,
+    ReusableCraigInvariant& smallRawSingletonInvariant) {
   KInductionProblem batchProblem = problem;
   configureOutputBatchProblem(
       batchProblem, problem, firstOutput, endOutput);
@@ -565,6 +787,24 @@ IMCResult runCraigOutputRange(
   const std::unordered_set<size_t> trackedStateSeeds =
       buildCraigTrackedStateSeedsForRange(
           supportCache, firstOutput, endOutput, seedScope);
+  const CraigOutputSupport rangeSupport = mergedCraigOutputSupportForRange(
+      supportCache, firstOutput, endOutput);
+  const ReusableCraigInvariant emptyReusableInvariant;
+  const bool useReusableInvariant = reusableCraigInvariantMatchesOutputRange(
+      supportCache, reusableInvariant, rangeSupport, firstOutput, endOutput);
+  const bool useSmallRawSingletonInvariant =
+      !useReusableInvariant &&
+      reusableCraigInvariantMatchesOutputRange(
+          supportCache,
+          smallRawSingletonInvariant,
+          rangeSupport,
+          firstOutput,
+          endOutput);
+  const ReusableCraigInvariant& activeReusableInvariant =
+      useReusableInvariant
+          ? reusableInvariant
+          : useSmallRawSingletonInvariant ? smallRawSingletonInvariant
+                                         : emptyReusableInvariant;
   emitSecDiag(
       "SEC diag: imc Craig output batch first=", firstOutput,
       " end=", endOutput,
@@ -574,17 +814,36 @@ IMCResult runCraigOutputRange(
           : std::string("<unknown>"),
       " bad_support=", batchProblem.bad->getSupportVars().size(),
       " tracked_seed_states=", trackedStateSeeds.size(),
-      " helper_regions=", reusableInvariant.regions.size());
+      " helper_regions=", activeReusableInvariant.regions.size());
+  if (!reusableInvariant.regions.empty() && !useReusableInvariant) {
+    emitSecDiag(
+        "SEC diag: imc Craig skips reusable invariant for output batch first=",
+        firstOutput, " end=", endOutput,
+        " source_first=", reusableInvariant.sourceFirstOutput,
+        " source_end=", reusableInvariant.sourceEndOutput,
+        " helper_regions=", reusableInvariant.regions.size());
+  }
+  if (useSmallRawSingletonInvariant) {
+    emitSecDiag(
+        "SEC diag: imc Craig uses retained small singleton invariant for "
+        "output batch first=",
+        firstOutput, " end=", endOutput,
+        " source_first=", smallRawSingletonInvariant.sourceFirstOutput,
+        " source_end=", smallRawSingletonInvariant.sourceEndOutput,
+        " helper_regions=", smallRawSingletonInvariant.regions.size());
+  }
 
-  if (!reusableInvariant.regions.empty() &&
+  if (!activeReusableInvariant.regions.empty() &&
       craigInvariantExcludesBad(
           batchProblem,
-          reusableInvariant.trackedStates,
-          reusableInvariant.regions)) {
+          activeReusableInvariant.trackedStates,
+          activeReusableInvariant.regions,
+          activeReusableInvariant.auxiliaryConstants,
+          activeReusableInvariant.auxiliaryEqualities)) {
     emitSecDiag(
         "SEC diag: imc Craig reused invariant for output batch first=",
         firstOutput, " end=", endOutput);
-    return {IMCStatus::Equivalent, reusableInvariant.proofBound};
+    return {IMCStatus::Equivalent, activeReusableInvariant.proofBound};
   }
 
   const bool multiOutputRange = !isSingleCraigOutputRange(
@@ -592,8 +851,7 @@ IMCResult runCraigOutputRange(
   const bool retrySingleOutputWithSelfProjection =
       shouldRetrySingleOutputWithSelfProjection(
           firstOutput, endOutput, trackedStateSeeds);
-  const bool enableGrowthBudget =
-      multiOutputRange || retrySingleOutputWithSelfProjection;
+  const bool enableGrowthBudget = true;
 
   // A single AES text bit can arrive with a huge precomputed transition
   // surface. If that seeded attempt blows the Craig budget, retry the same
@@ -601,7 +859,7 @@ IMCResult runCraigOutputRange(
   // refinement add only states the proof actually touches.
   CraigImcResult proof = runCraigCheckerAttempt(
       batchProblem,
-      reusableInvariant,
+      activeReusableInvariant,
       trackedStateSeeds,
       /*includeRangeSeeds=*/true,
       enableGrowthBudget,
@@ -613,10 +871,10 @@ IMCResult runCraigOutputRange(
         "first=",
         firstOutput, " end=", endOutput,
         " dropped_seed_states=", trackedStateSeeds.size(),
-        " helper_seed_states=", reusableInvariant.trackedStates.size());
+        " helper_seed_states=", activeReusableInvariant.trackedStates.size());
     proof = runCraigCheckerAttempt(
         batchProblem,
-        reusableInvariant,
+        activeReusableInvariant,
         trackedStateSeeds,
         /*includeRangeSeeds=*/false,
         /*enableGrowthBudget=*/true,
@@ -628,10 +886,25 @@ IMCResult runCraigOutputRange(
       // Any proved Craig region is a valid helper invariant. Small control
       // proofs, such as AES done/counter bits, can still prune later wide data
       // output images even though their own tracked surface is tiny.
-      reusableInvariant.regions = proof.invariantRegions;
-      reusableInvariant.trackedStates = proof.trackedStates;
-      reusableInvariant.proofBound =
-          std::max(reusableInvariant.proofBound, proof.iterations);
+      saveReusableCraigInvariant(
+          proof,
+          rangeSupport,
+          firstOutput,
+          endOutput,
+          reusableInvariant);
+      if (shouldRetainSmallRawSingletonCraigInvariant(
+              rangeSupport, firstOutput, endOutput)) {
+        saveReusableCraigInvariant(
+            proof,
+            rangeSupport,
+            firstOutput,
+            endOutput,
+            smallRawSingletonInvariant);
+        emitSecDiag(
+            "SEC diag: imc Craig retains small singleton invariant first=",
+            firstOutput, " end=", endOutput,
+            " helper_regions=", proof.invariantRegions.size());
+      }
     }
     return {IMCStatus::Equivalent, proof.iterations};
   }
@@ -670,7 +943,8 @@ IMCResult runCraigOutputRange(
         midpoint,
         supportCache,
         CraigTrackedSeedScope::LocalRange,
-        reusableInvariant);
+        reusableInvariant,
+        smallRawSingletonInvariant);
     const IMCResult right = runCraigOutputRange(
         problem,
         solverType,
@@ -679,7 +953,8 @@ IMCResult runCraigOutputRange(
         endOutput,
         supportCache,
         CraigTrackedSeedScope::LocalRange,
-        reusableInvariant);
+        reusableInvariant,
+        smallRawSingletonInvariant);
     if (left.status == IMCStatus::Different) {
       return left;
     }
@@ -734,6 +1009,7 @@ IMCResult runLargeDualRailCraigImc(
   size_t proofBound = 0;
   bool inconclusive = false;
   ReusableCraigInvariant reusableInvariant;
+  ReusableCraigInvariant smallRawSingletonInvariant;
   for (const CraigOutputBatchPlan& batchPlan : batches) {
     const IMCResult batchResult = runCraigOutputRange(
         problem,
@@ -743,12 +1019,19 @@ IMCResult runLargeDualRailCraigImc(
         batchPlan.endOutput,
         supportCache,
         CraigTrackedSeedScope::SharedReusableSurface,
-        reusableInvariant);
+        reusableInvariant,
+        smallRawSingletonInvariant);
     if (batchResult.status == IMCStatus::Different) {
       return batchResult;
     }
     if (batchResult.status == IMCStatus::Inconclusive) {
-      inconclusive = true;
+      // Once any output slice exhausts the strict Craig budgets, the whole
+      // equivalence proof is already inconclusive. Stop here instead of
+      // spending CI memory/time proving unrelated later outputs.
+      emitSecDiag(
+          "SEC diag: imc Craig stopping after inconclusive output batch first=",
+          batchPlan.firstOutput, " end=", batchPlan.endOutput);
+      return {IMCStatus::Inconclusive, maxK};
     } else {
       proofBound = std::max(proofBound, batchResult.bound);
     }
@@ -785,9 +1068,12 @@ std::vector<CraigOutputBatchPlan> buildLargeDualRailCraigImcOutputBatchPlans(
       size_t effectiveMaxOutputCount = limits.maxOutputBatchSize;
       const size_t batchOutputCount = endOutput - firstOutput;
       if (!canAddOutputToCraigBatch(
+              supportCache,
               batchSupport,
               outputSupports[endOutput],
               limits,
+              firstOutput,
+              endOutput,
               batchOutputCount,
               &rejectReason,
               &marginalSupport,

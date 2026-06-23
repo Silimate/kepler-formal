@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "common/SecDiag.h"
+#include "common/BoolExprUtils.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/TransitionExprResolver.h"
 
@@ -27,6 +29,14 @@ using ClausePartition = SATSolverWrapper::CraigClausePartition;
 using SteadyClock = std::chrono::steady_clock;
 
 constexpr size_t kAuxiliaryInvariantSupportLimit = 256;
+constexpr size_t kAuxiliaryInvariantCandidateLimit = 10000;
+constexpr size_t kLocalAuxiliaryInvariantCandidateLimit = 4096;
+constexpr size_t kLocalAuxiliaryInvariantLargeCandidateThreshold = 8192;
+constexpr size_t kLocalAuxiliaryInvariantLargeCandidateLimit = 1024;
+constexpr size_t kLocalAuxiliaryInvariantSupportMiningLimit = 65536;
+constexpr size_t kLocalAuxiliaryPreservationScoreBonus = 1ULL << 32;
+constexpr size_t kLocalAuxiliaryPreservationScoreSupportLimit = 512;
+constexpr size_t kLocalAuxiliaryPreservedCandidateExtraLimit = 512;
 constexpr size_t kAuxiliaryEqualityCandidateLimit = 1024;
 constexpr size_t kCraigSemanticSimplifyClauseLimit = 256;
 constexpr size_t kCraigSemanticSimplifyVariableLimit = 128;
@@ -34,6 +44,49 @@ constexpr size_t kCraigSubsumptionClauseLimit = 4096;
 constexpr size_t kCraigRegionCompactionStart = 8;
 constexpr size_t kCraigRegionCompactionCandidateLimit = 4;
 constexpr size_t kCraigModelGuidedProjectionRefinementLimit = 64;
+constexpr size_t kCraigLargeProjectionRefinementCandidateThreshold = 8192;
+constexpr size_t kCraigLargeProjectionRefinementLimit = 512;
+constexpr size_t kCraigTinyModelGuidedBackfillSupportThreshold =
+    kCraigLargeProjectionRefinementCandidateThreshold;
+constexpr size_t kCraigLowScoreBackfillSupportThreshold = 100000;
+constexpr size_t kCraigLowScoreBackfillScoreLimit = 64;
+constexpr size_t kCraigLowScoreProjectionRefinementLimit = 128;
+constexpr size_t kCraigTightLowScoreBackfillSupportThreshold = 104000;
+constexpr size_t kCraigTightLowScoreProjectionRefinementLimit = 64;
+constexpr size_t kCraigHighSupportRefinementThreshold = 65536;
+constexpr size_t kCraigHighSupportProjectionRefinementLimit = 1024;
+constexpr size_t kCraigVeryHighSupportRefinementThreshold = 90000;
+constexpr size_t kCraigVeryHighSupportHighScoreProjectionRefinementLimit = 1024;
+constexpr size_t kCraigVeryHighSupportProjectionRefinementLimit = 128;
+constexpr size_t kCraigDirectCdclProjectionQueryStateLimit = 4096;
+constexpr size_t kCraigLocalAuxiliaryRetryLimit = 2;
+constexpr size_t kCraigProjectedLocalSemanticsSupportLimit = 100000;
+constexpr size_t kCraigProjectedLocalSemanticsTrackedStateLimit = 4096;
+constexpr size_t kCraigFocusedImageTransitionTrackedStateLimit = 1024;
+constexpr size_t kCraigFocusedImageTransitionRequestLimit = 12000;
+constexpr size_t kCraigFocusedProjectionRefinementSupportLimit = 65536;
+constexpr size_t kCraigFocusedProjectionRefinementLimit = 4096;
+constexpr size_t kCraigFocusedProjectionBulkSupportLimit = 49152;
+constexpr size_t kCraigFocusedProjectionBulkCandidateLimit = 32768;
+// Saturated focused projections are a last chance after projection stops
+// moving.  Keep the extra Q expansion bounded; BP's q7 proof alone can cross
+// the 10GB target, so advance lookahead after six retained regions.
+constexpr size_t kCraigFocusedSaturatedQExpansionPassLimit = 6;
+// Advancing lookahead discards the current interpolant instead of adding it to
+// Q.  Permit a larger one-time proof than the normal retained-region budget,
+// but still stop before runaway traces threaten the memory target.
+constexpr size_t kCraigFocusedLookaheadAdvanceMaxClauses = 750000;
+constexpr size_t kCraigFocusedLookaheadAdvanceMaxLiterals = 1750000;
+constexpr size_t kCraigFocusedLookaheadAdvanceMaxAuxiliaries = 250000;
+// The BP tail showed that waiting until the saturated q-pass limit can build a
+// second huge proof and cross the memory target.  Once a focused proof reaches
+// this size, try the next strict-IMC lookahead before growing Q again.
+constexpr size_t kCraigFocusedLookaheadAdvanceMinClauses = 200000;
+constexpr size_t kCraigFocusedLookaheadAdvanceMinLiterals = 500000;
+constexpr size_t kCraigFocusedLookaheadAdvanceMinAuxiliaries = 70000;
+constexpr size_t kCraigHelperAuxiliaryCarryLimit = 512;
+constexpr size_t kCraigRetainedHelperLocalAuxiliarySkipRegions = 6;
+constexpr size_t kCraigRetainedHelperLocalAuxiliarySkipStateThreshold = 32768;
 
 struct AuxiliaryStateInvariants {
   std::vector<std::pair<size_t, bool>> constants;
@@ -74,6 +127,112 @@ struct ExprBootstrapValueKeyHash {
            (key.value ? 0x9e3779b97f4a7c15ULL : 0ULL);
   }
 };
+
+struct ProjectionRefinementCandidate {
+  size_t symbol = 0;
+  size_t score = 0;
+};
+
+struct FrontierResult;
+
+std::unordered_map<size_t, size_t> primaryByComplement(
+    const KInductionProblem& problem);
+
+size_t transitionTargetFor(
+    size_t symbol,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary);
+
+bool projectionRefinementCandidateBetter(
+    const ProjectionRefinementCandidate& lhs,
+    const ProjectionRefinementCandidate& rhs) {
+  if (lhs.score != rhs.score) {
+    return lhs.score > rhs.score;
+  }
+  return lhs.symbol < rhs.symbol;
+}
+
+size_t localAuxiliaryCandidateLimit(size_t candidateCount) {
+  // Large dual-rail cones can expose tens of thousands of local bootstrap
+  // constants.  Keep the full slice for moderate supports, but switch to the
+  // highest-scored quarter slice once the proof cost is dominated by thousands
+  // of per-candidate preservation SAT calls.
+  return candidateCount > kLocalAuxiliaryInvariantLargeCandidateThreshold
+             ? kLocalAuxiliaryInvariantLargeCandidateLimit
+             : kLocalAuxiliaryInvariantCandidateLimit;
+}
+
+size_t largeSupportProjectionRefinementLimit(size_t supportSize) {
+  // Once the support pool is BP-sized, many 64-symbol projection rounds spend
+  // more time rebuilding Craig queries than proving.  Take a wider scored
+  // slice while still avoiding the old all-support import that caused blowups.
+  return supportSize > kCraigLargeProjectionRefinementCandidateThreshold
+             ? kCraigLargeProjectionRefinementLimit
+             : kCraigModelGuidedProjectionRefinementLimit;
+}
+
+size_t boundedProjectionRefinementLimit(size_t candidateCount) {
+  return largeSupportProjectionRefinementLimit(candidateCount);
+}
+
+size_t modelGuidedProjectionRefinementLimit(size_t transitionSupportSize) {
+  return largeSupportProjectionRefinementLimit(transitionSupportSize);
+}
+
+bool shouldMineLocalAuxiliaryInvariants(size_t transitionSupportSize) {
+  return transitionSupportSize <= kLocalAuxiliaryInvariantSupportMiningLimit;
+}
+
+bool shouldUseDirectCdclCraigProjectionQuery(size_t trackedStateCount) {
+  return trackedStateCount > kCraigDirectCdclProjectionQueryStateLimit;
+}
+
+bool shouldEncodeProjectedLocalStateSemantics(
+    size_t leafCount,
+    size_t trackedStateCount) {
+  return leafCount <= kCraigProjectedLocalSemanticsSupportLimit &&
+         trackedStateCount <= kCraigProjectedLocalSemanticsTrackedStateLimit;
+}
+
+bool shouldFocusImageTransitionRequests(
+    size_t trackedStateCount,
+    size_t lookahead) {
+  return lookahead > 0 &&
+         trackedStateCount > kCraigFocusedImageTransitionTrackedStateLimit;
+}
+
+bool shouldCapFocusedImageTransitionRequests(size_t expandedRequestCount) {
+  return expandedRequestCount > kCraigFocusedImageTransitionRequestLimit;
+}
+
+size_t cappedFocusedImageTransitionRequestCount(
+    size_t currentRequestCount,
+    size_t expandedRequestCount) {
+  if (!shouldCapFocusedImageTransitionRequests(expandedRequestCount)) {
+    return expandedRequestCount;
+  }
+  return std::max(currentRequestCount, kCraigFocusedImageTransitionRequestLimit);
+}
+
+void configureCraigProjectionSolver(
+    SATSolverWrapper& solver,
+    size_t trackedStateCount,
+    const char* phase) {
+  if (!shouldUseDirectCdclCraigProjectionQuery(trackedStateCount)) {
+    return;
+  }
+  // Reuse the shared direct-CaDiCaL SEC profile locally.  Craig tracing keeps
+  // every preprocessing resolvent, so large BP projections must avoid variable
+  // elimination instead of building an exponential proof trace before CDCL.
+  solver.configureForSecPdrQuery(trackedStateCount);
+  emitSecDiag(
+      "SEC diag: imc Craig uses direct CaDiCaL profile phase=", phase,
+      " tracked_states=", trackedStateCount,
+      " state_limit=", kCraigDirectCdclProjectionQueryStateLimit);
+}
+
+bool modelGuidedProjectionNeedsBoundedBackfill(
+    const FrontierResult& frontier);
 
 bool imcAuxiliaryInvariantsEnabled() {
   const char* enabled = std::getenv("KEPLER_SEC_IMC_AUX_INVARIANTS");
@@ -392,6 +551,65 @@ std::vector<size_t> sortedSymbols(
   return sorted;
 }
 
+void closeProjectionRefinementTransitionTargets(
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    std::unordered_set<size_t>& symbols) {
+  // Refinement does not need to track every same-design semantic partner.  If a
+  // selected complemented rail maps to a primary transition target, add that
+  // target so the next-state relation is still encoded; leaving other partners
+  // untracked only over-approximates the Craig query, which is sound for proofs.
+  for (const size_t requested : sortedSymbols(symbols)) {
+    const size_t target =
+        transitionTargetFor(requested, resolver, complementPrimary);
+    if (resolver.contains(target)) {
+      symbols.insert(target);
+    }
+  }
+}
+
+void insertFocusedTransitionRequestWithTarget(
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& trackedStates,
+    size_t symbol,
+    std::unordered_set<size_t>& requests) {
+  if (!trackedStates.contains(symbol)) {
+    return;
+  }
+  const size_t target =
+      transitionTargetFor(symbol, resolver, complementPrimary);
+  if (resolver.contains(target) && trackedStates.contains(target)) {
+    requests.insert(target);
+  }
+  requests.insert(symbol);
+}
+
+std::unordered_set<size_t> selectCappedFocusedImageTransitionRequests(
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::unordered_set<size_t>& currentRequests,
+    const std::unordered_set<size_t>& expandedRequests,
+    size_t requestLimit) {
+  std::unordered_set<size_t> requests = currentRequests;
+  requests.reserve(std::min(expandedRequests.size(), requestLimit));
+  if (requests.size() >= requestLimit) {
+    return requests;
+  }
+  for (const size_t symbol : sortedSymbols(expandedRequests)) {
+    if (requests.size() >= requestLimit) {
+      break;
+    }
+    if (requests.contains(symbol)) {
+      continue;
+    }
+    insertFocusedTransitionRequestWithTarget(
+        resolver, complementPrimary, trackedStates, symbol, requests);
+  }
+  return requests;
+}
+
 std::unordered_set<size_t> initialTrackedStates(
     const KInductionProblem& problem) {
   const auto states = stateSymbolSet(problem);
@@ -403,6 +621,100 @@ std::unordered_set<size_t> initialTrackedStates(
   }
   closeSameDesignStateSemantics(problem, tracked);
   return tracked;
+}
+
+std::unordered_set<size_t> focusedImageTransitionRequests(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& trackedStates,
+    size_t lookahead) {
+  if (!shouldFocusImageTransitionRequests(trackedStates.size(), lookahead)) {
+    return trackedStates;
+  }
+
+  const auto states = stateSymbolSet(problem);
+  std::unordered_set<size_t> requests;
+  for (const size_t symbol : problem.bad->getSupportVars()) {
+    if (states.contains(symbol) && trackedStates.contains(symbol)) {
+      requests.insert(symbol);
+    }
+  }
+  closeSameDesignStateSemantics(problem, requests);
+  closeProjectionRefinementTransitionTargets(
+      resolver, complementPrimary, requests);
+  for (size_t depth = 1; depth < lookahead; ++depth) {
+    // A multi-step image needs the preimage support of the suffix-observed bad
+    // slice.  Grow the focused request set one transition layer per remaining
+    // suffix step; unrelated projected globals still stay unconstrained.
+    std::unordered_set<size_t> expandedRequests = requests;
+    for (const size_t requested : sortedSymbols(requests)) {
+      const size_t target =
+          transitionTargetFor(requested, resolver, complementPrimary);
+      if (!resolver.contains(target)) {
+        continue;
+      }
+      for (const size_t symbol : resolver.support(target)) {
+        if (states.contains(symbol) && trackedStates.contains(symbol)) {
+          expandedRequests.insert(symbol);
+        }
+      }
+    }
+    closeSameDesignStateSemantics(problem, expandedRequests);
+    closeProjectionRefinementTransitionTargets(
+        resolver, complementPrimary, expandedRequests);
+    const size_t cappedRequestCount = cappedFocusedImageTransitionRequestCount(
+        requests.size(), expandedRequests.size());
+    if (cappedRequestCount < expandedRequests.size()) {
+      // Keeping only a deterministic prefix of the expanded request layer
+      // leaves the remaining projected next-state functions unconstrained.
+      // That weakens the image query, preserving strict Craig proof soundness
+      // while avoiding BP's 130K-leaf lookahead-4 proof spike.
+      requests = selectCappedFocusedImageTransitionRequests(
+          resolver,
+          complementPrimary,
+          trackedStates,
+          requests,
+          expandedRequests,
+          cappedRequestCount);
+      emitSecDiag(
+          "SEC diag: imc Craig caps focused image transition requests "
+          "tracked_states=",
+          trackedStates.size(),
+          " lookahead=", lookahead,
+          " depth=", depth + 1,
+          " requests=", requests.size(),
+          " expanded=", expandedRequests.size(),
+          " limited=", cappedRequestCount,
+          " request_limit=", kCraigFocusedImageTransitionRequestLimit);
+      break;
+    }
+    requests = std::move(expandedRequests);
+  }
+
+  for (auto it = requests.begin(); it != requests.end();) {
+    if (!trackedStates.contains(*it)) {
+      it = requests.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (requests.empty()) {
+    return trackedStates;
+  }
+
+  // A safety-image query only observes the bad predicate on the suffix frames.
+  // Encoding transitions for unrelated tracked globals makes a stronger image
+  // but is not required for a strict Craig proof; the smaller request set is a
+  // sound over-approximation and keeps BP-sized proof traces from materializing
+  // every projected next-state cone.
+  emitSecDiag(
+      "SEC diag: imc Craig focuses image transition requests tracked_states=",
+      trackedStates.size(),
+      " requests=", requests.size(),
+      " lookahead=", lookahead,
+      " tracked_limit=", kCraigFocusedImageTransitionTrackedStateLimit);
+  return requests;
 }
 
 std::unordered_map<size_t, int> allocateLeafLits(
@@ -495,6 +807,45 @@ void addAuxiliaryStateInvariants(
   }
 }
 
+std::unordered_map<size_t, bool> auxiliaryConstantAssignments(
+    const AuxiliaryStateInvariants& invariants) {
+  std::unordered_map<size_t, bool> assignments;
+  assignments.reserve(invariants.constants.size());
+  for (const auto& [symbol, value] : invariants.constants) {
+    assignments.emplace(symbol, value);
+  }
+  return assignments;
+}
+
+std::unordered_map<size_t, bool> transitionConstantAssignmentsForEncoding(
+    const KInductionProblem& problem,
+    const AuxiliaryStateInvariants& invariants) {
+  std::unordered_map<size_t, bool> assignments =
+      auxiliaryConstantAssignments(invariants);
+  assignments.reserve(assignments.size() + problem.resetBootstrapInputs.size());
+  for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
+    // Projected transition queries already constrain reset inputs to their
+    // inactive value after the bootstrap frontier. Substitute the same value
+    // before Tseitin encoding so reset-gated BP cones never enter the Craig
+    // proof trace.
+    assignments[symbol] = !assertedValue;
+  }
+  return assignments;
+}
+
+BoolExpr* transitionExpressionForEncoding(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& constantAssignments,
+    std::unordered_map<BoolExpr*, BoolExpr*>& substitutionMemo) {
+  if (constantAssignments.empty()) {
+    return expr;
+  }
+  // Auxiliary constants are transition-proven invariants.  Substituting them
+  // before Tseitin encoding keeps the Craig proof formula strict but avoids
+  // streaming clauses for dead BP support cones gated by those constants.
+  return substituteBoolExprVariables(expr, constantAssignments, substitutionMemo);
+}
+
 std::unordered_map<size_t, bool> bootstrapStateConstants(
     const KInductionProblem& problem) {
   std::unordered_map<size_t, bool> constants;
@@ -508,19 +859,173 @@ std::unordered_map<size_t, bool> bootstrapStateConstants(
   return constants;
 }
 
+void closeComplementConstantsForPairs(
+    const std::vector<std::pair<size_t, size_t>>& pairs,
+    std::unordered_map<size_t, bool>& constants) {
+  for (const auto& [primary, complement] : pairs) {
+    const auto primaryValue = constants.find(primary);
+    const auto complementValue = constants.find(complement);
+    if (primaryValue != constants.end() &&
+        complementValue == constants.end()) {
+      constants.emplace(complement, !primaryValue->second);
+    } else if (primaryValue == constants.end() &&
+               complementValue != constants.end()) {
+      constants.emplace(primary, !complementValue->second);
+    }
+  }
+}
+
+void closeComplementStateConstants(
+    const KInductionProblem& problem,
+    std::unordered_map<size_t, bool>& constants) {
+  // Q/QN rail pairs are local to one design and are already encoded as state
+  // semantics in every Craig query.  Closing auxiliary constants over those
+  // pairs lets a proof of Q=0 also prune support that only mentions QN=1.
+  closeComplementConstantsForPairs(problem.complementedStatePairs0, constants);
+  closeComplementConstantsForPairs(problem.complementedStatePairs1, constants);
+}
+
+void closeAuxiliaryInvariantConstantComplements(
+    const KInductionProblem& problem,
+    AuxiliaryStateInvariants& invariants) {
+  std::unordered_map<size_t, bool> constants;
+  constants.reserve(invariants.constants.size());
+  for (const auto& [symbol, value] : invariants.constants) {
+    constants.emplace(symbol, value);
+  }
+  closeComplementStateConstants(problem, constants);
+  invariants.constants.assign(constants.begin(), constants.end());
+  std::sort(invariants.constants.begin(), invariants.constants.end());
+}
+
+std::unordered_map<size_t, bool> bootstrapAssignmentsForSymbols(
+    const std::vector<std::pair<size_t, bool>>& assignments,
+    const std::unordered_set<size_t>& symbols) {
+  std::unordered_map<size_t, bool> constants;
+  if (symbols.empty()) {
+    return constants;
+  }
+  constants.reserve(std::min(assignments.size(), symbols.size()));
+  for (const auto& [symbol, value] : assignments) {
+    if (symbols.contains(symbol)) {
+      constants[symbol] = value;
+    }
+  }
+  return constants;
+}
+
+std::optional<bool> constantBoolExprValue(BoolExpr* expr) {
+  if (expr == nullptr || expr->getOp() != Op::VAR || expr->getId() > 1) {
+    return std::nullopt;
+  }
+  return expr->getId() == 1;
+}
+
+std::optional<bool> evaluateBoolExprWithKnownSupport(
+    BoolExpr* expr,
+    const std::set<size_t>& support,
+    const std::unordered_map<size_t, bool>& constants) {
+  if (expr == nullptr) {
+    return std::nullopt;
+  }
+  for (const size_t supportSymbol : support) {
+    if (supportSymbol >= 2 && !constants.contains(supportSymbol)) {
+      return std::nullopt;
+    }
+  }
+  try {
+    return expr->evaluate(constants);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+std::optional<std::pair<size_t, bool>> transitionConstantTargetFor(
+    size_t symbol,
+    bool value,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary) {
+  if (resolver.contains(symbol)) {
+    return std::make_pair(symbol, value);
+  }
+  const auto primary = complementPrimary.find(symbol);
+  if (primary != complementPrimary.end() && resolver.contains(primary->second)) {
+    // Complement rails may not have an explicit transition expression.  Because
+    // same-design state semantics enforces complement = !primary, proving the
+    // primary next-state has the opposite value proves the complement constant.
+    return std::make_pair(primary->second, !value);
+  }
+  return std::nullopt;
+}
+
+size_t localAuxiliaryPreservationScore(
+    size_t symbol,
+    bool value,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_map<size_t, bool>& constants) {
+  const auto target =
+      transitionConstantTargetFor(symbol, value, resolver, complementPrimary);
+  if (!target.has_value()) {
+    return 0;
+  }
+  BoolExpr* expr = resolver.at(target->first);
+  if (expr == nullptr) {
+    return 0;
+  }
+  if (const auto constantValue = constantBoolExprValue(expr);
+      constantValue.has_value()) {
+    return *constantValue == target->second
+               ? kLocalAuxiliaryPreservationScoreBonus
+               : 0;
+  }
+  const auto& support = resolver.support(target->first);
+  if (support.size() > kLocalAuxiliaryPreservationScoreSupportLimit) {
+    return 0;
+  }
+  if (const auto knownValue =
+          evaluateBoolExprWithKnownSupport(expr, support, constants);
+      knownValue.has_value() && *knownValue == target->second) {
+    return kLocalAuxiliaryPreservationScoreBonus;
+  }
+  return 0;
+}
+
 bool transitionPreservesStateConstant(
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
     size_t symbol,
     bool value,
-    const std::unordered_map<size_t, bool>& constants) {
-  if (!resolver.contains(symbol)) {
+    const std::unordered_map<size_t, bool>& constants,
+    const std::unordered_map<size_t, size_t>& complementPrimary) {
+  const auto target =
+      transitionConstantTargetFor(symbol, value, resolver, complementPrimary);
+  if (!target.has_value()) {
     return false;
   }
-  if (resolver.at(symbol) == nullptr) {
+  const size_t targetSymbol = target->first;
+  const bool targetValue = target->second;
+  if (resolver.at(targetSymbol) == nullptr) {
     return false;
   }
-  const auto& support = resolver.support(symbol);
+  if (const auto constantValue = constantBoolExprValue(resolver.at(targetSymbol));
+      constantValue.has_value()) {
+    // Constant next-state functions do not need a SAT proof. This case is
+    // common in reset-pruned dual-rail cones, and avoiding thousands of tiny
+    // KISSAT instances keeps local auxiliary mining from becoming the bottleneck.
+    return *constantValue == targetValue;
+  }
+  const auto& support = resolver.support(targetSymbol);
+  if (const auto knownValue =
+          evaluateBoolExprWithKnownSupport(
+              resolver.at(targetSymbol), support, constants);
+      knownValue.has_value()) {
+    // If the current candidate invariant already determines the transition
+    // expression, the fixed-point local auxiliary loop can prove the constant
+    // without opening another SAT solver.  Candidates that only hold because of
+    // an invalid assumption are removed on the next fixed-point pass.
+    return *knownValue == targetValue;
+  }
   if (support.size() > kAuxiliaryInvariantSupportLimit) {
     return false;
   }
@@ -542,8 +1047,8 @@ bool transitionPreservesStateConstant(
 
   FrameFormulaEncoder encoder(
       solver, std::move(leaves), /*createMissingLeaves=*/true);
-  const int nextValue = encoder.encode(resolver.at(symbol));
-  solver.addClause({value ? -nextValue : nextValue});
+  const int nextValue = encoder.encode(resolver.at(targetSymbol));
+  solver.addClause({targetValue ? -nextValue : nextValue});
   return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
 }
 
@@ -583,6 +1088,7 @@ bool bothStatesHaveSameConstant(
 size_t appendAuxiliaryEqualityCandidatesForDesign(
     const TransitionExprResolver& resolver,
     const std::vector<size_t>& designStates,
+    const std::unordered_set<size_t>* eligibleSymbols,
     const std::unordered_map<size_t, bool>& bootstrapValues,
     const std::unordered_map<size_t, bool>& constants,
     std::vector<std::pair<size_t, size_t>>& candidates) {
@@ -592,6 +1098,9 @@ size_t appendAuxiliaryEqualityCandidatesForDesign(
       ExprBootstrapValueKeyHash>
       buckets;
   for (const size_t symbol : designStates) {
+    if (eligibleSymbols != nullptr && !eligibleSymbols->contains(symbol)) {
+      continue;
+    }
     const auto value = bootstrapValues.find(symbol);
     if (value == bootstrapValues.end() || !resolver.contains(symbol)) {
       continue;
@@ -631,13 +1140,16 @@ size_t appendAuxiliaryEqualityCandidatesForDesign(
 size_t appendAuxiliaryEqualityCandidates(
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
+    const std::unordered_set<size_t>* eligibleSymbols,
     const std::unordered_map<size_t, bool>& bootstrapValues,
     const std::unordered_map<size_t, bool>& constants,
     std::vector<std::pair<size_t, size_t>>& candidates) {
   size_t candidateCount = appendAuxiliaryEqualityCandidatesForDesign(
-      resolver, problem.state0Symbols, bootstrapValues, constants, candidates);
+      resolver, problem.state0Symbols, eligibleSymbols, bootstrapValues,
+      constants, candidates);
   candidateCount += appendAuxiliaryEqualityCandidatesForDesign(
-      resolver, problem.state1Symbols, bootstrapValues, constants, candidates);
+      resolver, problem.state1Symbols, eligibleSymbols, bootstrapValues,
+      constants, candidates);
   std::sort(candidates.begin(), candidates.end());
   candidates.erase(
       std::unique(candidates.begin(), candidates.end()), candidates.end());
@@ -699,15 +1211,37 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
     return {};
   }
 
-  const TransitionExprResolver resolver(problem);
+  const size_t candidateEstimate = problem.bootstrapStateAssignments.size();
+  if (candidateEstimate > kAuxiliaryInvariantCandidateLimit) {
+    // Auxiliary invariants are a pruning optimization.  Probing millions of
+    // bootstrap entries can exceed CI memory before Craig IMC starts, so huge
+    // dual-rail problems skip this optional pass and let the strict IMC
+    // projection loop refine only the current proof slice.  Use the raw
+    // assignment count as an upper bound so the skip itself stays allocation
+    // free on BP-sized designs.
+    emitSecDiag(
+        "SEC diag: imc Craig skips auxiliary invariants candidates=",
+        candidateEstimate,
+        " candidate_limit=", kAuxiliaryInvariantCandidateLimit);
+    return {};
+  }
+
   auto constants = bootstrapStateConstants(problem);
   const size_t candidateCount = constants.size();
+  const TransitionExprResolver resolver(problem);
+  const auto complementPrimary = primaryByComplement(problem);
+  closeComplementStateConstants(problem, constants);
   bool changed = true;
   while (changed) {
     changed = false;
     for (auto it = constants.begin(); it != constants.end();) {
       if (transitionPreservesStateConstant(
-              problem, resolver, it->first, it->second, constants)) {
+              problem,
+              resolver,
+              it->first,
+              it->second,
+              constants,
+              complementPrimary)) {
         ++it;
         continue;
       }
@@ -718,7 +1252,8 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
 
   std::vector<std::pair<size_t, size_t>> equalityCandidates;
   const size_t equalityCandidateCount = appendAuxiliaryEqualityCandidates(
-      problem, resolver, bootstrapStateConstants(problem), constants,
+      problem, resolver, /*eligibleSymbols=*/nullptr,
+      bootstrapStateConstants(problem), constants,
       equalityCandidates);
   std::vector<std::pair<size_t, size_t>> equalities = equalityCandidates;
   changed = true;
@@ -742,8 +1277,8 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
 
   AuxiliaryStateInvariants invariants;
   invariants.constants.assign(constants.begin(), constants.end());
-  std::sort(invariants.constants.begin(), invariants.constants.end());
   invariants.equalities = std::move(equalities);
+  closeAuxiliaryInvariantConstantComplements(problem, invariants);
   std::sort(invariants.equalities.begin(), invariants.equalities.end());
   emitSecDiag(
       "SEC diag: imc Craig auxiliary constants=", invariants.constants.size(),
@@ -753,6 +1288,399 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
       " equality_candidate_limit=", kAuxiliaryEqualityCandidateLimit,
       " support_limit=", kAuxiliaryInvariantSupportLimit);
   return invariants;
+}
+
+std::unordered_map<size_t, bool> localAuxiliaryCandidateConstants(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& candidateSymbols,
+    const AuxiliaryStateInvariants& existingInvariants,
+    size_t& candidateCount,
+    size_t& selectedCandidateCount,
+    size_t& selectedCandidateLimit,
+    size_t& topCandidateScore) {
+  candidateCount = 0;
+  selectedCandidateCount = 0;
+  selectedCandidateLimit = 0;
+  topCandidateScore = 0;
+  if (candidateSymbols.empty() ||
+      problem.bootstrapStateAssignments.empty()) {
+    return {};
+  }
+
+  std::unordered_set<size_t> existingConstants;
+  existingConstants.reserve(existingInvariants.constants.size());
+  for (const auto& [symbol, value] : existingInvariants.constants) {
+    (void)value;
+    existingConstants.insert(symbol);
+  }
+
+  std::unordered_map<size_t, bool> constants;
+  constants.reserve(std::min(
+      candidateSymbols.size(), problem.bootstrapStateAssignments.size()));
+  for (const auto& [symbol, value] : problem.bootstrapStateAssignments) {
+    if (candidateSymbols.contains(symbol) &&
+        !existingConstants.contains(symbol)) {
+      constants.emplace(symbol, value);
+    }
+  }
+  candidateCount = constants.size();
+  selectedCandidateLimit = localAuxiliaryCandidateLimit(candidateCount);
+  if (constants.size() <= selectedCandidateLimit) {
+    selectedCandidateCount = constants.size();
+    closeComplementStateConstants(problem, constants);
+    return constants;
+  }
+
+  std::unordered_map<size_t, bool> scoringConstants = constants;
+  closeComplementStateConstants(problem, scoringConstants);
+  const bool usePreservedExtraSlice =
+      candidateCount > kLocalAuxiliaryInvariantLargeCandidateThreshold;
+  std::unordered_map<size_t, size_t> faninScore;
+  for (const size_t requested : sortedSymbols(candidateSymbols)) {
+    const size_t target =
+        transitionTargetFor(requested, resolver, complementPrimary);
+    if (!resolver.contains(target)) {
+      continue;
+    }
+    for (const size_t supportSymbol : resolver.support(target)) {
+      if (constants.contains(supportSymbol)) {
+        ++faninScore[supportSymbol];
+      }
+    }
+  }
+
+  std::vector<ProjectionRefinementCandidate> candidates;
+  std::vector<ProjectionRefinementCandidate> preservedCandidates;
+  candidates.reserve(constants.size());
+  for (const auto& [symbol, value] : constants) {
+    const auto fanin = faninScore.find(symbol);
+    const size_t score = fanin == faninScore.end() ? 0 : fanin->second;
+    const size_t preservationScore = localAuxiliaryPreservationScore(
+        symbol, value, resolver, complementPrimary, scoringConstants);
+    candidates.push_back({symbol, score});
+    if (usePreservedExtraSlice && preservationScore != 0) {
+      preservedCandidates.push_back({symbol, preservationScore + score});
+    }
+  }
+  std::sort(
+      candidates.begin(),
+      candidates.end(),
+      projectionRefinementCandidateBetter);
+  topCandidateScore = candidates.empty() ? 0 : candidates.front().score;
+
+  std::unordered_map<size_t, bool> selected;
+  selected.reserve(
+      selectedCandidateLimit +
+      (usePreservedExtraSlice ? kLocalAuxiliaryPreservedCandidateExtraLimit
+                              : 0));
+  for (const ProjectionRefinementCandidate& candidate : candidates) {
+    if (selected.size() >= selectedCandidateLimit) {
+      break;
+    }
+    selected.emplace(candidate.symbol, constants.at(candidate.symbol));
+  }
+  if (usePreservedExtraSlice) {
+    std::sort(
+        preservedCandidates.begin(),
+        preservedCandidates.end(),
+        projectionRefinementCandidateBetter);
+    const size_t selectedWithPreservedLimit =
+        selectedCandidateLimit + kLocalAuxiliaryPreservedCandidateExtraLimit;
+    for (const ProjectionRefinementCandidate& candidate : preservedCandidates) {
+      if (selected.size() >= selectedWithPreservedLimit) {
+        break;
+      }
+      if (selected.contains(candidate.symbol)) {
+        continue;
+      }
+      // Preserve the original high-fan-in slice, then add candidates that the
+      // cheap constant/known-support screen expects to prove without opening
+      // many new SAT instances. The later induction filter remains the proof
+      // gate.
+      selected.emplace(candidate.symbol, constants.at(candidate.symbol));
+    }
+  }
+  selectedCandidateCount = selected.size();
+  closeComplementStateConstants(problem, selected);
+  return selected;
+}
+
+AuxiliaryStateInvariants deriveLocalAuxiliaryStateInvariants(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& candidateSymbols,
+    const AuxiliaryStateInvariants& existingInvariants) {
+  if (!shouldMineLocalAuxiliaryInvariants(candidateSymbols.size())) {
+    // At BP scale the local auxiliary pass can spend gigabytes validating a
+    // small handful of constants.  Once the Craig transition support is this
+    // large, direct projection refinement is the cheaper strict-IMC move.
+    emitSecDiag(
+        "SEC diag: imc Craig skips local auxiliary invariants support=",
+        candidateSymbols.size(),
+        " support_limit=", kLocalAuxiliaryInvariantSupportMiningLimit);
+    return {};
+  }
+
+  size_t candidateCount = 0;
+  size_t selectedCandidateCount = 0;
+  size_t selectedCandidateLimit = 0;
+  size_t topCandidateScore = 0;
+  std::unordered_map<size_t, bool> localConstants =
+      localAuxiliaryCandidateConstants(
+          problem,
+          resolver,
+          complementPrimary,
+          candidateSymbols,
+          existingInvariants,
+          candidateCount,
+          selectedCandidateCount,
+          selectedCandidateLimit,
+          topCandidateScore);
+  if (localConstants.empty()) {
+    return {};
+  }
+
+  std::unordered_set<size_t> selectedSymbols;
+  selectedSymbols.reserve(localConstants.size());
+  for (const auto& [symbol, value] : localConstants) {
+    (void)value;
+    selectedSymbols.insert(symbol);
+  }
+
+  std::unordered_map<size_t, bool> assumptions;
+  assumptions.reserve(
+      existingInvariants.constants.size() + localConstants.size());
+  for (const auto& [symbol, value] : existingInvariants.constants) {
+    assumptions[symbol] = value;
+  }
+  for (const auto& [symbol, value] : localConstants) {
+    assumptions[symbol] = value;
+  }
+  closeComplementStateConstants(problem, assumptions);
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto it = localConstants.begin(); it != localConstants.end();) {
+      if (transitionPreservesStateConstant(
+              problem,
+              resolver,
+              it->first,
+              it->second,
+              assumptions,
+              complementPrimary)) {
+        ++it;
+        continue;
+      }
+      assumptions.erase(it->first);
+      it = localConstants.erase(it);
+      changed = true;
+    }
+  }
+
+  std::vector<std::pair<size_t, size_t>> equalityCandidates;
+  const size_t equalityCandidateCount = appendAuxiliaryEqualityCandidates(
+      problem,
+      resolver,
+      &selectedSymbols,
+      bootstrapAssignmentsForSymbols(
+          problem.bootstrapStateAssignments, selectedSymbols),
+      assumptions,
+      equalityCandidates);
+  std::set<std::pair<size_t, size_t>> existingEqualities;
+  for (const auto& equality : existingInvariants.equalities) {
+    existingEqualities.insert(canonicalStateEqualityPair(
+        equality.first, equality.second));
+  }
+  std::vector<std::pair<size_t, size_t>> localEqualities;
+  localEqualities.reserve(equalityCandidates.size());
+  for (const auto& equality : equalityCandidates) {
+    const auto canonical =
+        canonicalStateEqualityPair(equality.first, equality.second);
+    if (!existingEqualities.contains(canonical)) {
+      localEqualities.push_back(canonical);
+    }
+  }
+  std::sort(localEqualities.begin(), localEqualities.end());
+  localEqualities.erase(
+      std::unique(localEqualities.begin(), localEqualities.end()),
+      localEqualities.end());
+
+  std::vector<std::pair<size_t, size_t>> equalityAssumptions =
+      existingInvariants.equalities;
+  equalityAssumptions.insert(
+      equalityAssumptions.end(), localEqualities.begin(),
+      localEqualities.end());
+  std::sort(equalityAssumptions.begin(), equalityAssumptions.end());
+  equalityAssumptions.erase(
+      std::unique(equalityAssumptions.begin(), equalityAssumptions.end()),
+      equalityAssumptions.end());
+  changed = true;
+  while (changed) {
+    changed = false;
+    for (auto it = localEqualities.begin(); it != localEqualities.end();) {
+      if (transitionPreservesStateEquality(
+              problem,
+              resolver,
+              it->first,
+              it->second,
+              assumptions,
+              equalityAssumptions)) {
+        ++it;
+        continue;
+      }
+      const auto removed = *it;
+      it = localEqualities.erase(it);
+      const auto assumption = std::lower_bound(
+          equalityAssumptions.begin(), equalityAssumptions.end(), removed);
+      if (assumption != equalityAssumptions.end() &&
+          *assumption == removed) {
+        equalityAssumptions.erase(assumption);
+      }
+      changed = true;
+    }
+  }
+
+  AuxiliaryStateInvariants invariants;
+  invariants.constants.assign(localConstants.begin(), localConstants.end());
+  invariants.equalities = std::move(localEqualities);
+  closeAuxiliaryInvariantConstantComplements(problem, invariants);
+  std::sort(invariants.equalities.begin(), invariants.equalities.end());
+  if (!invariants.empty()) {
+    // BP-sized designs cannot afford global auxiliary mining over millions of
+    // bootstrap assignments.  These local constants/equalities are still
+    // transition-proven, but only for the current Craig projection support.
+    emitSecDiag(
+        "SEC diag: imc Craig local auxiliary constants=",
+        invariants.constants.size(),
+        " candidates=", candidateCount,
+        " selected=", selectedCandidateCount,
+        " candidate_limit=", selectedCandidateLimit,
+        " top_score=", topCandidateScore,
+        " support_limit=", kAuxiliaryInvariantSupportLimit,
+        " equalities=", invariants.equalities.size(),
+        " equality_candidates=", equalityCandidateCount,
+        " equality_candidate_limit=", kAuxiliaryEqualityCandidateLimit);
+  }
+  return invariants;
+}
+
+size_t mergeAuxiliaryStateInvariants(
+    AuxiliaryStateInvariants& target,
+    const AuxiliaryStateInvariants& additions) {
+  size_t added = 0;
+  std::unordered_set<size_t> existingConstants;
+  existingConstants.reserve(target.constants.size());
+  for (const auto& [symbol, value] : target.constants) {
+    (void)value;
+    existingConstants.insert(symbol);
+  }
+  for (const auto& [symbol, value] : additions.constants) {
+    if (existingConstants.insert(symbol).second) {
+      target.constants.push_back({symbol, value});
+      ++added;
+    }
+  }
+  std::sort(target.constants.begin(), target.constants.end());
+  std::set<std::pair<size_t, size_t>> existingEqualities;
+  for (const auto& equality : target.equalities) {
+    existingEqualities.insert(canonicalStateEqualityPair(
+        equality.first, equality.second));
+  }
+  for (const auto& equality : additions.equalities) {
+    const auto canonical =
+        canonicalStateEqualityPair(equality.first, equality.second);
+    if (existingEqualities.insert(canonical).second) {
+      target.equalities.push_back(canonical);
+      ++added;
+    }
+  }
+  std::sort(target.equalities.begin(), target.equalities.end());
+  return added;
+}
+
+bool promoteLocalAuxiliaryInvariants(
+    AuxiliaryStateInvariants& activeInvariants,
+    AuxiliaryStateInvariants& projectionInvariants,
+    const AuxiliaryStateInvariants& localInvariants) {
+  if (mergeAuxiliaryStateInvariants(activeInvariants, localInvariants) == 0) {
+    return false;
+  }
+  const size_t promotedCount =
+      mergeAuxiliaryStateInvariants(projectionInvariants, localInvariants);
+  if (promotedCount != 0) {
+    // Local auxiliaries have already passed the same transition-preservation
+    // filter as global auxiliaries. Keeping them for later projection rounds
+    // avoids re-mining identical BP slices.
+    emitSecDiag(
+        "SEC diag: imc Craig promotes local auxiliary invariants added=",
+        promotedCount,
+        " total_constants=", projectionInvariants.constants.size(),
+        " total_equalities=", projectionInvariants.equalities.size());
+  }
+  return true;
+}
+
+AuxiliaryStateInvariants helperAuxiliaryStateInvariantsFromOptions(
+    const KInductionProblem& problem,
+    const CraigImcOptions& options) {
+  AuxiliaryStateInvariants invariants;
+  invariants.constants = options.helperAuxiliaryStateInvariants;
+  invariants.equalities = options.helperAuxiliaryStateEqualities;
+  const size_t rawCount = invariants.constants.size() +
+                          invariants.equalities.size();
+  if (rawCount > kCraigHelperAuxiliaryCarryLimit) {
+    // Helper auxiliaries are useful when they are a small proof certificate.
+    // Importing thousands of mined facts into a later BP singleton makes every
+    // Craig image carry that whole side condition and can be worse than
+    // re-discovering the local projection.
+    emitSecDiag(
+        "SEC diag: imc Craig skips broad helper auxiliary invariants "
+        "constants=",
+        invariants.constants.size(),
+        " equalities=", invariants.equalities.size(),
+        " limit=", kCraigHelperAuxiliaryCarryLimit);
+    return {};
+  }
+  closeAuxiliaryInvariantConstantComplements(problem, invariants);
+  std::sort(invariants.constants.begin(), invariants.constants.end());
+  std::sort(invariants.equalities.begin(), invariants.equalities.end());
+  invariants.constants.erase(
+      std::unique(invariants.constants.begin(), invariants.constants.end()),
+      invariants.constants.end());
+  invariants.equalities.erase(
+      std::unique(invariants.equalities.begin(), invariants.equalities.end()),
+      invariants.equalities.end());
+  const size_t normalizedCount = invariants.constants.size() +
+                                 invariants.equalities.size();
+  if (normalizedCount > kCraigHelperAuxiliaryCarryLimit) {
+    emitSecDiag(
+        "SEC diag: imc Craig skips broad helper auxiliary invariants "
+        "constants=",
+        invariants.constants.size(),
+        " equalities=", invariants.equalities.size(),
+        " limit=", kCraigHelperAuxiliaryCarryLimit);
+    return {};
+  }
+  return invariants;
+}
+
+CraigImcResult makeCraigEquivalentResult(
+    size_t iterations,
+    std::vector<InterpolantRegion> invariantRegions,
+    std::unordered_set<size_t> trackedStates,
+    const AuxiliaryStateInvariants& auxiliaryStateInvariants) {
+  CraigImcResult result;
+  result.status = CraigImcStatus::Equivalent;
+  result.iterations = iterations;
+  result.invariantRegions = std::move(invariantRegions);
+  result.trackedStates = std::move(trackedStates);
+  result.auxiliaryStateInvariants = auxiliaryStateInvariants.constants;
+  result.auxiliaryStateEqualities = auxiliaryStateInvariants.equalities;
+  return result;
 }
 
 void addResetInputValue(
@@ -832,6 +1760,7 @@ TransitionEncodingResult addProjectedTransition(
     const TransitionExprResolver& resolver,
     const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
+    const std::unordered_set<size_t>& transitionRequests,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     std::unordered_map<size_t, int> currentLits,
     const std::unordered_map<size_t, int>& nextStateLits,
@@ -851,10 +1780,16 @@ TransitionEncodingResult addProjectedTransition(
   FrameFormulaEncoder encoder(
       solver, std::move(currentLits), /*createMissingLeaves=*/true);
   std::unordered_set<size_t> encodedTargets;
+  const std::unordered_map<size_t, bool> constantAssignments =
+      transitionConstantAssignmentsForEncoding(problem, auxiliaryInvariants);
+  std::unordered_map<BoolExpr*, BoolExpr*> substitutionMemo;
   // SAT search and Craig interpolation are sensitive to clause order. Keep the
   // projected transition deterministic so repeated IMC batches do not depend on
   // unordered_set insertion history.
-  for (const size_t requested : sortedSymbols(trackedStates)) {
+  for (const size_t requested : sortedSymbols(transitionRequests)) {
+    if (!trackedStates.contains(requested)) {
+      continue;
+    }
     const size_t target =
         transitionTargetFor(requested, resolver, complementPrimary);
     if (!resolver.contains(target) || !encodedTargets.insert(target).second) {
@@ -866,7 +1801,8 @@ TransitionEncodingResult addProjectedTransition(
     }
     solver.setCraigVariablePartition(localVariablePartition);
     solver.setCraigClausePartition(clausePartition);
-    const int transitionLit = encoder.encode(resolver.at(target));
+    const int transitionLit = encoder.encode(transitionExpressionForEncoding(
+        resolver.at(target), constantAssignments, substitutionMemo));
     addLiteralEquivalenceForPartition(
         solver, next->second, transitionLit, clausePartition);
   }
@@ -879,7 +1815,21 @@ TransitionEncodingResult addProjectedTransition(
       /*asserted=*/false,
       localVariablePartition,
       clausePartition);
-  addStateSemantics(solver, problem, leaves, clausePartition);
+  if (shouldEncodeProjectedLocalStateSemantics(
+          leaves.size(), trackedStates.size())) {
+    addStateSemantics(solver, problem, leaves, clausePartition);
+  } else {
+    // The transition support leaves are local to one Craig side.  Dropping
+    // local same-frame rail semantics weakens the projected query, so every
+    // UNSAT interpolant remains a strict IMC proof while avoiding a large
+    // proof-trace clause burst on BP-sized cones.
+    emitSecDiag(
+        "SEC diag: imc Craig weakens projected local state semantics leaves=",
+        leaves.size(),
+        " leaf_limit=", kCraigProjectedLocalSemanticsSupportLimit,
+        " tracked_states=", trackedStates.size(),
+        " tracked_limit=", kCraigProjectedLocalSemanticsTrackedStateLimit);
+  }
   addAuxiliaryStateInvariants(
       solver, leaves, auxiliaryInvariants, clausePartition);
   return {std::move(leaves)};
@@ -1019,10 +1969,10 @@ void addRegionUnionConstraint(
 std::optional<InterpolantRegion> buildConcreteAssignmentRegion(
     const std::vector<std::pair<size_t, bool>>& assignments,
     const std::unordered_set<size_t>& trackedStates) {
-  std::unordered_map<size_t, bool> assignmentBySymbol;
-  assignmentBySymbol.reserve(assignments.size());
-  for (const auto& [symbol, value] : assignments) {
-    assignmentBySymbol.emplace(symbol, value);
+  const std::unordered_map<size_t, bool> assignmentBySymbol =
+      bootstrapAssignmentsForSymbols(assignments, trackedStates);
+  if (assignmentBySymbol.size() < trackedStates.size()) {
+    return std::nullopt;
   }
 
   std::vector<RegionLiteral> cubeLiterals;
@@ -1152,16 +2102,36 @@ struct FrontierResult {
       SATSolverWrapper::SolveStatus::Unknown;
   std::int64_t solveElapsedMilliseconds = 0;
   std::int64_t interpolationElapsedMilliseconds = 0;
+  bool focusedTransitionProjection = false;
+  size_t largestFocusedTransitionRequestCount = 0;
+
+  void recordTransitionRequests(
+      size_t trackedStateCount,
+      const std::unordered_set<size_t>& requests) {
+    if (requests.size() >= trackedStateCount) {
+      return;
+    }
+    focusedTransitionProjection = true;
+    largestFocusedTransitionRequestCount =
+        std::max(largestFocusedTransitionRequestCount, requests.size());
+  }
+
+  bool usesFocusedTransitionProjection() const {
+    return focusedTransitionProjection;
+  }
 };
 
-std::unordered_map<size_t, bool> assignmentMap(
-    const std::vector<std::pair<size_t, bool>>& assignments) {
-  std::unordered_map<size_t, bool> result;
-  result.reserve(assignments.size());
-  for (const auto& [symbol, value] : assignments) {
-    result.emplace(symbol, value);
-  }
-  return result;
+bool shouldTrySelectedLocalAuxiliaryInvariants(
+    const FrontierResult& frontier,
+    const std::unordered_set<size_t>& selectedSupport,
+    size_t retryCount) {
+  // Full local mining is disabled on BP-sized supports.  The refinement slice
+  // is already capped and proof-relevant, so it is a cheap last chance to prove
+  // selected bootstrap constants before permanently growing tracked state.
+  return retryCount < kCraigLocalAuxiliaryRetryLimit &&
+         !selectedSupport.empty() &&
+         frontier.transitionStateSupport.size() >
+             kLocalAuxiliaryInvariantSupportMiningLimit;
 }
 
 std::unordered_set<size_t> modelGuidedBootstrapProjectionSupport(
@@ -1170,6 +2140,8 @@ std::unordered_set<size_t> modelGuidedBootstrapProjectionSupport(
     const std::unordered_map<size_t, int>& currentLits,
     const std::unordered_set<size_t>& trackedStates,
     const std::unordered_set<size_t>& transitionStateSupport,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
     size_t& candidateCount) {
   candidateCount = 0;
   if (problem.bootstrapStateAssignments.empty()) {
@@ -1177,7 +2149,10 @@ std::unordered_set<size_t> modelGuidedBootstrapProjectionSupport(
   }
 
   const std::unordered_map<size_t, bool> bootstrapAssignments =
-      assignmentMap(problem.bootstrapStateAssignments);
+      bootstrapAssignmentsForSymbols(
+          problem.bootstrapStateAssignments, transitionStateSupport);
+  const size_t refinementLimit =
+      modelGuidedProjectionRefinementLimit(transitionStateSupport.size());
   std::unordered_set<size_t> selectedSupport;
   for (const size_t symbol : sortedSymbols(transitionStateSupport)) {
     if (trackedStates.contains(symbol)) {
@@ -1193,11 +2168,12 @@ std::unordered_set<size_t> modelGuidedBootstrapProjectionSupport(
       continue;
     }
     ++candidateCount;
-    if (selectedSupport.size() < kCraigModelGuidedProjectionRefinementLimit) {
+    if (selectedSupport.size() < refinementLimit) {
       selectedSupport.insert(symbol);
     }
   }
-  closeSameDesignStateSemantics(problem, selectedSupport);
+  closeProjectionRefinementTransitionTargets(
+      resolver, complementPrimary, selectedSupport);
   return selectedSupport;
 }
 
@@ -1208,27 +2184,280 @@ const std::unordered_set<size_t>& projectionRefinementSupport(
              : frontier.modelGuidedTransitionStateSupport;
 }
 
+bool modelGuidedProjectionNeedsBoundedBackfill(
+    const FrontierResult& frontier) {
+  // A SAT model may point at only a couple of bootstrap mismatches even though
+  // the untracked transition cone is BP-sized.  Backfill those tiny slices with
+  // the scored projection picker so one or two model bits do not force a full
+  // Craig rebuild round.
+  return !frontier.modelGuidedTransitionStateSupport.empty() &&
+         frontier.transitionStateSupport.size() >
+             kCraigTinyModelGuidedBackfillSupportThreshold &&
+         frontier.modelGuidedTransitionStateSupport.size() <
+             modelGuidedProjectionRefinementLimit(
+                 frontier.transitionStateSupport.size());
+}
+
+bool shouldUseSmallLowScoreRefinementStride(
+    size_t transitionSupportSize,
+    size_t topCandidateScore) {
+  // Once the remaining BP support surface has only tiny fan-in scores, smaller
+  // strict Craig projection slices are more valuable than fewer rebuild rounds:
+  // each imported state stays live in the later proof queries.
+  return transitionSupportSize > kCraigLowScoreBackfillSupportThreshold &&
+         topCandidateScore <= kCraigLowScoreBackfillScoreLimit;
+}
+
+bool shouldKeepOnlyModelGuidedRefinement(
+    const FrontierResult& frontier,
+    size_t boundedTopCandidateScore) {
+  return !frontier.modelGuidedTransitionStateSupport.empty() &&
+         shouldUseSmallLowScoreRefinementStride(
+             frontier.transitionStateSupport.size(), boundedTopCandidateScore);
+}
+
+class ProjectionRefinementScorer {
+ public:
+  ProjectionRefinementScorer(
+      const TransitionExprResolver& resolver,
+      const std::unordered_map<size_t, size_t>& complementPrimary)
+      : resolver_(resolver), complementPrimary_(complementPrimary) {}
+
+  std::unordered_set<size_t> selectBoundedSupport(
+      const std::unordered_set<size_t>& trackedStates,
+      const std::unordered_set<size_t>& transitionStateSupport,
+      bool focusedTransitionProjection,
+      size_t& candidateCount,
+      size_t& topCandidateScore,
+      size_t& refinementLimit,
+      bool& frozeScoreUpdates) {
+    candidateCount = 0;
+    topCandidateScore = 0;
+    refinementLimit = 0;
+    frozeScoreUpdates = false;
+
+    std::vector<size_t> candidateSymbols;
+    for (const size_t symbol : sortedSymbols(transitionStateSupport)) {
+      if (!trackedStates.contains(symbol)) {
+        candidateSymbols.push_back(symbol);
+      }
+    }
+    candidateCount = candidateSymbols.size();
+    const size_t defaultRefinementLimit = defaultBoundedRefinementLimit(
+        candidateCount, transitionStateSupport.size(),
+        focusedTransitionProjection);
+    refinementLimit = defaultRefinementLimit;
+    if (candidateCount <= defaultRefinementLimit) {
+      return {};
+    }
+
+    if (!scoreUpdatesFrozen_) {
+      scoreNewTrackedTargets(trackedStates);
+    }
+
+    std::vector<ProjectionRefinementCandidate> candidates;
+    candidates.reserve(candidateSymbols.size());
+    for (const size_t symbol : candidateSymbols) {
+      candidates.push_back({symbol, scoreFor(symbol)});
+    }
+    std::sort(
+        candidates.begin(),
+        candidates.end(),
+        projectionRefinementCandidateBetter);
+    topCandidateScore = candidates.empty() ? 0 : candidates.front().score;
+    if (shouldFreezeScoreUpdates(
+            transitionStateSupport.size(), topCandidateScore)) {
+      scoreUpdatesFrozen_ = true;
+      frozeScoreUpdates = true;
+    }
+    refinementLimit = supportAwareRefinementLimit(
+        transitionStateSupport.size(), topCandidateScore,
+        defaultRefinementLimit);
+
+    std::unordered_set<size_t> selectedSupport;
+    for (const ProjectionRefinementCandidate& candidate : candidates) {
+      if (selectedSupport.size() >= refinementLimit) {
+        break;
+      }
+      selectedSupport.insert(candidate.symbol);
+    }
+    closeProjectionRefinementTransitionTargets(
+        resolver_, complementPrimary_, selectedSupport);
+    return selectedSupport;
+  }
+
+  std::unordered_set<size_t> selectModelGuidedBackfill(
+      const std::unordered_set<size_t>& trackedStates,
+      const std::unordered_set<size_t>& transitionStateSupport,
+      const std::unordered_set<size_t>& modelGuidedSupport,
+      size_t refinementLimit,
+      size_t& candidateCount,
+      size_t& topCandidateScore) {
+    candidateCount = 0;
+    topCandidateScore = 0;
+    if (modelGuidedSupport.empty() || refinementLimit == 0) {
+      return {};
+    }
+
+    std::unordered_map<size_t, size_t> supportScore;
+    for (const size_t requested : sortedSymbols(modelGuidedSupport)) {
+      const size_t target =
+          transitionTargetFor(requested, resolver_, complementPrimary_);
+      if (!resolver_.contains(target)) {
+        continue;
+      }
+      for (const size_t symbol : resolver_.support(target)) {
+        if (symbol < 2 || trackedStates.contains(symbol) ||
+            !transitionStateSupport.contains(symbol)) {
+          continue;
+        }
+        ++supportScore[symbol];
+      }
+    }
+
+    std::vector<ProjectionRefinementCandidate> candidates;
+    candidates.reserve(supportScore.size());
+    for (const auto& [symbol, score] : supportScore) {
+      candidates.push_back({symbol, score});
+    }
+    std::sort(
+        candidates.begin(),
+        candidates.end(),
+        projectionRefinementCandidateBetter);
+    candidateCount = candidates.size();
+    topCandidateScore = candidates.empty() ? 0 : candidates.front().score;
+
+    std::unordered_set<size_t> selectedSupport;
+    for (const ProjectionRefinementCandidate& candidate : candidates) {
+      if (selectedSupport.size() >= refinementLimit) {
+        break;
+      }
+      selectedSupport.insert(candidate.symbol);
+    }
+    // The SAT model identifies currently missing states; adding their local
+    // transition fanin keeps the strict projection step focused on that witness.
+    closeProjectionRefinementTransitionTargets(
+        resolver_, complementPrimary_, selectedSupport);
+    return selectedSupport;
+  }
+
+ private:
+  bool shouldFreezeScoreUpdates(
+      size_t transitionSupportSize,
+      size_t topCandidateScore) const {
+    // BP-sized cones eventually reach a flat fan-in surface where every
+    // remaining candidate has a tiny score.  Continuing to rescore newly
+    // imported targets only materializes huge resolver support sets; freezing
+    // the score map keeps the strict Craig projection heuristic bounded.
+    return !scoreUpdatesFrozen_ &&
+           transitionSupportSize > kCraigLowScoreBackfillSupportThreshold &&
+           topCandidateScore <= kCraigLowScoreBackfillScoreLimit;
+  }
+
+  size_t supportAwareRefinementLimit(
+      size_t transitionSupportSize,
+      size_t topCandidateScore,
+      size_t defaultRefinementLimit) const {
+    if (scoreUpdatesFrozen_ &&
+        shouldUseSmallLowScoreRefinementStride(
+            transitionSupportSize, topCandidateScore)) {
+      if (transitionSupportSize > kCraigTightLowScoreBackfillSupportThreshold) {
+        // BP's first hard output enters a long flat-score plateau above 104K
+        // support.  At that point each extra tracked state lives across many
+        // Craig rebuilds, so use a tighter strict-refinement slice.
+        return std::min(
+            defaultRefinementLimit,
+            kCraigTightLowScoreProjectionRefinementLimit);
+      }
+      return std::min(
+          defaultRefinementLimit, kCraigLowScoreProjectionRefinementLimit);
+    }
+    if (transitionSupportSize > kCraigHighSupportRefinementThreshold) {
+      // Once local auxiliary mining is disabled, BP-sized cones keep the scored
+      // order but take bounded slices so every Craig rebuild stays below the
+      // physical memory target.  BP's 84K partial-cap tail was still dominated
+      // by repeated rebuilds at 512 states, so use a wider slice there while
+      // keeping the >90K low-score plateau tight below.
+      if (topCandidateScore > kCraigLowScoreBackfillScoreLimit) {
+        // The partial focused image cap exposes BP's hard tail as an 84K-state
+        // cone, below the old very-high threshold but still with a strong
+        // fan-in signal.  Use the wider strict slice while that signal exists
+        // so the proof does not rebuild the same capped query per 256 states.
+        return std::max(
+            defaultRefinementLimit,
+            kCraigVeryHighSupportHighScoreProjectionRefinementLimit);
+      }
+      if (transitionSupportSize > kCraigVeryHighSupportRefinementThreshold) {
+        return std::min(
+            defaultRefinementLimit,
+            kCraigVeryHighSupportProjectionRefinementLimit);
+      }
+      return std::max(
+          defaultRefinementLimit,
+          kCraigHighSupportProjectionRefinementLimit);
+    }
+    return defaultRefinementLimit;
+  }
+
+  size_t defaultBoundedRefinementLimit(
+      size_t candidateCount,
+      size_t transitionSupportSize,
+      bool focusedTransitionProjection) const {
+    return craigBoundedProjectionRefinementLimit(
+        candidateCount, transitionSupportSize, focusedTransitionProjection);
+  }
+
+  void scoreNewTrackedTargets(
+      const std::unordered_set<size_t>& trackedStates) {
+    // Projection only grows.  Remember already-scored requested states so each
+    // bounded refinement round pays for support fan-in of newly imported
+    // targets, not every target imported by earlier rounds.
+    for (const size_t requested : sortedSymbols(trackedStates)) {
+      const size_t target =
+          transitionTargetFor(requested, resolver_, complementPrimary_);
+      if (!trackedStates.contains(target) || !resolver_.contains(target)) {
+        continue;
+      }
+      if (!scoredRequestedStates_.insert(requested).second) {
+        continue;
+      }
+      for (const size_t symbol : resolver_.support(target)) {
+        if (symbol >= 2) {
+          ++faninScore_[symbol];
+        }
+      }
+    }
+  }
+
+  size_t scoreFor(size_t symbol) const {
+    const auto score = faninScore_.find(symbol);
+    return score == faninScore_.end() ? 0 : score->second;
+  }
+
+  const TransitionExprResolver& resolver_;
+  const std::unordered_map<size_t, size_t>& complementPrimary_;
+  std::unordered_set<size_t> scoredRequestedStates_;
+  std::unordered_map<size_t, size_t> faninScore_;
+  bool scoreUpdatesFrozen_ = false;
+};
+
 std::unordered_set<size_t> boundedProjectionRefinementSupport(
-    const KInductionProblem& problem,
+    ProjectionRefinementScorer& scorer,
     const std::unordered_set<size_t>& trackedStates,
     const std::unordered_set<size_t>& transitionStateSupport,
-    size_t& candidateCount) {
-  candidateCount = 0;
-  std::unordered_set<size_t> selectedSupport;
-  for (const size_t symbol : sortedSymbols(transitionStateSupport)) {
-    if (trackedStates.contains(symbol)) {
-      continue;
-    }
-    ++candidateCount;
-    if (selectedSupport.size() < kCraigModelGuidedProjectionRefinementLimit) {
-      selectedSupport.insert(symbol);
-    }
-  }
-  if (candidateCount <= kCraigModelGuidedProjectionRefinementLimit) {
-    return {};
-  }
-  closeSameDesignStateSemantics(problem, selectedSupport);
-  return selectedSupport;
+    bool focusedTransitionProjection,
+    size_t& candidateCount,
+    size_t& topCandidateScore,
+    size_t& refinementLimit,
+    bool& frozeScoreUpdates) {
+  return scorer.selectBoundedSupport(
+      trackedStates,
+      transitionStateSupport,
+      focusedTransitionProjection,
+      candidateCount,
+      topCandidateScore,
+      refinementLimit,
+      frozeScoreUpdates);
 }
 
 size_t frontierRegionClauseCount(const FrontierResult& frontier) {
@@ -1241,6 +2470,16 @@ size_t frontierRegionLiteralCount(const FrontierResult& frontier) {
 
 size_t frontierRegionAuxiliaryCount(const FrontierResult& frontier) {
   return frontier.region.has_value() ? frontier.region->auxiliaryCount : 0;
+}
+
+bool isLargeFocusedLookaheadAdvanceProof(
+    size_t interpolantClauses,
+    size_t interpolantLiterals,
+    size_t interpolantAuxiliaries) {
+  return interpolantClauses >= kCraigFocusedLookaheadAdvanceMinClauses ||
+         interpolantLiterals >= kCraigFocusedLookaheadAdvanceMinLiterals ||
+         interpolantAuxiliaries >=
+             kCraigFocusedLookaheadAdvanceMinAuxiliaries;
 }
 
 bool craigGrowthBudgetExceeded(
@@ -1299,6 +2538,103 @@ void emitCraigGrowthBudgetExceeded(
       " auxiliaries=", frontierRegionAuxiliaryCount(frontier));
 }
 
+bool craigProjectionBudgetExceeded(
+    const CraigImcGrowthBudget& budget,
+    size_t projectionStates) {
+  return budget.enabled && budget.maxProjectionStates > 0 &&
+         projectionStates > budget.maxProjectionStates;
+}
+
+bool shouldRefineFocusedProjectionAfterGrowthBudget(
+    const FrontierResult& frontier,
+    const std::unordered_set<size_t>& trackedStates) {
+  if (!frontier.usesFocusedTransitionProjection()) {
+    return false;
+  }
+  for (const size_t symbol : frontier.transitionStateSupport) {
+    if (!trackedStates.contains(symbol)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool shouldContinueSaturatedFocusedQExpansion(
+    const FrontierResult& frontier,
+    const std::unordered_set<size_t>& trackedStates,
+    const char* budgetReason,
+    size_t qExpansionPass) {
+  if (std::strcmp(budgetReason, "q_pass") != 0 ||
+      qExpansionPass >= kCraigFocusedSaturatedQExpansionPassLimit) {
+    return false;
+  }
+  if (isLargeFocusedLookaheadAdvanceProof(
+          frontierRegionClauseCount(frontier),
+          frontierRegionLiteralCount(frontier),
+          frontierRegionAuxiliaryCount(frontier))) {
+    return false;
+  }
+  // Once the focused transition support is fully tracked, projection
+  // refinement cannot make the Craig image stronger.  Spend a bounded number of
+  // extra McMillan Q-expansion passes before reporting the batch as budgeted.
+  return frontier.usesFocusedTransitionProjection() &&
+         !shouldRefineFocusedProjectionAfterGrowthBudget(
+             frontier, trackedStates);
+}
+
+bool shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
+    const FrontierResult& frontier,
+    const std::unordered_set<size_t>& trackedStates,
+    const char* budgetReason,
+    size_t qExpansionPass,
+    size_t lookahead,
+    size_t maxLookahead,
+    const CraigImcGrowthBudget& growthBudget) {
+  return shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      frontier.usesFocusedTransitionProjection(),
+      shouldRefineFocusedProjectionAfterGrowthBudget(frontier, trackedStates),
+      budgetReason,
+      qExpansionPass,
+      lookahead,
+      maxLookahead,
+      growthBudget,
+      frontierRegionClauseCount(frontier),
+      frontierRegionLiteralCount(frontier),
+      frontierRegionAuxiliaryCount(frontier),
+      frontier.solveElapsedMilliseconds);
+}
+
+bool shouldAdvanceLookaheadAfterBudgetedFocusedSat(
+    const FrontierResult& frontier,
+    const std::unordered_set<size_t>& trackedStates,
+    const char* budgetReason,
+    size_t lookahead,
+    size_t maxLookahead,
+    const CraigImcGrowthBudget& growthBudget) {
+  return shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
+      frontier.usesFocusedTransitionProjection(),
+      shouldRefineFocusedProjectionAfterGrowthBudget(frontier, trackedStates),
+      budgetReason,
+      lookahead,
+      maxLookahead,
+      growthBudget,
+      frontier.solveElapsedMilliseconds);
+}
+
+void emitCraigProjectionBudgetExceeded(
+    size_t projectionRound,
+    size_t projectionStates,
+    const CraigImcGrowthBudget& budget) {
+  // Projection growth is another Craig proof-size budget. For a single hard
+  // output there is nothing left to split, so the caller reports strict IMC as
+  // inconclusive instead of letting the process run into the memory cap.
+  emitSecDiag(
+      "SEC diag: imc Craig growth budget exceeded reason=projection_states",
+      " projection_round=", projectionRound,
+      " states=", projectionStates,
+      " state_limit=", budget.maxProjectionStates);
+}
+
 void addStateAssignments(
     SATSolverWrapper& solver,
     const std::unordered_map<size_t, int>& leaves,
@@ -1330,16 +2666,14 @@ void addConcreteCubeOrRegionRoots(
 
 FrontierResult deriveBoundedFrontierRegion(
     const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     size_t proofDepth) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
   solver.enableCraigInterpolation();
-  // This is the main IMC proof, not a small disposable validator. Keep
-  // CaDiCaL's proof-compatible preprocessing and inprocessing enabled so the
-  // large transition relation is simplified before the UNSAT search.
-  const TransitionExprResolver resolver(problem);
-  const auto complementPrimary = primaryByComplement(problem);
+  configureCraigProjectionSolver(solver, trackedStates.size(), "bounded");
   const bool startsAtConcreteBootstrapFrontier =
       problem.resetBootstrapCycles != 0 &&
       !problem.bootstrapStateAssignments.empty();
@@ -1496,6 +2830,8 @@ FrontierResult deriveBoundedFrontierRegion(
 
 FrontierResult deriveLookaheadFrontierRegion(
     const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& reachableRegions,
     const std::vector<InterpolantRegion>& helperInvariantRegions,
@@ -1506,6 +2842,7 @@ FrontierResult deriveLookaheadFrontierRegion(
     size_t qExpansionPass) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
   solver.enableCraigInterpolation();
+  configureCraigProjectionSolver(solver, trackedStates.size(), "image");
 
   const std::vector<size_t> tracked = sortedSymbols(trackedStates);
   std::vector<std::unordered_map<size_t, int>> frameLits(lookahead + 1);
@@ -1539,8 +2876,8 @@ FrontierResult deriveLookaheadFrontierRegion(
   }
   addAuxiliaryStateInvariants(
       solver, frameLits[0], auxiliaryInvariants, ClausePartition::A);
-  addAuxiliaryStateInvariants(
-      solver, frameLits[1], auxiliaryInvariants, ClausePartition::A);
+  // Frame 1 receives the same A-side auxiliary clauses below together with
+  // state semantics. Avoid adding the duplicate copy before transition build.
   for (size_t frame = 2; frame <= lookahead; ++frame) {
     addAuxiliaryStateInvariants(
         solver, frameLits[frame], auxiliaryInvariants, ClausePartition::B);
@@ -1588,8 +2925,6 @@ FrontierResult deriveLookaheadFrontierRegion(
     solver.addClause(currentRegionRoots);
   }
 
-  const TransitionExprResolver resolver(problem);
-  const auto complementPrimary = primaryByComplement(problem);
   const auto buildStart = SteadyClock::now();
   emitSecDiag(
       "SEC diag: imc Craig image build begin lookahead=", lookahead,
@@ -1597,12 +2932,16 @@ FrontierResult deriveLookaheadFrontierRegion(
       " regions=", reachableRegions.size(),
       " tracked_states=", trackedStates.size(),
       " direct_cube_source=", useDirectConcreteCube ? 1 : 0);
+  const std::unordered_set<size_t> imageTransitionRequests =
+      focusedImageTransitionRequests(
+          problem, resolver, complementPrimary, trackedStates, lookahead);
   const TransitionEncodingResult transition = addProjectedTransition(
       solver,
       problem,
       resolver,
       complementPrimary,
       trackedStates,
+      imageTransitionRequests,
       auxiliaryInvariants,
       frameLits[0],
       frameLits[1],
@@ -1615,6 +2954,7 @@ FrontierResult deriveLookaheadFrontierRegion(
       " elapsed_ms=", elapsedMilliseconds(buildStart));
 
   FrontierResult result;
+  result.recordTransitionRequests(trackedStates.size(), imageTransitionRequests);
   const auto states = stateSymbolSet(problem);
   for (const auto& [symbol, literal] : transition.currentLits) {
     (void)literal;
@@ -1623,12 +2963,22 @@ FrontierResult deriveLookaheadFrontierRegion(
     }
   }
   for (size_t frame = 1; frame < lookahead; ++frame) {
+    const std::unordered_set<size_t> suffixTransitionRequests =
+        focusedImageTransitionRequests(
+            problem,
+            resolver,
+            complementPrimary,
+            trackedStates,
+            lookahead - frame);
+    result.recordTransitionRequests(
+        trackedStates.size(), suffixTransitionRequests);
     const TransitionEncodingResult suffixTransition = addProjectedTransition(
         solver,
         problem,
         resolver,
         complementPrimary,
         trackedStates,
+        suffixTransitionRequests,
         auxiliaryInvariants,
         frameLits[frame],
         frameLits[frame + 1],
@@ -1692,6 +3042,8 @@ FrontierResult deriveLookaheadFrontierRegion(
               transition.currentLits,
               trackedStates,
               result.transitionStateSupport,
+              resolver,
+              complementPrimary,
               result.modelGuidedTransitionStateCandidates);
     }
     return result;
@@ -1895,19 +3247,29 @@ bool craigInvariantExcludesBadInternal(
 CraigImcResult runWithProjection(
     const KInductionProblem& problem,
     std::unordered_set<size_t>& trackedStates,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    ProjectionRefinementScorer& refinementScorer,
     const std::vector<InterpolantRegion>& helperInvariantRegions,
-    const AuxiliaryStateInvariants& auxiliaryInvariants,
+    AuxiliaryStateInvariants& projectionAuxiliaryInvariants,
     const CraigImcGrowthBudget& growthBudget,
     bool directConcreteCubeSourceEnabled,
     size_t maxLookahead) {
   FrontierResult frontier;
+  AuxiliaryStateInvariants activeAuxiliaryInvariants =
+      projectionAuxiliaryInvariants;
   std::optional<InterpolantRegion> initialRegion =
       buildConcreteAssignmentRegion(
           problem.bootstrapStateAssignments, trackedStates);
   const bool hasConcreteInitialCube = initialRegion.has_value();
   if (!initialRegion.has_value()) {
     frontier = deriveBoundedFrontierRegion(
-        problem, trackedStates, auxiliaryInvariants, 0);
+        problem,
+        resolver,
+        complementPrimary,
+        trackedStates,
+        activeAuxiliaryInvariants,
+        0);
     initialRegion = std::move(frontier.region);
     if (!initialRegion.has_value()) {
       const size_t oldSize = trackedStates.size();
@@ -1928,7 +3290,7 @@ CraigImcResult runWithProjection(
   const InterpolantRegion concreteInitialRegion = std::move(*initialRegion);
   if (!craigInvariantExcludesBadInternal(
           problem, trackedStates, {concreteInitialRegion},
-          auxiliaryInvariants)) {
+          activeAuxiliaryInvariants)) {
     return {
         hasConcreteInitialCube ? CraigImcStatus::CounterexampleCandidate
                                : CraigImcStatus::NoProgress,
@@ -1936,39 +3298,207 @@ CraigImcResult runWithProjection(
   }
   size_t lookahead = 1;
   size_t qExpansionPass = 1;
+  size_t localAuxiliaryRetryCount = 0;
   std::vector<InterpolantRegion> reachableRegions{concreteInitialRegion};
   while (lookahead <= maxLookahead) {
     frontier = deriveLookaheadFrontierRegion(
         problem,
+        resolver,
+        complementPrimary,
         trackedStates,
         reachableRegions,
         helperInvariantRegions,
-        auxiliaryInvariants,
+        activeAuxiliaryInvariants,
         hasConcreteInitialCube,
         directConcreteCubeSourceEnabled,
         lookahead,
         qExpansionPass);
     if (!frontier.region.has_value()) {
+      const bool skipLocalAuxiliaryMining =
+          shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+              frontier.usesFocusedTransitionProjection(),
+              trackedStates.size(),
+              frontier.transitionStateSupport.size(),
+              helperInvariantRegions.size());
+      if (frontier.solveStatus == SATSolverWrapper::SolveStatus::Sat) {
+        if (skipLocalAuxiliaryMining) {
+          emitSecDiag(
+              "SEC diag: imc Craig skips local auxiliary mining for retained "
+              "helper tail lookahead=",
+              lookahead,
+              " q_pass=", qExpansionPass,
+              " tracked_states=", trackedStates.size(),
+              " transition_states=", frontier.transitionStateSupport.size(),
+              " helper_regions=", helperInvariantRegions.size());
+        } else if (localAuxiliaryRetryCount < kCraigLocalAuxiliaryRetryLimit) {
+          const AuxiliaryStateInvariants localInvariants =
+              deriveLocalAuxiliaryStateInvariants(
+                  problem,
+                  resolver,
+                  complementPrimary,
+                  frontier.transitionStateSupport,
+                  activeAuxiliaryInvariants);
+          if (promoteLocalAuxiliaryInvariants(
+                  activeAuxiliaryInvariants,
+                  projectionAuxiliaryInvariants,
+                  localInvariants)) {
+            ++localAuxiliaryRetryCount;
+            // A projected SAT model may only exist because support state bits
+            // are unconstrained.  Retry a tiny bounded number of local slices
+            // before projection refinement so BP/AES cones can harvest the next
+            // useful constants without turning auxiliary mining into a proof
+            // search of its own.
+            continue;
+          }
+        } else {
+          emitSecDiag(
+              "SEC diag: imc Craig local auxiliary retry limit reached "
+              "lookahead=",
+              lookahead,
+              " q_pass=", qExpansionPass,
+              " limit=", kCraigLocalAuxiliaryRetryLimit);
+        }
+      }
       const size_t oldSize = trackedStates.size();
       size_t boundedCandidateCount = 0;
+      size_t boundedTopCandidateScore = 0;
+      size_t boundedRefinementLimit = 0;
+      bool frozeBoundedScoreUpdates = false;
       const bool hasModelGuidedRefinement =
           !frontier.modelGuidedTransitionStateSupport.empty();
+      const bool needsBoundedBackfill =
+          modelGuidedProjectionNeedsBoundedBackfill(frontier);
       std::unordered_set<size_t> boundedRefinementSupport;
-      if (!hasModelGuidedRefinement) {
+      if (!hasModelGuidedRefinement || needsBoundedBackfill) {
         boundedRefinementSupport = boundedProjectionRefinementSupport(
-            problem,
+            refinementScorer,
             trackedStates,
             frontier.transitionStateSupport,
-            boundedCandidateCount);
+            frontier.usesFocusedTransitionProjection(),
+            boundedCandidateCount,
+            boundedTopCandidateScore,
+            boundedRefinementLimit,
+            frozeBoundedScoreUpdates);
+        if (frozeBoundedScoreUpdates) {
+          emitSecDiag(
+              "SEC diag: imc Craig freezes low-score fanin scoring "
+              "candidates=",
+              boundedCandidateCount,
+              " top_score=", boundedTopCandidateScore,
+              " support=", frontier.transitionStateSupport.size(),
+              " score_limit=", kCraigLowScoreBackfillScoreLimit);
+        }
+        if (!boundedRefinementSupport.empty() &&
+            boundedRefinementLimit <
+                boundedProjectionRefinementLimit(boundedCandidateCount)) {
+          const bool cappedByLowScore =
+              boundedRefinementLimit <= kCraigLowScoreProjectionRefinementLimit &&
+              frontier.transitionStateSupport.size() >
+                  kCraigLowScoreBackfillSupportThreshold &&
+              boundedTopCandidateScore <= kCraigLowScoreBackfillScoreLimit;
+          if (cappedByLowScore) {
+            emitSecDiag(
+                "SEC diag: imc Craig caps low-score bounded refinement "
+                "candidates=",
+                boundedCandidateCount,
+                " selected_limit=", boundedRefinementLimit,
+                " top_score=", boundedTopCandidateScore,
+                " support=", frontier.transitionStateSupport.size(),
+                " score_limit=", kCraigLowScoreBackfillScoreLimit);
+          } else {
+            const size_t supportLimit =
+                boundedRefinementLimit <=
+                        kCraigVeryHighSupportProjectionRefinementLimit
+                    ? kCraigVeryHighSupportRefinementThreshold
+                    : kCraigHighSupportRefinementThreshold;
+            emitSecDiag(
+                "SEC diag: imc Craig caps high-support bounded refinement "
+                "candidates=",
+                boundedCandidateCount,
+                " selected_limit=", boundedRefinementLimit,
+                " top_score=", boundedTopCandidateScore,
+                " support=", frontier.transitionStateSupport.size(),
+                " support_limit=", supportLimit);
+          }
+        }
+        if (needsBoundedBackfill &&
+            shouldKeepOnlyModelGuidedRefinement(
+                frontier, boundedTopCandidateScore)) {
+          // In huge BP cones the bounded fan-in score eventually collapses.
+          // At that point the SAT model is the precise missing slice; importing
+          // another low-score 512-state backfill only grows Craig memory.
+          emitSecDiag(
+              "SEC diag: imc Craig skips low-score bounded backfill "
+              "model_selected=",
+              frontier.modelGuidedTransitionStateSupport.size(),
+              " candidates=", boundedCandidateCount,
+              " top_score=", boundedTopCandidateScore,
+              " support=", frontier.transitionStateSupport.size(),
+              " score_limit=", kCraigLowScoreBackfillScoreLimit);
+          boundedRefinementSupport.clear();
+        } else if (needsBoundedBackfill) {
+          if (boundedTopCandidateScore <= kCraigLowScoreBackfillScoreLimit) {
+            size_t guidedBackfillCandidateCount = 0;
+            size_t guidedBackfillTopScore = 0;
+            std::unordered_set<size_t> guidedBackfillSupport =
+                refinementScorer.selectModelGuidedBackfill(
+                    trackedStates,
+                    frontier.transitionStateSupport,
+                    frontier.modelGuidedTransitionStateSupport,
+                    boundedRefinementLimit,
+                    guidedBackfillCandidateCount,
+                    guidedBackfillTopScore);
+            if (!guidedBackfillSupport.empty()) {
+              emitSecDiag(
+                  "SEC diag: imc Craig model-guided bounded backfill "
+                  "candidates=",
+                  guidedBackfillCandidateCount,
+                  " selected=", guidedBackfillSupport.size(),
+                  " top_score=", guidedBackfillTopScore,
+                  " support=", frontier.transitionStateSupport.size());
+              boundedRefinementSupport = std::move(guidedBackfillSupport);
+            }
+          }
+          boundedRefinementSupport.insert(
+              frontier.modelGuidedTransitionStateSupport.begin(),
+              frontier.modelGuidedTransitionStateSupport.end());
+        }
       }
       const std::unordered_set<size_t>& refinementSupport =
           !boundedRefinementSupport.empty()
               ? boundedRefinementSupport
               : projectionRefinementSupport(frontier);
+      if (!skipLocalAuxiliaryMining &&
+          shouldTrySelectedLocalAuxiliaryInvariants(
+              frontier, refinementSupport, localAuxiliaryRetryCount)) {
+        const AuxiliaryStateInvariants localInvariants =
+            deriveLocalAuxiliaryStateInvariants(
+                problem,
+                resolver,
+                complementPrimary,
+                refinementSupport,
+                activeAuxiliaryInvariants);
+        if (promoteLocalAuxiliaryInvariants(
+                activeAuxiliaryInvariants,
+                projectionAuxiliaryInvariants,
+                localInvariants)) {
+          ++localAuxiliaryRetryCount;
+          emitSecDiag(
+              "SEC diag: imc Craig retries selected local auxiliary "
+              "invariants selected=",
+              refinementSupport.size(),
+              " full_support=", frontier.transitionStateSupport.size(),
+              " retry=", localAuxiliaryRetryCount,
+              " retry_limit=", kCraigLocalAuxiliaryRetryLimit);
+          continue;
+        }
+      }
+      // Do not close refinement picks over every rail/equality partner here.
+      // Missing partners weaken the projected Craig query but keep any proof
+      // sound, while avoiding thousands of extra global interpolant variables.
       trackedStates.insert(
           refinementSupport.begin(),
           refinementSupport.end());
-      closeSameDesignStateSemantics(problem, trackedStates);
       if (trackedStates.size() != oldSize) {
         if (hasModelGuidedRefinement) {
           emitSecDiag(
@@ -1978,12 +3508,14 @@ CraigImcResult runWithProjection(
               " selected=",
               frontier.modelGuidedTransitionStateSupport.size(),
               " full=", frontier.transitionStateSupport.size());
-        } else if (!boundedRefinementSupport.empty()) {
+        }
+        if (!boundedRefinementSupport.empty()) {
           emitSecDiag(
               "SEC diag: imc Craig bounded projection refinement candidates=",
               boundedCandidateCount,
               " selected=", boundedRefinementSupport.size(),
-              " full=", frontier.transitionStateSupport.size());
+              " full=", frontier.transitionStateSupport.size(),
+              " top_score=", boundedTopCandidateScore);
         }
         emitSecDiag(
             "SEC diag: imc Craig refines transition projection states=",
@@ -2002,50 +3534,170 @@ CraigImcResult runWithProjection(
       const char* budgetReason = nullptr;
       if (craigGrowthBudgetExceeded(
               growthBudget, qExpansionPass, frontier, &budgetReason)) {
-        emitCraigGrowthBudgetExceeded(
-            lookahead, qExpansionPass, frontier, budgetReason);
-        return {CraigImcStatus::BudgetExceeded, lookahead};
+        if (shouldAdvanceLookaheadAfterBudgetedFocusedSat(
+                frontier,
+                trackedStates,
+                budgetReason,
+                lookahead,
+                maxLookahead,
+                growthBudget)) {
+          // A focused SAT frontier with every transition-support bit already
+          // tracked has no projection work left.  Let strict IMC perform its
+          // ordinary SAT action, k := k + 1, instead of treating the q-pass
+          // guard as a proof failure.
+          emitSecDiag(
+              "SEC diag: imc Craig advances focused lookahead after budgeted "
+              "sat frontier lookahead=",
+              lookahead,
+              " next=", lookahead + 1,
+              " q_pass=", qExpansionPass,
+              " tracked_states=", trackedStates.size(),
+              " solve_ms=", frontier.solveElapsedMilliseconds);
+          ++lookahead;
+          qExpansionPass = 1;
+          localAuxiliaryRetryCount = 0;
+          reachableRegions = {concreteInitialRegion};
+          continue;
+        } else {
+          emitCraigGrowthBudgetExceeded(
+              lookahead, qExpansionPass, frontier, budgetReason);
+          return {CraigImcStatus::BudgetExceeded, lookahead};
+        }
       }
       // McMillan SAT branch: increase k and restart from Q := S0.
       ++lookahead;
       qExpansionPass = 1;
+      localAuxiliaryRetryCount = 0;
       reachableRegions = {concreteInitialRegion};
       continue;
     }
     const char* budgetReason = nullptr;
-    if (craigGrowthBudgetExceeded(
-            growthBudget, qExpansionPass, frontier, &budgetReason)) {
-      emitCraigGrowthBudgetExceeded(
-          lookahead, qExpansionPass, frontier, budgetReason);
-      return {CraigImcStatus::BudgetExceeded, lookahead};
-    }
-    const InterpolantRegion nextRegion = std::move(*frontier.region);
+    const bool budgetExceeded = craigGrowthBudgetExceeded(
+        growthBudget, qExpansionPass, frontier, &budgetReason);
+    const InterpolantRegion& nextRegion = *frontier.region;
     if (regionContainedInReachableUnion(
             problem,
             trackedStates,
             reachableRegions,
             helperInvariantRegions,
-            auxiliaryInvariants,
+            activeAuxiliaryInvariants,
             nextRegion)) {
-      return {
-          CraigImcStatus::Equivalent,
+      return makeCraigEquivalentResult(
           lookahead,
-          reachableRegions,
-          trackedStates};
+          std::move(reachableRegions),
+          trackedStates,
+          activeAuxiliaryInvariants);
+    }
+    if (budgetExceeded) {
+      // The Craig proof has already paid to build this interpolant.  Let a large
+      // final interpolant close the strict IMC fixed point, but stop before
+      // adding it to Q when it only grows the next proof obligation.  For a
+      // focused BP/AES image, use the proof's transition support as the next
+      // strict projection slice instead of spending the budget on deeper suffix
+      // frames over the same projected state surface.
+      if (shouldRefineFocusedProjectionAfterGrowthBudget(
+              frontier, trackedStates)) {
+        const size_t oldSize = trackedStates.size();
+        size_t boundedCandidateCount = 0;
+        size_t boundedTopCandidateScore = 0;
+        size_t boundedRefinementLimit = 0;
+        bool frozeBoundedScoreUpdates = false;
+        std::unordered_set<size_t> boundedRefinementSupport =
+            boundedProjectionRefinementSupport(
+                refinementScorer,
+                trackedStates,
+                frontier.transitionStateSupport,
+                /*focusedTransitionProjection=*/true,
+                boundedCandidateCount,
+                boundedTopCandidateScore,
+                boundedRefinementLimit,
+                frozeBoundedScoreUpdates);
+        const std::unordered_set<size_t>& refinementSupport =
+            boundedRefinementSupport.empty() ? frontier.transitionStateSupport
+                                             : boundedRefinementSupport;
+        trackedStates.insert(
+            refinementSupport.begin(), refinementSupport.end());
+        if (trackedStates.size() != oldSize) {
+          if (frozeBoundedScoreUpdates) {
+            emitSecDiag(
+                "SEC diag: imc Craig freezes low-score fanin scoring "
+                "candidates=",
+                boundedCandidateCount,
+                " top_score=", boundedTopCandidateScore,
+                " support=", frontier.transitionStateSupport.size(),
+                " score_limit=", kCraigLowScoreBackfillScoreLimit);
+          }
+          if (!boundedRefinementSupport.empty()) {
+            emitSecDiag(
+                "SEC diag: imc Craig refines focused projection after growth "
+                "budget reason=",
+                budgetReason,
+                " candidates=", boundedCandidateCount,
+                " selected=", boundedRefinementSupport.size(),
+                " full=", frontier.transitionStateSupport.size(),
+                " top_score=", boundedTopCandidateScore);
+          }
+          emitSecDiag(
+              "SEC diag: imc Craig refines transition projection states=",
+              oldSize, "->", trackedStates.size());
+          return {CraigImcStatus::NoProgress, 0};
+        }
+      }
+      if (shouldContinueSaturatedFocusedQExpansion(
+              frontier, trackedStates, budgetReason, qExpansionPass)) {
+        emitSecDiag(
+            "SEC diag: imc Craig continues saturated focused q expansion "
+            "lookahead=",
+            lookahead,
+            " q_pass=", qExpansionPass,
+            " limit=", kCraigFocusedSaturatedQExpansionPassLimit,
+            " tracked_states=", trackedStates.size());
+      } else if (shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
+                     frontier,
+                     trackedStates,
+                     budgetReason,
+                     qExpansionPass,
+                     lookahead,
+                     maxLookahead,
+                     growthBudget)) {
+        // The q-pass limit is an optimization guard, not a semantic bound.
+        // When projection is saturated, avoid q13's proof explosion by trying
+        // the next strict IMC unroll depth from the concrete frontier.
+        emitSecDiag(
+            "SEC diag: imc Craig advances focused lookahead after q budget "
+            "lookahead=",
+            lookahead,
+            " next=", lookahead + 1,
+            " q_pass=", qExpansionPass,
+            " tracked_states=", trackedStates.size(),
+            " clauses=", frontierRegionClauseCount(frontier),
+            " literals=", frontierRegionLiteralCount(frontier),
+            " auxiliaries=", frontierRegionAuxiliaryCount(frontier));
+        ++lookahead;
+        qExpansionPass = 1;
+        localAuxiliaryRetryCount = 0;
+        reachableRegions = {concreteInitialRegion};
+        continue;
+      } else {
+        emitCraigGrowthBudgetExceeded(
+            lookahead, qExpansionPass, frontier, budgetReason);
+        return {CraigImcStatus::BudgetExceeded, lookahead};
+      }
     }
 
     // McMillan UNSAT branch: Q := Q OR I, then repeat the same loop without
     // increasing k.
-    reachableRegions.push_back(nextRegion);
+    reachableRegions.push_back(std::move(*frontier.region));
     compactReachableRegionsImpl(
         problem,
         trackedStates,
         helperInvariantRegions,
-        auxiliaryInvariants,
+        activeAuxiliaryInvariants,
         reachableRegions,
         kCraigRegionCompactionStart,
         kCraigRegionCompactionCandidateLimit);
     ++qExpansionPass;
+    localAuxiliaryRetryCount = 0;
   }
   return {
       hasConcreteInitialCube ? CraigImcStatus::ConcreteNoProgress
@@ -2074,6 +3726,97 @@ size_t compactCraigReachableRegions(
       reachableRegions,
       compactionStart,
       candidateLimit);
+}
+
+bool shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+    bool focusedTransitionProjection,
+    bool hasUntrackedTransitionSupport,
+    const char* budgetReason,
+    size_t qExpansionPass,
+    size_t lookahead,
+    size_t maxLookahead,
+    const CraigImcGrowthBudget& budget,
+    size_t interpolantClauses,
+    size_t interpolantLiterals,
+    size_t interpolantAuxiliaries,
+    std::int64_t imageSolveMilliseconds) {
+  const bool saturatedQPass =
+      qExpansionPass >= kCraigFocusedSaturatedQExpansionPassLimit;
+  const bool largeProof = isLargeFocusedLookaheadAdvanceProof(
+      interpolantClauses, interpolantLiterals, interpolantAuxiliaries);
+  return budgetReason != nullptr &&
+         std::strcmp(budgetReason, "q_pass") == 0 &&
+         (saturatedQPass || largeProof) &&
+         lookahead < maxLookahead &&
+         focusedTransitionProjection &&
+         !hasUntrackedTransitionSupport &&
+         (budget.maxImageSolveMilliseconds == 0 ||
+          imageSolveMilliseconds <= budget.maxImageSolveMilliseconds) &&
+         interpolantClauses <= kCraigFocusedLookaheadAdvanceMaxClauses &&
+         interpolantLiterals <= kCraigFocusedLookaheadAdvanceMaxLiterals &&
+         interpolantAuxiliaries <=
+             kCraigFocusedLookaheadAdvanceMaxAuxiliaries;
+}
+
+bool shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
+    bool focusedTransitionProjection,
+    bool hasUntrackedTransitionSupport,
+    const char* budgetReason,
+    size_t lookahead,
+    size_t maxLookahead,
+    const CraigImcGrowthBudget& budget,
+    std::int64_t imageSolveMilliseconds) {
+  return budgetReason != nullptr &&
+         std::strcmp(budgetReason, "q_pass") == 0 &&
+         lookahead < maxLookahead &&
+         focusedTransitionProjection &&
+         !hasUntrackedTransitionSupport &&
+         (budget.maxImageSolveMilliseconds == 0 ||
+          imageSolveMilliseconds <= budget.maxImageSolveMilliseconds);
+}
+
+size_t craigBoundedProjectionRefinementLimit(
+    size_t candidateCount,
+    size_t transitionSupportSize,
+    bool focusedTransitionProjection) {
+  const size_t defaultLimit = boundedProjectionRefinementLimit(candidateCount);
+  if (!focusedTransitionProjection ||
+      transitionSupportSize > kCraigFocusedProjectionRefinementSupportLimit) {
+    return defaultLimit;
+  }
+  if (transitionSupportSize <= kCraigFocusedProjectionBulkSupportLimit &&
+      candidateCount <= kCraigFocusedProjectionBulkCandidateLimit) {
+    // Focused image queries already cap the encoded transition request.  When
+    // the remaining support is BP-modest, import it in one strict refinement
+    // step instead of rebuilding the same saturated Craig proof per 4K states.
+    return candidateCount;
+  }
+  return std::max(defaultLimit, kCraigFocusedProjectionRefinementLimit);
+}
+
+bool shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+    bool focusedTransitionProjection,
+    size_t trackedStateCount,
+    size_t transitionSupportSize,
+    size_t helperInvariantRegionCount) {
+  return focusedTransitionProjection &&
+         helperInvariantRegionCount >=
+             kCraigRetainedHelperLocalAuxiliarySkipRegions &&
+         trackedStateCount >=
+             kCraigRetainedHelperLocalAuxiliarySkipStateThreshold &&
+         transitionSupportSize >=
+             kCraigRetainedHelperLocalAuxiliarySkipStateThreshold;
+}
+
+bool shouldCapCraigFocusedImageTransitionRequests(size_t expandedRequestCount) {
+  return shouldCapFocusedImageTransitionRequests(expandedRequestCount);
+}
+
+size_t cappedCraigFocusedImageTransitionRequestCount(
+    size_t currentRequestCount,
+    size_t expandedRequestCount) {
+  return cappedFocusedImageTransitionRequestCount(
+      currentRequestCount, expandedRequestCount);
 }
 
 CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(
@@ -2105,15 +3848,35 @@ CraigImcResult CraigInterpolatingModelChecker::run(
   const std::vector<InterpolantRegion>& helperRegions =
       helperInvariantRegions_ == nullptr ? emptyHelperRegions
                                          : *helperInvariantRegions_;
-  const AuxiliaryStateInvariants auxiliaryInvariants =
+  AuxiliaryStateInvariants projectionAuxiliaryInvariants =
       deriveAuxiliaryStateInvariants(
           problem_, options_.enableAuxiliaryInvariants);
+  const AuxiliaryStateInvariants helperAuxiliaryInvariants =
+      helperAuxiliaryStateInvariantsFromOptions(problem_, options_);
+  if (!helperAuxiliaryInvariants.empty()) {
+    const size_t added = mergeAuxiliaryStateInvariants(
+        projectionAuxiliaryInvariants, helperAuxiliaryInvariants);
+    emitSecDiag(
+        "SEC diag: imc Craig seeds helper auxiliary invariants constants=",
+        helperAuxiliaryInvariants.constants.size(),
+        " equalities=", helperAuxiliaryInvariants.equalities.size(),
+        " added=", added);
+  }
+  const TransitionExprResolver resolver(problem_);
+  const auto complementPrimary = primaryByComplement(problem_);
+  ProjectionRefinementScorer refinementScorer(resolver, complementPrimary);
 
   for (size_t projectionRound = 0;
        projectionRound <= problem_.state0Symbols.size() +
                               problem_.state1Symbols.size();
        ++projectionRound) {
     const size_t projectionSize = trackedStates.size();
+    if (craigProjectionBudgetExceeded(
+            options_.growthBudget, projectionSize)) {
+      emitCraigProjectionBudgetExceeded(
+          projectionRound, projectionSize, options_.growthBudget);
+      return {CraigImcStatus::BudgetExceeded, 0};
+    }
     emitSecDiag(
         "SEC diag: imc Craig projection round=", projectionRound,
         " states=", projectionSize);
@@ -2121,8 +3884,11 @@ CraigImcResult CraigInterpolatingModelChecker::run(
         runWithProjection(
             problem_,
             trackedStates,
+            resolver,
+            complementPrimary,
+            refinementScorer,
             helperRegions,
-            auxiliaryInvariants,
+            projectionAuxiliaryInvariants,
             options_.growthBudget,
             options_.enableDirectConcreteCubeSource,
             maxLookahead);
@@ -2130,6 +3896,12 @@ CraigImcResult CraigInterpolatingModelChecker::run(
         result.iterations != 0 ||
         trackedStates.size() == projectionSize) {
       return result;
+    }
+    if (craigProjectionBudgetExceeded(
+            options_.growthBudget, trackedStates.size())) {
+      emitCraigProjectionBudgetExceeded(
+          projectionRound, trackedStates.size(), options_.growthBudget);
+      return {CraigImcStatus::BudgetExceeded, 0};
     }
   }
   return {};
@@ -2139,9 +3911,11 @@ bool craigInvariantExcludesBad(
     const KInductionProblem& problem,
     const std::unordered_set<size_t>& trackedStates,
     const std::vector<InterpolantRegion>& invariantRegions,
-    const std::vector<std::pair<size_t, bool>>& auxiliaryStateInvariants) {
+    const std::vector<std::pair<size_t, bool>>& auxiliaryStateInvariants,
+    const std::vector<std::pair<size_t, size_t>>& auxiliaryStateEqualities) {
   AuxiliaryStateInvariants auxiliaryInvariants;
   auxiliaryInvariants.constants = auxiliaryStateInvariants;
+  auxiliaryInvariants.equalities = auxiliaryStateEqualities;
   return craigInvariantExcludesBadInternal(
       problem, trackedStates, invariantRegions, auxiliaryInvariants);
 }

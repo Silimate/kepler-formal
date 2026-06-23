@@ -16,6 +16,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -78,6 +79,18 @@ struct PendingTransitionForTest {
   size_t independentStateOutputCount = 0;
   std::unordered_map<std::string, std::vector<PendingPinTermForTest>> pinTermIDs;
 };
+
+size_t countTextOccurrences(
+    const std::string& text,
+    const std::string& needle) {
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = text.find(needle, pos)) != std::string::npos) {
+    ++count;
+    pos += needle.size();
+  }
+  return count;
+}
 
 struct ConeTraceForTest {
   std::vector<std::vector<std::string>> levels;
@@ -2308,9 +2321,11 @@ KInductionProblem buildProjectionSharedImcBatchProblem(
 
 KInductionProblem buildBootstrapModelGuidedCraigProjectionProblem(
     size_t supportCount = 96,
-    bool assignSupportBootstrap = true) {
+    bool assignSupportBootstrap = true,
+    bool addDualRailPartners = false) {
   constexpr size_t outputState = 2;
   constexpr size_t firstSupportState = 3;
+  const size_t firstPartnerState = firstSupportState + supportCount;
 
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
@@ -2329,6 +2344,16 @@ KInductionProblem buildBootstrapModelGuidedCraigProjectionProblem(
     if (assignSupportBootstrap) {
       problem.bootstrapStateAssignments.push_back({symbol, false});
     }
+    if (addDualRailPartners) {
+      const size_t partnerSymbol = firstPartnerState + index;
+      problem.state0Symbols.push_back(partnerSymbol);
+      problem.allSymbols.push_back(partnerSymbol);
+      if (assignSupportBootstrap) {
+        problem.bootstrapStateAssignments.push_back({partnerSymbol, true});
+      }
+      problem.dualRailStatePairs.push_back(
+          DualRailSymbolPair{symbol, partnerSymbol});
+    }
   }
 
   problem.transitions0.emplace_back(
@@ -2338,6 +2363,110 @@ KInductionProblem buildBootstrapModelGuidedCraigProjectionProblem(
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
   problem.property = BoolExpr::Not(BoolExpr::Var(outputState));
   problem.bad = BoolExpr::Var(outputState);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildHighFaninCraigProjectionProblemForTest(
+    size_t helperTrackedCount = 4,
+    size_t decoySupportCount = 96) {
+  constexpr size_t outputState = 2;
+  constexpr size_t firstHelperState = 3;
+  constexpr size_t firstDecoyState = 100;
+  const size_t sharedControlState = firstDecoyState + decoySupportCount + 100;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols.push_back(outputState);
+  problem.allSymbols.push_back(outputState);
+  problem.bootstrapStateAssignments.push_back({outputState, false});
+
+  std::vector<size_t> decoyStates;
+  decoyStates.reserve(decoySupportCount);
+  for (size_t index = 0; index < decoySupportCount; ++index) {
+    const size_t symbol = firstDecoyState + index;
+    decoyStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+  problem.state0Symbols.push_back(sharedControlState);
+  problem.allSymbols.push_back(sharedControlState);
+
+  BoolExpr* outputNext = BoolExpr::Var(sharedControlState);
+  for (const size_t symbol : decoyStates) {
+    outputNext = BoolExpr::Or(outputNext, BoolExpr::Var(symbol));
+  }
+  problem.transitions0.emplace_back(outputState, outputNext);
+
+  for (size_t index = 0; index < helperTrackedCount; ++index) {
+    const size_t symbol = firstHelperState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+    // sharedControlState is intentionally a high-id symbol.  A sorted fallback
+    // would spend the first slice on decoys; fan-in scoring should rank this
+    // shared dependency first.
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(sharedControlState));
+  }
+
+  problem.bad = BoolExpr::Var(outputState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildTinyModelGuidedBackfillCraigProjectionProblemForTest(
+    size_t decoyPairCount,
+    size_t controlCount = 1) {
+  constexpr size_t outputState = 2;
+  constexpr size_t firstControlState = 3;
+  const size_t firstDecoyState = firstControlState + controlCount + 100;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {outputState};
+  problem.allSymbols = {outputState};
+  problem.bootstrapStateAssignments = {{outputState, false}};
+
+  BoolExpr* controlCone = BoolExpr::createTrue();
+  for (size_t index = 0; index < controlCount; ++index) {
+    const size_t symbol = firstControlState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+    controlCone = BoolExpr::And(controlCone, BoolExpr::Var(symbol));
+  }
+
+  BoolExpr* impossibleDecoyCone = BoolExpr::createFalse();
+  for (size_t index = 0; index < decoyPairCount; ++index) {
+    const size_t symbol = firstDecoyState + index * 2;
+    const size_t partnerSymbol = symbol + 1;
+    problem.state0Symbols.push_back(symbol);
+    problem.state0Symbols.push_back(partnerSymbol);
+    problem.allSymbols.push_back(symbol);
+    problem.allSymbols.push_back(partnerSymbol);
+    problem.complementedStatePairs0.push_back({symbol, partnerSymbol});
+    // Same-design complement semantics makes symbol && partnerSymbol
+    // unreachable, but both rails remain in the transition support.
+    BoolExpr* contradiction =
+        BoolExpr::And(BoolExpr::Var(symbol), BoolExpr::Var(partnerSymbol));
+    impossibleDecoyCone = BoolExpr::Or(impossibleDecoyCone, contradiction);
+  }
+
+  // The full transition support is large, but the SAT witness can only make
+  // progress through controlState.  Tiny model-guided slices should therefore
+  // be backfilled by the scored bounded selector.
+  problem.transitions0.emplace_back(
+      outputState,
+      BoolExpr::Or(controlCone, impossibleDecoyCone));
+  problem.bad = BoolExpr::Var(outputState);
+  problem.property = BoolExpr::Not(problem.bad);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
   problem.totalStateCount = problem.state0Symbols.size();
@@ -9443,12 +9572,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   options.growthBudget.enabled = true;
   options.growthBudget.maxQExpansionPass = 1;
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  const std::unordered_set<size_t> initialTrackedStates(
+      problem.state0Symbols.begin(), problem.state0Symbols.end());
 
   testing::internal::CaptureStderr();
   CraigInterpolatingModelChecker checker(
       problem,
       /*helperInvariantRegions=*/nullptr,
-      /*initialTrackedStates=*/nullptr,
+      &initialTrackedStates,
       options);
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
@@ -9493,6 +9624,77 @@ KInductionProblem buildCraigAuxiliaryConstantProblemForTest() {
       {stableState, BoolExpr::createFalse()},
       {unstableState, BoolExpr::Var(input)}};
   problem.bad = BoolExpr::Var(stableState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigAuxiliaryConstantGatedConeProblemForTest(
+    size_t coneStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t guardState = 3;
+  constexpr size_t firstConeState = 4;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState, guardState};
+  problem.allSymbols = {badState, guardState};
+  problem.bootstrapStateAssignments = {
+      {badState, false},
+      {guardState, false}};
+
+  std::vector<size_t> coneStates;
+  coneStates.reserve(coneStateCount);
+  for (size_t index = 0; index < coneStateCount; ++index) {
+    const size_t symbol = firstConeState + index;
+    coneStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+
+  problem.transitions0 = {
+      {badState,
+       BoolExpr::And(BoolExpr::Var(guardState),
+                     makeConjunctionOfVars(coneStates))},
+      {guardState, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigResetGatedConeProblemForTest(
+    size_t coneStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t resetInput = 3;
+  constexpr size_t firstConeState = 4;
+
+  KInductionProblem problem;
+  problem.inputSymbols = {resetInput};
+  problem.resetBootstrapInputs = {{resetInput, true}};
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState};
+  problem.allSymbols = {badState, resetInput};
+  problem.bootstrapStateAssignments = {{badState, false}};
+
+  std::vector<size_t> coneStates;
+  coneStates.reserve(coneStateCount);
+  for (size_t index = 0; index < coneStateCount; ++index) {
+    const size_t symbol = firstConeState + index;
+    coneStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+
+  problem.transitions0 = {
+      {badState,
+       BoolExpr::And(BoolExpr::Var(resetInput),
+                     makeConjunctionOfVars(coneStates))}};
+  problem.bad = BoolExpr::Var(badState);
   problem.property = BoolExpr::Not(problem.bad);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
@@ -9549,6 +9751,447 @@ KInductionProblem buildCraigCrossDesignAuxiliaryEqualityProblemForTest() {
   problem.inductionBad = problem.bad;
   problem.totalStateCount =
       problem.state0Symbols.size() + problem.state1Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigLocalAuxiliaryEqualityProblemForTest(
+    size_t paddingStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t lhsState = 3;
+  constexpr size_t rhsState = 4;
+  constexpr size_t input = 5;
+  constexpr size_t firstPaddingState = 6;
+
+  KInductionProblem problem;
+  problem.inputSymbols = {input};
+  problem.state0Symbols = {badState, lhsState, rhsState};
+  problem.allSymbols = {badState, lhsState, rhsState, input};
+  problem.resetBootstrapCycles = 1;
+  problem.bootstrapStateAssignments = {
+      {badState, false},
+      {lhsState, false},
+      {rhsState, false}};
+  for (size_t index = 0; index < paddingStateCount; ++index) {
+    const size_t symbol = firstPaddingState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+
+  // lhsState and rhsState are not constants, but they start equal and share the
+  // same next-state function.  With the oversized padding the global auxiliary
+  // pass must skip, so only local equality mining can keep badState out without
+  // importing the lhs/rhs support into the Craig projection.
+  problem.transitions0 = {
+      {badState,
+       BoolExpr::Not(makeEqualityExpr(
+           BoolExpr::Var(lhsState), BoolExpr::Var(rhsState)))},
+      {lhsState, BoolExpr::Var(input)},
+      {rhsState, BoolExpr::Var(input)}};
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigAuxiliaryCandidateGuardProblemForTest(
+    size_t candidateCount) {
+  constexpr size_t firstState = 2;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols.reserve(candidateCount);
+  problem.allSymbols.reserve(candidateCount);
+  problem.bootstrapStateAssignments.reserve(candidateCount);
+  for (size_t index = 0; index < candidateCount; ++index) {
+    const size_t symbol = firstState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+  // Keep only the first state in the property so the test exercises the
+  // auxiliary-candidate guard without building a large Craig proof.
+  problem.transitions0 = {{firstState, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(firstState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigLocalAuxiliaryInvariantProblemForTest(
+    size_t noiseStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t guardState = 3;
+  constexpr size_t firstNoiseState = 4;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState, guardState};
+  problem.allSymbols = {badState, guardState};
+  problem.bootstrapStateAssignments = {
+      {badState, false},
+      {guardState, false}};
+  for (size_t index = 0; index < noiseStateCount; ++index) {
+    const size_t symbol = firstNoiseState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+  // The property state can only become bad through guardState.  The oversized
+  // bootstrap vector forces global auxiliary mining to skip, so the proof needs
+  // the local Craig projection to prove guardState is a stable constant.
+  problem.transitions0 = {
+      {badState, BoolExpr::Var(guardState)},
+      {guardState, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigAuxiliaryReuseAcrossOutputsProblemForTest(
+    size_t noiseStateCount) {
+  constexpr size_t outputCount = 60;
+  constexpr size_t firstBadState = 2;
+  constexpr size_t guardState = firstBadState + outputCount;
+  constexpr size_t firstNoiseState = guardState + 1;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  for (size_t output = 0; output < outputCount; ++output) {
+    const size_t badState = firstBadState + output;
+    problem.state0Symbols.push_back(badState);
+    problem.allSymbols.push_back(badState);
+    problem.bootstrapStateAssignments.push_back({badState, false});
+    problem.transitions0.emplace_back(badState, BoolExpr::Var(guardState));
+    problem.observedOutputNames.push_back(
+        "aux_reuse_out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(badState));
+    problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
+  }
+  problem.state0Symbols.push_back(guardState);
+  problem.allSymbols.push_back(guardState);
+  problem.bootstrapStateAssignments.push_back({guardState, false});
+  for (size_t index = 0; index < noiseStateCount; ++index) {
+    const size_t symbol = firstNoiseState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+
+  // All outputs depend on the same stable guard.  The first output proves the
+  // guard as a local auxiliary constant after global mining skips; the second
+  // output should seed that fact from the saved Craig helper instead of mining
+  // it again.
+  problem.transitions0.emplace_back(guardState, BoolExpr::createFalse());
+  problem.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < outputCount; ++output) {
+    problem.property = BoolExpr::And(
+        problem.property,
+        makeEqualityExpr(problem.observedOutputExprs0[output],
+                         problem.observedOutputExprs1[output]));
+  }
+  problem.property = BoolExpr::simplify(problem.property);
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigComplementLocalAuxiliaryProblemForTest(
+    size_t paddingStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t primaryRailState = 3;
+  constexpr size_t complementRailState = 4;
+  constexpr size_t firstPaddingState = 5;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState, primaryRailState, complementRailState};
+  problem.allSymbols = {badState, primaryRailState, complementRailState};
+  problem.bootstrapStateAssignments = {
+      {badState, false},
+      {primaryRailState, false},
+      {complementRailState, true}};
+  problem.complementedStatePairs0.push_back(
+      {primaryRailState, complementRailState});
+  for (size_t index = 0; index < paddingStateCount; ++index) {
+    const size_t symbol = firstPaddingState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+
+  // The bad transition only mentions the complement rail, while only the
+  // primary rail has an explicit next-state function.  Local auxiliary mining
+  // must use same-design Q/QN semantics to prove and apply complement constants
+  // without growing the Craig projection.
+  problem.transitions0 = {
+      {badState, BoolExpr::Not(BoolExpr::Var(complementRailState))},
+      {primaryRailState, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigSelfPreservingLocalAuxiliaryPriorityProblemForTest(
+    size_t noiseStateCount,
+    size_t paddingStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t firstNoiseState = 3;
+
+  const size_t guardState = firstNoiseState + noiseStateCount;
+  const size_t firstPaddingState = guardState + 1;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState};
+  problem.allSymbols = {badState};
+  problem.bootstrapStateAssignments = {{badState, false}};
+
+  std::vector<size_t> noiseStates;
+  noiseStates.reserve(noiseStateCount);
+  for (size_t index = 0; index < noiseStateCount; ++index) {
+    const size_t symbol = firstNoiseState + index;
+    noiseStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, index == 1});
+  }
+  problem.state0Symbols.push_back(guardState);
+  problem.allSymbols.push_back(guardState);
+  problem.bootstrapStateAssignments.push_back({guardState, false});
+  for (size_t index = 0; index < paddingStateCount; ++index) {
+    const size_t symbol = firstPaddingState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+  if (noiseStates.size() >= 2) {
+    problem.complementedStatePairs0.push_back(
+        {noiseStates[0], noiseStates[1]});
+  }
+
+  BoolExpr* unreachableNoiseCone = BoolExpr::createFalse();
+  if (noiseStates.size() >= 2) {
+    unreachableNoiseCone =
+        BoolExpr::And(BoolExpr::Var(noiseStates[0]), BoolExpr::Var(noiseStates[1]));
+    for (size_t index = 2; index < noiseStates.size(); ++index) {
+      unreachableNoiseCone =
+          BoolExpr::And(unreachableNoiseCone, BoolExpr::Var(noiseStates[index]));
+    }
+  }
+
+  // guardState has a high symbol number and would be outside a simple
+  // first-1024 slice.  The noise cone keeps the support huge but is impossible
+  // under same-design complement semantics, so proving guardState=0 is the
+  // useful local auxiliary fact.
+  problem.transitions0 = {
+      {badState, BoolExpr::Or(BoolExpr::Var(guardState), unreachableNoiseCone)},
+      {guardState, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigLargeLocalAuxiliaryInvariantProblemForTest(
+    size_t supportNoiseCount,
+    size_t paddingStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t guardState = 3;
+  constexpr size_t firstNoiseState = 4;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState, guardState};
+  problem.allSymbols = {badState, guardState};
+  problem.bootstrapStateAssignments = {
+      {badState, false},
+      {guardState, false}};
+
+  std::vector<size_t> noiseStates;
+  noiseStates.reserve(supportNoiseCount);
+  for (size_t index = 0; index < supportNoiseCount; ++index) {
+    const size_t symbol = firstNoiseState + index;
+    noiseStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+  const size_t firstPaddingState = firstNoiseState + supportNoiseCount;
+  for (size_t index = 0; index < paddingStateCount; ++index) {
+    const size_t symbol = firstPaddingState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+
+  BoolExpr* unreachableNoiseCone = BoolExpr::createFalse();
+  if (noiseStates.size() >= 2) {
+    problem.complementedStatePairs0.push_back(
+        {noiseStates[0], noiseStates[1]});
+    unreachableNoiseCone =
+        BoolExpr::And(BoolExpr::Var(noiseStates[0]), BoolExpr::Var(noiseStates[1]));
+    for (size_t index = 2; index < noiseStates.size(); ++index) {
+      unreachableNoiseCone =
+          BoolExpr::And(unreachableNoiseCone, BoolExpr::Var(noiseStates[index]));
+    }
+  }
+
+  // The large support cone forces local auxiliary mining through its bounded
+  // candidate selector.  Only guardState has a transition proof; the noise
+  // terms keep the support large without needing thousands of useful constants.
+  problem.transitions0 = {
+      {badState, BoolExpr::Or(BoolExpr::Var(guardState), unreachableNoiseCone)},
+      {guardState, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigKnownSupportLocalAuxiliaryProblemForTest(
+    size_t supportStateCount,
+    size_t paddingStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t guardState = 3;
+  constexpr size_t firstSupportState = 4;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState, guardState};
+  problem.allSymbols = {badState, guardState};
+  problem.bootstrapStateAssignments = {
+      {badState, false},
+      {guardState, false}};
+
+  std::vector<size_t> supportStates;
+  supportStates.reserve(supportStateCount);
+  for (size_t index = 0; index < supportStateCount; ++index) {
+    const size_t symbol = firstSupportState + index;
+    supportStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+  const size_t firstPaddingState = firstSupportState + supportStateCount;
+  for (size_t index = 0; index < paddingStateCount; ++index) {
+    const size_t symbol = firstPaddingState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+
+  BoolExpr* knownFalseSupportCone = makeConjunctionOfVars(supportStates);
+  problem.transitions0.emplace_back(
+      badState,
+      BoolExpr::Or(BoolExpr::Var(guardState), knownFalseSupportCone));
+  problem.transitions0.emplace_back(guardState, knownFalseSupportCone);
+  for (const size_t symbol : supportStates) {
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigLocalAuxiliaryRetryLimitProblemForTest(
+    size_t supportStateCount,
+    size_t paddingStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t firstSupportState = 3;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState};
+  problem.allSymbols = {badState};
+  problem.bootstrapStateAssignments = {{badState, false}};
+
+  std::vector<size_t> supportStates;
+  supportStates.reserve(supportStateCount);
+  for (size_t index = 0; index < supportStateCount; ++index) {
+    const size_t symbol = firstSupportState + index;
+    supportStates.push_back(symbol);
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+  const size_t firstPaddingState = firstSupportState + supportStateCount;
+  for (size_t index = 0; index < paddingStateCount; ++index) {
+    const size_t symbol = firstPaddingState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+  }
+
+  BoolExpr* supportCanMakeBad = BoolExpr::createFalse();
+  for (const size_t symbol : supportStates) {
+    supportCanMakeBad =
+        BoolExpr::Or(supportCanMakeBad, BoolExpr::Var(symbol));
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+  problem.transitions0.emplace_back(
+      badState, BoolExpr::simplify(supportCanMakeBad));
+
+  problem.bad = BoolExpr::Var(badState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+  return problem;
+}
+
+KInductionProblem buildCraigLargeProjectionAuxiliarySuppressionProblemForTest(
+    size_t paddingStateCount) {
+  constexpr size_t badState = 2;
+  constexpr size_t guardState = 3;
+  constexpr size_t firstPaddingState = 4;
+
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  problem.state0Symbols = {badState, guardState};
+  problem.allSymbols = {badState, guardState};
+  problem.bootstrapStateAssignments = {
+      {badState, false},
+      {guardState, false}};
+  for (size_t index = 0; index < paddingStateCount; ++index) {
+    const size_t symbol = firstPaddingState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+  }
+
+  // Keep the useful proof tiny while the tracked projection itself is large.
+  // The stable guard still creates a non-empty auxiliary set, while the
+  // trivially safe property lets the test focus on query-clause suppression
+  // instead of depending on auxiliaries for the proof.
+  problem.transitions0 = {
+      {badState, BoolExpr::Var(guardState)},
+      {guardState, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::createFalse();
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
   return problem;
 }
 
@@ -9657,6 +10300,474 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSubstitutesAuxiliaryConstantsBeforeTransitionEncoding) {
+  const KInductionProblem problem =
+      buildCraigAuxiliaryConstantGatedConeProblemForTest(
+          /*coneStateCount=*/4096);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The stable guard is a proven auxiliary constant.  Substitute it before
+  // Tseitin encoding so the large gated cone never enters the Craig proof.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig auxiliary constants=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("transition_states=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_FALSE(result.auxiliaryStateInvariants.empty());
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSubstitutesInactiveResetBeforeTransitionEncoding) {
+  const KInductionProblem problem =
+      buildCraigResetGatedConeProblemForTest(/*coneStateCount=*/4096);
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Reset is already asserted inactive in every post-bootstrap transition
+  // query. Substitute that value before Tseitin encoding so reset-gated support
+  // cones do not enter the Craig proof trace.
+  EXPECT_NE(
+      stderrOutput.find("transition_states=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSkipsAuxiliaryInvariantMiningForHugeBootstrap) {
+  const KInductionProblem problem =
+      buildCraigAuxiliaryCandidateGuardProblemForTest(10001);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  (void)checker.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Auxiliary constants are only a pruning aid.  Very large bootstrap maps
+  // must not spend memory mining transition support before Craig IMC starts.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10001"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig auxiliary constants="),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcUsesLocalAuxiliaryConstantsAfterGlobalMiningSkip) {
+  const KInductionProblem problem =
+      buildCraigLocalAuxiliaryInvariantProblemForTest(10001);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The global pass must still avoid the huge bootstrap map, but a SAT witness
+  // over the tiny projected support can mine transition-proven constants
+  // locally and retry the same strict Craig query.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10003"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig local auxiliary constants=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcUsesLocalAuxiliaryEqualitiesAfterGlobalMiningSkip) {
+  const KInductionProblem problem =
+      buildCraigLocalAuxiliaryEqualityProblemForTest(10000);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The local pass should reuse the same same-design equality proof as the
+  // global auxiliary path, but only over the selected Craig support.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10003"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig local auxiliary constants=0"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("equalities=1 equality_candidates=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcClosesLocalAuxiliaryConstantsOverComplementRails) {
+  const KInductionProblem problem =
+      buildCraigComplementLocalAuxiliaryProblemForTest(10000);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Same-design complement rails are already part of the Craig state
+  // semantics.  Local auxiliary mining should close constants over those pairs
+  // so support that only contains QN can still use a proven Q constant.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10003"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig local auxiliary constants=3 candidates=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcPrioritizesSelfPreservingLocalAuxiliaryCandidates) {
+  const KInductionProblem problem =
+      buildCraigSelfPreservingLocalAuxiliaryPriorityProblemForTest(
+          /*noiseStateCount=*/8193,
+          /*paddingStateCount=*/2000);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The stable guard is above the first 1024 symbols in a huge support pool.
+  // Candidate scoring should promote cheaply self-preserving constants before
+  // fan-in-only noise, then the normal transition proof validates the choice.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10195"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig local auxiliary constants=1 candidates=8195 "
+          "selected=1025 candidate_limit=1024"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("top_score=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSelectsLocalAuxiliaryConstantsFromLargeSupport) {
+  const KInductionProblem problem =
+      buildCraigLargeLocalAuxiliaryInvariantProblemForTest(
+          /*supportNoiseCount=*/4097,
+          /*paddingStateCount=*/6000);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Local auxiliary mining must not give up when the current projection support
+  // is above the candidate budget. It should select a bounded slice, prove the
+  // stable guard constant, and retry before growing the projection.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10099"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig local auxiliary constants=1 candidates=4099 "
+          "selected=4096"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcShrinksLocalAuxiliarySliceForHugeSupport) {
+  const KInductionProblem problem =
+      buildCraigLargeLocalAuxiliaryInvariantProblemForTest(
+          /*supportNoiseCount=*/8193,
+          /*paddingStateCount=*/2000);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Huge local support pools are sorted by transition fanin score and then
+  // capped before the transition-proof pass.  The useful guard is still in the
+  // selected slice, but IMC avoids thousands of low-value SAT checks.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10195"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig local auxiliary constants=1 candidates=8195 "
+          "selected=1024 candidate_limit=1024"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcProvesLocalAuxiliaryConstantsFromKnownSupport) {
+  const KInductionProblem problem =
+      buildCraigKnownSupportLocalAuxiliaryProblemForTest(
+          /*supportStateCount=*/300,
+          /*paddingStateCount=*/9800);
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The guard's next-state support is larger than the SAT proof support limit,
+  // but every support bit is already a local candidate constant.  IMC should
+  // prove the whole local set by evaluating that known support instead of
+  // expanding the projection.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10102"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig local auxiliary constants=302 candidates=302 "
+          "selected=302"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcUsesSecondLocalAuxiliaryRetryBeforeProjection) {
+  const KInductionProblem problem =
+      buildCraigLocalAuxiliaryRetryLimitProblemForTest(
+          /*supportStateCount=*/4097,
+          /*paddingStateCount=*/6000);
+  const std::unordered_set<size_t> initialTrackedStates = {2};
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.maxProjectionStates = 1;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The first bounded local-aux slice is useful but leaves two support bits
+  // unconstrained.  A second bounded slice should prove the remaining local
+  // constants before IMC grows the Craig projection.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips auxiliary invariants candidates=10098"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig local auxiliary constants=4096 candidates=4098 "
+          "selected=4096"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig local auxiliary constants=2 candidates=2 "
+          "selected=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig local auxiliary retry limit reached"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcUsesDirectCadicalProfileForLargeProjectionQueries) {
+  const KInductionProblem problem =
+      buildCraigLargeProjectionAuxiliarySuppressionProblemForTest(
+          /*paddingStateCount=*/6200);
+  const std::unordered_set<size_t> initialTrackedStates(
+      problem.state0Symbols.begin(), problem.state0Symbols.end());
+  CraigImcOptions options;
+  options.enableAuxiliaryInvariants = true;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // High-projection image queries keep the strict Craig formula, but must avoid
+  // CaDiCaL variable elimination because Craig tracing records every derived
+  // resolvent. The direct profile keeps that optimization local to IMC.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig uses direct CaDiCaL profile phase=image "
+          "tracked_states=6202"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcOptionsUseDirectConcreteCubeSourceWithoutEnv) {
   const KInductionProblem problem = buildCraigAuxiliaryConstantProblemForTest();
   CraigImcOptions options;
@@ -9679,6 +10790,315 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("direct_cube_source=1"),
       std::string::npos)
       << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSkipsBroadHelperAuxiliarySeed) {
+  constexpr size_t firstState = 2;
+  constexpr size_t stateCount = 600;
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  for (size_t index = 0; index < stateCount; ++index) {
+    const size_t symbol = firstState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+  problem.bad = BoolExpr::Var(firstState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  for (const size_t symbol : problem.state0Symbols) {
+    options.helperAuxiliaryStateInvariants.push_back({symbol, false});
+  }
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Broad helper auxiliary packets are not a compact proof hint anymore; they
+  // become a side condition on every image query.  Skip them and let strict IMC
+  // rediscover only the local facts it actually needs.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips broad helper auxiliary invariants "
+          "constants=600 equalities=0 limit=512"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig seeds helper auxiliary invariants"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcAdvancesFocusedLookaheadAfterSaturatedQBudget) {
+  CraigImcGrowthBudget budget;
+  budget.maxInterpolantClauses = 100000;
+  budget.maxInterpolantLiterals = 250000;
+  budget.maxInterpolantAuxiliaries = 50000;
+  budget.maxImageSolveMilliseconds = 25000;
+
+  // The saturated focused q-pass limit is only a proof-size guard.  Strict IMC
+  // can still try the next unroll depth from S0 instead of reporting the
+  // singleton inconclusive or attempting the known-explosive next q pass.
+  EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/12,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/82359,
+      /*interpolantLiterals=*/192171,
+      /*interpolantAuxiliaries=*/27453,
+      /*imageSolveMilliseconds=*/6862));
+  EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/7,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/214323,
+      /*interpolantLiterals=*/500087,
+      /*interpolantAuxiliaries=*/71441,
+      /*imageSolveMilliseconds=*/8494));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/true,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/12,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/82359,
+      /*interpolantLiterals=*/192171,
+      /*interpolantAuxiliaries=*/27453,
+      /*imageSolveMilliseconds=*/6862));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/5,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/13443,
+      /*interpolantLiterals=*/31367,
+      /*interpolantAuxiliaries=*/4481,
+      /*imageSolveMilliseconds=*/2325));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"clauses",
+      /*qExpansionPass=*/12,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/82359,
+      /*interpolantLiterals=*/192171,
+      /*interpolantAuxiliaries=*/27453,
+      /*imageSolveMilliseconds=*/6862));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/5,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/82359,
+      /*interpolantLiterals=*/192171,
+      /*interpolantAuxiliaries=*/27453,
+      /*imageSolveMilliseconds=*/6862));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/12,
+      /*lookahead=*/32,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/82359,
+      /*interpolantLiterals=*/192171,
+      /*interpolantAuxiliaries=*/27453,
+      /*imageSolveMilliseconds=*/6862));
+  EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/12,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/567639,
+      /*interpolantLiterals=*/1324491,
+      /*interpolantAuxiliaries=*/189213,
+      /*imageSolveMilliseconds=*/9000));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/12,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/900000,
+      /*interpolantLiterals=*/1900000,
+      /*interpolantAuxiliaries=*/260000,
+      /*imageSolveMilliseconds=*/9000));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcAdvancesFocusedLookaheadAfterBudgetedSatFrontier) {
+  CraigImcGrowthBudget budget;
+  budget.maxQExpansionPass = 4;
+  budget.maxImageSolveMilliseconds = 25000;
+
+  // BP's retained singleton tail reached a fully tracked focused SAT frontier
+  // at lookahead 3/q7.  That is strict IMC's cue to try k=4, not a reason to
+  // stop merely because the q-pass growth guard had already fired.
+  EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*imageSolveMilliseconds=*/7554));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/true,
+      /*budgetReason=*/"q_pass",
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*imageSolveMilliseconds=*/7554));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"solve_time",
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*imageSolveMilliseconds=*/7554));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*lookahead=*/32,
+      /*maxLookahead=*/32,
+      budget,
+      /*imageSolveMilliseconds=*/7554));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*imageSolveMilliseconds=*/26000));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcBulkImportsModestFocusedProjectionSupport) {
+  // BP's early single-output churn reached a focused 36K transition cone and
+  // was paying one saturated Craig rebuild per 4K imported states.  Import that
+  // modest focused support in one strict refinement step.
+  EXPECT_EQ(
+      craigBoundedProjectionRefinementLimit(
+          /*candidateCount=*/26232,
+          /*transitionSupportSize=*/36088,
+          /*focusedTransitionProjection=*/true),
+      26232u);
+  EXPECT_EQ(
+      craigBoundedProjectionRefinementLimit(
+          /*candidateCount=*/21562,
+          /*transitionSupportSize=*/36088,
+          /*focusedTransitionProjection=*/true),
+      21562u);
+
+  // Larger focused pools still use the bounded stride that protects the
+  // memory-heavy BP tail.
+  EXPECT_EQ(
+      craigBoundedProjectionRefinementLimit(
+          /*candidateCount=*/32769,
+          /*transitionSupportSize=*/36088,
+          /*focusedTransitionProjection=*/true),
+      4096u);
+  EXPECT_EQ(
+      craigBoundedProjectionRefinementLimit(
+          /*candidateCount=*/80046,
+          /*transitionSupportSize=*/117866,
+          /*focusedTransitionProjection=*/true),
+      512u);
+  EXPECT_EQ(
+      craigBoundedProjectionRefinementLimit(
+          /*candidateCount=*/96,
+          /*transitionSupportSize=*/36088,
+          /*focusedTransitionProjection=*/false),
+      64u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSkipsLocalAuxiliaryMiningForLargeRetainedHelperTail) {
+  EXPECT_TRUE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/true,
+      /*trackedStateCount=*/36088,
+      /*transitionSupportSize=*/36644,
+      /*helperInvariantRegionCount=*/6));
+
+  EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/false,
+      /*trackedStateCount=*/36088,
+      /*transitionSupportSize=*/36644,
+      /*helperInvariantRegionCount=*/6));
+  EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/true,
+      /*trackedStateCount=*/36088,
+      /*transitionSupportSize=*/36644,
+      /*helperInvariantRegionCount=*/3));
+  EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/true,
+      /*trackedStateCount=*/9856,
+      /*transitionSupportSize=*/36088,
+      /*helperInvariantRegionCount=*/6));
+  EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/true,
+      /*trackedStateCount=*/36088,
+      /*transitionSupportSize=*/9856,
+      /*helperInvariantRegionCount=*/6));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcCapsExplosiveFocusedImageRequestExpansion) {
+  // BP's lookahead-4 tail expanded from a useful 9,336-state suffix request to
+  // a 37,984-state transition request and 130K local leaves.  Keep that query
+  // as a weaker strict over-approximation instead of materializing the spike.
+  EXPECT_FALSE(shouldCapCraigFocusedImageTransitionRequests(
+      /*expandedRequestCount=*/9336));
+  EXPECT_TRUE(shouldCapCraigFocusedImageTransitionRequests(
+      /*expandedRequestCount=*/37984));
+  EXPECT_EQ(
+      cappedCraigFocusedImageTransitionRequestCount(
+          /*currentRequestCount=*/9336,
+          /*expandedRequestCount=*/37984),
+      12000u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9763,6 +11183,35 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcSkipsProjectionCacheForHugeOutputStateProduct) {
+  constexpr size_t kSharedTransitionStates = 1000;
+  constexpr size_t kOutputCount = 400;
+  const KInductionProblem problem = buildProjectionSharedImcBatchProblem(
+      kSharedTransitionStates,
+      kOutputCount);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/8,
+                                    /*outputBatchSupportLimit=*/8192});
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // BP-like dual-rail problems have many outputs over a huge state surface.
+  // Avoid materializing one transition-closed projection per output before
+  // the first Craig query; raw support batching keeps the cache bounded.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig skips projection support cache"),
+      std::string::npos)
+      << stderrOutput;
+  ASSERT_EQ(batches.size(), kOutputCount);
+  EXPECT_EQ(batches.front(), std::make_pair(size_t{0}, size_t{1}));
+  EXPECT_EQ(
+      batches.back(),
+      std::make_pair(kOutputCount - 1, kOutputCount));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcBudgetSplitUsesLocalChildSeeds) {
   const KInductionProblem problem =
       buildWideSharedConeImcProblem(/*outputCount=*/3,
@@ -9794,7 +11243,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
           "bad_support=301 tracked_seed_states=301"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(result.status, IMCStatus::Different);
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig stopping after inconclusive output batch first=0 end=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, IMCStatus::Inconclusive);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9838,6 +11292,48 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcKeepsModelGuidedRefinementSemanticallyMinimal) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildBootstrapModelGuidedCraigProjectionProblem(
+          /*supportCount=*/96,
+          /*assignSupportBootstrap=*/true,
+          /*addDualRailPartners=*/true);
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Missing dual-rail partners make the projected query an over-approximation,
+  // so proof soundness is preserved.  Keep them out of the tracked interpolant
+  // state set unless they are actual transition targets.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig model-guided projection refinement "
+          "candidates=96 selected=64 full=193"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig refines transition projection states=1->65"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig refines transition projection states=1->129"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(result.status, CraigImcStatus::CounterexampleCandidate);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcBoundsLargeProjectionRefinementWithoutModelHint) {
   constexpr size_t outputState = 2;
   const KInductionProblem problem =
@@ -9873,6 +11369,361 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(result.status, CraigImcStatus::CounterexampleCandidate);
   EXPECT_NE(result.status, CraigImcStatus::BudgetExceeded);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcScoresBoundedProjectionRefinementByFanin) {
+  const KInductionProblem problem =
+      buildHighFaninCraigProjectionProblemForTest();
+  std::unordered_set<size_t> initialTrackedStates = {2, 3, 4, 5, 6};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxProjectionStates = 600;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // When model-guided reset facts are unavailable, prioritize support states
+  // that feed many tracked next-state functions.  This keeps high-fan-in
+  // control symbols ahead of low-id decoy support.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig bounded projection refinement candidates=97"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("top_score=5"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcWidensBoundedProjectionRefinementForHugeSupport) {
+  const KInductionProblem problem =
+      buildHighFaninCraigProjectionProblemForTest(
+          /*helperTrackedCount=*/4,
+          /*decoySupportCount=*/8200);
+  std::unordered_set<size_t> initialTrackedStates = {2, 3, 4, 5, 6};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxProjectionStates = initialTrackedStates.size() + 1;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // BP-like support pools should move by a wider scored slice than the small
+  // 64-symbol default, while still ranking the high-fan-in control first.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig bounded projection refinement candidates=8201 "
+          "selected=512"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("top_score=5"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcWidensHighSupportRefinementWhileScoresAreStrong) {
+  const KInductionProblem problem =
+      buildHighFaninCraigProjectionProblemForTest(
+          /*helperTrackedCount=*/100,
+          /*decoySupportCount=*/84000);
+  std::unordered_set<size_t> initialTrackedStates = {2};
+  for (size_t symbol = 3; symbol < 103; ++symbol) {
+    initialTrackedStates.insert(symbol);
+  }
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxProjectionStates = initialTrackedStates.size() + 1;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The partial focused image cap leaves BP's hard tail around 84K support.
+  // While the fan-in score is still strong, use the wider strict slice instead
+  // of rebuilding the same capped proof one 256-state step at a time.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig bounded projection refinement candidates=83998 "
+          "selected=1024"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("top_score=101"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcUsesWideStrideForHighSupportLowScoreRefinement) {
+  const KInductionProblem problem =
+      buildHighFaninCraigProjectionProblemForTest(
+          /*helperTrackedCount=*/4,
+          /*decoySupportCount=*/84000);
+  std::unordered_set<size_t> initialTrackedStates = {2, 3, 4, 5, 6};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxProjectionStates = initialTrackedStates.size() + 1;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // BP's partial-cap tail enters a flat-score surface near 84K support.  Move
+  // by a wide strict slice there; the >100K test below keeps the tighter cap
+  // for truly huge low-score cones.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig bounded projection refinement candidates=84001 "
+          "selected=1024"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("top_score=5"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcWidensVeryHighSupportRefinementWhileScoresAreStrong) {
+  const KInductionProblem problem =
+      buildHighFaninCraigProjectionProblemForTest(
+          /*helperTrackedCount=*/100,
+          /*decoySupportCount=*/100000);
+  std::unordered_set<size_t> initialTrackedStates = {2};
+  for (size_t symbol = 3; symbol < 103; ++symbol) {
+    initialTrackedStates.insert(symbol);
+  }
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxProjectionStates = initialTrackedStates.size() + 1;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Very large BP tails should still move quickly while the fan-in scorer has a
+  // strong signal.  The low-score plateau test below keeps the later cap.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig bounded projection refinement candidates=99998 "
+          "selected=1024"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("top_score=101"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcFreezesAndCapsLowScoreFaninRefinementForHugeSupport) {
+  const KInductionProblem problem =
+      buildHighFaninCraigProjectionProblemForTest(
+          /*helperTrackedCount=*/4,
+          /*decoySupportCount=*/100000);
+  std::unordered_set<size_t> initialTrackedStates = {2, 3, 4, 5, 6};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxProjectionStates = initialTrackedStates.size() + 1;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Once a BP-sized support pool has only low fan-in scores left, do not keep
+  // materializing enormous resolver support sets just to refresh the ranking.
+  const std::string freezeDiag =
+      "imc Craig freezes low-score fanin scoring "
+      "candidates=100001 top_score=5 support=100006";
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig skips local auxiliary invariants support=100006 "
+          "support_limit=65536"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig weakens projected local state semantics leaves=100006 "
+          "leaf_limit=100000"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(freezeDiag), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      KEPLER_FORMAL::SEC::detail::countTextOccurrences(
+          stderrOutput, freezeDiag),
+      1u)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig caps low-score bounded refinement "
+          "candidates=100001 selected_limit=128 top_score=5 "
+          "support=100006 score_limit=64"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig bounded projection refinement candidates=100001 "
+          "selected=128 full=100006 top_score=5"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcBackfillsTinyModelGuidedRefinementForLargeSupport) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildTinyModelGuidedBackfillCraigProjectionProblemForTest(
+          /*decoyPairCount=*/4100);
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // A large support cone with a one-bit SAT witness should not spend one Craig
+  // rebuild per model-guided bit.  Backfill the tiny witness with a bounded
+  // scored slice in the same strict IMC refinement step.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig model-guided projection refinement candidates=1 "
+          "selected=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig bounded projection refinement candidates="),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("selected=512"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcBackfillsMediumModelGuidedRefinementForLargeSupport) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildTinyModelGuidedBackfillCraigProjectionProblemForTest(
+          /*decoyPairCount=*/4100,
+          /*controlCount=*/128);
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  (void)checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // On large supports the model-guided slice can be much larger than 64 and
+  // still smaller than the adaptive 512-symbol stride.  Backfill those medium
+  // witnesses too, so BP-sized cones do not spend one rebuild per model slice.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig model-guided projection refinement candidates=128 "
+          "selected=128"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig bounded projection refinement candidates="),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcStopsProjectionRefinementAtGrowthBudget) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildBootstrapModelGuidedCraigProjectionProblem(
+          /*supportCount=*/96,
+          /*assignSupportBootstrap=*/false);
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxProjectionStates = 32;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // A single hard output cannot be bisected further. Bound projection growth
+  // so strict Craig IMC returns budget-exceeded instead of exhausting memory.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig growth budget exceeded reason=projection_states"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9975,6 +11826,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find("imc Craig reused invariant for output batch first=8 end=9"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, IMCStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcSeedsAuxiliaryInvariantsFromReusableHelper) {
+  const KInductionProblem problem =
+      buildCraigAuxiliaryReuseAcrossOutputsProblemForTest(10001);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const IMCResult result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The saved helper carries transition-proven auxiliary constants into the
+  // next strict Craig batch.  This keeps large dual-rail output sweeps from
+  // paying the same local-mining cost and proof width repeatedly.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig output batch first=0 end=1 first_name=aux_reuse_out0"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig output batch first=1 end=2 first_name=aux_reuse_out1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("imc Craig seeds helper auxiliary invariants"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, IMCStatus::Equivalent);
