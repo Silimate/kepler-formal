@@ -10793,7 +10793,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       CraigImcSkipsBroadHelperAuxiliarySeed) {
+       CraigImcCarriesModerateHelperAuxiliarySeed) {
   constexpr size_t firstState = 2;
   constexpr size_t stateCount = 600;
   KInductionProblem problem;
@@ -10827,13 +10827,62 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Broad helper auxiliary packets are not a compact proof hint anymore; they
-  // become a side condition on every image query.  Skip them and let strict IMC
-  // rediscover only the local facts it actually needs.
+  // BP's retained-helper tail carries roughly 3K transition-proven facts.
+  // Keep moderate helper packets available so later singleton outputs do not
+  // rebuild the same auxiliary pruning from scratch.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig seeds helper auxiliary invariants"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig skips broad helper auxiliary invariants"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcSkipsBroadHelperAuxiliarySeed) {
+  constexpr size_t firstState = 2;
+  constexpr size_t stateCount = 5000;
+  KInductionProblem problem;
+  problem.resetBootstrapCycles = 1;
+  for (size_t index = 0; index < stateCount; ++index) {
+    const size_t symbol = firstState + index;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.bootstrapStateAssignments.push_back({symbol, false});
+    problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
+  }
+  problem.bad = BoolExpr::Var(firstState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.totalStateCount = problem.state0Symbols.size();
+
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  for (const size_t symbol : problem.state0Symbols) {
+    options.helperAuxiliaryStateInvariants.push_back({symbol, false});
+  }
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      /*initialTrackedStates=*/nullptr,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Very broad helper auxiliary packets are not a compact proof hint anymore;
+  // they become a side condition on every image query.  Skip them and let
+  // strict IMC rediscover only the local facts it actually needs.
   EXPECT_NE(
       stderrOutput.find(
           "imc Craig skips broad helper auxiliary invariants "
-          "constants=600 equalities=0 limit=512"),
+          "constants=5000 equalities=0 limit=4096"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(
@@ -10902,6 +10951,32 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*interpolantLiterals=*/31367,
       /*interpolantAuxiliaries=*/4481,
       /*imageSolveMilliseconds=*/2325));
+  EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/3,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/2541,
+      /*interpolantLiterals=*/5929,
+      /*interpolantAuxiliaries=*/847,
+      /*imageSolveMilliseconds=*/1220,
+      /*qExpansionPassLimit=*/3));
+  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
+      /*focusedTransitionProjection=*/true,
+      /*hasUntrackedTransitionSupport=*/false,
+      /*budgetReason=*/"q_pass",
+      /*qExpansionPass=*/3,
+      /*lookahead=*/3,
+      /*maxLookahead=*/32,
+      budget,
+      /*interpolantClauses=*/2541,
+      /*interpolantLiterals=*/5929,
+      /*interpolantAuxiliaries=*/847,
+      /*imageSolveMilliseconds=*/1220,
+      /*qExpansionPassLimit=*/6));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11057,12 +11132,33 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcSkipsLocalAuxiliaryMiningForLargeRetainedHelperTail) {
+  // Helper-backed singleton outputs still need their small local-auxiliary
+  // packets; those transition-proven facts closed BP's first hard singleton
+  // before the projection grew into the broad retained-helper tail.
+  EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/false,
+      /*trackedStateCount=*/448,
+      /*transitionSupportSize=*/736,
+      /*helperInvariantRegionCount=*/3));
+  EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/true,
+      /*trackedStateCount=*/1878,
+      /*transitionSupportSize=*/10640,
+      /*helperInvariantRegionCount=*/3));
+
   EXPECT_TRUE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
       /*focusedTransitionProjection=*/true,
-      /*trackedStateCount=*/36088,
-      /*transitionSupportSize=*/36644,
+      /*trackedStateCount=*/42584,
+      /*transitionSupportSize=*/84516,
       /*helperInvariantRegionCount=*/6));
 
+  // Once helper auxiliaries prune BP's tail to 49K support, the existing
+  // bounded local-auxiliary pass is cheaper than another deep lookahead walk.
+  EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+      /*focusedTransitionProjection=*/true,
+      /*trackedStateCount=*/49024,
+      /*transitionSupportSize=*/49024,
+      /*helperInvariantRegionCount=*/6));
   EXPECT_FALSE(shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
       /*focusedTransitionProjection=*/false,
       /*trackedStateCount=*/36088,
@@ -11082,7 +11178,129 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*focusedTransitionProjection=*/true,
       /*trackedStateCount=*/36088,
       /*transitionSupportSize=*/9856,
-      /*helperInvariantRegionCount=*/6));
+      /*helperInvariantRegionCount=*/0));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcShortensSaturatedQReplayForLargeRetainedHelperTail) {
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/42584,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/6),
+      3u);
+
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/49024,
+          /*transitionSupportSize=*/49024,
+          /*helperInvariantRegionCount=*/6),
+      3u);
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/49682,
+          /*transitionSupportSize=*/49682,
+          /*helperInvariantRegionCount=*/3),
+      6u);
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/39728,
+          /*transitionSupportSize=*/39728,
+          /*helperInvariantRegionCount=*/3),
+      6u);
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/42584,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/3),
+      6u);
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/85498,
+          /*transitionSupportSize=*/85498,
+          /*helperInvariantRegionCount=*/3),
+      6u);
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/9856,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/6),
+      6u);
+  EXPECT_EQ(
+      craigFocusedSaturatedQExpansionPassLimit(
+          /*focusedTransitionProjection=*/false,
+          /*trackedStateCount=*/42584,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/6),
+      6u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcRefinesLargeRetainedHelperTailProjectionAfterQ3) {
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/42584,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/6),
+      3u);
+
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/49024,
+          /*transitionSupportSize=*/49024,
+          /*helperInvariantRegionCount=*/6),
+      3u);
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/49682,
+          /*transitionSupportSize=*/49682,
+          /*helperInvariantRegionCount=*/3),
+      0u);
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/39728,
+          /*transitionSupportSize=*/84336,
+          /*helperInvariantRegionCount=*/3),
+      0u);
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/42584,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/3),
+      0u);
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/82450,
+          /*transitionSupportSize=*/85498,
+          /*helperInvariantRegionCount=*/3),
+      0u);
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/true,
+          /*trackedStateCount=*/9856,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/6),
+      0u);
+  EXPECT_EQ(
+      craigFocusedProjectionRefinementQExpansionPassLimit(
+          /*focusedTransitionProjection=*/false,
+          /*trackedStateCount=*/42584,
+          /*transitionSupportSize=*/84516,
+          /*helperInvariantRegionCount=*/6),
+      0u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -11099,6 +11317,52 @@ TEST_F(SequentialEquivalenceStrategyTests,
           /*currentRequestCount=*/9336,
           /*expandedRequestCount=*/37984),
       12000u);
+  EXPECT_EQ(
+      craigFocusedImageTransitionRequestLimit(
+          /*trackedStateCount=*/49024,
+          /*helperInvariantRegionCount=*/6),
+      8192u);
+  EXPECT_EQ(
+      craigFocusedImageTransitionRequestLimit(
+          /*trackedStateCount=*/36088,
+          /*helperInvariantRegionCount=*/6),
+      12000u);
+  EXPECT_EQ(
+      craigFocusedImageTransitionRequestLimit(
+          /*trackedStateCount=*/49024,
+          /*helperInvariantRegionCount=*/3),
+      10000u);
+  EXPECT_EQ(
+      craigFocusedImageTransitionRequestLimit(
+          /*trackedStateCount=*/58104,
+          /*helperInvariantRegionCount=*/9),
+      8192u);
+  EXPECT_EQ(
+      craigFocusedImageTransitionRequestLimit(
+          /*trackedStateCount=*/9856,
+          /*helperInvariantRegionCount=*/6),
+      12000u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcCombinesRetainedSingletonWithReusableHelper) {
+  EXPECT_TRUE(shouldCombineCraigHelpersForSmallRawSingleton(
+      /*useSmallRawSingletonInvariant=*/true,
+      /*reusableInvariantHasRegions=*/true));
+  EXPECT_FALSE(shouldCombineCraigHelpersForSmallRawSingleton(
+      /*useSmallRawSingletonInvariant=*/false,
+      /*reusableInvariantHasRegions=*/true));
+  EXPECT_FALSE(shouldCombineCraigHelpersForSmallRawSingleton(
+      /*useSmallRawSingletonInvariant=*/true,
+      /*reusableInvariantHasRegions=*/false));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcProjectionBudgetCoversRetainedHelperTail) {
+  // BP's retained-helper tail needs the full 84,516-state focused projection
+  // surface, but should stay below the broader >90K memory-risk regime.
+  EXPECT_GE(largeDualRailCraigImcProjectionStateLimit(), 84516u);
+  EXPECT_LT(largeDualRailCraigImcProjectionStateLimit(), 90000u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -11472,7 +11736,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       stderrOutput.find(
           "imc Craig bounded projection refinement candidates=83998 "
-          "selected=1024"),
+          "selected=4096"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
@@ -11504,12 +11768,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // BP's partial-cap tail enters a flat-score surface near 84K support.  Move
-  // by a wide strict slice there; the >100K test below keeps the tighter cap
-  // for truly huge low-score cones.
+  // by the focused strict slice there; the >100K test below keeps the tighter
+  // cap for truly huge low-score cones.
   EXPECT_NE(
       stderrOutput.find(
           "imc Craig bounded projection refinement candidates=84001 "
-          "selected=1024"),
+          "selected=4096"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(

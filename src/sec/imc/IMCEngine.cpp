@@ -36,6 +36,8 @@ constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
     /*maxOutputBatchSize=*/8,
     /*outputBatchSupportLimit=*/8192};
 
+constexpr size_t kLargeDualRailCraigProjectionStateLimit = 86016;
+
 constexpr CraigImcGrowthBudget kDefaultLargeDualRailCraigGrowthBudget{
     /*enabled=*/true,
     /*maxQExpansionPass=*/4,
@@ -43,11 +45,10 @@ constexpr CraigImcGrowthBudget kDefaultLargeDualRailCraigGrowthBudget{
     /*maxInterpolantLiterals=*/250000,
     /*maxInterpolantAuxiliaries=*/50000,
     /*maxImageSolveMilliseconds=*/25000,
-    // BP's hard retained-helper tail needs a little more than 49K tracked
-    // states after the focused request cap exposes the final strict projection
-    // surface. Keep the guard well below the full 84K support so projection
-    // cannot silently grow into the old all-support Craig query.
-    /*maxProjectionStates=*/65536};
+    // BP's retained-helper tail exposes an 84,516-state focused support cone.
+    // Allow exactly that strict projection surface, with a small power-of-two
+    // margin, while staying below the next broad all-support regime.
+    /*maxProjectionStates=*/kLargeDualRailCraigProjectionStateLimit};
 
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
 constexpr size_t kCraigBatchMinMarginalSupportLimit = 64;
@@ -64,6 +65,7 @@ constexpr size_t kCraigIndexedVectorOutputRawSupportLimit = 64;
 constexpr size_t kCraigIndexedVectorUnionRawSupportLimit = 128;
 constexpr size_t kCraigHelperReuseMinOverlapPercent = 80;
 constexpr size_t kCraigSingletonRawHelperSourceLimit = 32;
+
 struct CraigOutputSupport {
   std::unordered_set<size_t> raw;
   std::unordered_set<size_t> projection;
@@ -719,6 +721,32 @@ void saveReusableCraigInvariant(
   reusableInvariant.hasSource = true;
 }
 
+template <typename T>
+void appendUniqueCraigHelperFacts(std::vector<T>& target,
+                                  const std::vector<T>& source) {
+  for (const T& fact : source) {
+    if (std::find(target.begin(), target.end(), fact) == target.end()) {
+      target.push_back(fact);
+    }
+  }
+}
+
+ReusableCraigInvariant combineCraigHelperInvariants(
+    const ReusableCraigInvariant& primary,
+    const ReusableCraigInvariant& secondary) {
+  ReusableCraigInvariant combined = primary;
+  combined.regions.insert(
+      combined.regions.end(), secondary.regions.begin(), secondary.regions.end());
+  mergeSupport(combined.trackedStates, secondary.trackedStates);
+  appendUniqueCraigHelperFacts(
+      combined.auxiliaryConstants, secondary.auxiliaryConstants);
+  appendUniqueCraigHelperFacts(
+      combined.auxiliaryEqualities, secondary.auxiliaryEqualities);
+  combined.proofBound = std::max(combined.proofBound, secondary.proofBound);
+  combined.hasSource = primary.hasSource || secondary.hasSource;
+  return combined;
+}
+
 std::unordered_set<size_t> buildCraigInitialTrackedStatesForAttempt(
     const std::unordered_set<size_t>& trackedStateSeeds,
     const ReusableCraigInvariant& reusableInvariant,
@@ -800,9 +828,23 @@ IMCResult runCraigOutputRange(
           rangeSupport,
           firstOutput,
           endOutput);
+  const bool combineCraigHelpers =
+      shouldCombineCraigHelpersForSmallRawSingleton(
+          useSmallRawSingletonInvariant,
+          !reusableInvariant.regions.empty());
+  ReusableCraigInvariant combinedReusableInvariant;
+  if (combineCraigHelpers) {
+    // The skipped reusable invariant and the retained singleton are both
+    // already-proved Craig invariants over this same SEC problem.  Conjoin them
+    // as helper facts instead of choosing one and rediscovering the other in
+    // the expensive retained-helper tail.
+    combinedReusableInvariant = combineCraigHelperInvariants(
+        smallRawSingletonInvariant, reusableInvariant);
+  }
   const ReusableCraigInvariant& activeReusableInvariant =
       useReusableInvariant
           ? reusableInvariant
+          : combineCraigHelpers ? combinedReusableInvariant
           : useSmallRawSingletonInvariant ? smallRawSingletonInvariant
                                          : emptyReusableInvariant;
   emitSecDiag(
@@ -831,6 +873,14 @@ IMCResult runCraigOutputRange(
         " source_first=", smallRawSingletonInvariant.sourceFirstOutput,
         " source_end=", smallRawSingletonInvariant.sourceEndOutput,
         " helper_regions=", smallRawSingletonInvariant.regions.size());
+  }
+  if (combineCraigHelpers) {
+    emitSecDiag(
+        "SEC diag: imc Craig combines reusable helpers for output batch first=",
+        firstOutput, " end=", endOutput,
+        " singleton_regions=", smallRawSingletonInvariant.regions.size(),
+        " reusable_regions=", reusableInvariant.regions.size(),
+        " combined_regions=", combinedReusableInvariant.regions.size());
   }
 
   if (!activeReusableInvariant.regions.empty() &&
@@ -886,20 +936,19 @@ IMCResult runCraigOutputRange(
       // Any proved Craig region is a valid helper invariant. Small control
       // proofs, such as AES done/counter bits, can still prune later wide data
       // output images even though their own tracked surface is tiny.
+      ReusableCraigInvariant proofInvariant;
       saveReusableCraigInvariant(
           proof,
           rangeSupport,
           firstOutput,
           endOutput,
-          reusableInvariant);
-      if (shouldRetainSmallRawSingletonCraigInvariant(
-              rangeSupport, firstOutput, endOutput)) {
-        saveReusableCraigInvariant(
-            proof,
-            rangeSupport,
-            firstOutput,
-            endOutput,
-            smallRawSingletonInvariant);
+          proofInvariant);
+      reusableInvariant = proofInvariant;
+      const bool retainSmallRawSingleton =
+          shouldRetainSmallRawSingletonCraigInvariant(
+              rangeSupport, firstOutput, endOutput);
+      if (retainSmallRawSingleton) {
+        smallRawSingletonInvariant = proofInvariant;
         emitSecDiag(
             "SEC diag: imc Craig retains small singleton invariant first=",
             firstOutput, " end=", endOutput,
@@ -941,20 +990,20 @@ IMCResult runCraigOutputRange(
         maxK,
         firstOutput,
         midpoint,
-        supportCache,
-        CraigTrackedSeedScope::LocalRange,
-        reusableInvariant,
-        smallRawSingletonInvariant);
+          supportCache,
+          CraigTrackedSeedScope::LocalRange,
+          reusableInvariant,
+          smallRawSingletonInvariant);
     const IMCResult right = runCraigOutputRange(
         problem,
         solverType,
         maxK,
         midpoint,
         endOutput,
-        supportCache,
-        CraigTrackedSeedScope::LocalRange,
-        reusableInvariant,
-        smallRawSingletonInvariant);
+          supportCache,
+          CraigTrackedSeedScope::LocalRange,
+          reusableInvariant,
+          smallRawSingletonInvariant);
     if (left.status == IMCStatus::Different) {
       return left;
     }
@@ -1128,6 +1177,16 @@ std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
     batches.emplace_back(plan.firstOutput, plan.endOutput);
   }
   return batches;
+}
+
+size_t largeDualRailCraigImcProjectionStateLimit() {
+  return kLargeDualRailCraigProjectionStateLimit;
+}
+
+bool shouldCombineCraigHelpersForSmallRawSingleton(
+    bool useSmallRawSingletonInvariant,
+    bool reusableInvariantHasRegions) {
+  return useSmallRawSingletonInvariant && reusableInvariantHasRegions;
 }
 
 IMCEngine::IMCEngine(const KInductionProblem& problem,

@@ -54,7 +54,7 @@ constexpr size_t kCraigLowScoreProjectionRefinementLimit = 128;
 constexpr size_t kCraigTightLowScoreBackfillSupportThreshold = 104000;
 constexpr size_t kCraigTightLowScoreProjectionRefinementLimit = 64;
 constexpr size_t kCraigHighSupportRefinementThreshold = 65536;
-constexpr size_t kCraigHighSupportProjectionRefinementLimit = 1024;
+constexpr size_t kCraigHighSupportProjectionRefinementLimit = 4096;
 constexpr size_t kCraigVeryHighSupportRefinementThreshold = 90000;
 constexpr size_t kCraigVeryHighSupportHighScoreProjectionRefinementLimit = 1024;
 constexpr size_t kCraigVeryHighSupportProjectionRefinementLimit = 128;
@@ -64,6 +64,15 @@ constexpr size_t kCraigProjectedLocalSemanticsSupportLimit = 100000;
 constexpr size_t kCraigProjectedLocalSemanticsTrackedStateLimit = 4096;
 constexpr size_t kCraigFocusedImageTransitionTrackedStateLimit = 1024;
 constexpr size_t kCraigFocusedImageTransitionRequestLimit = 12000;
+constexpr size_t kCraigRetainedHelperFocusedImageTransitionStateThreshold =
+    48000;
+constexpr size_t kCraigRetainedHelperFocusedImageTransitionRequestLimit = 10000;
+constexpr size_t
+    kCraigBroadRetainedHelperFocusedImageTransitionStateThreshold = 48000;
+constexpr size_t
+    kCraigBroadRetainedHelperFocusedImageTransitionRegionThreshold = 6;
+constexpr size_t
+    kCraigBroadRetainedHelperFocusedImageTransitionRequestLimit = 8192;
 constexpr size_t kCraigFocusedProjectionRefinementSupportLimit = 65536;
 constexpr size_t kCraigFocusedProjectionRefinementLimit = 4096;
 constexpr size_t kCraigFocusedProjectionBulkSupportLimit = 49152;
@@ -72,6 +81,8 @@ constexpr size_t kCraigFocusedProjectionBulkCandidateLimit = 32768;
 // moving.  Keep the extra Q expansion bounded; BP's q7 proof alone can cross
 // the 10GB target, so advance lookahead after six retained regions.
 constexpr size_t kCraigFocusedSaturatedQExpansionPassLimit = 6;
+constexpr size_t kCraigRetainedHelperFocusedQExpansionPassLimit = 3;
+constexpr size_t kCraigRetainedHelperFocusedProjectionQExpansionPassLimit = 3;
 // Advancing lookahead discards the current interpolant instead of adding it to
 // Q.  Permit a larger one-time proof than the normal retained-region budget,
 // but still stop before runaway traces threaten the memory target.
@@ -84,7 +95,7 @@ constexpr size_t kCraigFocusedLookaheadAdvanceMaxAuxiliaries = 250000;
 constexpr size_t kCraigFocusedLookaheadAdvanceMinClauses = 200000;
 constexpr size_t kCraigFocusedLookaheadAdvanceMinLiterals = 500000;
 constexpr size_t kCraigFocusedLookaheadAdvanceMinAuxiliaries = 70000;
-constexpr size_t kCraigHelperAuxiliaryCarryLimit = 512;
+constexpr size_t kCraigHelperAuxiliaryCarryLimit = 4096;
 constexpr size_t kCraigRetainedHelperLocalAuxiliarySkipRegions = 6;
 constexpr size_t kCraigRetainedHelperLocalAuxiliarySkipStateThreshold = 32768;
 
@@ -201,17 +212,56 @@ bool shouldFocusImageTransitionRequests(
          trackedStateCount > kCraigFocusedImageTransitionTrackedStateLimit;
 }
 
-bool shouldCapFocusedImageTransitionRequests(size_t expandedRequestCount) {
-  return expandedRequestCount > kCraigFocusedImageTransitionRequestLimit;
+bool shouldUseRetainedHelperFocusedImageRequestLimit(
+    size_t trackedStateCount,
+    size_t helperInvariantRegionCount) {
+  return trackedStateCount >=
+             kCraigRetainedHelperFocusedImageTransitionStateThreshold &&
+         helperInvariantRegionCount > 0;
+}
+
+bool shouldUseBroadRetainedHelperFocusedImageRequestLimit(
+    size_t trackedStateCount,
+    size_t helperInvariantRegionCount) {
+  return trackedStateCount >=
+             kCraigBroadRetainedHelperFocusedImageTransitionStateThreshold &&
+         helperInvariantRegionCount >=
+             kCraigBroadRetainedHelperFocusedImageTransitionRegionThreshold;
+}
+
+size_t focusedImageTransitionRequestLimit(
+    size_t trackedStateCount,
+    size_t helperInvariantRegionCount) {
+  // Retained helper tails already carry proof-derived pruning facts.  Keep the
+  // first helper-region-3 singleton at 10K so it still includes BP's 9,336
+  // suffix layer; later broad retained-helper tails use a smaller strict
+  // over-approximation instead of rebuilding the same saturated suffix cone.
+  if (shouldUseBroadRetainedHelperFocusedImageRequestLimit(
+          trackedStateCount, helperInvariantRegionCount)) {
+    return kCraigBroadRetainedHelperFocusedImageTransitionRequestLimit;
+  }
+  if (shouldUseRetainedHelperFocusedImageRequestLimit(
+          trackedStateCount, helperInvariantRegionCount)) {
+    return kCraigRetainedHelperFocusedImageTransitionRequestLimit;
+  }
+  return kCraigFocusedImageTransitionRequestLimit;
+}
+
+bool shouldCapFocusedImageTransitionRequests(
+    size_t expandedRequestCount,
+    size_t requestLimit) {
+  return expandedRequestCount > requestLimit;
 }
 
 size_t cappedFocusedImageTransitionRequestCount(
     size_t currentRequestCount,
-    size_t expandedRequestCount) {
-  if (!shouldCapFocusedImageTransitionRequests(expandedRequestCount)) {
+    size_t expandedRequestCount,
+    size_t requestLimit) {
+  if (!shouldCapFocusedImageTransitionRequests(
+          expandedRequestCount, requestLimit)) {
     return expandedRequestCount;
   }
-  return std::max(currentRequestCount, kCraigFocusedImageTransitionRequestLimit);
+  return std::max(currentRequestCount, requestLimit);
 }
 
 void configureCraigProjectionSolver(
@@ -255,6 +305,11 @@ int64_t elapsedMilliseconds(SteadyClock::time_point start) {
 
 struct TransitionEncodingResult {
   std::unordered_map<size_t, int> currentLits;
+};
+
+struct TransitionEncodingCache {
+  std::unordered_map<size_t, bool> constantAssignments;
+  std::unordered_map<BoolExpr*, BoolExpr*> substitutionMemo;
 };
 
 size_t regionClauseCount(const InterpolantRegion& region) {
@@ -628,10 +683,13 @@ std::unordered_set<size_t> focusedImageTransitionRequests(
     const TransitionExprResolver& resolver,
     const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
+    size_t helperInvariantRegionCount,
     size_t lookahead) {
   if (!shouldFocusImageTransitionRequests(trackedStates.size(), lookahead)) {
     return trackedStates;
   }
+  const size_t requestLimit = focusedImageTransitionRequestLimit(
+      trackedStates.size(), helperInvariantRegionCount);
 
   const auto states = stateSymbolSet(problem);
   std::unordered_set<size_t> requests;
@@ -664,7 +722,7 @@ std::unordered_set<size_t> focusedImageTransitionRequests(
     closeProjectionRefinementTransitionTargets(
         resolver, complementPrimary, expandedRequests);
     const size_t cappedRequestCount = cappedFocusedImageTransitionRequestCount(
-        requests.size(), expandedRequests.size());
+        requests.size(), expandedRequests.size(), requestLimit);
     if (cappedRequestCount < expandedRequests.size()) {
       // Keeping only a deterministic prefix of the expanded request layer
       // leaves the remaining projected next-state functions unconstrained.
@@ -686,7 +744,7 @@ std::unordered_set<size_t> focusedImageTransitionRequests(
           " requests=", requests.size(),
           " expanded=", expandedRequests.size(),
           " limited=", cappedRequestCount,
-          " request_limit=", kCraigFocusedImageTransitionRequestLimit);
+          " request_limit=", requestLimit);
       break;
     }
     requests = std::move(expandedRequests);
@@ -835,15 +893,15 @@ std::unordered_map<size_t, bool> transitionConstantAssignmentsForEncoding(
 
 BoolExpr* transitionExpressionForEncoding(
     BoolExpr* expr,
-    const std::unordered_map<size_t, bool>& constantAssignments,
-    std::unordered_map<BoolExpr*, BoolExpr*>& substitutionMemo) {
-  if (constantAssignments.empty()) {
+    TransitionEncodingCache& cache) {
+  if (cache.constantAssignments.empty()) {
     return expr;
   }
   // Auxiliary constants are transition-proven invariants.  Substituting them
   // before Tseitin encoding keeps the Craig proof formula strict but avoids
   // streaming clauses for dead BP support cones gated by those constants.
-  return substituteBoolExprVariables(expr, constantAssignments, substitutionMemo);
+  return substituteBoolExprVariables(
+      expr, cache.constantAssignments, cache.substitutionMemo);
 }
 
 std::unordered_map<size_t, bool> bootstrapStateConstants(
@@ -1633,10 +1691,9 @@ AuxiliaryStateInvariants helperAuxiliaryStateInvariantsFromOptions(
   const size_t rawCount = invariants.constants.size() +
                           invariants.equalities.size();
   if (rawCount > kCraigHelperAuxiliaryCarryLimit) {
-    // Helper auxiliaries are useful when they are a small proof certificate.
-    // Importing thousands of mined facts into a later BP singleton makes every
-    // Craig image carry that whole side condition and can be worse than
-    // re-discovering the local projection.
+    // Helper auxiliaries are useful when they are still a compact proof
+    // certificate.  BP's retained-helper tail needs its moderate mined packet,
+    // but very broad packets make every Craig image carry a second proof.
     emitSecDiag(
         "SEC diag: imc Craig skips broad helper auxiliary invariants "
         "constants=",
@@ -1762,6 +1819,7 @@ TransitionEncodingResult addProjectedTransition(
     const std::unordered_set<size_t>& trackedStates,
     const std::unordered_set<size_t>& transitionRequests,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
+    TransitionEncodingCache& transitionEncodingCache,
     std::unordered_map<size_t, int> currentLits,
     const std::unordered_map<size_t, int>& nextStateLits,
     VariablePartition localVariablePartition,
@@ -1780,9 +1838,6 @@ TransitionEncodingResult addProjectedTransition(
   FrameFormulaEncoder encoder(
       solver, std::move(currentLits), /*createMissingLeaves=*/true);
   std::unordered_set<size_t> encodedTargets;
-  const std::unordered_map<size_t, bool> constantAssignments =
-      transitionConstantAssignmentsForEncoding(problem, auxiliaryInvariants);
-  std::unordered_map<BoolExpr*, BoolExpr*> substitutionMemo;
   // SAT search and Craig interpolation are sensitive to clause order. Keep the
   // projected transition deterministic so repeated IMC batches do not depend on
   // unordered_set insertion history.
@@ -1802,7 +1857,7 @@ TransitionEncodingResult addProjectedTransition(
     solver.setCraigVariablePartition(localVariablePartition);
     solver.setCraigClausePartition(clausePartition);
     const int transitionLit = encoder.encode(transitionExpressionForEncoding(
-        resolver.at(target), constantAssignments, substitutionMemo));
+        resolver.at(target), transitionEncodingCache));
     addLiteralEquivalenceForPartition(
         solver, next->second, transitionLit, clausePartition);
   }
@@ -2376,13 +2431,18 @@ class ProjectionRefinementScorer {
       // Once local auxiliary mining is disabled, BP-sized cones keep the scored
       // order but take bounded slices so every Craig rebuild stays below the
       // physical memory target.  BP's 84K partial-cap tail was still dominated
-      // by repeated rebuilds at 512 states, so use a wider slice there while
-      // keeping the >90K low-score plateau tight below.
+      // by repeated rebuilds at 1024 states, so use the focused projection
+      // slice there while keeping the >90K low-score plateau tight below.
       if (topCandidateScore > kCraigLowScoreBackfillScoreLimit) {
         // The partial focused image cap exposes BP's hard tail as an 84K-state
         // cone, below the old very-high threshold but still with a strong
         // fan-in signal.  Use the wider strict slice while that signal exists
         // so the proof does not rebuild the same capped query per 256 states.
+        if (transitionSupportSize <= kCraigVeryHighSupportRefinementThreshold) {
+          return std::max(
+              defaultRefinementLimit,
+              kCraigHighSupportProjectionRefinementLimit);
+        }
         return std::max(
             defaultRefinementLimit,
             kCraigVeryHighSupportHighScoreProjectionRefinementLimit);
@@ -2486,7 +2546,8 @@ bool craigGrowthBudgetExceeded(
     const CraigImcGrowthBudget& budget,
     size_t qExpansionPass,
     const FrontierResult& frontier,
-    const char** reason) {
+    const char** reason,
+    size_t qExpansionPassLimitOverride = 0) {
   if (!budget.enabled) {
     return false;
   }
@@ -2495,8 +2556,10 @@ bool craigGrowthBudgetExceeded(
     *reason = "solve_time";
     return true;
   }
-  if (budget.maxQExpansionPass > 0 &&
-      qExpansionPass >= budget.maxQExpansionPass) {
+  const size_t qExpansionPassLimit =
+      qExpansionPassLimitOverride > 0 ? qExpansionPassLimitOverride
+                                      : budget.maxQExpansionPass;
+  if (qExpansionPassLimit > 0 && qExpansionPass >= qExpansionPassLimit) {
     *reason = "q_pass";
     return true;
   }
@@ -2563,9 +2626,10 @@ bool shouldContinueSaturatedFocusedQExpansion(
     const FrontierResult& frontier,
     const std::unordered_set<size_t>& trackedStates,
     const char* budgetReason,
-    size_t qExpansionPass) {
+    size_t qExpansionPass,
+    size_t qExpansionPassLimit) {
   if (std::strcmp(budgetReason, "q_pass") != 0 ||
-      qExpansionPass >= kCraigFocusedSaturatedQExpansionPassLimit) {
+      qExpansionPass >= qExpansionPassLimit) {
     return false;
   }
   if (isLargeFocusedLookaheadAdvanceProof(
@@ -2589,7 +2653,8 @@ bool shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
     size_t qExpansionPass,
     size_t lookahead,
     size_t maxLookahead,
-    const CraigImcGrowthBudget& growthBudget) {
+    const CraigImcGrowthBudget& growthBudget,
+    size_t qExpansionPassLimit) {
   return shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       frontier.usesFocusedTransitionProjection(),
       shouldRefineFocusedProjectionAfterGrowthBudget(frontier, trackedStates),
@@ -2601,7 +2666,8 @@ bool shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
       frontierRegionClauseCount(frontier),
       frontierRegionLiteralCount(frontier),
       frontierRegionAuxiliaryCount(frontier),
-      frontier.solveElapsedMilliseconds);
+      frontier.solveElapsedMilliseconds,
+      qExpansionPassLimit);
 }
 
 bool shouldAdvanceLookaheadAfterBudgetedFocusedSat(
@@ -2932,9 +2998,17 @@ FrontierResult deriveLookaheadFrontierRegion(
       " regions=", reachableRegions.size(),
       " tracked_states=", trackedStates.size(),
       " direct_cube_source=", useDirectConcreteCube ? 1 : 0);
+  TransitionEncodingCache transitionEncodingCache{
+      transitionConstantAssignmentsForEncoding(problem, auxiliaryInvariants),
+      /*substitutionMemo=*/{}};
   const std::unordered_set<size_t> imageTransitionRequests =
       focusedImageTransitionRequests(
-          problem, resolver, complementPrimary, trackedStates, lookahead);
+          problem,
+          resolver,
+          complementPrimary,
+          trackedStates,
+          helperInvariantRegions.size(),
+          lookahead);
   const TransitionEncodingResult transition = addProjectedTransition(
       solver,
       problem,
@@ -2943,6 +3017,7 @@ FrontierResult deriveLookaheadFrontierRegion(
       trackedStates,
       imageTransitionRequests,
       auxiliaryInvariants,
+      transitionEncodingCache,
       frameLits[0],
       frameLits[1],
       VariablePartition::ALocal,
@@ -2969,6 +3044,7 @@ FrontierResult deriveLookaheadFrontierRegion(
             resolver,
             complementPrimary,
             trackedStates,
+            helperInvariantRegions.size(),
             lookahead - frame);
     result.recordTransitionRequests(
         trackedStates.size(), suffixTransitionRequests);
@@ -2980,6 +3056,7 @@ FrontierResult deriveLookaheadFrontierRegion(
         trackedStates,
         suffixTransitionRequests,
         auxiliaryInvariants,
+        transitionEncodingCache,
         frameLits[frame],
         frameLits[frame + 1],
         VariablePartition::BLocal,
@@ -2996,6 +3073,8 @@ FrontierResult deriveLookaheadFrontierRegion(
       lookahead,
       " q_pass=", qExpansionPass,
       " suffix_frames=", lookahead > 0 ? lookahead - 1 : 0,
+      " cached_transition_exprs=",
+      transitionEncodingCache.substitutionMemo.size(),
       " elapsed_ms=", elapsedMilliseconds(buildStart));
   closeSameDesignStateSemantics(problem, result.transitionStateSupport);
   addStateSemantics(solver, problem, frameLits[1], ClausePartition::A);
@@ -3572,8 +3651,18 @@ CraigImcResult runWithProjection(
       continue;
     }
     const char* budgetReason = nullptr;
+    const size_t projectionQExpansionPassLimit =
+        craigFocusedProjectionRefinementQExpansionPassLimit(
+            frontier.usesFocusedTransitionProjection(),
+            trackedStates.size(),
+            frontier.transitionStateSupport.size(),
+            helperInvariantRegions.size());
     const bool budgetExceeded = craigGrowthBudgetExceeded(
-        growthBudget, qExpansionPass, frontier, &budgetReason);
+        growthBudget,
+        qExpansionPass,
+        frontier,
+        &budgetReason,
+        projectionQExpansionPassLimit);
     const InterpolantRegion& nextRegion = *frontier.region;
     if (regionContainedInReachableUnion(
             problem,
@@ -3643,14 +3732,24 @@ CraigImcResult runWithProjection(
           return {CraigImcStatus::NoProgress, 0};
         }
       }
+      const size_t qExpansionPassLimit =
+          craigFocusedSaturatedQExpansionPassLimit(
+              frontier.usesFocusedTransitionProjection(),
+              trackedStates.size(),
+              frontier.transitionStateSupport.size(),
+              helperInvariantRegions.size());
       if (shouldContinueSaturatedFocusedQExpansion(
-              frontier, trackedStates, budgetReason, qExpansionPass)) {
+              frontier,
+              trackedStates,
+              budgetReason,
+              qExpansionPass,
+              qExpansionPassLimit)) {
         emitSecDiag(
             "SEC diag: imc Craig continues saturated focused q expansion "
             "lookahead=",
             lookahead,
             " q_pass=", qExpansionPass,
-            " limit=", kCraigFocusedSaturatedQExpansionPassLimit,
+            " limit=", qExpansionPassLimit,
             " tracked_states=", trackedStates.size());
       } else if (shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
                      frontier,
@@ -3659,7 +3758,8 @@ CraigImcResult runWithProjection(
                      qExpansionPass,
                      lookahead,
                      maxLookahead,
-                     growthBudget)) {
+                     growthBudget,
+                     qExpansionPassLimit)) {
         // The q-pass limit is an optimization guard, not a semantic bound.
         // When projection is saturated, avoid q13's proof explosion by trying
         // the next strict IMC unroll depth from the concrete frontier.
@@ -3739,9 +3839,10 @@ bool shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
     size_t interpolantClauses,
     size_t interpolantLiterals,
     size_t interpolantAuxiliaries,
-    std::int64_t imageSolveMilliseconds) {
+    std::int64_t imageSolveMilliseconds,
+    size_t qExpansionPassLimit) {
   const bool saturatedQPass =
-      qExpansionPass >= kCraigFocusedSaturatedQExpansionPassLimit;
+      qExpansionPass >= qExpansionPassLimit;
   const bool largeProof = isLargeFocusedLookaheadAdvanceProof(
       interpolantClauses, interpolantLiterals, interpolantAuxiliaries);
   return budgetReason != nullptr &&
@@ -3799,6 +3900,27 @@ bool shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
     size_t trackedStateCount,
     size_t transitionSupportSize,
     size_t helperInvariantRegionCount) {
+  // Helper-backed BP/AES singleton outputs need their small and mid-size local
+  // auxiliary packets; those transition-proven facts can close a strict Craig
+  // fixed point before the projection grows to the full suffix surface.  Skip
+  // only the broad retained-helper surface where validation probes dominate.
+  return focusedTransitionProjection &&
+         helperInvariantRegionCount >=
+             kCraigRetainedHelperLocalAuxiliarySkipRegions &&
+         trackedStateCount >=
+             kCraigRetainedHelperLocalAuxiliarySkipStateThreshold &&
+         transitionSupportSize >=
+             kCraigFocusedProjectionRefinementSupportLimit;
+}
+
+bool shouldShortenRetainedHelperQReplay(
+    bool focusedTransitionProjection,
+    size_t trackedStateCount,
+    size_t transitionSupportSize,
+    size_t helperInvariantRegionCount) {
+  // The first helper-backed singleton still needs q6 to close its Craig fixed
+  // point.  Shorten only later retained-helper tails, where q4+ mostly replays
+  // the same saturated suffix image before each strict projection import.
   return focusedTransitionProjection &&
          helperInvariantRegionCount >=
              kCraigRetainedHelperLocalAuxiliarySkipRegions &&
@@ -3808,15 +3930,63 @@ bool shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
              kCraigRetainedHelperLocalAuxiliarySkipStateThreshold;
 }
 
+size_t craigFocusedSaturatedQExpansionPassLimit(
+    bool focusedTransitionProjection,
+    size_t trackedStateCount,
+    size_t transitionSupportSize,
+    size_t helperInvariantRegionCount) {
+  // The first singleton still needs the default q6 guard.  Large helper-backed
+  // focused tails replay the same saturated proof before each strict projection
+  // import, so stop that replay at q3 once the support has already reached the
+  // BP/AES-sized surface.
+  if (shouldShortenRetainedHelperQReplay(
+          focusedTransitionProjection,
+          trackedStateCount,
+          transitionSupportSize,
+          helperInvariantRegionCount)) {
+    return kCraigRetainedHelperFocusedQExpansionPassLimit;
+  }
+  return kCraigFocusedSaturatedQExpansionPassLimit;
+}
+
+size_t craigFocusedProjectionRefinementQExpansionPassLimit(
+    bool focusedTransitionProjection,
+    size_t trackedStateCount,
+    size_t transitionSupportSize,
+    size_t helperInvariantRegionCount) {
+  // Projection refinement only needs enough Q expansion to rank the next
+  // strict state slice.  In BP's unpruned retained-helper tail q4 mostly
+  // repeats the same capped lookahead query, so use q3 there; zero keeps the
+  // caller's normal growth budget everywhere else.
+  if (shouldShortenRetainedHelperQReplay(
+          focusedTransitionProjection,
+          trackedStateCount,
+          transitionSupportSize,
+          helperInvariantRegionCount)) {
+    return kCraigRetainedHelperFocusedProjectionQExpansionPassLimit;
+  }
+  return 0;
+}
+
 bool shouldCapCraigFocusedImageTransitionRequests(size_t expandedRequestCount) {
-  return shouldCapFocusedImageTransitionRequests(expandedRequestCount);
+  return shouldCapFocusedImageTransitionRequests(
+      expandedRequestCount, kCraigFocusedImageTransitionRequestLimit);
+}
+
+size_t craigFocusedImageTransitionRequestLimit(
+    size_t trackedStateCount,
+    size_t helperInvariantRegionCount) {
+  return focusedImageTransitionRequestLimit(
+      trackedStateCount, helperInvariantRegionCount);
 }
 
 size_t cappedCraigFocusedImageTransitionRequestCount(
     size_t currentRequestCount,
     size_t expandedRequestCount) {
   return cappedFocusedImageTransitionRequestCount(
-      currentRequestCount, expandedRequestCount);
+      currentRequestCount,
+      expandedRequestCount,
+      kCraigFocusedImageTransitionRequestLimit);
 }
 
 CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(

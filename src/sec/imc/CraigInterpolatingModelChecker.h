@@ -109,7 +109,8 @@ bool shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
     size_t interpolantClauses,
     size_t interpolantLiterals,
     size_t interpolantAuxiliaries,
-    std::int64_t imageSolveMilliseconds);
+    std::int64_t imageSolveMilliseconds,
+    size_t qExpansionPassLimit = 6);
 
 // SAT on a fully tracked focused frontier is the normal strict-IMC signal to
 // increase k.  The q-pass budget is only a growth guard, so it must not turn
@@ -132,7 +133,26 @@ size_t craigBoundedProjectionRefinementLimit(
     size_t transitionSupportSize,
     bool focusedTransitionProjection);
 
+// Local auxiliary mining is optional.  Skip it when reusable helpers already
+// cover a small singleton, or when a broad retained-helper tail would turn the
+// validation pass into the bottleneck.
 bool shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
+    bool focusedTransitionProjection,
+    size_t trackedStateCount,
+    size_t transitionSupportSize,
+    size_t helperInvariantRegionCount);
+
+// Helper-backed singleton tails replay the same saturated q proof before the
+// capped lookahead import.  This hook shortens that replay once the strict
+// focused support is already BP/AES-sized.
+size_t craigFocusedSaturatedQExpansionPassLimit(
+    bool focusedTransitionProjection,
+    size_t trackedStateCount,
+    size_t transitionSupportSize,
+    size_t helperInvariantRegionCount);
+
+// Return zero when the normal growth-budget q-pass limit should be used.
+size_t craigFocusedProjectionRefinementQExpansionPassLimit(
     bool focusedTransitionProjection,
     size_t trackedStateCount,
     size_t transitionSupportSize,
@@ -142,6 +162,10 @@ bool shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
 // preimage layers.  A true result means the next layer is large enough that the
 // checker should keep the previous strict over-approximation for this query.
 bool shouldCapCraigFocusedImageTransitionRequests(size_t expandedRequestCount);
+
+size_t craigFocusedImageTransitionRequestLimit(
+    size_t trackedStateCount,
+    size_t helperInvariantRegionCount);
 
 // Test hook for the focused request cap. A capped query keeps the old request
 // layer and admits a deterministic prefix of the expanded layer instead of

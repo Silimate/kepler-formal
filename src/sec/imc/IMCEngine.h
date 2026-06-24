@@ -33,6 +33,16 @@ std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
     const KInductionProblem& problem,
     const OutputBatchingLimits& limits);
 
+// Test-visible strict projection cap used by the large dual-rail Craig path.
+size_t largeDualRailCraigImcProjectionStateLimit();
+
+// Test-visible policy for combining two previously proved Craig helpers.  The
+// merged helper is still strict IMC: both inputs are Craig-derived inductive
+// invariants from the same SEC problem.
+bool shouldCombineCraigHelpersForSmallRawSingleton(
+    bool useSmallRawSingletonInvariant,
+    bool reusableInvariantHasRegions);
+
 // Interpolation-Based Model Checking over the extracted SEC problem. It keeps
 // counterexample discovery on the shared BMC path, then grows a proof frontier
 // with validated interpolation/reachability invariants until that frontier
