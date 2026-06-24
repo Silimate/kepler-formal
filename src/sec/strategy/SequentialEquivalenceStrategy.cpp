@@ -4339,6 +4339,21 @@ const char* describeSecEngine(SecEngine secEngine) {
   }
 }
 
+void emitSecEngineProofProgress(
+    const KInductionProblem& problem,
+    const std::string& engineLabel,
+    size_t provenOutputCount) {
+  // Keep proof-progress wording in the SEC layer so engines only report proof
+  // data and future engines can share the same diagnostic style.
+  for (const std::string& line : detail::buildSecEngineProofProgressDiagLines(
+           engineLabel,
+           problem.observedOutputNames,
+           problem.observedOutputExprs0.size(),
+           provenOutputCount)) {
+    emitSecDiag(line);
+  }
+}
+
 std::string summarizeGuardedOutputNames(const KInductionProblem& problem) {  // LCOV_EXCL_LINE
   constexpr size_t kMaxOutputNames = 8;  // LCOV_EXCL_LINE
   std::ostringstream oss;  // LCOV_EXCL_LINE
@@ -6128,6 +6143,8 @@ SequentialEquivalenceResult runImcSecEngine(
   const auto result = engine.run(maxK);
   switch (result.status) {
     case IMCStatus::Equivalent:
+      emitSecEngineProofProgress(
+          problem, "IMC", problem.observedOutputExprs0.size());
       return makeSecResult(
           SequentialEquivalenceStatus::Equivalent,
           result.bound,
@@ -6153,6 +6170,10 @@ SequentialEquivalenceResult runImcSecEngine(
     default:
       // Honor the selected SEC engine.  IMC must not silently invoke PDR as a
       // secondary prover; callers can rerun with sec_engine=pdr if desired.
+      if (result.firstUnprovenOutput.has_value()) {  // LCOV_EXCL_LINE
+        emitSecEngineProofProgress(  // LCOV_EXCL_LINE
+            problem, "IMC", *result.firstUnprovenOutput);  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
       return keepDualRailImpliedCoverageOnEngineInconclusive(  // LCOV_EXCL_LINE
           problem,  // LCOV_EXCL_LINE
           outputCoverage,  // LCOV_EXCL_LINE
@@ -6318,6 +6339,39 @@ std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
 }
 
 }  // namespace
+
+namespace detail {
+
+std::vector<std::string> buildSecEngineProofProgressDiagLines(
+    const std::string& engineLabel,
+    const std::vector<std::string>& observedOutputNames,
+    size_t totalOutputCount,
+    size_t provenOutputCount) {
+  const size_t clampedProvenOutputCount =
+      std::min(provenOutputCount, totalOutputCount);
+  std::vector<std::string> lines;
+  lines.reserve(1 + totalOutputCount - clampedProvenOutputCount);
+
+  std::ostringstream summary;
+  summary << "SEC diag: SEC " << engineLabel
+          << " proven outputs: " << clampedProvenOutputCount << "/"
+          << totalOutputCount;
+  lines.push_back(summary.str());
+
+  for (size_t output = clampedProvenOutputCount; output < totalOutputCount;
+       ++output) {
+    const std::string outputName =
+        output < observedOutputNames.size() ? observedOutputNames[output]
+                                            : std::string("<unknown>");
+    std::ostringstream line;
+    line << "SEC diag: SEC " << engineLabel << " not proven output["
+         << output << "]=" << outputName;
+    lines.push_back(line.str());
+  }
+  return lines;
+}
+
+}  // namespace detail
 
 SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
     naja::NL::SNLDesign* top0,

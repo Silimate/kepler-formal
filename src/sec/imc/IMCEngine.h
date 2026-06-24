@@ -24,6 +24,9 @@ struct IMCResult {
   IMCStatus status = IMCStatus::Inconclusive;
   size_t bound = 0;
   std::optional<KInductionResult::CounterexampleWitness> witness;
+  // Batched Craig IMC reports the first output index it could not prove so the
+  // SEC strategy layer can format a uniform engine progress diagnostic.
+  std::optional<size_t> firstUnprovenOutput;
 };
 
 // IMC-specific batching for large dual-rail Craig proofs. Unlike the shared

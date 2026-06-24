@@ -102,6 +102,12 @@ constexpr size_t kMaxPdrDualRailFrameZeroValidationOutputs = 384;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationStateSymbols = 1000000;
 constexpr size_t kMaxDualRailGlobalBootstrapEqualityOutputs = 384;
 
+std::vector<std::string> buildSecEngineProofProgressDiagLines(
+    const std::string& engineLabel,
+    const std::vector<std::string>& observedOutputNames,
+    size_t totalOutputCount,
+    size_t provenOutputCount);
+
 inline bool shouldInferPdrInductiveStateEqualities(
     SecEngine secEngine,
     size_t observedOutputSurface) {

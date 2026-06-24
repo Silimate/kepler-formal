@@ -5092,6 +5092,23 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
 }
 
+TEST_F(SequentialEquivalenceStrategyTests,
+       SecEngineProofProgressListsUnprovenOutputs) {
+  const std::vector<std::string> lines =
+      detail::buildSecEngineProofProgressDiagLines(
+          "IMC",
+          {"wide_out0", "wide_out1", "wide_out2"},
+          /*totalOutputCount=*/3,
+          /*provenOutputCount=*/1);
+
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_EQ(lines[0], "SEC diag: SEC IMC proven outputs: 1/3");
+  EXPECT_EQ(
+      lines[1], "SEC diag: SEC IMC not proven output[1]=wide_out1");
+  EXPECT_EQ(
+      lines[2], "SEC diag: SEC IMC not proven output[2]=wide_out2");
+}
+
 TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalent) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -5162,10 +5179,21 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithI
       createDffTop(library, "top1", invModel, false, false, "in", "out", "ff1");
 
   auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::Imc);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
   const auto result = strategy.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_LE(result.bound, 1u);
+  EXPECT_NE(
+      stderrOutput.find("SEC diag: SEC IMC proven outputs: 1/1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("SEC diag: SEC IMC not proven output"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObservation) {
@@ -11476,10 +11504,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       LargeDualRailImcBudgetSplitUsesLocalChildSeeds) {
-  const KInductionProblem problem =
-      buildWideSharedConeImcProblem(/*outputCount=*/3,
-                                    /*sharedSupportCount=*/300);
+       LargeDualRailImcBudgetSplitReportsFirstUnprovenOutput) {
+  KInductionProblem problem = buildCraigResetSecProblem(/*equivalent=*/true);
+  problem.observedOutputNames = {"out0", "out1"};
+  problem.observedOutputExprs0.push_back(problem.observedOutputExprs0.front());
+  problem.observedOutputExprs1.push_back(problem.observedOutputExprs1.front());
+  // The duplicate output keeps the proof tiny but still exercises the same
+  // multi-output Craig batch split and first-unproven-output propagation.
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(
+          problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]),
+      makeEqualityExpr(
+          problem.observedOutputExprs0[1], problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   const ScopedEnvVar maxQPass("KEPLER_SEC_IMC_CRAIG_MAX_Q_PASS", "1");
 
@@ -11492,27 +11531,27 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // budget split each child must restart from only its own output range.
   EXPECT_NE(
       stderrOutput.find(
-          "imc Craig output batch first=0 end=3 first_name=wide_out0 "
-          "bad_support=303 tracked_seed_states=303"),
+          "imc Craig output batch first=0 end=2 first_name=out0"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "imc Craig splitting output batch after growth budget first=0 end=3"),
+          "imc Craig splitting output batch after growth budget first=0 end=2"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "imc Craig output batch first=0 end=1 first_name=wide_out0 "
-          "bad_support=301 tracked_seed_states=301"),
+          "imc Craig output batch first=0 end=1 first_name=out0"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "imc Craig stopping after inconclusive output batch first=0 end=3"),
+          "imc Craig stopping after inconclusive output batch first=0 end=2"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, IMCStatus::Inconclusive);
+  ASSERT_TRUE(result.firstUnprovenOutput.has_value());
+  EXPECT_EQ(*result.firstUnprovenOutput, 0u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

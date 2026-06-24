@@ -798,6 +798,16 @@ CraigImcResult runCraigCheckerAttempt(
   return checker.run(maxK);
 }
 
+IMCResult makeCraigInconclusiveResult(
+    size_t bound,
+    size_t firstUnprovenOutput) {
+  IMCResult result;
+  result.status = IMCStatus::Inconclusive;
+  result.bound = bound;
+  result.firstUnprovenOutput = firstUnprovenOutput;
+  return result;
+}
+
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -967,7 +977,7 @@ IMCResult runCraigOutputRange(
         counterexample.has_value()) {
       return *counterexample;
     }
-    return {IMCStatus::Inconclusive, maxK};
+    return makeCraigInconclusiveResult(maxK, firstOutput);
   }
   if (proof.status == CraigImcStatus::BudgetExceeded) {
     if (multiOutputRange) {
@@ -990,42 +1000,47 @@ IMCResult runCraigOutputRange(
         maxK,
         firstOutput,
         midpoint,
-          supportCache,
-          CraigTrackedSeedScope::LocalRange,
-          reusableInvariant,
-          smallRawSingletonInvariant);
+        supportCache,
+        CraigTrackedSeedScope::LocalRange,
+        reusableInvariant,
+        smallRawSingletonInvariant);
     const IMCResult right = runCraigOutputRange(
         problem,
         solverType,
         maxK,
         midpoint,
         endOutput,
-          supportCache,
-          CraigTrackedSeedScope::LocalRange,
-          reusableInvariant,
-          smallRawSingletonInvariant);
+        supportCache,
+        CraigTrackedSeedScope::LocalRange,
+        reusableInvariant,
+        smallRawSingletonInvariant);
     if (left.status == IMCStatus::Different) {
       return left;
     }
     if (right.status == IMCStatus::Different) {
       return right;
     }
+    if (left.status == IMCStatus::Inconclusive) {
+      return left;
+    }
+    if (right.status == IMCStatus::Inconclusive) {
+      return right;
+    }
     if (left.status == IMCStatus::Equivalent &&
         right.status == IMCStatus::Equivalent) {
-      return {
-          IMCStatus::Equivalent, std::max(left.bound, right.bound)};
+      return {IMCStatus::Equivalent, std::max(left.bound, right.bound)};
     }
-    return {IMCStatus::Inconclusive, maxK};
+    return makeCraigInconclusiveResult(maxK, firstOutput);
   }
 
   if (proof.status == CraigImcStatus::ConcreteNoProgress) {
     // Every first-iteration lookahead already started from the complete
     // concrete post-reset cube. Repeating all bounded SAT queries here would
     // rebuild the same transition prefixes without adding proof information.
-    return {IMCStatus::Inconclusive, maxK};
+    return makeCraigInconclusiveResult(maxK, firstOutput);
   }
   if (proof.status == CraigImcStatus::BudgetExceeded) {
-    return {IMCStatus::Inconclusive, proof.iterations};
+    return makeCraigInconclusiveResult(proof.iterations, firstOutput);
   }
 
   // Partial or implicit initial frontiers are over-approximations. Preserve the
@@ -1039,7 +1054,7 @@ IMCResult runCraigOutputRange(
       return *counterexample;
     }
   }
-  return {IMCStatus::Inconclusive, maxK};
+  return makeCraigInconclusiveResult(maxK, firstOutput);
 }
 
 IMCResult runLargeDualRailCraigImc(
@@ -1056,7 +1071,6 @@ IMCResult runLargeDualRailCraigImc(
   const auto batches = buildLargeDualRailCraigImcOutputBatchPlans(
       supportCache, kLargeDualRailCraigBatchingLimits);
   size_t proofBound = 0;
-  bool inconclusive = false;
   ReusableCraigInvariant reusableInvariant;
   ReusableCraigInvariant smallRawSingletonInvariant;
   for (const CraigOutputBatchPlan& batchPlan : batches) {
@@ -1080,13 +1094,14 @@ IMCResult runLargeDualRailCraigImc(
       emitSecDiag(
           "SEC diag: imc Craig stopping after inconclusive output batch first=",
           batchPlan.firstOutput, " end=", batchPlan.endOutput);
-      return {IMCStatus::Inconclusive, maxK};
+      return makeCraigInconclusiveResult(
+          maxK,
+          batchResult.firstUnprovenOutput.value_or(batchPlan.firstOutput));
     } else {
       proofBound = std::max(proofBound, batchResult.bound);
     }
   }
-  return inconclusive ? IMCResult{IMCStatus::Inconclusive, maxK}
-                      : IMCResult{IMCStatus::Equivalent, proofBound};
+  return IMCResult{IMCStatus::Equivalent, proofBound};
 }
 
 bool shouldBuildExplicitImcInitFormula(const KInductionProblem& problem) {
