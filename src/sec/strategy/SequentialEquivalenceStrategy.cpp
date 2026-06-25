@@ -2285,13 +2285,15 @@ SequentialEquivalenceResult keepDualRailImpliedCoverageOnEngineInconclusive(  //
   // The dual-rail induction core has already certified the implied outputs.
   // Keep that coverage and report residual engine failures as uncovered rather
   // than invoking another SEC engine behind the user's selected mode.
-  return makeSecResult(  // LCOV_EXCL_LINE
+  SequentialEquivalenceResult partialResult = makeSecResult(  // LCOV_EXCL_LINE
       SequentialEquivalenceStatus::Equivalent,
       originalResult.bound,  // LCOV_EXCL_LINE
       "",  // LCOV_EXCL_LINE
       partialCoverage,
       abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
       extractedBoundaryReports);  // LCOV_EXCL_LINE
+  partialResult.proofProgress = originalResult.proofProgress;  // LCOV_EXCL_LINE
+  return partialResult;  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
 enum class DualRailResidualEngine {
@@ -4354,6 +4356,18 @@ void emitSecEngineProofProgress(
   }
 }
 
+void setSecEngineProofProgress(
+    SequentialEquivalenceResult& result,
+    const KInductionProblem& problem,
+    const std::string& engineLabel,
+    size_t provenOutputCount) {
+  result.proofProgress = detail::buildSecEngineProofProgress(
+      engineLabel,
+      problem.observedOutputNames,
+      problem.observedOutputExprs0.size(),
+      provenOutputCount);
+}
+
 std::string summarizeGuardedOutputNames(const KInductionProblem& problem) {  // LCOV_EXCL_LINE
   constexpr size_t kMaxOutputNames = 8;  // LCOV_EXCL_LINE
   std::ostringstream oss;  // LCOV_EXCL_LINE
@@ -6142,16 +6156,20 @@ SequentialEquivalenceResult runImcSecEngine(
   IMCEngine engine(problem, solverType);
   const auto result = engine.run(maxK);
   switch (result.status) {
-    case IMCStatus::Equivalent:
+    case IMCStatus::Equivalent: {
       emitSecEngineProofProgress(
           problem, "IMC", problem.observedOutputExprs0.size());
-      return makeSecResult(
+      SequentialEquivalenceResult secResult = makeSecResult(
           SequentialEquivalenceStatus::Equivalent,
           result.bound,
           "",
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
+      setSecEngineProofProgress(
+          secResult, problem, "IMC", problem.observedOutputExprs0.size());
+      return secResult;
+    }
     case IMCStatus::Different: {
       const KInductionResult witnessResult{  // LCOV_EXCL_LINE
           KInductionStatus::Different, result.bound, result.witness};  // LCOV_EXCL_LINE
@@ -6167,12 +6185,23 @@ SequentialEquivalenceResult runImcSecEngine(
           extractedBoundaryReports);  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     case IMCStatus::Inconclusive:  // LCOV_EXCL_LINE
-    default:
+    default: {
       // Honor the selected SEC engine.  IMC must not silently invoke PDR as a
       // secondary prover; callers can rerun with sec_engine=pdr if desired.
       if (result.firstUnprovenOutput.has_value()) {  // LCOV_EXCL_LINE
         emitSecEngineProofProgress(  // LCOV_EXCL_LINE
             problem, "IMC", *result.firstUnprovenOutput);  // LCOV_EXCL_LINE
+      }  // LCOV_EXCL_LINE
+      SequentialEquivalenceResult secResult = makeSecResult(  // LCOV_EXCL_LINE
+          SequentialEquivalenceStatus::Inconclusive,
+          result.bound,  // LCOV_EXCL_LINE
+          "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
+          outputCoverage,  // LCOV_EXCL_LINE
+          abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
+          extractedBoundaryReports);  // LCOV_EXCL_LINE
+      if (result.firstUnprovenOutput.has_value()) {  // LCOV_EXCL_LINE
+        setSecEngineProofProgress(  // LCOV_EXCL_LINE
+            secResult, problem, "IMC", *result.firstUnprovenOutput);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
       return keepDualRailImpliedCoverageOnEngineInconclusive(  // LCOV_EXCL_LINE
           problem,  // LCOV_EXCL_LINE
@@ -6180,13 +6209,8 @@ SequentialEquivalenceResult runImcSecEngine(
           abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
           extractedBoundaryReports,  // LCOV_EXCL_LINE
           "imc",
-          makeSecResult(  // LCOV_EXCL_LINE
-              SequentialEquivalenceStatus::Inconclusive,
-              result.bound,  // LCOV_EXCL_LINE
-              "Reached max_k without a proof or counterexample",  // LCOV_EXCL_LINE
-              outputCoverage,  // LCOV_EXCL_LINE
-              abstractedSequentialBoundaries,  // LCOV_EXCL_LINE
-              extractedBoundaryReports));  // LCOV_EXCL_LINE
+          secResult);  // LCOV_EXCL_LINE
+    }
   }
 }
 
@@ -6342,30 +6366,51 @@ std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
 
 namespace detail {
 
+SequentialEquivalenceProofProgress buildSecEngineProofProgress(
+    const std::string& engineLabel,
+    const std::vector<std::string>& observedOutputNames,
+    size_t totalOutputCount,
+    size_t provenOutputCount) {
+  SequentialEquivalenceProofProgress progress;
+  progress.engineLabel = engineLabel;
+  progress.provenOutputs = std::min(provenOutputCount, totalOutputCount);
+  progress.totalOutputs = totalOutputCount;
+  progress.unprovenOutputs.reserve(totalOutputCount - progress.provenOutputs);
+  for (size_t output = progress.provenOutputs; output < totalOutputCount;
+       ++output) {
+    progress.unprovenOutputs.push_back(
+        {output,
+         output < observedOutputNames.size() ? observedOutputNames[output]
+                                             : std::string("<unknown>")});
+  }
+  return progress;
+}
+
 std::vector<std::string> buildSecEngineProofProgressDiagLines(
     const std::string& engineLabel,
     const std::vector<std::string>& observedOutputNames,
     size_t totalOutputCount,
     size_t provenOutputCount) {
-  const size_t clampedProvenOutputCount =
-      std::min(provenOutputCount, totalOutputCount);
+  const SequentialEquivalenceProofProgress progress =
+      buildSecEngineProofProgress(
+          engineLabel,
+          observedOutputNames,
+          totalOutputCount,
+          provenOutputCount);
   std::vector<std::string> lines;
-  lines.reserve(1 + totalOutputCount - clampedProvenOutputCount);
+  lines.reserve(1 + progress.unprovenOutputs.size());
 
   std::ostringstream summary;
-  summary << "SEC diag: SEC " << engineLabel
-          << " proven outputs: " << clampedProvenOutputCount << "/"
-          << totalOutputCount;
+  summary << "SEC diag: SEC " << progress.engineLabel
+          << " proven outputs: " << progress.provenOutputs << "/"
+          << progress.totalOutputs;
   lines.push_back(summary.str());
 
-  for (size_t output = clampedProvenOutputCount; output < totalOutputCount;
-       ++output) {
-    const std::string outputName =
-        output < observedOutputNames.size() ? observedOutputNames[output]
-                                            : std::string("<unknown>");
+  for (const SequentialEquivalenceUnprovenOutput& output :
+       progress.unprovenOutputs) {
     std::ostringstream line;
-    line << "SEC diag: SEC " << engineLabel << " not proven output["
-         << output << "]=" << outputName;
+    line << "SEC diag: SEC " << progress.engineLabel
+         << " not proven output[" << output.index << "]=" << output.name;
     lines.push_back(line.str());
   }
   return lines;

@@ -5094,6 +5094,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        SecEngineProofProgressListsUnprovenOutputs) {
+  const SequentialEquivalenceProofProgress progress =
+      detail::buildSecEngineProofProgress(
+          "IMC",
+          {"wide_out0", "wide_out1", "wide_out2"},
+          /*totalOutputCount=*/3,
+          /*provenOutputCount=*/1);
   const std::vector<std::string> lines =
       detail::buildSecEngineProofProgressDiagLines(
           "IMC",
@@ -5101,6 +5107,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
           /*totalOutputCount=*/3,
           /*provenOutputCount=*/1);
 
+  EXPECT_EQ(progress.engineLabel, "IMC");
+  EXPECT_EQ(progress.provenOutputs, 1u);
+  EXPECT_EQ(progress.totalOutputs, 3u);
+  ASSERT_EQ(progress.unprovenOutputs.size(), 2u);
+  EXPECT_EQ(progress.unprovenOutputs[0].index, 1u);
+  EXPECT_EQ(progress.unprovenOutputs[0].name, "wide_out1");
+  EXPECT_EQ(progress.unprovenOutputs[1].index, 2u);
+  EXPECT_EQ(progress.unprovenOutputs[1].name, "wide_out2");
   ASSERT_EQ(lines.size(), 3u);
   EXPECT_EQ(lines[0], "SEC diag: SEC IMC proven outputs: 1/3");
   EXPECT_EQ(
@@ -5194,6 +5208,11 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithI
       stderrOutput.find("SEC diag: SEC IMC not proven output"),
       std::string::npos)
       << stderrOutput;
+  ASSERT_TRUE(result.proofProgress.has_value());
+  EXPECT_EQ(result.proofProgress->engineLabel, "IMC");
+  EXPECT_EQ(result.proofProgress->provenOutputs, 1u);
+  EXPECT_EQ(result.proofProgress->totalOutputs, 1u);
+  EXPECT_TRUE(result.proofProgress->unprovenOutputs.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObservation) {

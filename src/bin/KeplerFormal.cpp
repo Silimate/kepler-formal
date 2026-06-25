@@ -1711,10 +1711,25 @@ int KeplerFormalMain(int argc, char** argv) {
       [&](const KEPLER_FORMAL::SEC::SequentialEquivalenceResult& result) {
         if (result.totalOutputs != 0) {
           SPDLOG_INFO(
-              "SEC output coverage: {:.2f}% ({}/{} covered/existing outputs).",
+              "SEC checked-output coverage: {:.2f}% ({}/{} covered/existing outputs).",
               result.outputCoveragePercent(),
               result.coveredOutputs,
               result.totalOutputs);
+        }
+        if (result.proofProgress.has_value()) {
+          const auto& progress = *result.proofProgress;
+          SPDLOG_INFO(
+              "SEC {} proven outputs: {}/{}",
+              progress.engineLabel,
+              progress.provenOutputs,
+              progress.totalOutputs);
+          for (const auto& output : progress.unprovenOutputs) {
+            SPDLOG_INFO(
+                "SEC {} not proven output[{}]={}",
+                progress.engineLabel,
+                output.index,
+                output.name);
+          }
         }
         if (!result.skippedObservedOutputs.empty()) {
           // LCOV_EXCL_START

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,12 +42,25 @@ struct ExtractedBoundaryReportEntry {  // LCOV_EXCL_LINE
   std::string connectivitySkip;
 };
 
+struct SequentialEquivalenceUnprovenOutput {
+  size_t index = 0;
+  std::string name;
+};
+
+struct SequentialEquivalenceProofProgress {
+  std::string engineLabel;
+  size_t provenOutputs = 0;
+  size_t totalOutputs = 0;
+  std::vector<SequentialEquivalenceUnprovenOutput> unprovenOutputs;
+};
+
 struct SequentialEquivalenceResult {  // LCOV_EXCL_LINE
   SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Unsupported;
   size_t bound = 0;
   std::string reason;
   size_t coveredOutputs = 0;
   size_t totalOutputs = 0;
+  std::optional<SequentialEquivalenceProofProgress> proofProgress;
   std::vector<std::string> skippedObservedOutputs;
   std::vector<std::string> resetUnanchoredSkippedOutputs;
   std::vector<std::string> multiClockDomainSkippedOutputs;
@@ -101,6 +115,12 @@ constexpr size_t kMinPdrDualRailFrameZeroValidationOutputs = 256;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationOutputs = 384;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationStateSymbols = 1000000;
 constexpr size_t kMaxDualRailGlobalBootstrapEqualityOutputs = 384;
+
+SequentialEquivalenceProofProgress buildSecEngineProofProgress(
+    const std::string& engineLabel,
+    const std::vector<std::string>& observedOutputNames,
+    size_t totalOutputCount,
+    size_t provenOutputCount);
 
 std::vector<std::string> buildSecEngineProofProgressDiagLines(
     const std::string& engineLabel,

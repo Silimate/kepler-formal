@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
   exit 2
 fi
 
@@ -26,7 +26,7 @@ engines=(k_induction imc pdr)
 
 for option in "${@:5}"; do
   case "${option}" in
-    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage)
+    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive)
       expectation="${option}"
       ;;
     compact)
@@ -176,11 +176,30 @@ run_engine() {
       return 0
     fi
 
+    # Measurement-only SEC runs still fail on real counterexamples above, but
+    # allow inconclusive positive proofs so one hard design does not stop the
+    # rest of the regression from reporting its current behavior.
+    if [[ "${expectation}" == "allow-inconclusive" ]]; then
+      if grep -q "SEC proved equivalence" "${stdout_log}"; then
+        grep "SEC proved equivalence" "${stdout_log}"
+        return 0
+      fi
+      if grep -q "SEC was inconclusive" "${stdout_log}"; then
+        grep "SEC was inconclusive" "${stdout_log}"
+        return 0
+      fi
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      echo "Expected SEC equivalence or inconclusive result for ${test_name} (${engine})" >&2
+      return 1
+    fi
+
     if [[ "${expectation}" == "expect-full-coverage" ]]; then
       if [[ "${kepler_status}" -ne 0 ]]; then
         return "${kepler_status}"
       fi
-      grep "SEC output coverage: 100.00%" "${stdout_log}"
+      grep -E "SEC (checked-output|output) coverage: 100.00%" "${stdout_log}"
       grep "SEC proved equivalence" "${stdout_log}"
       return 0
     fi
