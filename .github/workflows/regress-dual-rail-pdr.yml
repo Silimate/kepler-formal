@@ -74,8 +74,75 @@ jobs:
         echo "BP final isolated probe SEC settings:"
         grep -E "^(verification|sec_engine|sec_encoding|max_k|compact_mode):" "${probe_config}"
         grep -qx "sec_encoding: dual_rail_steady" "${probe_config}"
-        /usr/bin/time -v "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
-          --config "${probe_config}"
+        time_log="${RUNNER_TEMP}/bp-final-dual-rail-pdr.time"
+        stdout_log="${RUNNER_TEMP}/bp-final-dual-rail-pdr.stdout"
+        kepler_pid=""
+        tail_pid=""
+        print_probe_resources() {
+          local stage="$1"
+          echo "[bp-final-probe] stage=${stage}"
+          free -h || true
+          if [[ -n "${kepler_pid}" && -r "/proc/${kepler_pid}/status" ]]; then
+            awk '/^(VmPeak|VmHWM|VmRSS|VmSwap|Threads):/ { print "[bp-final-probe] proc " $0 }' \
+              "/proc/${kepler_pid}/status" || true
+          fi
+          for path in \
+            /sys/fs/cgroup/memory.current \
+            /sys/fs/cgroup/memory.peak \
+            /sys/fs/cgroup/memory.max \
+            /sys/fs/cgroup/memory.swap.current \
+            /sys/fs/cgroup/memory.swap.peak
+          do
+            if [[ -r "${path}" ]]; then
+              echo "[bp-final-probe] cgroup ${path##*/}=$(< "${path}")"
+            fi
+          done
+          if [[ -r /sys/fs/cgroup/memory.events ]]; then
+            sed 's/^/[bp-final-probe] cgroup memory.events /' /sys/fs/cgroup/memory.events
+          fi
+        }
+        cancel_probe() {
+          echo "[bp-final-probe] received cancellation signal"
+          print_probe_resources "signal"
+          if [[ -n "${kepler_pid}" ]]; then
+            kill -TERM "${kepler_pid}" 2>/dev/null || true
+            sleep 2
+            print_probe_resources "after-term"
+            kill -KILL "${kepler_pid}" 2>/dev/null || true
+          fi
+          if [[ -n "${tail_pid}" ]]; then
+            kill "${tail_pid}" 2>/dev/null || true
+          fi
+          if [[ -s "${time_log}" ]]; then
+            cat "${time_log}"
+          else
+            echo "[bp-final-probe] no /usr/bin/time output was written"
+          fi
+          exit 130
+        }
+        trap cancel_probe INT TERM
+        : > "${stdout_log}"
+        print_probe_resources "before"
+        /usr/bin/time -v -o "${time_log}" \
+          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+          --config "${probe_config}" > "${stdout_log}" 2>&1 &
+        kepler_pid=$!
+        tail -n +1 -f "${stdout_log}" &
+        tail_pid=$!
+        while kill -0 "${kepler_pid}" 2>/dev/null; do
+          sleep 30
+          if kill -0 "${kepler_pid}" 2>/dev/null; then
+            print_probe_resources "running"
+          fi
+        done
+        kepler_status=0
+        wait "${kepler_pid}" || kepler_status=$?
+        sleep 1
+        kill "${tail_pid}" 2>/dev/null || true
+        wait "${tail_pid}" 2>/dev/null || true
+        print_probe_resources "after"
+        cat "${time_log}" || true
+        exit "${kepler_status}"
 
   build:
     needs: bp-final-probe
