@@ -13,10 +13,15 @@ on:
         required: false
         type: string
         default: "binary"
+      skip_bp_final:
+        required: false
+        type: boolean
+        default: false
 
 env:
   SEC_ENGINE: pdr
   SEC_ENCODING: ${{ inputs.sec_encoding || 'binary' }}
+  SKIP_BP_FINAL: ${{ inputs.skip_bp_final || false }}
 
 jobs:
   build:
@@ -201,15 +206,19 @@ jobs:
           sec-encoding=${{ env.SEC_ENCODING }}
         # BP final has resetless FIFO state. Binary SEC intentionally drops
         # that surface, so only the dual-rail workflow can require full coverage.
-        bash regress/run_sec_strategies_regress.sh \
-          nangate45_black_parrot_sec_final \
-          "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
-          "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
-          6_final_sec_test.yml \
-          ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-full-coverage' || 'expect-equivalent' }} \
-          compact \
-          engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=${{ env.SEC_ENCODING }}
+        if [[ "${SKIP_BP_FINAL}" == "true" ]]; then
+          echo "Skipping nangate45_black_parrot_sec_final because SKIP_BP_FINAL=true"
+        else
+          bash regress/run_sec_strategies_regress.sh \
+            nangate45_black_parrot_sec_final \
+            "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
+            "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
+            6_final_sec_test.yml \
+            ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-full-coverage' || 'expect-equivalent' }} \
+            compact \
+            engine=${{ env.SEC_ENGINE }} \
+            sec-encoding=${{ env.SEC_ENCODING }}
+        fi
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}
