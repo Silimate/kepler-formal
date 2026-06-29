@@ -10365,8 +10365,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The stable guard is a proven auxiliary constant.  Substitute it before
-  // Tseitin encoding so the large gated cone never enters the Craig proof.
+  // The stable guard is a proven auxiliary constant.  Encode it as a fixed
+  // transition leaf so the large gated cone never enters the Craig proof.
   EXPECT_NE(
       stderrOutput.find("imc Craig auxiliary constants=1"),
       std::string::npos)
@@ -12038,12 +12038,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // A single hard output cannot be bisected further. Bound projection growth
-  // so strict Craig IMC returns budget-exceeded instead of exhausting memory.
+  // A single hard output cannot be bisected further. Bound the projected
+  // transition build so strict Craig IMC returns budget-exceeded before
+  // materializing a memory-heavy image query.
   EXPECT_NE(
       stderrOutput.find(
-          "imc Craig growth budget exceeded reason=projection_states"),
+          "imc Craig growth budget exceeded reason=transition_build"),
       std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(" transition_targets="), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(" transition_nodes="), std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
 }

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <functional>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -75,6 +76,9 @@ constexpr size_t
     kCraigBroadRetainedHelperFocusedImageTransitionRequestLimit = 8192;
 constexpr size_t kCraigFocusedProjectionRefinementSupportLimit = 65536;
 constexpr size_t kCraigFocusedProjectionRefinementLimit = 4096;
+constexpr size_t kCraigProjectedTransitionBuildSupportLimit = 49152;
+constexpr size_t kCraigProjectedTransitionBuildTargetLimit = 2048;
+constexpr size_t kCraigProjectedTransitionBuildNodeLimit = 200000;
 constexpr size_t kCraigFocusedProjectionBulkSupportLimit = 49152;
 constexpr size_t kCraigFocusedProjectionBulkCandidateLimit = 32768;
 // Saturated focused projections are a last chance after projection stops
@@ -106,6 +110,53 @@ struct AuxiliaryStateInvariants {
   bool empty() const {
     return constants.empty() && equalities.empty();
   }
+};
+
+struct IndexedStatePairSemantics {
+  size_t rhs = 0;
+  bool complemented = false;
+};
+
+struct IndexedDualRailSemantics {
+  size_t mayBeZero = 0;
+};
+
+struct StateSemanticsIndex {
+  std::unordered_map<size_t, std::vector<IndexedStatePairSemantics>>
+      pairSemanticsByLhs;
+  std::unordered_map<size_t, std::vector<IndexedDualRailSemantics>>
+      dualRailSemanticsByMayOne;
+};
+
+struct StateConstantPreservationKey {
+  BoolExpr* expr = nullptr;
+  bool value = false;
+
+  bool operator==(const StateConstantPreservationKey& other) const {
+    return expr == other.expr && value == other.value;
+  }
+};
+
+struct StateConstantPreservationKeyHash {
+  size_t operator()(const StateConstantPreservationKey& key) const {
+    size_t hash = std::hash<BoolExpr*>{}(key.expr);
+    if (key.value) {
+      hash ^= 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    }
+    return hash;
+  }
+};
+
+using StateConstantPreservationCache =
+    std::unordered_map<
+        StateConstantPreservationKey,
+        bool,
+        StateConstantPreservationKeyHash>;
+
+struct ProjectedTransitionBuildEstimate {
+  size_t stateSupport = 0;
+  size_t encodedTargets = 0;
+  size_t expressionNodes = 0;
 };
 
 struct RegionVariableKey {
@@ -232,10 +283,9 @@ bool shouldUseBroadRetainedHelperFocusedImageRequestLimit(
 size_t focusedImageTransitionRequestLimit(
     size_t trackedStateCount,
     size_t helperInvariantRegionCount) {
-  // Retained helper tails already carry proof-derived pruning facts.  Keep the
-  // first helper-region-3 singleton at 10K so it still includes BP's 9,336
-  // suffix layer; later broad retained-helper tails use a smaller strict
-  // over-approximation instead of rebuilding the same saturated suffix cone.
+  // Retained helper tails already carry proof-derived pruning facts.  Keep
+  // later broad retained-helper tails on a smaller strict over-approximation
+  // instead of rebuilding the same saturated suffix cone.
   if (shouldUseBroadRetainedHelperFocusedImageRequestLimit(
           trackedStateCount, helperInvariantRegionCount)) {
     return kCraigBroadRetainedHelperFocusedImageTransitionRequestLimit;
@@ -281,6 +331,20 @@ void configureCraigProjectionSolver(
       " state_limit=", kCraigDirectCdclProjectionQueryStateLimit);
 }
 
+void configureCraigProjectionSolverForTransitionRequests(
+    SATSolverWrapper& solver,
+    size_t transitionRequestCount,
+    const char* phase) {
+  if (!shouldUseDirectCdclCraigProjectionQuery(transitionRequestCount)) {
+    return;
+  }
+  solver.configureForSecPdrQuery(transitionRequestCount);
+  emitSecDiag(
+      "SEC diag: imc Craig uses direct CaDiCaL profile phase=", phase,
+      " transition_requests=", transitionRequestCount,
+      " state_limit=", kCraigDirectCdclProjectionQueryStateLimit);
+}
+
 bool modelGuidedProjectionNeedsBoundedBackfill(
     const FrontierResult& frontier);
 
@@ -309,7 +373,6 @@ struct TransitionEncodingResult {
 
 struct TransitionEncodingCache {
   std::unordered_map<size_t, bool> constantAssignments;
-  std::unordered_map<BoolExpr*, BoolExpr*> substitutionMemo;
 };
 
 size_t regionClauseCount(const InterpolantRegion& region) {
@@ -788,6 +851,271 @@ std::unordered_map<size_t, int> allocateLeafLits(
   return leaves;
 }
 
+class ConstantAwareFrameFormulaEncoder {
+ public:
+  ConstantAwareFrameFormulaEncoder(
+      SATSolverWrapper& solver,
+      std::unordered_map<size_t, int> leafLits,
+      const std::unordered_map<size_t, bool>& constantAssignments,
+      VariablePartition variablePartition,
+      ClausePartition clausePartition)
+      : solver_(solver),
+        leafLits_(std::move(leafLits)),
+        constantAssignments_(constantAssignments),
+        variablePartition_(variablePartition),
+        clausePartition_(clausePartition) {
+    nodeToLit_.reserve(std::max(
+        static_cast<size_t>(256),
+        leafLits_.size() * static_cast<size_t>(8)));
+  }
+
+  int encode(BoolExpr* expr) {
+    if (expr == nullptr) {
+      throw std::invalid_argument(
+          "ConstantAwareFrameFormulaEncoder::encode: null expr");
+    }
+    return encodeImpl(expr);
+  }
+
+  const std::unordered_map<size_t, int>& leafLits() const {
+    return leafLits_;
+  }
+
+ private:
+  int newLiteral() {
+    solver_.setCraigVariablePartition(variablePartition_);
+    return solver_.newVar() + 2;
+  }
+
+  void addClause(const std::vector<int>& clause) {
+    solver_.setCraigClausePartition(clausePartition_);
+    solver_.addClause(clause);
+  }
+
+  int constLit(bool value) {
+    if (trueLit_ == 0) {
+      trueLit_ = newLiteral();
+      addClause({trueLit_});
+    }
+    return value ? trueLit_ : -trueLit_;
+  }
+
+  bool isConstLit(int lit, bool value) const {
+    return trueLit_ != 0 && lit == (value ? trueLit_ : -trueLit_);
+  }
+
+  std::optional<bool> assignedConstantValue(BoolExpr* expr) {
+    if (const auto cached = constantValueByNode_.find(expr);
+        cached != constantValueByNode_.end()) {
+      return cached->second;
+    }
+
+    std::optional<bool> value;
+    switch (expr->getOp()) {
+      case Op::VAR: {
+        const size_t symbol = expr->getId();
+        if (symbol == 0) {
+          value = false;
+        } else if (symbol == 1) {
+          value = true;
+        } else if (const auto constant = constantAssignments_.find(symbol);
+                   constant != constantAssignments_.end()) {
+          value = constant->second;
+        }
+        break;
+      }
+      case Op::NOT: {
+        const auto child = assignedConstantValue(expr->getLeft());
+        if (child.has_value()) {
+          value = !*child;
+        }
+        break;
+      }
+      case Op::AND: {
+        const auto left = assignedConstantValue(expr->getLeft());
+        if (left.has_value() && !*left) {
+          value = false;
+          break;
+        }
+        const auto right = assignedConstantValue(expr->getRight());
+        if (right.has_value() && !*right) {
+          value = false;
+        } else if (left.has_value() && right.has_value()) {
+          value = *left && *right;
+        } else if (left.has_value() && *left) {
+          value = right;
+        } else if (right.has_value() && *right) {
+          value = left;
+        }
+        break;
+      }
+      case Op::OR: {
+        const auto left = assignedConstantValue(expr->getLeft());
+        if (left.has_value() && *left) {
+          value = true;
+          break;
+        }
+        const auto right = assignedConstantValue(expr->getRight());
+        if (right.has_value() && *right) {
+          value = true;
+        } else if (left.has_value() && right.has_value()) {
+          value = *left || *right;
+        } else if (left.has_value() && !*left) {
+          value = right;
+        } else if (right.has_value() && !*right) {
+          value = left;
+        }
+        break;
+      }
+      case Op::XOR: {
+        const auto left = assignedConstantValue(expr->getLeft());
+        const auto right = assignedConstantValue(expr->getRight());
+        if (left.has_value() && right.has_value()) {
+          value = *left != *right;
+        }
+        break;
+      }
+      case Op::NONE:
+      default:
+        throw std::runtime_error(
+            "Unsupported BoolExpr operator in constant-aware evaluation");
+    }
+
+    constantValueByNode_.emplace(expr, value);
+    return value;
+  }
+
+  int encodeImpl(BoolExpr* expr) {
+    if (const auto cached = nodeToLit_.find(expr); cached != nodeToLit_.end()) {
+      return cached->second;
+    }
+    if (const auto value = assignedConstantValue(expr); value.has_value()) {
+      const int lit = constLit(*value);
+      nodeToLit_.emplace(expr, lit);
+      return lit;
+    }
+
+    int lit = 0;
+    switch (expr->getOp()) {
+      case Op::VAR: {
+        const size_t symbol = expr->getId();
+        if (symbol == 0) {
+          lit = constLit(false);
+          break;
+        }
+        if (symbol == 1) {
+          lit = constLit(true);
+          break;
+        }
+        if (const auto constant = constantAssignments_.find(symbol);
+            constant != constantAssignments_.end()) {
+          lit = constLit(constant->second);
+          break;
+        }
+        auto leaf = leafLits_.find(symbol);
+        if (leaf == leafLits_.end()) {
+          leaf = leafLits_.emplace(symbol, newLiteral()).first;
+        }
+        lit = leaf->second;
+        break;
+      }
+      case Op::NOT:
+        lit = -encodeImpl(expr->getLeft());
+        break;
+      case Op::AND: {
+        const int leftLit = encodeImpl(expr->getLeft());
+        if (isConstLit(leftLit, false)) {
+          lit = constLit(false);
+          break;
+        }
+        if (isConstLit(leftLit, true)) {
+          lit = encodeImpl(expr->getRight());
+          break;
+        }
+        const int rightLit = encodeImpl(expr->getRight());
+        if (leftLit == rightLit || isConstLit(rightLit, true)) {
+          lit = leftLit;
+        } else if (leftLit == -rightLit || isConstLit(rightLit, false)) {
+          lit = constLit(false);
+        } else {
+          lit = newLiteral();
+          addClause({-lit, leftLit});
+          addClause({-lit, rightLit});
+          addClause({lit, -leftLit, -rightLit});
+        }
+        break;
+      }
+      case Op::OR: {
+        const int leftLit = encodeImpl(expr->getLeft());
+        if (isConstLit(leftLit, true)) {
+          lit = constLit(true);
+          break;
+        }
+        if (isConstLit(leftLit, false)) {
+          lit = encodeImpl(expr->getRight());
+          break;
+        }
+        const int rightLit = encodeImpl(expr->getRight());
+        if (leftLit == rightLit || isConstLit(rightLit, false)) {
+          lit = leftLit;
+        } else if (leftLit == -rightLit || isConstLit(rightLit, true)) {
+          lit = constLit(true);
+        } else {
+          lit = newLiteral();
+          addClause({-leftLit, lit});
+          addClause({-rightLit, lit});
+          addClause({-lit, leftLit, rightLit});
+        }
+        break;
+      }
+      case Op::XOR: {
+        const int leftLit = encodeImpl(expr->getLeft());
+        if (isConstLit(leftLit, false)) {
+          lit = encodeImpl(expr->getRight());
+          break;
+        }
+        if (isConstLit(leftLit, true)) {
+          lit = -encodeImpl(expr->getRight());
+          break;
+        }
+        const int rightLit = encodeImpl(expr->getRight());
+        if (leftLit == rightLit) {
+          lit = constLit(false);
+        } else if (leftLit == -rightLit) {
+          lit = constLit(true);
+        } else if (isConstLit(rightLit, false)) {
+          lit = leftLit;
+        } else if (isConstLit(rightLit, true)) {
+          lit = -leftLit;
+        } else {
+          lit = newLiteral();
+          addClause({-lit, -leftLit, -rightLit});
+          addClause({-lit, leftLit, rightLit});
+          addClause({lit, -leftLit, rightLit});
+          addClause({lit, leftLit, -rightLit});
+        }
+        break;
+      }
+      case Op::NONE:
+      default:
+        throw std::runtime_error(
+            "Unsupported BoolExpr operator in constant-aware encoding");
+    }
+
+    nodeToLit_.emplace(expr, lit);
+    return lit;
+  }
+
+  SATSolverWrapper& solver_;
+  std::unordered_map<size_t, int> leafLits_;
+  const std::unordered_map<size_t, bool>& constantAssignments_;
+  VariablePartition variablePartition_;
+  ClausePartition clausePartition_;
+  std::unordered_map<BoolExpr*, int> nodeToLit_;
+  std::unordered_map<BoolExpr*, std::optional<bool>> constantValueByNode_;
+  int trueLit_ = 0;
+};
+
 void addLiteralEquivalenceForPartition(
     SATSolverWrapper& solver,
     int lhs,
@@ -814,6 +1142,72 @@ void addPairEqualities(
         rhs->second,
         complemented ? -lhs->second : lhs->second,
         partition);
+  }
+}
+
+void indexPairEqualities(
+    StateSemanticsIndex& index,
+    const std::vector<std::pair<size_t, size_t>>& pairs,
+    bool complemented) {
+  for (const auto& [lhsSymbol, rhsSymbol] : pairs) {
+    index.pairSemanticsByLhs[lhsSymbol].push_back(
+        {rhsSymbol, complemented});
+  }
+}
+
+StateSemanticsIndex buildStateSemanticsIndex(
+    const KInductionProblem& problem) {
+  StateSemanticsIndex index;
+  indexPairEqualities(
+      index, problem.complementedStatePairs0, /*complemented=*/true);
+  indexPairEqualities(
+      index, problem.complementedStatePairs1, /*complemented=*/true);
+  indexPairEqualities(
+      index, problem.sameFrameStateEqualityPairs0, /*complemented=*/false);
+  indexPairEqualities(
+      index, problem.sameFrameStateEqualityPairs1, /*complemented=*/false);
+  for (const auto& rails : problem.dualRailStatePairs) {
+    index.dualRailSemanticsByMayOne[rails.mayBeOne].push_back(
+        {rails.mayBeZero});
+  }
+  return index;
+}
+
+void addIndexedStateSemantics(
+    SATSolverWrapper& solver,
+    const StateSemanticsIndex& index,
+    const std::unordered_map<size_t, int>& leaves,
+    ClausePartition partition) {
+  for (const auto& [lhsSymbol, lhsLit] : leaves) {
+    const auto relations = index.pairSemanticsByLhs.find(lhsSymbol);
+    if (relations == index.pairSemanticsByLhs.end()) {
+      continue;
+    }
+    for (const IndexedStatePairSemantics& relation : relations->second) {
+      const auto rhs = leaves.find(relation.rhs);
+      if (rhs == leaves.end()) {
+        continue;
+      }
+      addLiteralEquivalenceForPartition(
+          solver,
+          rhs->second,
+          relation.complemented ? -lhsLit : lhsLit,
+          partition);
+    }
+  }
+
+  solver.setCraigClausePartition(partition);
+  for (const auto& [mayOneSymbol, mayOneLit] : leaves) {
+    const auto relations = index.dualRailSemanticsByMayOne.find(mayOneSymbol);
+    if (relations == index.dualRailSemanticsByMayOne.end()) {
+      continue;
+    }
+    for (const IndexedDualRailSemantics& relation : relations->second) {
+      const auto mayZero = leaves.find(relation.mayBeZero);
+      if (mayZero != leaves.end()) {
+        solver.addClause({mayOneLit, mayZero->second});
+      }
+    }
   }
 }
 
@@ -891,17 +1285,12 @@ std::unordered_map<size_t, bool> transitionConstantAssignmentsForEncoding(
   return assignments;
 }
 
-BoolExpr* transitionExpressionForEncoding(
-    BoolExpr* expr,
-    TransitionEncodingCache& cache) {
-  if (cache.constantAssignments.empty()) {
-    return expr;
-  }
-  // Auxiliary constants are transition-proven invariants.  Substituting them
-  // before Tseitin encoding keeps the Craig proof formula strict but avoids
-  // streaming clauses for dead BP support cones gated by those constants.
-  return substituteBoolExprVariables(
-      expr, cache.constantAssignments, cache.substitutionMemo);
+void resetTransitionEncodingCache(
+    TransitionEncodingCache& cache,
+    const KInductionProblem& problem,
+    const AuxiliaryStateInvariants& invariants) {
+  cache.constantAssignments =
+      transitionConstantAssignmentsForEncoding(problem, invariants);
 }
 
 std::unordered_map<size_t, bool> bootstrapStateConstants(
@@ -1052,10 +1441,12 @@ size_t localAuxiliaryPreservationScore(
 bool transitionPreservesStateConstant(
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
+    const StateSemanticsIndex& stateSemanticsIndex,
     size_t symbol,
     bool value,
     const std::unordered_map<size_t, bool>& constants,
-    const std::unordered_map<size_t, size_t>& complementPrimary) {
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    StateConstantPreservationCache* preservationCache) {
   const auto target =
       transitionConstantTargetFor(symbol, value, resolver, complementPrimary);
   if (!target.has_value()) {
@@ -1066,29 +1457,45 @@ bool transitionPreservesStateConstant(
   if (resolver.at(targetSymbol) == nullptr) {
     return false;
   }
-  if (const auto constantValue = constantBoolExprValue(resolver.at(targetSymbol));
+  BoolExpr* targetExpr = resolver.at(targetSymbol);
+  const StateConstantPreservationKey cacheKey{targetExpr, targetValue};
+  if (preservationCache != nullptr) {
+    const auto cached = preservationCache->find(cacheKey);
+    if (cached != preservationCache->end()) {
+      return cached->second;
+    }
+  }
+  const auto recordResult = [&](bool result) {
+    if (preservationCache != nullptr) {
+      preservationCache->emplace(cacheKey, result);
+    }
+    return result;
+  };
+
+  if (const auto constantValue = constantBoolExprValue(targetExpr);
       constantValue.has_value()) {
     // Constant next-state functions do not need a SAT proof. This case is
     // common in reset-pruned dual-rail cones, and avoiding thousands of tiny
     // KISSAT instances keeps local auxiliary mining from becoming the bottleneck.
-    return *constantValue == targetValue;
+    return recordResult(*constantValue == targetValue);
   }
   const auto& support = resolver.support(targetSymbol);
   if (const auto knownValue =
           evaluateBoolExprWithKnownSupport(
-              resolver.at(targetSymbol), support, constants);
+              targetExpr, support, constants);
       knownValue.has_value()) {
     // If the current candidate invariant already determines the transition
     // expression, the fixed-point local auxiliary loop can prove the constant
     // without opening another SAT solver.  Candidates that only hold because of
     // an invalid assumption are removed on the next fixed-point pass.
-    return *knownValue == targetValue;
+    return recordResult(*knownValue == targetValue);
   }
   if (support.size() > kAuxiliaryInvariantSupportLimit) {
-    return false;
+    return recordResult(false);
   }
 
-  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  solver.configureForSecLocalBooleanCheck(support.size());
   std::unordered_map<size_t, int> leaves;
   leaves.reserve(support.size());
   for (const size_t supportSymbol : support) {
@@ -1099,15 +1506,17 @@ bool transitionPreservesStateConstant(
 
   AuxiliaryStateInvariants assumptions;
   assumptions.constants.assign(constants.begin(), constants.end());
-  addStateSemantics(solver, problem, leaves, ClausePartition::A);
+  addIndexedStateSemantics(
+      solver, stateSemanticsIndex, leaves, ClausePartition::A);
   addAuxiliaryStateInvariants(
       solver, leaves, assumptions, ClausePartition::A);
 
   FrameFormulaEncoder encoder(
       solver, std::move(leaves), /*createMissingLeaves=*/true);
-  const int nextValue = encoder.encode(resolver.at(targetSymbol));
+  const int nextValue = encoder.encode(targetExpr);
   solver.addClause({targetValue ? -nextValue : nextValue});
-  return solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat;
+  return recordResult(
+      solver.solveStatus() == SATSolverWrapper::SolveStatus::Unsat);
 }
 
 bool addTransitionSupportWithinLimit(
@@ -1217,6 +1626,7 @@ size_t appendAuxiliaryEqualityCandidates(
 bool transitionPreservesStateEquality(
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
+    const StateSemanticsIndex& stateSemanticsIndex,
     size_t lhsSymbol,
     size_t rhsSymbol,
     const std::unordered_map<size_t, bool>& constants,
@@ -1238,7 +1648,8 @@ bool transitionPreservesStateEquality(
     return false;
   }
 
-  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  solver.configureForSecLocalBooleanCheck(support.size());
   auto leaves = allocateLeafLits(
       solver, sortedSymbols(support), VariablePartition::ALocal);
 
@@ -1248,7 +1659,8 @@ bool transitionPreservesStateEquality(
   // Auxiliary equalities are only trusted after this local induction check.
   // Same-design rail semantics are unconditional, so the proof may rely on
   // them just like every Craig image/fixed-point query does.
-  addStateSemantics(solver, problem, leaves, ClausePartition::A);
+  addIndexedStateSemantics(
+      solver, stateSemanticsIndex, leaves, ClausePartition::A);
   addAuxiliaryStateInvariants(
       solver, leaves, assumptions, ClausePartition::A);
 
@@ -1288,22 +1700,29 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
   const size_t candidateCount = constants.size();
   const TransitionExprResolver resolver(problem);
   const auto complementPrimary = primaryByComplement(problem);
+  const StateSemanticsIndex stateSemanticsIndex =
+      buildStateSemanticsIndex(problem);
   closeComplementStateConstants(problem, constants);
   bool changed = true;
   while (changed) {
     changed = false;
+    StateConstantPreservationCache preservationCache;
+    preservationCache.reserve(constants.size());
     for (auto it = constants.begin(); it != constants.end();) {
       if (transitionPreservesStateConstant(
               problem,
               resolver,
+              stateSemanticsIndex,
               it->first,
               it->second,
               constants,
-              complementPrimary)) {
+              complementPrimary,
+              &preservationCache)) {
         ++it;
         continue;
       }
       it = constants.erase(it);
+      preservationCache.clear();
       changed = true;
     }
   }
@@ -1321,6 +1740,7 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
       if (transitionPreservesStateEquality(
               problem,
               resolver,
+              stateSemanticsIndex,
               it->first,
               it->second,
               constants,
@@ -1396,12 +1816,14 @@ std::unordered_map<size_t, bool> localAuxiliaryCandidateConstants(
   const bool usePreservedExtraSlice =
       candidateCount > kLocalAuxiliaryInvariantLargeCandidateThreshold;
   std::unordered_map<size_t, size_t> faninScore;
+  size_t scoredRequestCount = 0;
   for (const size_t requested : sortedSymbols(candidateSymbols)) {
     const size_t target =
         transitionTargetFor(requested, resolver, complementPrimary);
     if (!resolver.contains(target)) {
       continue;
     }
+    ++scoredRequestCount;
     for (const size_t supportSymbol : resolver.support(target)) {
       if (constants.contains(supportSymbol)) {
         ++faninScore[supportSymbol];
@@ -1415,11 +1837,13 @@ std::unordered_map<size_t, bool> localAuxiliaryCandidateConstants(
   for (const auto& [symbol, value] : constants) {
     const auto fanin = faninScore.find(symbol);
     const size_t score = fanin == faninScore.end() ? 0 : fanin->second;
-    const size_t preservationScore = localAuxiliaryPreservationScore(
-        symbol, value, resolver, complementPrimary, scoringConstants);
     candidates.push_back({symbol, score});
-    if (usePreservedExtraSlice && preservationScore != 0) {
-      preservedCandidates.push_back({symbol, preservationScore + score});
+    if (usePreservedExtraSlice && score != 0) {
+      const size_t preservationScore = localAuxiliaryPreservationScore(
+          symbol, value, resolver, complementPrimary, scoringConstants);
+      if (preservationScore != 0) {
+        preservedCandidates.push_back({symbol, preservationScore + score});
+      }
     }
   }
   std::sort(
@@ -1500,6 +1924,8 @@ AuxiliaryStateInvariants deriveLocalAuxiliaryStateInvariants(
   if (localConstants.empty()) {
     return {};
   }
+  const StateSemanticsIndex stateSemanticsIndex =
+      buildStateSemanticsIndex(problem);
 
   std::unordered_set<size_t> selectedSymbols;
   selectedSymbols.reserve(localConstants.size());
@@ -1522,19 +1948,24 @@ AuxiliaryStateInvariants deriveLocalAuxiliaryStateInvariants(
   bool changed = true;
   while (changed) {
     changed = false;
+    StateConstantPreservationCache preservationCache;
+    preservationCache.reserve(localConstants.size());
     for (auto it = localConstants.begin(); it != localConstants.end();) {
       if (transitionPreservesStateConstant(
               problem,
               resolver,
+              stateSemanticsIndex,
               it->first,
               it->second,
               assumptions,
-              complementPrimary)) {
+              complementPrimary,
+              &preservationCache)) {
         ++it;
         continue;
       }
       assumptions.erase(it->first);
       it = localConstants.erase(it);
+      preservationCache.clear();
       changed = true;
     }
   }
@@ -1583,6 +2014,7 @@ AuxiliaryStateInvariants deriveLocalAuxiliaryStateInvariants(
       if (transitionPreservesStateEquality(
               problem,
               resolver,
+              stateSemanticsIndex,
               it->first,
               it->second,
               assumptions,
@@ -1811,10 +2243,72 @@ std::unordered_set<size_t> transitionProjectionSupport(
   return support;
 }
 
+size_t countTransitionExpressionNodes(
+    BoolExpr* root,
+    std::unordered_set<BoolExpr*>& visited) {
+  if (root == nullptr) {
+    return 0;
+  }
+  const size_t before = visited.size();
+  std::vector<BoolExpr*> stack{root};
+  while (!stack.empty()) {
+    BoolExpr* node = stack.back();
+    stack.pop_back();
+    if (node == nullptr || !visited.insert(node).second) {
+      continue;
+    }
+    if (node->getLeft() != nullptr) {
+      stack.push_back(node->getLeft());
+    }
+    if (node->getRight() != nullptr) {
+      stack.push_back(node->getRight());
+    }
+  }
+  return visited.size() - before;
+}
+
+ProjectedTransitionBuildEstimate estimateProjectedTransitionBuild(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::vector<std::unordered_set<size_t>>& transitionRequestsByFrame) {
+  const auto states = stateSymbolSet(problem);
+  std::unordered_set<size_t> support = trackedStates;
+  ProjectedTransitionBuildEstimate estimate;
+  for (const auto& transitionRequests : transitionRequestsByFrame) {
+    std::unordered_set<size_t> encodedTargets;
+    std::unordered_set<BoolExpr*> frameExpressionNodes;
+    for (const size_t requested : sortedSymbols(transitionRequests)) {
+      if (!trackedStates.contains(requested)) {
+        continue;
+      }
+      const size_t target =
+          transitionTargetFor(requested, resolver, complementPrimary);
+      if (!trackedStates.contains(target) || !resolver.contains(target) ||
+          !encodedTargets.insert(target).second) {
+        continue;
+      }
+      ++estimate.encodedTargets;
+      estimate.expressionNodes += countTransitionExpressionNodes(
+          resolver.at(target), frameExpressionNodes);
+      for (const size_t symbol : resolver.support(target)) {
+        if (states.contains(symbol)) {
+          support.insert(symbol);
+        }
+      }
+    }
+  }
+  closeSameDesignStateSemantics(problem, support);
+  estimate.stateSupport = support.size();
+  return estimate;
+}
+
 TransitionEncodingResult addProjectedTransition(
     SATSolverWrapper& solver,
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
+    const StateSemanticsIndex& stateSemanticsIndex,
     const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
     const std::unordered_set<size_t>& transitionRequests,
@@ -1829,14 +2323,7 @@ TransitionEncodingResult addProjectedTransition(
   // Select the transition's Craig side before encoding, not only before adding
   // the final next-state equivalence.
   solver.setCraigClausePartition(clausePartition);
-  for (const size_t symbol : problem.inputSymbols) {
-    if (!currentLits.contains(symbol)) {
-      currentLits.emplace(symbol, solver.newVar() + 2);
-    }
-  }
-
-  FrameFormulaEncoder encoder(
-      solver, std::move(currentLits), /*createMissingLeaves=*/true);
+  std::vector<size_t> targets;
   std::unordered_set<size_t> encodedTargets;
   // SAT search and Craig interpolation are sensitive to clause order. Keep the
   // projected transition deterministic so repeated IMC batches do not depend on
@@ -1850,19 +2337,42 @@ TransitionEncodingResult addProjectedTransition(
     if (!resolver.contains(target) || !encodedTargets.insert(target).second) {
       continue;
     }
-    const auto next = nextStateLits.find(target);
-    if (next == nextStateLits.end()) {
+    if (!nextStateLits.contains(target)) {
       continue;
     }
-    solver.setCraigVariablePartition(localVariablePartition);
-    solver.setCraigClausePartition(clausePartition);
-    const int transitionLit = encoder.encode(transitionExpressionForEncoding(
-        resolver.at(target), transitionEncodingCache));
-    addLiteralEquivalenceForPartition(
-        solver, next->second, transitionLit, clausePartition);
+    targets.push_back(target);
+  }
+  std::unordered_map<size_t, int> leaves;
+  if (transitionEncodingCache.constantAssignments.empty()) {
+    FrameFormulaEncoder encoder(
+        solver, std::move(currentLits), /*createMissingLeaves=*/true);
+    for (const size_t target : targets) {
+      const auto next = nextStateLits.find(target);
+      solver.setCraigVariablePartition(localVariablePartition);
+      solver.setCraigClausePartition(clausePartition);
+      const int transitionLit = encoder.encode(resolver.at(target));
+      addLiteralEquivalenceForPartition(
+          solver, next->second, transitionLit, clausePartition);
+    }
+    leaves = encoder.leafLits();
+  } else {
+    ConstantAwareFrameFormulaEncoder encoder(
+        solver,
+        std::move(currentLits),
+        transitionEncodingCache.constantAssignments,
+        localVariablePartition,
+        clausePartition);
+    for (const size_t target : targets) {
+      const auto next = nextStateLits.find(target);
+      solver.setCraigVariablePartition(localVariablePartition);
+      solver.setCraigClausePartition(clausePartition);
+      const int transitionLit = encoder.encode(resolver.at(target));
+      addLiteralEquivalenceForPartition(
+          solver, next->second, transitionLit, clausePartition);
+    }
+    leaves = encoder.leafLits();
   }
 
-  auto leaves = encoder.leafLits();
   addResetInputValue(
       solver,
       problem,
@@ -1872,7 +2382,8 @@ TransitionEncodingResult addProjectedTransition(
       clausePartition);
   if (shouldEncodeProjectedLocalStateSemantics(
           leaves.size(), trackedStates.size())) {
-    addStateSemantics(solver, problem, leaves, clausePartition);
+    addIndexedStateSemantics(
+        solver, stateSemanticsIndex, leaves, clausePartition);
   } else {
     // The transition support leaves are local to one Craig side.  Dropping
     // local same-frame rail semantics weakens the projected query, so every
@@ -2159,6 +2670,8 @@ struct FrontierResult {
   std::int64_t interpolationElapsedMilliseconds = 0;
   bool focusedTransitionProjection = false;
   size_t largestFocusedTransitionRequestCount = 0;
+  bool buildBudgetExceeded = false;
+  ProjectedTransitionBuildEstimate estimatedTransitionBuild;
 
   void recordTransitionRequests(
       size_t trackedStateCount,
@@ -2608,6 +3121,23 @@ bool craigProjectionBudgetExceeded(
          projectionStates > budget.maxProjectionStates;
 }
 
+bool craigTransitionBuildBudgetExceeded(
+    const CraigImcGrowthBudget& budget,
+    const ProjectedTransitionBuildEstimate& estimate) {
+  if (!budget.enabled) {
+    return false;
+  }
+  const size_t supportLimit =
+      budget.maxProjectionStates == 0
+          ? kCraigProjectedTransitionBuildSupportLimit
+          : std::min(
+                budget.maxProjectionStates,
+                kCraigProjectedTransitionBuildSupportLimit);
+  return estimate.stateSupport > supportLimit ||
+         estimate.encodedTargets > kCraigProjectedTransitionBuildTargetLimit ||
+         estimate.expressionNodes > kCraigProjectedTransitionBuildNodeLimit;
+}
+
 bool shouldRefineFocusedProjectionAfterGrowthBudget(
     const FrontierResult& frontier,
     const std::unordered_set<size_t>& trackedStates) {
@@ -2699,6 +3229,34 @@ void emitCraigProjectionBudgetExceeded(
       " projection_round=", projectionRound,
       " states=", projectionStates,
       " state_limit=", budget.maxProjectionStates);
+}
+
+void emitCraigTransitionBuildBudgetExceeded(
+    size_t lookahead,
+    size_t qExpansionPass,
+    size_t trackedStates,
+    const ProjectedTransitionBuildEstimate& estimate,
+    size_t largestTransitionRequestCount,
+    const CraigImcGrowthBudget& budget) {
+  const size_t supportLimit =
+      budget.maxProjectionStates == 0
+          ? kCraigProjectedTransitionBuildSupportLimit
+          : std::min(
+                budget.maxProjectionStates,
+                kCraigProjectedTransitionBuildSupportLimit);
+  emitSecDiag(
+      "SEC diag: imc Craig growth budget exceeded "
+      "reason=transition_build",
+      " lookahead=", lookahead,
+      " q_pass=", qExpansionPass,
+      " tracked_states=", trackedStates,
+      " transition_support=", estimate.stateSupport,
+      " transition_targets=", estimate.encodedTargets,
+      " transition_nodes=", estimate.expressionNodes,
+      " largest_transition_requests=", largestTransitionRequestCount,
+      " support_limit=", supportLimit,
+      " target_limit=", kCraigProjectedTransitionBuildTargetLimit,
+      " node_limit=", kCraigProjectedTransitionBuildNodeLimit);
 }
 
 void addStateAssignments(
@@ -2902,13 +3460,56 @@ FrontierResult deriveLookaheadFrontierRegion(
     const std::vector<InterpolantRegion>& reachableRegions,
     const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
+    TransitionEncodingCache& transitionEncodingCache,
+    const CraigImcGrowthBudget& growthBudget,
     bool sourceIncludesConcreteBootstrapCube,
     bool directConcreteCubeSourceEnabled,
     size_t lookahead,
     size_t qExpansionPass) {
+  std::vector<std::unordered_set<size_t>> transitionRequestsByFrame;
+  transitionRequestsByFrame.reserve(lookahead);
+  size_t largestTransitionRequestCount = 0;
+  for (size_t frame = 0; frame < lookahead; ++frame) {
+    transitionRequestsByFrame.push_back(focusedImageTransitionRequests(
+        problem,
+        resolver,
+        complementPrimary,
+        trackedStates,
+        helperInvariantRegions.size(),
+        lookahead - frame));
+    largestTransitionRequestCount = std::max(
+        largestTransitionRequestCount,
+        transitionRequestsByFrame.back().size());
+  }
+  const ProjectedTransitionBuildEstimate estimatedTransitionBuild =
+      estimateProjectedTransitionBuild(
+          problem,
+          resolver,
+          complementPrimary,
+          trackedStates,
+          transitionRequestsByFrame);
+  if (craigTransitionBuildBudgetExceeded(
+          growthBudget, estimatedTransitionBuild)) {
+    FrontierResult result;
+    result.buildBudgetExceeded = true;
+    result.estimatedTransitionBuild = estimatedTransitionBuild;
+    result.recordTransitionRequests(
+        trackedStates.size(), transitionRequestsByFrame.front());
+    emitCraigTransitionBuildBudgetExceeded(
+        lookahead,
+        qExpansionPass,
+        trackedStates.size(),
+        estimatedTransitionBuild,
+        largestTransitionRequestCount,
+        growthBudget);
+    return result;
+  }
+
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
   solver.enableCraigInterpolation();
   configureCraigProjectionSolver(solver, trackedStates.size(), "image");
+  configureCraigProjectionSolverForTransitionRequests(
+      solver, largestTransitionRequestCount, "image_transition");
 
   const std::vector<size_t> tracked = sortedSymbols(trackedStates);
   std::vector<std::unordered_map<size_t, int>> frameLits(lookahead + 1);
@@ -2998,21 +3599,15 @@ FrontierResult deriveLookaheadFrontierRegion(
       " regions=", reachableRegions.size(),
       " tracked_states=", trackedStates.size(),
       " direct_cube_source=", useDirectConcreteCube ? 1 : 0);
-  TransitionEncodingCache transitionEncodingCache{
-      transitionConstantAssignmentsForEncoding(problem, auxiliaryInvariants),
-      /*substitutionMemo=*/{}};
-  const std::unordered_set<size_t> imageTransitionRequests =
-      focusedImageTransitionRequests(
-          problem,
-          resolver,
-          complementPrimary,
-          trackedStates,
-          helperInvariantRegions.size(),
-          lookahead);
+  const StateSemanticsIndex stateSemanticsIndex =
+      buildStateSemanticsIndex(problem);
+  const std::unordered_set<size_t>& imageTransitionRequests =
+      transitionRequestsByFrame.front();
   const TransitionEncodingResult transition = addProjectedTransition(
       solver,
       problem,
       resolver,
+      stateSemanticsIndex,
       complementPrimary,
       trackedStates,
       imageTransitionRequests,
@@ -3038,20 +3633,15 @@ FrontierResult deriveLookaheadFrontierRegion(
     }
   }
   for (size_t frame = 1; frame < lookahead; ++frame) {
-    const std::unordered_set<size_t> suffixTransitionRequests =
-        focusedImageTransitionRequests(
-            problem,
-            resolver,
-            complementPrimary,
-            trackedStates,
-            helperInvariantRegions.size(),
-            lookahead - frame);
+    const std::unordered_set<size_t>& suffixTransitionRequests =
+        transitionRequestsByFrame[frame];
     result.recordTransitionRequests(
         trackedStates.size(), suffixTransitionRequests);
     const TransitionEncodingResult suffixTransition = addProjectedTransition(
         solver,
         problem,
         resolver,
+        stateSemanticsIndex,
         complementPrimary,
         trackedStates,
         suffixTransitionRequests,
@@ -3073,15 +3663,16 @@ FrontierResult deriveLookaheadFrontierRegion(
       lookahead,
       " q_pass=", qExpansionPass,
       " suffix_frames=", lookahead > 0 ? lookahead - 1 : 0,
-      " cached_transition_exprs=",
-      transitionEncodingCache.substitutionMemo.size(),
+      " largest_transition_requests=",
+      largestTransitionRequestCount,
       " elapsed_ms=", elapsedMilliseconds(buildStart));
   closeSameDesignStateSemantics(problem, result.transitionStateSupport);
-  addStateSemantics(solver, problem, frameLits[1], ClausePartition::A);
+  addIndexedStateSemantics(
+      solver, stateSemanticsIndex, frameLits[1], ClausePartition::A);
   addAuxiliaryStateInvariants(
       solver, frameLits[1], auxiliaryInvariants, ClausePartition::A);
-  addStateSemantics(
-      solver, problem, frameLits[lookahead], ClausePartition::B);
+  addIndexedStateSemantics(
+      solver, stateSemanticsIndex, frameLits[lookahead], ClausePartition::B);
   addAuxiliaryStateInvariants(
       solver, frameLits[lookahead], auxiliaryInvariants, ClausePartition::B);
   // McMillan's suffix checks whether the bad set appears at any suffix frame,
@@ -3379,6 +3970,9 @@ CraigImcResult runWithProjection(
   size_t qExpansionPass = 1;
   size_t localAuxiliaryRetryCount = 0;
   std::vector<InterpolantRegion> reachableRegions{concreteInitialRegion};
+  TransitionEncodingCache transitionEncodingCache{
+      transitionConstantAssignmentsForEncoding(
+          problem, activeAuxiliaryInvariants)};
   while (lookahead <= maxLookahead) {
     frontier = deriveLookaheadFrontierRegion(
         problem,
@@ -3388,11 +3982,16 @@ CraigImcResult runWithProjection(
         reachableRegions,
         helperInvariantRegions,
         activeAuxiliaryInvariants,
+        transitionEncodingCache,
+        growthBudget,
         hasConcreteInitialCube,
         directConcreteCubeSourceEnabled,
         lookahead,
         qExpansionPass);
     if (!frontier.region.has_value()) {
+      if (frontier.buildBudgetExceeded) {
+        return {CraigImcStatus::BudgetExceeded, lookahead};
+      }
       const bool skipLocalAuxiliaryMining =
           shouldSkipCraigLocalAuxiliaryMiningForLargeRetainedHelper(
               frontier.usesFocusedTransitionProjection(),
@@ -3422,6 +4021,8 @@ CraigImcResult runWithProjection(
                   projectionAuxiliaryInvariants,
                   localInvariants)) {
             ++localAuxiliaryRetryCount;
+            resetTransitionEncodingCache(
+                transitionEncodingCache, problem, activeAuxiliaryInvariants);
             // A projected SAT model may only exist because support state bits
             // are unconstrained.  Retry a tiny bounded number of local slices
             // before projection refinement so BP/AES cones can harvest the next
@@ -3562,6 +4163,8 @@ CraigImcResult runWithProjection(
                 projectionAuxiliaryInvariants,
                 localInvariants)) {
           ++localAuxiliaryRetryCount;
+          resetTransitionEncodingCache(
+              transitionEncodingCache, problem, activeAuxiliaryInvariants);
           emitSecDiag(
               "SEC diag: imc Craig retries selected local auxiliary "
               "invariants selected=",
