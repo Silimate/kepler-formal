@@ -129,6 +129,16 @@ add_dependencies(cadical cadical_external)
 add_subdirectory(src)
 add_subdirectory(thirdparty)
 
+if(TARGET slang_slang)
+  # fmt 12 no longer exposes fmt::format through <fmt/core.h>. Keep vendored
+  # slang sources untouched and provide the full formatting declarations here.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(slang_slang PRIVATE -include fmt/format.h)
+  elseif(MSVC)
+    target_compile_options(slang_slang PRIVATE /FIfmt/format.h)
+  endif()
+endif()
+
 option(ENABLE_UNIT_TESTS "Enable unit tests" ON)
 if(ENABLE_UNIT_TESTS)
  include(CTest)
