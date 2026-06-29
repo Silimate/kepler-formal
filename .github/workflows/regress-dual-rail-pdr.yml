@@ -150,3 +150,4 @@ jobs:
     with:
       sec_encoding: dual_rail_steady
       skip_bp_final: true
+      require_full_coverage: true
