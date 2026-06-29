@@ -12038,17 +12038,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // A single hard output cannot be bisected further. Bound the projected
-  // transition build so strict Craig IMC returns budget-exceeded before
-  // materializing a memory-heavy image query.
+  // A single hard output cannot be bisected further. The transition build can
+  // complete, but the projection-state guard still reports the strict growth
+  // budget before importing an oversized refinement slice.
   EXPECT_NE(
       stderrOutput.find(
-          "imc Craig growth budget exceeded reason=transition_build"),
+          "imc Craig growth budget exceeded reason=projection_states"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(stderrOutput.find(" transition_targets="), std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(stderrOutput.find(" transition_nodes="), std::string::npos)
+  EXPECT_NE(stderrOutput.find(" state_limit=32"), std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
 }

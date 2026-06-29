@@ -4,10 +4,13 @@
 #include "imc/CraigInterpolatingModelChecker.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
-#include <cstring>
+#include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
+#include <memory_resource>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -76,9 +79,10 @@ constexpr size_t
     kCraigBroadRetainedHelperFocusedImageTransitionRequestLimit = 8192;
 constexpr size_t kCraigFocusedProjectionRefinementSupportLimit = 65536;
 constexpr size_t kCraigFocusedProjectionRefinementLimit = 4096;
-constexpr size_t kCraigProjectedTransitionBuildSupportLimit = 49152;
-constexpr size_t kCraigProjectedTransitionBuildTargetLimit = 2048;
-constexpr size_t kCraigProjectedTransitionBuildNodeLimit = 200000;
+constexpr size_t kCraigProjectedTransitionBuildSupportLimit = 131072;
+constexpr size_t kCraigProjectedTransitionBuildTargetLimit = 12000;
+constexpr size_t kCraigProjectedTransitionBuildNodeLimit = 1000000;
+constexpr size_t kCraigMaxSolverTseitinReserveHint = 65536;
 constexpr size_t kCraigFocusedProjectionBulkSupportLimit = 49152;
 constexpr size_t kCraigFocusedProjectionBulkCandidateLimit = 32768;
 // Saturated focused projections are a last chance after projection stops
@@ -128,6 +132,17 @@ struct StateSemanticsIndex {
       dualRailSemanticsByMayOne;
 };
 
+struct CraigProblemStaticIndex {
+  std::unordered_set<size_t> states;
+  StateSemanticsIndex stateSemantics;
+};
+
+struct ProjectedTransitionFrame {
+  std::unordered_set<size_t> requests;
+  std::vector<size_t> targets;
+  size_t expressionNodes = 0;
+};
+
 struct StateConstantPreservationKey {
   BoolExpr* expr = nullptr;
   bool value = false;
@@ -158,6 +173,15 @@ struct ProjectedTransitionBuildEstimate {
   size_t encodedTargets = 0;
   size_t expressionNodes = 0;
 };
+
+struct ProjectedTransitionPlan {
+  std::vector<ProjectedTransitionFrame> frames;
+  ProjectedTransitionBuildEstimate estimate;
+  size_t largestTransitionRequestCount = 0;
+};
+
+using ProjectedTransitionPlanCache =
+    std::unordered_map<size_t, ProjectedTransitionPlan>;
 
 struct RegionVariableKey {
   bool isState = false;
@@ -729,8 +753,8 @@ std::unordered_set<size_t> selectCappedFocusedImageTransitionRequests(
 }
 
 std::unordered_set<size_t> initialTrackedStates(
-    const KInductionProblem& problem) {
-  const auto states = stateSymbolSet(problem);
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& states) {
   std::unordered_set<size_t> tracked;
   for (const size_t symbol : problem.bad->getSupportVars()) {
     if (states.contains(symbol)) {
@@ -745,6 +769,7 @@ std::unordered_set<size_t> focusedImageTransitionRequests(
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
     const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& states,
     const std::unordered_set<size_t>& trackedStates,
     size_t helperInvariantRegionCount,
     size_t lookahead) {
@@ -754,7 +779,6 @@ std::unordered_set<size_t> focusedImageTransitionRequests(
   const size_t requestLimit = focusedImageTransitionRequestLimit(
       trackedStates.size(), helperInvariantRegionCount);
 
-  const auto states = stateSymbolSet(problem);
   std::unordered_set<size_t> requests;
   for (const size_t symbol : problem.bad->getSupportVars()) {
     if (states.contains(symbol) && trackedStates.contains(symbol)) {
@@ -838,6 +862,30 @@ std::unordered_set<size_t> focusedImageTransitionRequests(
   return requests;
 }
 
+std::vector<size_t> projectedTransitionTargets(
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& trackedStates,
+    const std::unordered_set<size_t>& transitionRequests) {
+  std::vector<size_t> targets;
+  targets.reserve(transitionRequests.size());
+  std::unordered_set<size_t> encodedTargets;
+  encodedTargets.reserve(transitionRequests.size());
+  for (const size_t requested : sortedSymbols(transitionRequests)) {
+    if (!trackedStates.contains(requested)) {
+      continue;
+    }
+    const size_t target =
+        transitionTargetFor(requested, resolver, complementPrimary);
+    if (!trackedStates.contains(target) || !resolver.contains(target) ||
+        !encodedTargets.insert(target).second) {
+      continue;
+    }
+    targets.push_back(target);
+  }
+  return targets;
+}
+
 std::unordered_map<size_t, int> allocateLeafLits(
     SATSolverWrapper& solver,
     const std::vector<size_t>& symbols,
@@ -858,15 +906,33 @@ class ConstantAwareFrameFormulaEncoder {
       std::unordered_map<size_t, int> leafLits,
       const std::unordered_map<size_t, bool>& constantAssignments,
       VariablePartition variablePartition,
-      ClausePartition clausePartition)
+      ClausePartition clausePartition,
+      size_t expectedNodeHint = 0)
       : solver_(solver),
         leafLits_(std::move(leafLits)),
         constantAssignments_(constantAssignments),
         variablePartition_(variablePartition),
-        clausePartition_(clausePartition) {
-    nodeToLit_.reserve(std::max(
+        clausePartition_(clausePartition),
+        nodeArena_(nodeArenaBuffer_.data(), nodeArenaBuffer_.size()),
+        nodeToLit_(&nodeArena_) {
+    size_t expectedNodes = std::max(
         static_cast<size_t>(256),
-        leafLits_.size() * static_cast<size_t>(8)));
+        leafLits_.size() * static_cast<size_t>(8));
+    if (expectedNodeHint != 0) {
+      const size_t hintedNodes =
+          expectedNodeHint +
+          std::max(expectedNodeHint / 8, static_cast<size_t>(256));
+      expectedNodes = std::max(expectedNodes, hintedNodes);
+      leafLits_.reserve(
+          leafLits_.size() +
+          std::min(
+              std::max(expectedNodeHint / 16, static_cast<size_t>(256)),
+              static_cast<size_t>(65536)));
+    }
+    nodeToLit_.reserve(expectedNodes);
+    constantValueByNode_.reserve(expectedNodes);
+    solver_.reserveAdditionalVars(
+        std::min(expectedNodes, kCraigMaxSolverTseitinReserveHint));
   }
 
   int encode(BoolExpr* expr) {
@@ -1111,7 +1177,9 @@ class ConstantAwareFrameFormulaEncoder {
   const std::unordered_map<size_t, bool>& constantAssignments_;
   VariablePartition variablePartition_;
   ClausePartition clausePartition_;
-  std::unordered_map<BoolExpr*, int> nodeToLit_;
+  std::array<std::byte, 16 * 1024> nodeArenaBuffer_{};
+  std::pmr::monotonic_buffer_resource nodeArena_;
+  std::pmr::unordered_map<BoolExpr*, int> nodeToLit_;
   std::unordered_map<BoolExpr*, std::optional<bool>> constantValueByNode_;
   int trueLit_ = 0;
 };
@@ -1892,6 +1960,7 @@ std::unordered_map<size_t, bool> localAuxiliaryCandidateConstants(
 AuxiliaryStateInvariants deriveLocalAuxiliaryStateInvariants(
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
+    const StateSemanticsIndex& stateSemanticsIndex,
     const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& candidateSymbols,
     const AuxiliaryStateInvariants& existingInvariants) {
@@ -1924,9 +1993,6 @@ AuxiliaryStateInvariants deriveLocalAuxiliaryStateInvariants(
   if (localConstants.empty()) {
     return {};
   }
-  const StateSemanticsIndex stateSemanticsIndex =
-      buildStateSemanticsIndex(problem);
-
   std::unordered_set<size_t> selectedSymbols;
   selectedSymbols.reserve(localConstants.size());
   for (const auto& [symbol, value] : localConstants) {
@@ -2270,28 +2336,20 @@ size_t countTransitionExpressionNodes(
 ProjectedTransitionBuildEstimate estimateProjectedTransitionBuild(
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
-    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& states,
     const std::unordered_set<size_t>& trackedStates,
-    const std::vector<std::unordered_set<size_t>>& transitionRequestsByFrame) {
-  const auto states = stateSymbolSet(problem);
+    std::vector<ProjectedTransitionFrame>& transitionFrames) {
   std::unordered_set<size_t> support = trackedStates;
   ProjectedTransitionBuildEstimate estimate;
-  for (const auto& transitionRequests : transitionRequestsByFrame) {
-    std::unordered_set<size_t> encodedTargets;
+  for (ProjectedTransitionFrame& frame : transitionFrames) {
+    frame.expressionNodes = 0;
     std::unordered_set<BoolExpr*> frameExpressionNodes;
-    for (const size_t requested : sortedSymbols(transitionRequests)) {
-      if (!trackedStates.contains(requested)) {
-        continue;
-      }
-      const size_t target =
-          transitionTargetFor(requested, resolver, complementPrimary);
-      if (!trackedStates.contains(target) || !resolver.contains(target) ||
-          !encodedTargets.insert(target).second) {
-        continue;
-      }
+    for (const size_t target : frame.targets) {
       ++estimate.encodedTargets;
-      estimate.expressionNodes += countTransitionExpressionNodes(
+      const size_t expressionNodes = countTransitionExpressionNodes(
           resolver.at(target), frameExpressionNodes);
+      frame.expressionNodes += expressionNodes;
+      estimate.expressionNodes += expressionNodes;
       for (const size_t symbol : resolver.support(target)) {
         if (states.contains(symbol)) {
           support.insert(symbol);
@@ -2304,50 +2362,82 @@ ProjectedTransitionBuildEstimate estimateProjectedTransitionBuild(
   return estimate;
 }
 
+const ProjectedTransitionPlan& projectedTransitionPlanForLookahead(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& resolver,
+    const std::unordered_map<size_t, size_t>& complementPrimary,
+    const std::unordered_set<size_t>& states,
+    const std::unordered_set<size_t>& trackedStates,
+    size_t helperInvariantRegionCount,
+    size_t lookahead,
+    ProjectedTransitionPlanCache& cache) {
+  auto [planIt, inserted] = cache.try_emplace(lookahead);
+  ProjectedTransitionPlan& plan = planIt->second;
+  if (!inserted) {
+    return plan;
+  }
+
+  plan.frames.reserve(lookahead);
+  for (size_t frame = 0; frame < lookahead; ++frame) {
+    ProjectedTransitionFrame transitionFrame;
+    transitionFrame.requests = focusedImageTransitionRequests(
+        problem,
+        resolver,
+        complementPrimary,
+        states,
+        trackedStates,
+        helperInvariantRegionCount,
+        lookahead - frame);
+    transitionFrame.targets = projectedTransitionTargets(
+        resolver,
+        complementPrimary,
+        trackedStates,
+        transitionFrame.requests);
+    plan.largestTransitionRequestCount = std::max(
+        plan.largestTransitionRequestCount,
+        transitionFrame.requests.size());
+    plan.frames.push_back(std::move(transitionFrame));
+  }
+  plan.estimate = estimateProjectedTransitionBuild(
+      problem,
+      resolver,
+      states,
+      trackedStates,
+      plan.frames);
+  return plan;
+}
+
 TransitionEncodingResult addProjectedTransition(
     SATSolverWrapper& solver,
     const KInductionProblem& problem,
     const TransitionExprResolver& resolver,
     const StateSemanticsIndex& stateSemanticsIndex,
-    const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
-    const std::unordered_set<size_t>& transitionRequests,
+    const std::vector<size_t>& transitionTargets,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     TransitionEncodingCache& transitionEncodingCache,
-    std::unordered_map<size_t, int> currentLits,
+    const std::unordered_map<size_t, int>& currentLits,
     const std::unordered_map<size_t, int>& nextStateLits,
     VariablePartition localVariablePartition,
-    ClausePartition clausePartition) {
+    ClausePartition clausePartition,
+    size_t transitionExpressionNodeHint = 0) {
   solver.setCraigVariablePartition(localVariablePartition);
   // FrameFormulaEncoder emits Tseitin clauses while encoding each transition.
   // Select the transition's Craig side before encoding, not only before adding
   // the final next-state equivalence.
   solver.setCraigClausePartition(clausePartition);
-  std::vector<size_t> targets;
-  std::unordered_set<size_t> encodedTargets;
-  // SAT search and Craig interpolation are sensitive to clause order. Keep the
-  // projected transition deterministic so repeated IMC batches do not depend on
-  // unordered_set insertion history.
-  for (const size_t requested : sortedSymbols(transitionRequests)) {
-    if (!trackedStates.contains(requested)) {
-      continue;
-    }
-    const size_t target =
-        transitionTargetFor(requested, resolver, complementPrimary);
-    if (!resolver.contains(target) || !encodedTargets.insert(target).second) {
-      continue;
-    }
-    if (!nextStateLits.contains(target)) {
-      continue;
-    }
-    targets.push_back(target);
-  }
   std::unordered_map<size_t, int> leaves;
   if (transitionEncodingCache.constantAssignments.empty()) {
     FrameFormulaEncoder encoder(
-        solver, std::move(currentLits), /*createMissingLeaves=*/true);
-    for (const size_t target : targets) {
+        solver,
+        std::unordered_map<size_t, int>(currentLits),
+        /*createMissingLeaves=*/true,
+        transitionExpressionNodeHint);
+    for (const size_t target : transitionTargets) {
       const auto next = nextStateLits.find(target);
+      if (next == nextStateLits.end()) {
+        continue;
+      }
       solver.setCraigVariablePartition(localVariablePartition);
       solver.setCraigClausePartition(clausePartition);
       const int transitionLit = encoder.encode(resolver.at(target));
@@ -2358,12 +2448,16 @@ TransitionEncodingResult addProjectedTransition(
   } else {
     ConstantAwareFrameFormulaEncoder encoder(
         solver,
-        std::move(currentLits),
+        std::unordered_map<size_t, int>(currentLits),
         transitionEncodingCache.constantAssignments,
         localVariablePartition,
-        clausePartition);
-    for (const size_t target : targets) {
+        clausePartition,
+        transitionExpressionNodeHint);
+    for (const size_t target : transitionTargets) {
       const auto next = nextStateLits.find(target);
+      if (next == nextStateLits.end()) {
+        continue;
+      }
       solver.setCraigVariablePartition(localVariablePartition);
       solver.setCraigClausePartition(clausePartition);
       const int transitionLit = encoder.encode(resolver.at(target));
@@ -3127,12 +3221,7 @@ bool craigTransitionBuildBudgetExceeded(
   if (!budget.enabled) {
     return false;
   }
-  const size_t supportLimit =
-      budget.maxProjectionStates == 0
-          ? kCraigProjectedTransitionBuildSupportLimit
-          : std::min(
-                budget.maxProjectionStates,
-                kCraigProjectedTransitionBuildSupportLimit);
+  const size_t supportLimit = kCraigProjectedTransitionBuildSupportLimit;
   return estimate.stateSupport > supportLimit ||
          estimate.encodedTargets > kCraigProjectedTransitionBuildTargetLimit ||
          estimate.expressionNodes > kCraigProjectedTransitionBuildNodeLimit;
@@ -3238,12 +3327,8 @@ void emitCraigTransitionBuildBudgetExceeded(
     const ProjectedTransitionBuildEstimate& estimate,
     size_t largestTransitionRequestCount,
     const CraigImcGrowthBudget& budget) {
-  const size_t supportLimit =
-      budget.maxProjectionStates == 0
-          ? kCraigProjectedTransitionBuildSupportLimit
-          : std::min(
-                budget.maxProjectionStates,
-                kCraigProjectedTransitionBuildSupportLimit);
+  (void)budget;
+  const size_t supportLimit = kCraigProjectedTransitionBuildSupportLimit;
   emitSecDiag(
       "SEC diag: imc Craig growth budget exceeded "
       "reason=transition_build",
@@ -3454,6 +3539,7 @@ FrontierResult deriveBoundedFrontierRegion(
 
 FrontierResult deriveLookaheadFrontierRegion(
     const KInductionProblem& problem,
+    const CraigProblemStaticIndex& staticIndex,
     const TransitionExprResolver& resolver,
     const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
@@ -3461,40 +3547,35 @@ FrontierResult deriveLookaheadFrontierRegion(
     const std::vector<InterpolantRegion>& helperInvariantRegions,
     const AuxiliaryStateInvariants& auxiliaryInvariants,
     TransitionEncodingCache& transitionEncodingCache,
+    ProjectedTransitionPlanCache& transitionPlanCache,
     const CraigImcGrowthBudget& growthBudget,
     bool sourceIncludesConcreteBootstrapCube,
     bool directConcreteCubeSourceEnabled,
     size_t lookahead,
     size_t qExpansionPass) {
-  std::vector<std::unordered_set<size_t>> transitionRequestsByFrame;
-  transitionRequestsByFrame.reserve(lookahead);
-  size_t largestTransitionRequestCount = 0;
-  for (size_t frame = 0; frame < lookahead; ++frame) {
-    transitionRequestsByFrame.push_back(focusedImageTransitionRequests(
-        problem,
-        resolver,
-        complementPrimary,
-        trackedStates,
-        helperInvariantRegions.size(),
-        lookahead - frame));
-    largestTransitionRequestCount = std::max(
-        largestTransitionRequestCount,
-        transitionRequestsByFrame.back().size());
-  }
-  const ProjectedTransitionBuildEstimate estimatedTransitionBuild =
-      estimateProjectedTransitionBuild(
+  const ProjectedTransitionPlan& transitionPlan =
+      projectedTransitionPlanForLookahead(
           problem,
           resolver,
           complementPrimary,
+          staticIndex.states,
           trackedStates,
-          transitionRequestsByFrame);
+          helperInvariantRegions.size(),
+          lookahead,
+          transitionPlanCache);
+  const std::vector<ProjectedTransitionFrame>& transitionFrames =
+      transitionPlan.frames;
+  const ProjectedTransitionBuildEstimate& estimatedTransitionBuild =
+      transitionPlan.estimate;
+  const size_t largestTransitionRequestCount =
+      transitionPlan.largestTransitionRequestCount;
   if (craigTransitionBuildBudgetExceeded(
           growthBudget, estimatedTransitionBuild)) {
     FrontierResult result;
     result.buildBudgetExceeded = true;
     result.estimatedTransitionBuild = estimatedTransitionBuild;
     result.recordTransitionRequests(
-        trackedStates.size(), transitionRequestsByFrame.front());
+        trackedStates.size(), transitionFrames.front().requests);
     emitCraigTransitionBuildBudgetExceeded(
         lookahead,
         qExpansionPass,
@@ -3599,24 +3680,22 @@ FrontierResult deriveLookaheadFrontierRegion(
       " regions=", reachableRegions.size(),
       " tracked_states=", trackedStates.size(),
       " direct_cube_source=", useDirectConcreteCube ? 1 : 0);
-  const StateSemanticsIndex stateSemanticsIndex =
-      buildStateSemanticsIndex(problem);
   const std::unordered_set<size_t>& imageTransitionRequests =
-      transitionRequestsByFrame.front();
+      transitionFrames.front().requests;
   const TransitionEncodingResult transition = addProjectedTransition(
       solver,
       problem,
       resolver,
-      stateSemanticsIndex,
-      complementPrimary,
+      staticIndex.stateSemantics,
       trackedStates,
-      imageTransitionRequests,
+      transitionFrames.front().targets,
       auxiliaryInvariants,
       transitionEncodingCache,
       frameLits[0],
       frameLits[1],
       VariablePartition::ALocal,
-      ClausePartition::A);
+      ClausePartition::A,
+      transitionFrames.front().expressionNodes);
   emitSecDiag(
       "SEC diag: imc Craig image build after_a_transition lookahead=",
       lookahead,
@@ -3625,35 +3704,34 @@ FrontierResult deriveLookaheadFrontierRegion(
 
   FrontierResult result;
   result.recordTransitionRequests(trackedStates.size(), imageTransitionRequests);
-  const auto states = stateSymbolSet(problem);
   for (const auto& [symbol, literal] : transition.currentLits) {
     (void)literal;
-    if (states.contains(symbol)) {
+    if (staticIndex.states.contains(symbol)) {
       result.transitionStateSupport.insert(symbol);
     }
   }
   for (size_t frame = 1; frame < lookahead; ++frame) {
     const std::unordered_set<size_t>& suffixTransitionRequests =
-        transitionRequestsByFrame[frame];
+        transitionFrames[frame].requests;
     result.recordTransitionRequests(
         trackedStates.size(), suffixTransitionRequests);
     const TransitionEncodingResult suffixTransition = addProjectedTransition(
         solver,
         problem,
         resolver,
-        stateSemanticsIndex,
-        complementPrimary,
+        staticIndex.stateSemantics,
         trackedStates,
-        suffixTransitionRequests,
+        transitionFrames[frame].targets,
         auxiliaryInvariants,
         transitionEncodingCache,
         frameLits[frame],
         frameLits[frame + 1],
         VariablePartition::BLocal,
-        ClausePartition::B);
+        ClausePartition::B,
+        transitionFrames[frame].expressionNodes);
     for (const auto& [symbol, literal] : suffixTransition.currentLits) {
       (void)literal;
-      if (states.contains(symbol)) {
+      if (staticIndex.states.contains(symbol)) {
         result.transitionStateSupport.insert(symbol);
       }
     }
@@ -3668,11 +3746,14 @@ FrontierResult deriveLookaheadFrontierRegion(
       " elapsed_ms=", elapsedMilliseconds(buildStart));
   closeSameDesignStateSemantics(problem, result.transitionStateSupport);
   addIndexedStateSemantics(
-      solver, stateSemanticsIndex, frameLits[1], ClausePartition::A);
+      solver, staticIndex.stateSemantics, frameLits[1], ClausePartition::A);
   addAuxiliaryStateInvariants(
       solver, frameLits[1], auxiliaryInvariants, ClausePartition::A);
   addIndexedStateSemantics(
-      solver, stateSemanticsIndex, frameLits[lookahead], ClausePartition::B);
+      solver,
+      staticIndex.stateSemantics,
+      frameLits[lookahead],
+      ClausePartition::B);
   addAuxiliaryStateInvariants(
       solver, frameLits[lookahead], auxiliaryInvariants, ClausePartition::B);
   // McMillan's suffix checks whether the bad set appears at any suffix frame,
@@ -3916,6 +3997,7 @@ bool craigInvariantExcludesBadInternal(
 
 CraigImcResult runWithProjection(
     const KInductionProblem& problem,
+    const CraigProblemStaticIndex& staticIndex,
     std::unordered_set<size_t>& trackedStates,
     const TransitionExprResolver& resolver,
     const std::unordered_map<size_t, size_t>& complementPrimary,
@@ -3973,9 +4055,11 @@ CraigImcResult runWithProjection(
   TransitionEncodingCache transitionEncodingCache{
       transitionConstantAssignmentsForEncoding(
           problem, activeAuxiliaryInvariants)};
+  ProjectedTransitionPlanCache transitionPlanCache;
   while (lookahead <= maxLookahead) {
     frontier = deriveLookaheadFrontierRegion(
         problem,
+        staticIndex,
         resolver,
         complementPrimary,
         trackedStates,
@@ -3983,6 +4067,7 @@ CraigImcResult runWithProjection(
         helperInvariantRegions,
         activeAuxiliaryInvariants,
         transitionEncodingCache,
+        transitionPlanCache,
         growthBudget,
         hasConcreteInitialCube,
         directConcreteCubeSourceEnabled,
@@ -4013,6 +4098,7 @@ CraigImcResult runWithProjection(
               deriveLocalAuxiliaryStateInvariants(
                   problem,
                   resolver,
+                  staticIndex.stateSemantics,
                   complementPrimary,
                   frontier.transitionStateSupport,
                   activeAuxiliaryInvariants);
@@ -4155,6 +4241,7 @@ CraigImcResult runWithProjection(
             deriveLocalAuxiliaryStateInvariants(
                 problem,
                 resolver,
+                staticIndex.stateSemantics,
                 complementPrimary,
                 refinementSupport,
                 activeAuxiliaryInvariants);
@@ -4604,11 +4691,13 @@ CraigInterpolatingModelChecker::CraigInterpolatingModelChecker(
 
 CraigImcResult CraigInterpolatingModelChecker::run(
     size_t maxLookahead) const {
-  std::unordered_set<size_t> trackedStates = initialTrackedStates(problem_);
+  const CraigProblemStaticIndex staticIndex{
+      stateSymbolSet(problem_), buildStateSemanticsIndex(problem_)};
+  std::unordered_set<size_t> trackedStates =
+      initialTrackedStates(problem_, staticIndex.states);
   if (initialTrackedStates_ != nullptr) {
-    const auto states = stateSymbolSet(problem_);
     for (const size_t symbol : *initialTrackedStates_) {
-      if (states.contains(symbol)) {
+      if (staticIndex.states.contains(symbol)) {
         trackedStates.insert(symbol);
       }
     }
@@ -4656,6 +4745,7 @@ CraigImcResult CraigInterpolatingModelChecker::run(
     const CraigImcResult result =
         runWithProjection(
             problem_,
+            staticIndex,
             trackedStates,
             resolver,
             complementPrimary,
