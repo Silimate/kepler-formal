@@ -15839,6 +15839,15 @@ KInductionProblem makeWideMultiLiteralResetExpressionSatShortcutProblem(
   return problem;
 }
 
+void addLargeDualRailResetFrontierSurfaceForTest(
+    KInductionProblem& problem,
+    size_t railPairCount = 10001) {
+  problem.usesDualRailStateEncoding = true;
+  for (size_t index = 0; index < railPairCount; ++index) {
+    problem.dualRailStatePairs.push_back({1000 + index * 2, 1001 + index * 2});
+  }
+}
+
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineAttemptsModerateWideResetExpressionSatShortcut) {
   KInductionProblem problem =
@@ -16054,11 +16063,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.property = BoolExpr::Not(problem.bad);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
-  constexpr size_t railPairCount = 10001;
-  problem.usesDualRailStateEncoding = true;
-  for (size_t index = 0; index < railPairCount; ++index) {
-    problem.dualRailStatePairs.push_back({1000 + index * 2, 1001 + index * 2});
-  }
+  addLargeDualRailResetFrontierSurfaceForTest(problem);
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
@@ -16089,6 +16094,85 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find(
           "concrete cube reachability begin cube=3 max_step=1 "
           "mode=one_shot_unit_clauses"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "released large dual-rail PDR transient caches reason=pdr_run_exit"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("bad_solver=1"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("predecessor_solver=1"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "released large dual-rail reset-frontier memory reason=pdr_run_exit"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("skipped large dual-rail reset-frontier precheck"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "released large dual-rail reset-frontier memory "
+          "reason=before_singleton_reset_frontier_core"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "reset frontier one-shot cube coi post_bootstrap_steps=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "released large dual-rail reset-frontier memory "
+          "reason=reachable_singleton_reset_frontier_probe"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "released large dual-rail reset-frontier memory "
+          "reason=cheap_concrete_frame_conflict"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineLargeDualRailRunExitReleasesTransientCaches) {
+  KInductionProblem problem;
+  constexpr size_t state = 2;
+  constexpr size_t reset = 3;
+  problem.state0Symbols = {state};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {state, reset};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateAssignments = {{state, false}};
+  problem.transitions0.emplace_back(state, BoolExpr::createFalse());
+  problem.bad = BoolExpr::Var(state);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  addLargeDualRailResetFrontierSurfaceForTest(problem);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result =
+      engine.run(/*maxFrames=*/0, /*resetBootstrapFrameCheckedSafe=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "released large dual-rail PDR transient caches reason=pdr_run_exit"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "released large dual-rail reset-frontier memory reason=pdr_run_exit"),
       std::string::npos)
       << stderrOutput;
 }
@@ -16140,6 +16224,85 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("concrete cube reachability begin cube=32"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineBudgetsDeepLargeDualRailExactResetFrontierQuery) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.dualRailStatePairs = {{20, 21}};
+  problem.resetBootstrapCycles = 3;
+  problem.state0Symbols = {2, 3, 4, 5, 6, 7};
+  problem.allSymbols = {2, 3, 4, 5, 6, 7};
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(2)),
+                    BoolExpr::Not(BoolExpr::Var(3))),
+      BoolExpr::And(
+          BoolExpr::And(BoolExpr::Not(BoolExpr::Var(4)),
+                        BoolExpr::Not(BoolExpr::Var(5))),
+          BoolExpr::And(BoolExpr::Not(BoolExpr::Var(6)),
+                        BoolExpr::Not(BoolExpr::Var(7)))));
+  problem.initialStateAssignments = {
+      {2, false}, {3, false}, {4, false},
+      {5, false}, {6, false}, {7, false}};
+  problem.initializedStateCount = 6;
+  problem.totalStateCount = 6;
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
+  problem.transitions0.emplace_back(4, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(
+      5,
+      BoolExpr::And(
+          BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3)),
+          BoolExpr::Var(4)));
+  problem.transitions0.emplace_back(6, BoolExpr::Var(5));
+  problem.transitions0.emplace_back(7, BoolExpr::Var(6));
+  problem.bad = BoolExpr::And(BoolExpr::Var(7), BoolExpr::Var(4));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 5)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
+  const ScopedEnvVar frontierStateLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_RESET_FRONTIER_STATE_SYMBOL_LIMIT", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/4,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(5);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          "skipped fresh large dual-rail exact reset-frontier query "
+          "reason=concrete_frame_reachability post_bootstrap_steps=4"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "reset-specialized expression relaxed_budget cube="),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reset frontier cube coi post_bootstrap_steps=4"),
       std::string::npos)
       << stderrOutput;
 }
