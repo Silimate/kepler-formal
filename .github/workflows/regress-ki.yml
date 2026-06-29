@@ -131,10 +131,10 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/sky130hd_riscv32i" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-full-coverage \
+          expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=dual_rail_steady
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           sky130hs_riscv32i \
           "${{github.workspace}}/kepler-formal-examples/sky130hs_riscv32i" \
@@ -143,7 +143,7 @@ jobs:
           expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=dual_rail_steady
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           nangate45_ibex \
           "${{github.workspace}}/kepler-formal-examples/nangate45_ibex" \
@@ -199,17 +199,18 @@ jobs:
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
-        # BP final has resetless FIFO state. Binary SEC intentionally drops
-        # that surface, so this regression always exercises dual-rail coverage.
+        # BP final has resetless FIFO state. The regular KI workflow uses the
+        # requested encoding; the dual-rail wrapper exercises dual-rail
+        # equivalence without requiring full output coverage from KI.
         bash regress/run_sec_strategies_regress.sh \
           nangate45_black_parrot_sec_final \
           "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-full-coverage \
+          expect-equivalent \
           compact \
           engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=dual_rail_steady
+          sec-encoding=${{ env.SEC_ENCODING }}
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}

@@ -141,7 +141,7 @@ jobs:
           ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=dual_rail_steady
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           sky130hs_riscv32i \
           "${{github.workspace}}/kepler-formal-examples/sky130hs_riscv32i" \
@@ -150,7 +150,7 @@ jobs:
           ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=dual_rail_steady
+          sec-encoding=${{ env.SEC_ENCODING }}
         bash regress/run_sec_strategies_regress.sh \
           nangate45_ibex \
           "${{github.workspace}}/kepler-formal-examples/nangate45_ibex" \
@@ -207,8 +207,8 @@ jobs:
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
-        # BP final has resetless FIFO state. Binary SEC intentionally drops
-        # that surface, so this regression always measures dual-rail progress.
+        # BP final has resetless FIFO state. The regular IMC workflow uses the
+        # requested encoding; the dual-rail wrapper measures dual-rail progress.
         bash regress/run_sec_strategies_regress.sh \
           nangate45_black_parrot_sec_final \
           "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
@@ -217,7 +217,7 @@ jobs:
           ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
-          sec-encoding=dual_rail_steady
+          sec-encoding=${{ env.SEC_ENCODING }}
 
     - name: Run TinyRocket SEC regressions
       working-directory: ${{github.workspace}}

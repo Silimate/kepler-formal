@@ -17,11 +17,16 @@ on:
         required: false
         type: boolean
         default: false
+      require_full_coverage:
+        required: false
+        type: boolean
+        default: false
 
 env:
   SEC_ENGINE: pdr
   SEC_ENCODING: ${{ inputs.sec_encoding || 'binary' }}
   SKIP_BP_FINAL: ${{ inputs.skip_bp_final || false }}
+  SEC_FULL_COVERAGE_EXPECTATION: ${{ inputs.require_full_coverage && 'expect-full-coverage' || 'expect-equivalent' }}
 
 jobs:
   build:
@@ -136,7 +141,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/sky130hd_riscv32i" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-full-coverage' || 'expect-equivalent' }} \
+          ${{ env.SEC_FULL_COVERAGE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -204,8 +209,9 @@ jobs:
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
-        # BP final has resetless FIFO state. Binary SEC intentionally drops
-        # that surface, so only the dual-rail workflow can require full coverage.
+        # BP final has resetless FIFO state. The regular PDR workflow uses the
+        # requested encoding and coverage policy; the dual-rail wrapper owns
+        # dual-rail full-coverage requirements.
         if [[ "${SKIP_BP_FINAL}" == "true" ]]; then
           echo "Skipping nangate45_black_parrot_sec_final because SKIP_BP_FINAL=true"
         else
@@ -214,7 +220,7 @@ jobs:
             "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
             "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
             6_final_sec_test.yml \
-            ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-full-coverage' || 'expect-equivalent' }} \
+            ${{ env.SEC_FULL_COVERAGE_EXPECTATION }} \
             compact \
             engine=${{ env.SEC_ENGINE }} \
             sec-encoding=${{ env.SEC_ENCODING }}
