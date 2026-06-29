@@ -808,6 +808,21 @@ IMCResult makeCraigInconclusiveResult(
   return result;
 }
 
+std::optional<IMCResult> findImcCounterexampleUpTo(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK) {
+  const auto cache = makeImcBaseCounterexampleCache(problem);
+  for (size_t depth = 0; depth <= maxK; ++depth) {
+    if (const auto counterexample =
+            findImcCounterexample(*cache, solverType, depth);
+        counterexample.has_value()) {
+      return counterexample;
+    }
+  }
+  return std::nullopt;
+}
+
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -1034,25 +1049,29 @@ IMCResult runCraigOutputRange(
   }
 
   if (proof.status == CraigImcStatus::ConcreteNoProgress) {
-    // Every first-iteration lookahead already started from the complete
-    // concrete post-reset cube. Repeating all bounded SAT queries here would
-    // rebuild the same transition prefixes without adding proof information.
+    if (const auto counterexample =
+            findImcCounterexampleUpTo(batchProblem, solverType, maxK);
+        counterexample.has_value()) {
+      return *counterexample;
+    }
     return makeCraigInconclusiveResult(maxK, firstOutput);
   }
   if (proof.status == CraigImcStatus::BudgetExceeded) {
+    if (const auto counterexample =
+            findImcCounterexampleUpTo(batchProblem, solverType, maxK);
+        counterexample.has_value()) {
+      return *counterexample;
+    }
     return makeCraigInconclusiveResult(proof.iterations, firstOutput);
   }
 
   // Partial or implicit initial frontiers are over-approximations. Preserve the
   // exact bounded localization sweep for those cases so a reachable mismatch
   // is never hidden by an abstract Craig SAT result.
-  const auto cache = makeImcBaseCounterexampleCache(batchProblem);
-  for (size_t depth = 0; depth <= maxK; ++depth) {
-    if (const auto counterexample =
-            findImcCounterexample(*cache, solverType, depth);
-        counterexample.has_value()) {
-      return *counterexample;
-    }
+  if (const auto counterexample =
+          findImcCounterexampleUpTo(batchProblem, solverType, maxK);
+      counterexample.has_value()) {
+    return *counterexample;
   }
   return makeCraigInconclusiveResult(maxK, firstOutput);
 }
@@ -1089,8 +1108,14 @@ IMCResult runLargeDualRailCraigImc(
     }
     if (batchResult.status == IMCStatus::Inconclusive) {
       // Once any output slice exhausts the strict Craig budgets, the whole
-      // equivalence proof is already inconclusive. Stop here instead of
-      // spending CI memory/time proving unrelated later outputs.
+      // equivalence proof is already inconclusive. Before stopping, preserve
+      // IMC's bounded counterexample obligation across all output slices so a
+      // later concrete edit is not hidden by this proof-only budget.
+      if (const auto counterexample =
+              findImcCounterexampleUpTo(problem, solverType, maxK);
+          counterexample.has_value()) {
+        return *counterexample;
+      }
       emitSecDiag(
           "SEC diag: imc Craig stopping after inconclusive output batch first=",
           batchPlan.firstOutput, " end=", batchPlan.endOutput);
@@ -1209,10 +1234,11 @@ IMCEngine::IMCEngine(const KInductionProblem& problem,
     : problem_(problem), solverType_(solverType) {}
 
 IMCResult IMCEngine::run(size_t maxK) const {
+  const auto baseCache = makeImcBaseCounterexampleCache(problem_);
+
   if (problem_.combinedStateSymbols().empty()) {
     // Stateless SEC is still a real IMC base query: a combinational mismatch
     // at frame 0 must be reported before declaring equivalence.
-    const auto baseCache = makeImcBaseCounterexampleCache(problem_);
     if (const auto counterexample =
             findImcCounterexample(*baseCache, solverType_, 0);
         counterexample.has_value()) {
@@ -1226,10 +1252,14 @@ IMCResult IMCEngine::run(size_t maxK) const {
       !problem_.observedOutputExprs0.empty() &&
       problem_.observedOutputExprs0.size() ==
           problem_.observedOutputExprs1.size()) {
+    if (const auto counterexample =
+            findImcCounterexample(*baseCache, solverType_, 0);
+        counterexample.has_value()) {
+      return *counterexample;
+    }
     return runLargeDualRailCraigImc(problem_, solverType_, maxK);
   }
 
-  const auto baseCache = makeImcBaseCounterexampleCache(problem_);
   // Keep counterexample discovery on the same bounded base-case machinery as
   // the rest of SEC so witnesses and reported cycles stay consistent.
   if (const auto counterexample =

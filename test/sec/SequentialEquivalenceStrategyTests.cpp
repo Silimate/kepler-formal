@@ -2292,19 +2292,25 @@ KInductionProblem buildProjectionSharedImcBatchProblem(
 
   std::vector<size_t> sharedStates;
   sharedStates.reserve(sharedTransitionStates);
+  BoolExpr* init = BoolExpr::createTrue();
   for (size_t index = 0; index < sharedTransitionStates; ++index) {
     const size_t symbol = firstSymbol + index;
     sharedStates.push_back(symbol);
     problem.state0Symbols.push_back(symbol);
     problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.push_back({symbol, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
     problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
   }
 
   BoolExpr* sharedCone = makeConjunctionOfVars(sharedStates);
+  BoolExpr* property = BoolExpr::createTrue();
   for (size_t output = 0; output < outputCount; ++output) {
     const size_t outputState = firstOutputState + output;
     problem.state0Symbols.push_back(outputState);
     problem.allSymbols.push_back(outputState);
+    problem.initialStateAssignments.push_back({outputState, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(outputState)));
     // Raw output supports are disjoint, but both next-state functions pull in
     // the same transition cone. This mirrors AES text_out bits, where a
     // one-bit bad predicate expands to a much larger shared Craig projection.
@@ -2314,8 +2320,19 @@ KInductionProblem buildProjectionSharedImcBatchProblem(
         "projection_shared_out" + std::to_string(output));
     problem.observedOutputExprs0.push_back(BoolExpr::Var(outputState));
     problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
+    property = BoolExpr::And(
+        property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0.back(),
+            problem.observedOutputExprs1.back()));
   }
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.allSymbols.size();
   problem.totalStateCount = problem.state0Symbols.size();
+  problem.property = BoolExpr::simplify(property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
   return problem;
 }
 
@@ -14488,6 +14505,34 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // KI residual batching must not bury a concrete input-only top-output edit
   // behind an expensive residual proof.  The pre-batch witness check keeps the
   // counterexample in the selected SEC engine path without using LEC fallback.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, kObservedOutputs);
+  EXPECT_EQ(result.totalOutputs, kObservedOutputs);
+  EXPECT_NE(
+      result.reason.find("wide_frame_zero_probe[0]"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsImcDualRailFindsWideFrameZeroCounterexampleBeforeCraigBatching) {
+  constexpr size_t kObservedOutputs = 133;
+  constexpr size_t kDummyStatesPerDesign = 4100;
+  const auto models = makeWideFrameZeroMismatchModelsForTest(
+      kObservedOutputs, kDummyStatesPerDesign);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 1);
+
+  // Large dual-rail IMC uses Craig batching for proof work, but concrete
+  // frame-0 edits still have to be found by the selected IMC base query before
+  // an early inconclusive batch can hide a later edited output.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
   EXPECT_EQ(result.bound, 0u);
   EXPECT_EQ(result.coveredOutputs, kObservedOutputs);
