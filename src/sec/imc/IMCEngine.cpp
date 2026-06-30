@@ -1189,8 +1189,10 @@ IMCResult runCraigOutputRange(
   // Partial or implicit initial frontiers are over-approximations. Do not turn
   // an abstract Craig SAT result into a proof claim; report inconclusive
   // instead of falling back to an unrelated full bounded sweep.
-  const size_t checkedDepth =
-      boundedCraigWitnessDepth(maxK, proof.iterations);
+  // The local probe is still IMC's bounded counterexample search, restricted to
+  // small output supports.  Use the caller horizon so a shallow Craig attempt
+  // cannot hide a concrete bad state that is already within maxK.
+  const size_t checkedDepth = maxK;
   if (const auto counterexample =
           findLargeDualRailCounterexampleUpTo(
               batchProblem, solverType, checkedDepth);

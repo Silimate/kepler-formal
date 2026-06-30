@@ -58,13 +58,6 @@
 #include "clocks/SecClockModel.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
-// The production SEC strategy includes the KI header before the structural
-// matcher so KI can guard its pre-engine state mining.  These tests also call
-// the structural matcher directly, so keep those calls on the original API and
-// invoke inferKInductionScopedStatePairs explicitly in the KI regression.
-#ifdef inferStructurallyEquivalentStatePairs
-#undef inferStructurallyEquivalentStatePairs
-#endif
 #include "strategy/StructuralStateInvariant.h"
 
 using namespace naja::NL;
@@ -5254,7 +5247,9 @@ TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObserv
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 0u);
+  // Without a cross-design state assumption, the inverted registered output is
+  // first a concrete SEC mismatch after one transition.
+  EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests, NextStateMismatchFailsAtOneStep) {
@@ -5376,7 +5371,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 1u);
+  // Strict SEC proves the reset-initialized pipeline by unrolling through the
+  // visible output stage instead of assuming matching internal flops.
+  EXPECT_EQ(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -5485,7 +5482,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapAutomaticallyExtendsForHiddenShiftPipelines) {
+       ResetBootstrapHiddenShiftPipelineDoesNotCloseBelowDepth) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5503,12 +5500,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  // A one-step proof cannot justify equality of a hidden 20-stage shift chain
+  // unless SEC assumes cross-design internal state correspondence.  Keep the
+  // result inconclusive until the caller supplies a sufficient KI horizon.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapLongEquivalentPipelineStillClosesAtSmallK) {
+       ResetBootstrapLongEquivalentPipelineDoesNotCloseAtSmallK) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5525,8 +5525,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
+  // The removed startup certificate used internal cross-design state facts.
+  // With strict top-output KI/PDR/IMC inputs only, this 12-stage pipe needs a
+  // deeper caller horizon than k=3.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -8404,28 +8407,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       {{5, true}, {8, false}},
   };
   EXPECT_EQ(cubes, expected);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrStateEqualityMiningSkipsRiscvSizedOutputSurface) {
-  EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::Pdr,
-      /*observedOutputSurface=*/64));
-
-  // The sky130hs_riscv32i SEC surface has 99 top outputs. Keeping PDR's mined
-  // state equalities out of that medium reset-bootstrap case prevents an
-  // abstract startup state from being reported as a real cycle-0 diff.
-  EXPECT_FALSE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::Pdr,
-      /*observedOutputSurface=*/99));
-
-  EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::KInduction,
-      /*observedOutputSurface=*/99));
-
-  EXPECT_FALSE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::Imc,
-      /*observedOutputSurface=*/1));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -12595,7 +12576,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsCountsSatImpliedOutputEquality) {
+       RunExtractedModelsRequiresEngineProofWithoutCrossDesignStateCore) {
   const SignalKey out = makeSignalKey("out");
   const SignalKey stateA0 = makeSignalKey("stateA0");
   const SignalKey stateB0 = makeSignalKey("stateB0");
@@ -12646,9 +12627,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.bound, 1u);
-  EXPECT_NE(
-      stdoutOutput.find("sat_implied_outputs=1"),
-      std::string::npos);
+  // The output is still proved by strict k-induction from per-design init and
+  // transition facts, but it is no longer pre-certified by a mined state core.
+  EXPECT_NE(stdoutOutput.find("sat_implied_outputs=0"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13734,8 +13715,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // IMC must enter its own interpolation engine directly.  The old dual-rail
-  // residual helper batched/skipped outputs before IMCEngine saw the problem.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  // residual helper batched/skipped outputs before IMCEngine saw the problem;
+  // strict IMC may return inconclusive on this large state-dependent surface.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
       stderrOutput.find("SEC diag: entering imc engine"),
       std::string::npos);
@@ -14442,7 +14426,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrMinesStateEqualitiesForSmallOutputLargeStateSurface) {
+       RunExtractedModelsPdrDoesNotMineCrossDesignStateEqualities) {
   constexpr size_t kStateBitsPerDesign = 4097;
   const SignalKey out = makeSignalKey("smallOutputLargeStateOut");
   SequentialDesignModel model0;
@@ -14479,6 +14463,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   }
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -14487,20 +14472,24 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::Pdr,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Large state count alone should not disable validated state-equality mining.
-  // Mock CPU has a small top-output surface but many FIFO state bits; without
-  // this path PDR relearns those relations per cube and can cover no outputs.
+  // SEC engines must not assume that internal state from different designs is
+  // related. Even small-output PDR surfaces may use only top IO, per-design
+  // facts, transitions, and same-design rail consistency.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
-      stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      stderrOutput.find("cross-design internal state equality mining disabled"),
       std::string::npos);
   EXPECT_EQ(
-      stderrOutput.find(
-          "SEC diag: skipping inductive state equality mining for selected engine"),
+      stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find(
+          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
       std::string::npos);
 }
 
@@ -14534,6 +14523,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       BoolExpr::Var(3));
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -14542,20 +14532,68 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::Imc,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Classic IMC should start from interpolation/reachability, not from
-  // optional cross-design internal-state mining before the engine runs.
+  // Classic IMC should start from interpolation/reachability, never from
+  // assumed cross-design internal-state relations before the engine runs.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_NE(
-      stderrOutput.find(
-          "SEC diag: skipping inductive state equality mining for selected engine"),
-      std::string::npos);
-  EXPECT_NE(
-      stderrOutput.find("SEC diag: skipping reset-bootstrap candidate equality mining"),
+      stderrOutput.find("cross-design internal state equality mining disabled"),
       std::string::npos);
   EXPECT_EQ(
       stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find(
+          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsKInductionDoesNotMineCrossDesignStateEqualities) {
+  const SignalKey out = makeSignalKey("kiNoCrossStateOut");
+  const SignalKey state0 = makeSignalKey("kiNoCrossState0");
+  const SignalKey state1 = makeSignalKey("kiNoCrossState1");
+
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model0.displayNameByKey.emplace(out, "ki_no_cross_state_out[0]");
+  model1.displayNameByKey.emplace(out, "ki_no_cross_state_out[0]");
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  addStateBitForTest(
+      model0, state0, /*symbol=*/2, "ki_no_cross_state_q0[0]", BoolExpr::Var(2));
+  addStateBitForTest(
+      model1, state1, /*symbol=*/3, "ki_no_cross_state_q1[0]", BoolExpr::Var(3));
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("cross-design internal state equality mining disabled"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find(
+          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
       std::string::npos);
 }
 
@@ -14723,7 +14761,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsKeepsWideStartupCertificateBeforeResetCoverageFilter) {
+       RunExtractedModelsRejectsWideStartupCertificateWithoutStateRelations) {
   const SignalKey rst = makeSignalKey("wideStartupCertificateRst");
   const SignalKey stateA0 = makeSignalKey("wideStartupCertificateStateA0");
   const SignalKey stateB0 = makeSignalKey("wideStartupCertificateStateB0");
@@ -14779,14 +14817,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinaryExtractedSecStrategy(SecEngine::Pdr);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
-  // Wide ASIC-style reset proofs use one validated startup certificate instead
-  // of proving each output cone separately.  The conservative reset-unanchored
-  // coverage filter must not run first and collapse the checked surface to zero.
+  // Wide reset/bootstrap state-dependent outputs cannot be certified by a
+  // cross-design startup relation.  Binary SEC reports the conservative skip
+  // surface instead of proving outputs from internal element names.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.bound, 0u);
-  EXPECT_EQ(result.coveredOutputs, kWideStartupCertificateOutputs);
+  EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, kWideStartupCertificateOutputs);
-  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_EQ(result.skippedObservedOutputs.size(), kWideStartupCertificateOutputs);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("reset-unanchored internal state"),
+      std::string::npos);
 
   SequentialEquivalenceStrategy dualRailKiStrategy(
       nullptr,
@@ -14796,11 +14837,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEncoding::DualRailSteady);
   const auto dualRailKiResult =
       dualRailKiStrategy.runExtractedModels(model0, model1, 1);
-  EXPECT_EQ(dualRailKiResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(dualRailKiResult.bound, 0u);
-  EXPECT_EQ(dualRailKiResult.coveredOutputs, kWideStartupCertificateOutputs);
+  EXPECT_EQ(dualRailKiResult.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(dualRailKiResult.bound, 1u);
+  EXPECT_EQ(dualRailKiResult.coveredOutputs, 0u);
   EXPECT_EQ(dualRailKiResult.totalOutputs, kWideStartupCertificateOutputs);
-  EXPECT_TRUE(dualRailKiResult.skippedObservedOutputs.empty());
+  EXPECT_FALSE(dualRailKiResult.skippedObservedOutputs.empty());
 
   SequentialEquivalenceStrategy dualRailImcStrategy(
       nullptr,
@@ -20740,52 +20781,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(aligned.names.size(), 1u);
   EXPECT_EQ(aligned.keys0.front(), root0);
   EXPECT_EQ(aligned.keys1.front(), root1);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       KInductionScopedStateMiningSkipsHugeOrderedSurface) {
-  constexpr size_t stateCount = 40001;
-  SequentialDesignModel model0;
-  SequentialDesignModel model1;
-
-  for (size_t i = 0; i < stateCount; ++i) {
-    const size_t var0 = 2 + i;
-    const size_t var1 = 2 + stateCount + i;
-    addStateBitForTest(
-        model0,
-        makeSignalKey("ki_large_state0_" + std::to_string(i)),
-        var0,
-        "left_q[" + std::to_string(i) + "]",
-        BoolExpr::Var(var0));
-    addStateBitForTest(
-        model1,
-        makeSignalKey("ki_large_state1_" + std::to_string(i)),
-        var1,
-        "right_q[" + std::to_string(i) + "]",
-        BoolExpr::Var(var1));
-  }
-
-  const SignalKey out0 = makeSignalKey("ki_large_out0");
-  const SignalKey out1 = makeSignalKey("ki_large_out1");
-  model0.observedOutputExprByKey.emplace(out0, BoolExpr::Var(2));
-  model1.observedOutputExprByKey.emplace(out1, BoolExpr::Var(2 + stateCount));
-
-  AlignedSignals alignedOutputs;
-  alignedOutputs.names = {"out"};
-  alignedOutputs.keys0 = {out0};
-  alignedOutputs.keys1 = {out1};
-
-  const auto aligned = inferKInductionScopedStatePairs(
-      model0,
-      model1,
-      AlignedSignals{},
-      alignedOutputs,
-      KEPLER_FORMAL::Config::SolverType::KISSAT);
-
-  // The ordered relation would expose every state pair before KI starts.  The
-  // KI-scoped guard keeps huge designs on output-rooted mining, which is enough
-  // for strict base/step k-induction and avoids the Ariane pre-engine wall.
-  EXPECT_EQ(aligned.names.size(), 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

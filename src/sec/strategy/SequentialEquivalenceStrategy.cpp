@@ -1530,8 +1530,6 @@ bool secSummaryStatsEnabled() {
 }
 
 constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
-constexpr size_t kMaxPdrResetBootstrapCandidateStates = 8192;
-constexpr size_t kMinPdrStartupCertificateOutputs = 129;
 constexpr unsigned kLocalImplicationConflictLimit = 256;
 constexpr unsigned kDualRailLocalImplicationConflictLimit = 2000000;
 // LCOV_EXCL_START
@@ -3296,9 +3294,6 @@ SequentialDesignModel extractSecDesign(naja::NL::SNLDesign* top,
 
 AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
                                       const SequentialDesignModel& model1,
-                                      KEPLER_FORMAL::Config::SolverType solverType,
-                                      bool inferInductiveStateEqualities,
-                                      bool inferResetBootstrapCandidateEqualities,
                                       bool secDiagEnabled) {
   AlignedSecInterface aligned;
   logSecDiagLine(secDiagEnabled, "SEC diag: aligning inputs/outputs");
@@ -3338,37 +3333,12 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
   // the raw extractor-visible list would reintroduce stale or one-sided skipped
   // outputs after selectCoveredObservedOutputs already removed them.
 
-  const auto localValidationSolverType =
-      SATSolverWrapper::assumptionSolverTypeFor(solverType);
-  if (!inferInductiveStateEqualities) {
-    // PDR proves top-output properties directly.  Broad cross-design state
-    // mining is only a strengthening hint, and on large ASICs it can dominate
-    // runtime before the selected engine starts doing useful proof work.
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: skipping inductive state equality mining for selected engine");
-  } else {
-    logSecDiagLine(secDiagEnabled, "SEC diag: inferring inductive state equalities");
-    aligned.inductiveStateEqualities = inferStructurallyEquivalentStatePairs(
-        model0, model1, aligned.inputs, aligned.outputs, localValidationSolverType);
-    logSecDiagLine(secDiagEnabled, "SEC diag: inferred inductive state equalities");
-  }
-  if (!inferResetBootstrapCandidateEqualities) {
-    // PDR proves top-output properties directly.  Output-rooted startup
-    // candidates are useful for the wide startup certificate, but on smaller
-    // sequential ASICs this pre-engine SAT mining can dominate runtime.
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: skipping reset-bootstrap candidate equality mining");
-  } else {
-    aligned.resetBootstrapCandidateStateEqualities =
-        inferStructurallyEquivalentOutputConeStatePairs(
-            model0,
-            model1,
-            aligned.inputs,
-            aligned.outputs,
-            localValidationSolverType);
-  }
+  // Never turn internal elements from different designs into assumed proof
+  // relations.  SEC engines must prove the top-output contract from aligned
+  // inputs, per-design reset/init facts, transitions, and same-design invariants.
+  logSecDiagLine(
+      secDiagEnabled,
+      "SEC diag: cross-design internal state equality mining disabled");
   return aligned;
 }
 
@@ -3734,19 +3704,6 @@ void addDualRailBootstrapAssignments(
   }
 }
 
-void addDualRailEqualityPairs(
-    const AlignedSignals& equalities,
-    const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& rails0,
-    const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& rails1,
-    std::vector<std::pair<size_t, size_t>>& targetPairs) {
-  for (size_t i = 0; i < equalities.names.size(); ++i) {
-    const auto lhs = rails0.at(equalities.keys0[i]);
-    const auto rhs = rails1.at(equalities.keys1[i]);
-    targetPairs.emplace_back(lhs.mayBeOne, rhs.mayBeOne);
-    targetPairs.emplace_back(lhs.mayBeZero, rhs.mayBeZero);
-  }
-}
-
 void addDualRailComplementStateEqualities(
     const SequentialDesignModel& model,
     const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& railsByKey,
@@ -3878,21 +3835,19 @@ ReachableStateInvariant integrateReachableStateInvariant(
     problem.initialCondition = BoolExpr::simplify(initialCondition);
   }
 
+  const AlignedSignals noCrossDesignStateEqualities;
   const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
       model0,
       model1,
       alignedInputs,
-      inductiveStateEqualities,
+      noCrossDesignStateEqualities,
       deriveResetBootstrapStrengthening,
       secDiagEnabled,
       SATSolverWrapper::assumptionSolverTypeFor(solverType),
       deriveResetBootstrapEqualities,
-      resetBootstrapCandidateStateEqualities);
-  for (size_t i = 0; i < reachableInvariant.initialStateCorrespondence.names.size(); ++i) {
-    problem.initialStateEqualityPairs.emplace_back(
-        state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]),
-        state1Symbols.at(reachableInvariant.initialStateCorrespondence.keys1[i]));
-  }
+      noCrossDesignStateEqualities);
+  (void)inductiveStateEqualities;
+  (void)resetBootstrapCandidateStateEqualities;
 
   for (const auto& [key, value] : reachableInvariant.bootstrapValues0) {
     if (state0Symbols.find(key) != state0Symbols.end()) {
@@ -3924,28 +3879,6 @@ ReachableStateInvariant integrateReachableStateInvariant(
     problem.resetBootstrapCycles = 0;
     problem.bootstrapStateAssignments.clear();
     problem.bootstrapStateEqualityPairs.clear();
-  }
-  for (size_t i = 0; i < reachableInvariant.anchoredStateEqualities.names.size(); ++i) {
-    problem.inductiveStateEqualityPairs.emplace_back(
-        state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
-        state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
-    if (!problem.resetBootstrapInputs.empty()) {
-      problem.bootstrapStateEqualityPairs.emplace_back(
-          state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
-          state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
-    }
-  }
-  for (size_t i = 0;
-       // LCOV_EXCL_START
-       i < reachableInvariant.bootstrapOnlyStateEqualities.names.size();
-       ++i) {
-    if (!problem.resetBootstrapInputs.empty()) {
-    // LCOV_EXCL_STOP
-      problem.bootstrapStateEqualityPairs.emplace_back(
-          // LCOV_EXCL_START
-          state0Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys0[i]),
-          state1Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys1[i]));
-    }
   }
   return reachableInvariant;
 }
@@ -4129,30 +4062,6 @@ KInductionProblem buildDualRailSecProblem(
       model0, reachableInvariant.bootstrapValues0, railMaps.state0ByKey, problem);
   addDualRailBootstrapAssignments(
       model1, reachableInvariant.bootstrapValues1, railMaps.state1ByKey, problem);
-  addDualRailEqualityPairs(
-      reachableInvariant.initialStateCorrespondence,
-      railMaps.state0ByKey,
-      railMaps.state1ByKey,
-      problem.initialStateEqualityPairs);
-  addDualRailEqualityPairs(
-      reachableInvariant.anchoredStateEqualities,
-      railMaps.state0ByKey,
-      railMaps.state1ByKey,
-      problem.inductiveStateEqualityPairs);
-  if (!problem.resetBootstrapInputs.empty()) {
-    addDualRailEqualityPairs(
-        reachableInvariant.anchoredStateEqualities,
-        // LCOV_EXCL_START
-        railMaps.state0ByKey,
-        // LCOV_EXCL_STOP
-        railMaps.state1ByKey,
-        problem.bootstrapStateEqualityPairs);
-    addDualRailEqualityPairs(
-        reachableInvariant.bootstrapOnlyStateEqualities,
-        railMaps.state0ByKey,
-        railMaps.state1ByKey,
-        problem.bootstrapStateEqualityPairs);
-  }
 
 // LCOV_EXCL_START
 
@@ -6505,26 +6414,11 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // facts to avoid relearning identical state relations one cube at a time.
   const size_t observedOutputSurface =
       std::max(model0.observedOutputs.size(), model1.observedOutputs.size());
-  // PDR validates mined state equalities before using them, but medium
-  // reset-bootstrap CPU surfaces can spend proof effort on state relations
-  // that are not needed for the top-output property and may expose abstract
-  // startup counterexamples. Keep this accelerator for focused properties.
-  const bool inferInductiveStateEqualities =
-      detail::shouldInferPdrInductiveStateEqualities(
-          secEngine_, observedOutputSurface);
-  // IMC owns reachability through interpolation.  Do not spend pre-engine SAT
-  // effort mining cross-design internal state candidates for that engine.
-  const bool inferResetBootstrapCandidateEqualities =
-      secEngine_ != SecEngine::Imc &&
-      (secEngine_ != SecEngine::Pdr ||
-       observedOutputSurface >= kMinPdrStartupCertificateOutputs ||
-       totalStateBits <= kMaxPdrResetBootstrapCandidateStates);
+  // All selected SEC engines share the same rule: internal elements from
+  // different designs are never related as assumed proof facts.
   AlignedSecInterface aligned = alignSecInterface(
       model0,
       model1,
-      solverType_,
-      inferInductiveStateEqualities,
-      inferResetBootstrapCandidateEqualities,
       secDiagEnabled);
   if (aligned.outputs.names.empty()) {
     return makeSecResult(
@@ -6621,31 +6515,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       deriveResetBootstrapStrengthening,
       deriveResetBootstrapEqualities,
       secDiagEnabled);
-  const bool useStartupCertificateFastPath =
-      aligned.outputs.names.size() >= kMinPdrStartupCertificateOutputs &&
-      !aligned.resetBootstrapCandidateStateEqualities.names.empty() &&
-      !symbolSpace.problem.resetBootstrapInputs.empty();
-  if (useStartupCertificateFastPath) {
-    // The reset-bootstrap candidate relation is output-rooted and validated as
-    // part of reachable invariant integration.  Keep this ahead of the
-    // conservative coverage filter: wide ASICs such as BlackParrot can have many
-    // state-dependent outputs that are still covered by one validated startup
-    // certificate, and should not be reported as uncovered one-by-one.  The
-    // certificate is stronger than the later binary/dual-rail encoding choice:
-    // it proves the checked top-output relation after reset from arbitrary
-    // startup state, so KI/IMC do not need to rediscover that reachable-state
-    // invariant by broad induction queries.
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: output-rooted structural startup relation proves SEC");
-    return makeSecResult(
-        SequentialEquivalenceStatus::Equivalent,
-        0,
-        "",
-        aligned.outputCoverage,
-        abstractedSequentialBoundaries,
-        extractedBoundaryReports);
-  }
   const OutputCoverageSelection coverageBeforeResetUnanchoredFilter =
       aligned.outputCoverage;
   if (encoding_ == SecEncoding::Binary) {
