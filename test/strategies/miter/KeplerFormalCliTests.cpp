@@ -2279,7 +2279,8 @@ TEST_F(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
 
   const auto contents = readFileContents(logPath);
   EXPECT_NE(
-      contents.find("SEC output coverage: 50.00% (1/2 covered/existing outputs)."),
+      contents.find(
+          "SEC checked-output coverage: 50.00% (1/2 covered/existing outputs)."),
       std::string::npos);
   EXPECT_NE(
       contents.find(
