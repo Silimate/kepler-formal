@@ -69,7 +69,7 @@ constexpr size_t kMaxResetSummaryCachedCois = 64;
 // solvers while only a couple of frames remain.
 constexpr size_t kMaxSparseResetFrontierPerStepChecks = 2;
 // Fast localized counterexample searches should not let one hard UNSAT cone
-// consume the whole workflow budget before other top-output slices are tried.
+// consume all local solver effort before other top-output slices are tried.
 constexpr int64_t kFastCounterexampleSearchConflictLimit = 5000;
 // Some dual-rail frontier checks spend their budget in propagation-heavy
 // decision search before conflicts accumulate.  Bound decisions too so a hard

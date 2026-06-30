@@ -3,10 +3,6 @@
 
 #include "kinduction/KInductionEngine.h"
 
-#ifdef inferStructurallyEquivalentStatePairs
-#undef inferStructurallyEquivalentStatePairs
-#endif
-
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
@@ -18,8 +14,6 @@
 #include "kinduction/BaseCaseSolver.h"
 #include "kinduction/InductionStepSolver.h"
 #include "kinduction/OutputBatching.h"
-#include "model/SequentialDesignModel.h"
-#include "strategy/StructuralStateInvariant.h"
 
 namespace KEPLER_FORMAL::SEC {
 
@@ -38,7 +32,6 @@ constexpr unsigned kDefaultBatchedInductionDecisionLimit = 200000;
 // that do not close quickly should become uncovered/inconclusive instead of
 // letting one expanded rail query dominate the full regression runtime.
 constexpr unsigned kDefaultDualRailInductionDecisionLimit = 5000;
-constexpr size_t kMaxPreEngineOrderedStateMiningStates = 40000;
 
 std::optional<unsigned> readUnsignedEnv(const char* name) {
   const char* value = std::getenv(name);
@@ -134,23 +127,6 @@ bool proofNeedsConcreteFrontierValidation(const KInductionProblem& problem) {
   return problem.resetBootstrapCycles != 0 ||
          problem.inductionProperty != nullptr ||
          problem.inductionBad != nullptr;
-}
-
-bool shouldSkipPreEngineOrderedStateMining(
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    const AlignedSignals& alignedOutputs) {
-  if (alignedOutputs.names.empty()) {
-    return false;
-  }
-
-  // Ordered internal-state mining is only a strengthening accelerator.  On
-  // huge SoCs it can dominate memory before KI reaches its base/step loop, so
-  // keep those runs on output-rooted state mining plus strict k-induction.
-  const size_t stateCount0 = model0.stateBits.size();
-  const size_t stateCount1 = model1.stateBits.size();
-  return stateCount0 > kMaxPreEngineOrderedStateMiningStates ||
-         stateCount1 > kMaxPreEngineOrderedStateMiningStates - stateCount0;
 }
 
 std::optional<KInductionResult> validateConcreteBasePrefix(
@@ -468,30 +444,6 @@ KInductionEngine::KInductionEngine(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType)
     : problem_(problem), solverType_(solverType) {}
-
-AlignedSignals inferKInductionScopedStatePairs(
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    const AlignedSignals& alignedInputs,
-    const AlignedSignals& alignedOutputs,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  if (shouldSkipPreEngineOrderedStateMining(
-          model0, model1, alignedOutputs)) {
-    return inferStructurallyEquivalentOutputConeStatePairs(
-        model0, model1, alignedInputs, alignedOutputs, solverType);
-  }
-  return inferStructurallyEquivalentStatePairs(
-      model0, model1, alignedInputs, alignedOutputs, solverType);
-}
-
-AlignedSignals inferKInductionScopedStatePairs(
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    const AlignedSignals& alignedInputs,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  return inferStructurallyEquivalentStatePairs(
-      model0, model1, alignedInputs, solverType);
-}
 
 KInductionResult KInductionEngine::run(size_t maxK) const {
   if (problem_.observedOutputExprs0.size() <= 1) {
