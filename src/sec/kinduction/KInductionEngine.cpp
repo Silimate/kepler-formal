@@ -3,6 +3,10 @@
 
 #include "kinduction/KInductionEngine.h"
 
+#ifdef inferStructurallyEquivalentStatePairs
+#undef inferStructurallyEquivalentStatePairs
+#endif
+
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
@@ -14,6 +18,8 @@
 #include "kinduction/BaseCaseSolver.h"
 #include "kinduction/InductionStepSolver.h"
 #include "kinduction/OutputBatching.h"
+#include "model/SequentialDesignModel.h"
+#include "strategy/StructuralStateInvariant.h"
 
 namespace KEPLER_FORMAL::SEC {
 
@@ -32,6 +38,7 @@ constexpr unsigned kDefaultBatchedInductionDecisionLimit = 200000;
 // that do not close quickly should become uncovered/inconclusive instead of
 // letting one expanded rail query dominate the full regression runtime.
 constexpr unsigned kDefaultDualRailInductionDecisionLimit = 5000;
+constexpr size_t kMaxPreEngineOrderedStateMiningStates = 40000;
 
 std::optional<unsigned> readUnsignedEnv(const char* name) {
   const char* value = std::getenv(name);
@@ -117,29 +124,6 @@ void emitKInductionProblemDiag(const KInductionProblem& problem,
       " max_k=", maxK);
 }
 
-bool provesDualRailFrontierWithoutWitness(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t k) {
-  if (!problem.usesDualRailStateEncoding ||
-      problem.observedOutputExprs0.size() <= 1) {
-    return false;
-  }
-  if (!SEC::provesNoBaseCounterexampleAtFrontier(problem, solverType, k)) {  // LCOV_EXCL_LINE
-    return false;  // LCOV_EXCL_LINE
-  }
-  if (isKInductionDiagEnabled()) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
-    emitSecDiag(  // LCOV_EXCL_LINE
-        "SEC diag: k-induction dual-rail proof-only base k=", k,
-        // LCOV_EXCL_STOP
-        " unsat");
-  // LCOV_EXCL_START
-  }  // LCOV_EXCL_LINE
-  return true;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
-}
-
 // LCOV_EXCL_START
 bool shouldCheckLocalBaseCase(const KInductionProblem& problem) {
   return !problem.deferBaseCaseChecks;
@@ -150,6 +134,59 @@ bool proofNeedsConcreteFrontierValidation(const KInductionProblem& problem) {
   return problem.resetBootstrapCycles != 0 ||
          problem.inductionProperty != nullptr ||
          problem.inductionBad != nullptr;
+}
+
+bool shouldSkipPreEngineOrderedStateMining(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedOutputs) {
+  if (alignedOutputs.names.empty()) {
+    return false;
+  }
+
+  // Ordered internal-state mining is only a strengthening accelerator.  On
+  // huge SoCs it can dominate memory before KI reaches its base/step loop, so
+  // keep those runs on output-rooted state mining plus strict k-induction.
+  const size_t stateCount0 = model0.stateBits.size();
+  const size_t stateCount1 = model1.stateBits.size();
+  return stateCount0 > kMaxPreEngineOrderedStateMiningStates ||
+         stateCount1 > kMaxPreEngineOrderedStateMiningStates - stateCount0;
+}
+
+std::optional<KInductionResult> validateConcreteBasePrefix(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k) {
+  if (!problem.usesDualRailStateEncoding) {
+    if (auto witness = SEC::findBaseCounterexample(problem, solverType, k);
+        witness.has_value()) {
+      return KInductionResult{
+          KInductionStatus::Different,
+          witness->badFrame,
+          std::move(witness)};
+    }
+    return std::nullopt;
+  }
+
+  const BaseCounterexampleCheckResult baseCheck =
+      SEC::checkBaseCounterexampleWithFastValidation(problem, solverType, k);
+  if (baseCheck.status == BaseCounterexampleCheckStatus::Counterexample ||
+      baseCheck.witness.has_value()) {
+    const size_t badFrame =
+        baseCheck.witness.has_value() ? baseCheck.witness->badFrame : k;
+    return KInductionResult{
+        KInductionStatus::Different,
+        badFrame,
+        baseCheck.witness};
+  }
+  if (baseCheck.status == BaseCounterexampleCheckStatus::NoCounterexample) {
+    return std::nullopt;
+  }
+
+  // A resource-limited concrete base check is not a proof.  Keep KI strict by
+  // returning inconclusive instead of accepting a strengthened induction
+  // certificate as a full SEC result.
+  return KInductionResult{KInductionStatus::Inconclusive, k};
 }
 
 KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
@@ -216,13 +253,10 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
         // LCOV_EXCL_START
         // validate the concrete top-output base predicate through the proved
         // frontier.
-        if (auto witness = SEC::findBaseCounterexample(problem, solverType, k);
-            witness.has_value()) {
-            // LCOV_EXCL_STOP
-          return {
-              KInductionStatus::Different,
-              witness->badFrame,
-              std::move(witness)};
+        if (auto validation =
+                validateConcreteBasePrefix(problem, solverType, k);
+            validation.has_value()) {
+          return *validation;
         }
       // LCOV_EXCL_START
       }
@@ -269,23 +303,16 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     // OR-of-all-previous-bads query at every depth.
     // LCOV_EXCL_START
     if (shouldCheckLocalBaseCase(problem)) {
-      const bool frontierProvedWithoutWitness =
-      // LCOV_EXCL_STOP
-          provesDualRailFrontierWithoutWitness(problem, solverType, k);
-      // LCOV_EXCL_START
-      if (!frontierProvedWithoutWitness) {
-      // LCOV_EXCL_STOP
-        if (auto witness = SEC::findKInductionBaseCounterexampleAtFrontier(
-                *baseFrontierCache, solverType, k);
-            witness.has_value()) {
-          if (isKInductionDiagEnabled()) {
-            emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
-          }
-          return {
-              KInductionStatus::Different,
-              witness->badFrame,
-              std::move(witness)};
+      if (auto witness = SEC::findKInductionBaseCounterexampleAtFrontier(
+              *baseFrontierCache, solverType, k);
+          witness.has_value()) {
+        if (isKInductionDiagEnabled()) {
+          emitSecDiag("SEC diag: k-induction base k=", k, " found cex");
         }
+        return {
+            KInductionStatus::Different,
+            witness->badFrame,
+            std::move(witness)};
       }
       if (isKInductionDiagEnabled()) {
         emitSecDiag("SEC diag: k-induction base k=", k, " unsat");
@@ -302,9 +329,10 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
   // bootstrap offsets or observation-only startup semantics cannot hide a real
   // bounded counterexample.
   if (shouldCheckLocalBaseCase(problem)) {
-    if (auto witness = SEC::findBaseCounterexample(problem, solverType, maxK);
-        witness.has_value()) {
-      return {KInductionStatus::Different, witness->badFrame, std::move(witness)};  // LCOV_EXCL_LINE
+    if (auto validation =
+            validateConcreteBasePrefix(problem, solverType, maxK);
+        validation.has_value()) {
+      return *validation;
     }
   }
 
@@ -415,10 +443,10 @@ KInductionResult runOutputBatchedKInduction(
   if (useSharedBaseCase && combined.status == KInductionStatus::Equivalent) {
     // Slices may prove before running their local frontier BMC. The shared
     // full-output check must therefore include the proved frontier itself.
-    if (auto witness =
-            SEC::findBaseCounterexample(problem, solverType, combined.bound);
-        witness.has_value()) {
-      return {KInductionStatus::Different, witness->badFrame, std::move(witness)};
+    if (auto validation =
+            validateConcreteBasePrefix(problem, solverType, combined.bound);
+        validation.has_value()) {
+      return *validation;
     }
   }
   return combined;
@@ -434,12 +462,36 @@ KInductionResult runOutputBatchedKInduction(
 // 4. If the step is inconclusive, extend the safe prefix by checking the next
 //    concrete base frontier for a counterexample.
 // 5. Return the first counterexample, the first successful proof bound, or
-//    "inconclusive" if neither happens within the requested budget.
+//    "inconclusive" if neither happens within the requested maxK.
 
 KInductionEngine::KInductionEngine(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType)
     : problem_(problem), solverType_(solverType) {}
+
+AlignedSignals inferKInductionScopedStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  if (shouldSkipPreEngineOrderedStateMining(
+          model0, model1, alignedOutputs)) {
+    return inferStructurallyEquivalentOutputConeStatePairs(
+        model0, model1, alignedInputs, alignedOutputs, solverType);
+  }
+  return inferStructurallyEquivalentStatePairs(
+      model0, model1, alignedInputs, alignedOutputs, solverType);
+}
+
+AlignedSignals inferKInductionScopedStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  return inferStructurallyEquivalentStatePairs(
+      model0, model1, alignedInputs, solverType);
+}
 
 KInductionResult KInductionEngine::run(size_t maxK) const {
   if (problem_.observedOutputExprs0.size() <= 1) {

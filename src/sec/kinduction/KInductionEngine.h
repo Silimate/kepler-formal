@@ -13,6 +13,9 @@
 
 namespace KEPLER_FORMAL::SEC {
 
+struct AlignedSignals;
+struct SequentialDesignModel;
+
 enum class KInductionStatus {
   Equivalent,
   Different,
@@ -59,4 +62,23 @@ class KInductionEngine {
   KEPLER_FORMAL::Config::SolverType solverType_;
 };
 
+AlignedSignals inferKInductionScopedStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    const AlignedSignals& alignedOutputs,
+    KEPLER_FORMAL::Config::SolverType solverType);
+
+AlignedSignals inferKInductionScopedStatePairs(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& alignedInputs,
+    KEPLER_FORMAL::Config::SolverType solverType);
+
 }  // namespace KEPLER_FORMAL::SEC
+
+// SequentialEquivalenceStrategy includes this KI header before the structural
+// matcher.  Route optional pre-engine internal-state mining through the KI-owned
+// guard below so huge dual-rail runs do not spend their budget proving helper
+// equalities before strict base/step k-induction starts.
+#define inferStructurallyEquivalentStatePairs inferKInductionScopedStatePairs

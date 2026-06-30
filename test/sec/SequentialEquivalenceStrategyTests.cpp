@@ -58,6 +58,13 @@
 #include "clocks/SecClockModel.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
+// The production SEC strategy includes the KI header before the structural
+// matcher so KI can guard its pre-engine state mining.  These tests also call
+// the structural matcher directly, so keep those calls on the original API and
+// invoke inferKInductionScopedStatePairs explicitly in the KI regression.
+#ifdef inferStructurallyEquivalentStatePairs
+#undef inferStructurallyEquivalentStatePairs
+#endif
 #include "strategy/StructuralStateInvariant.h"
 
 using namespace naja::NL;
@@ -20639,6 +20646,52 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(aligned.names.size(), 1u);
   EXPECT_EQ(aligned.keys0.front(), root0);
   EXPECT_EQ(aligned.keys1.front(), root1);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionScopedStateMiningSkipsHugeOrderedSurface) {
+  constexpr size_t stateCount = 40001;
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+
+  for (size_t i = 0; i < stateCount; ++i) {
+    const size_t var0 = 2 + i;
+    const size_t var1 = 2 + stateCount + i;
+    addStateBitForTest(
+        model0,
+        makeSignalKey("ki_large_state0_" + std::to_string(i)),
+        var0,
+        "left_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(var0));
+    addStateBitForTest(
+        model1,
+        makeSignalKey("ki_large_state1_" + std::to_string(i)),
+        var1,
+        "right_q[" + std::to_string(i) + "]",
+        BoolExpr::Var(var1));
+  }
+
+  const SignalKey out0 = makeSignalKey("ki_large_out0");
+  const SignalKey out1 = makeSignalKey("ki_large_out1");
+  model0.observedOutputExprByKey.emplace(out0, BoolExpr::Var(2));
+  model1.observedOutputExprByKey.emplace(out1, BoolExpr::Var(2 + stateCount));
+
+  AlignedSignals alignedOutputs;
+  alignedOutputs.names = {"out"};
+  alignedOutputs.keys0 = {out0};
+  alignedOutputs.keys1 = {out1};
+
+  const auto aligned = inferKInductionScopedStatePairs(
+      model0,
+      model1,
+      AlignedSignals{},
+      alignedOutputs,
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
+
+  // The ordered relation would expose every state pair before KI starts.  The
+  // KI-scoped guard keeps huge designs on output-rooted mining, which is enough
+  // for strict base/step k-induction and avoids the Ariane pre-engine wall.
+  EXPECT_EQ(aligned.names.size(), 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
