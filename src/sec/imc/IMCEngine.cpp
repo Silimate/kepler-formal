@@ -37,6 +37,7 @@ constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
     /*outputBatchSupportLimit=*/8192};
 
 constexpr size_t kLargeDualRailCraigProjectionStateLimit = 86016;
+constexpr size_t kLargeDualRailCraigImageTransitionStateLimit = 32768;
 constexpr size_t kLargeDualRailCounterexampleProbeSupportLimit = 512;
 constexpr size_t kLargeDualRailCounterexampleProbeStatefulStateLimit = 8192;
 
@@ -50,7 +51,12 @@ constexpr CraigImcGrowthBudget kDefaultLargeDualRailCraigGrowthBudget{
     // BP's retained-helper tail exposes an 84,516-state focused support cone.
     // Allow exactly that strict projection surface, with a small power-of-two
     // margin, while staying below the next broad all-support regime.
-    /*maxProjectionStates=*/kLargeDualRailCraigProjectionStateLimit};
+    /*maxProjectionStates=*/kLargeDualRailCraigProjectionStateLimit,
+    // A single projected image above this size has already entered the memory
+    // risk zone.  Return a strict IMC budget result before allocating the Craig
+    // solver/proof trace for that image; the caller can split or report
+    // allowed-inconclusive instead of crossing the top-MEM cap.
+    /*maxImageTransitionStates=*/kLargeDualRailCraigImageTransitionStateLimit};
 
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
 constexpr size_t kCraigBatchMinMarginalSupportLimit = 64;
@@ -63,6 +69,8 @@ constexpr size_t kCraigBatchProjectionHardMaxOutputs = 2;
 constexpr size_t kCraigReusableProjectionMinSupport = 256;
 constexpr size_t kCraigSingleOutputSelfProjectionSeedLimit = 1024;
 constexpr size_t kCraigProjectionCacheWorkLimit = 500000;
+constexpr size_t kCraigDenseProjectionCacheStateThreshold = 4096;
+constexpr size_t kCraigDenseProjectionCacheOutputThreshold = 64;
 constexpr size_t kCraigIndexedVectorOutputRawSupportLimit = 64;
 constexpr size_t kCraigIndexedVectorUnionRawSupportLimit = 128;
 constexpr size_t kCraigHelperReuseMinOverlapPercent = 80;
@@ -121,9 +129,15 @@ bool shouldBuildCraigProjectionSupportCache(
   }
   // The cache expands each output support through the transition relation.
   // That is useful on AES-sized surfaces, but BP-sized dual-rail problems can
-  // spend tens of GB before the first Craig query.  When the estimated cache
-  // work is too large, keep raw support batching and let Craig's bounded
+  // spend tens of GB before the first Craig query, and RISC-V-sized buses spend
+  // minutes in closure walks before proving only a few outputs.  When the
+  // surface is dense, keep raw support batching and let Craig's bounded
   // projection refinement grow one proof slice at a time.
+  if (stateCount >= kCraigDenseProjectionCacheStateThreshold &&
+      outputCount >= kCraigDenseProjectionCacheOutputThreshold) {
+    return false;
+  }
+  // Keep a product cap for broad state/output mixes below the dense guard.
   return stateCount <= kCraigProjectionCacheWorkLimit / outputCount;
 }
 
@@ -377,6 +391,9 @@ CraigImcGrowthBudget largeDualRailCraigGrowthBudget() {
   CraigImcGrowthBudget budget = kDefaultLargeDualRailCraigGrowthBudget;
   budget.maxQExpansionPass = envSizeOrDefault(
       "KEPLER_SEC_IMC_CRAIG_MAX_Q_PASS", budget.maxQExpansionPass);
+  budget.maxImageTransitionStates = envSizeOrDefault(
+      "KEPLER_SEC_IMC_CRAIG_MAX_IMAGE_TRANSITION_STATES",
+      budget.maxImageTransitionStates);
   return budget;
 }
 
@@ -876,13 +893,6 @@ std::optional<IMCResult> findLargeDualRailCounterexampleUpTo(
         ++skippedStateDependent;
         continue;
       }
-      const std::unordered_set<size_t> projection =
-          computeCraigImcProjectionClosure(problem, support);
-      if (projection.size() > kLargeDualRailCounterexampleProbeSupportLimit) {
-        ++skippedProjectionSupport;
-        continue;
-      }
-      supportScore = projection.size();
     }
     probes.push_back({output, supportScore, touchesState});
   }
@@ -901,6 +911,7 @@ std::optional<IMCResult> findLargeDualRailCounterexampleUpTo(
       " support_limit=", kLargeDualRailCounterexampleProbeSupportLimit,
       " stateful_state_limit=",
       kLargeDualRailCounterexampleProbeStatefulStateLimit,
+      " projection_sizing=raw_support",
       " max_k=", maxK);
 
   for (size_t depth = 0; depth <= maxK; ++depth) {
