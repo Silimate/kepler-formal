@@ -106,6 +106,7 @@ constexpr size_t kCraigFocusedLookaheadAdvanceMinAuxiliaries = 70000;
 constexpr size_t kCraigHelperAuxiliaryCarryLimit = 4096;
 constexpr size_t kCraigRetainedHelperLocalAuxiliarySkipRegions = 6;
 constexpr size_t kCraigRetainedHelperLocalAuxiliarySkipStateThreshold = 32768;
+constexpr size_t kCraigNearSaturatedProjectionRemainderLimit = 256;
 
 struct AuxiliaryStateInvariants {
   std::vector<std::pair<size_t, bool>> constants;
@@ -2846,6 +2847,22 @@ const std::unordered_set<size_t>& projectionRefinementSupport(
              : frontier.modelGuidedTransitionStateSupport;
 }
 
+std::unordered_set<size_t> nearSaturatedProjectionRemainderSupport(
+    const std::unordered_set<size_t>& transitionStateSupport,
+    const std::unordered_set<size_t>& trackedStates) {
+  std::unordered_set<size_t> remainder;
+  for (const size_t symbol : transitionStateSupport) {
+    if (trackedStates.contains(symbol)) {
+      continue;
+    }
+    remainder.insert(symbol);
+    if (remainder.size() > kCraigNearSaturatedProjectionRemainderLimit) {
+      return {};
+    }
+  }
+  return remainder;
+}
+
 bool modelGuidedProjectionNeedsBoundedBackfill(
     const FrontierResult& frontier) {
   // A SAT model may point at only a couple of bootstrap mismatches even though
@@ -3222,7 +3239,9 @@ bool craigTransitionBuildBudgetExceeded(
     return false;
   }
   const size_t supportLimit = kCraigProjectedTransitionBuildSupportLimit;
-  return estimate.stateSupport > supportLimit ||
+  return (budget.maxImageTransitionStates > 0 &&
+          estimate.stateSupport > budget.maxImageTransitionStates) ||
+         estimate.stateSupport > supportLimit ||
          estimate.encodedTargets > kCraigProjectedTransitionBuildTargetLimit ||
          estimate.expressionNodes > kCraigProjectedTransitionBuildNodeLimit;
 }
@@ -3327,8 +3346,11 @@ void emitCraigTransitionBuildBudgetExceeded(
     const ProjectedTransitionBuildEstimate& estimate,
     size_t largestTransitionRequestCount,
     const CraigImcGrowthBudget& budget) {
-  (void)budget;
   const size_t supportLimit = kCraigProjectedTransitionBuildSupportLimit;
+  const size_t activeSupportLimit =
+      budget.maxImageTransitionStates > 0
+          ? std::min(supportLimit, budget.maxImageTransitionStates)
+          : supportLimit;
   emitSecDiag(
       "SEC diag: imc Craig growth budget exceeded "
       "reason=transition_build",
@@ -3339,7 +3361,7 @@ void emitCraigTransitionBuildBudgetExceeded(
       " transition_targets=", estimate.encodedTargets,
       " transition_nodes=", estimate.expressionNodes,
       " largest_transition_requests=", largestTransitionRequestCount,
-      " support_limit=", supportLimit,
+      " support_limit=", activeSupportLimit,
       " target_limit=", kCraigProjectedTransitionBuildTargetLimit,
       " node_limit=", kCraigProjectedTransitionBuildNodeLimit);
 }
@@ -4230,20 +4252,33 @@ CraigImcResult runWithProjection(
               frontier.modelGuidedTransitionStateSupport.end());
         }
       }
-      const std::unordered_set<size_t>& refinementSupport =
+      std::unordered_set<size_t> nearSaturatedRefinementSupport =
+          nearSaturatedProjectionRemainderSupport(
+              frontier.transitionStateSupport, trackedStates);
+      const std::unordered_set<size_t>* refinementSupport =
           !boundedRefinementSupport.empty()
-              ? boundedRefinementSupport
-              : projectionRefinementSupport(frontier);
+              ? &boundedRefinementSupport
+              : &projectionRefinementSupport(frontier);
+      if (!nearSaturatedRefinementSupport.empty()) {
+        emitSecDiag(
+            "SEC diag: imc Craig imports near-saturated projection remainder "
+            "selected=",
+            nearSaturatedRefinementSupport.size(),
+            " tracked_states=", trackedStates.size(),
+            " full=", frontier.transitionStateSupport.size(),
+            " limit=", kCraigNearSaturatedProjectionRemainderLimit);
+        refinementSupport = &nearSaturatedRefinementSupport;
+      }
       if (!skipLocalAuxiliaryMining &&
           shouldTrySelectedLocalAuxiliaryInvariants(
-              frontier, refinementSupport, localAuxiliaryRetryCount)) {
+              frontier, *refinementSupport, localAuxiliaryRetryCount)) {
         const AuxiliaryStateInvariants localInvariants =
             deriveLocalAuxiliaryStateInvariants(
                 problem,
                 resolver,
                 staticIndex.stateSemantics,
                 complementPrimary,
-                refinementSupport,
+                *refinementSupport,
                 activeAuxiliaryInvariants);
         if (promoteLocalAuxiliaryInvariants(
                 activeAuxiliaryInvariants,
@@ -4255,7 +4290,7 @@ CraigImcResult runWithProjection(
           emitSecDiag(
               "SEC diag: imc Craig retries selected local auxiliary "
               "invariants selected=",
-              refinementSupport.size(),
+              refinementSupport->size(),
               " full_support=", frontier.transitionStateSupport.size(),
               " retry=", localAuxiliaryRetryCount,
               " retry_limit=", kCraigLocalAuxiliaryRetryLimit);
@@ -4266,8 +4301,8 @@ CraigImcResult runWithProjection(
       // Missing partners weaken the projected Craig query but keep any proof
       // sound, while avoiding thousands of extra global interpolant variables.
       trackedStates.insert(
-          refinementSupport.begin(),
-          refinementSupport.end());
+          refinementSupport->begin(),
+          refinementSupport->end());
       if (trackedStates.size() != oldSize) {
         if (hasModelGuidedRefinement) {
           emitSecDiag(

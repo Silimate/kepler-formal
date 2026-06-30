@@ -11451,6 +11451,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcStartupProbeUsesRawSupportSizing) {
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  (void)engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Startup witness probes are concrete bounded SAT checks.  Their ordering
+  // should not spend a full Craig projection-closure walk before the first
+  // proof attempt; RISC-V-sized output sets were dominated by that sizing pass.
+  EXPECT_NE(
+      stderrOutput.find("imc large dual-rail bounded witness probes="),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("projection_sizing=raw_support"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcBatchesWideSharedOutputCones) {
   const KInductionProblem problem = buildWideSharedConeImcProblem(3);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -11535,6 +11558,35 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // BP-like dual-rail problems have many outputs over a huge state surface.
   // Avoid materializing one transition-closed projection per output before
   // the first Craig query; raw support batching keeps the cache bounded.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig skips projection support cache"),
+      std::string::npos)
+      << stderrOutput;
+  ASSERT_EQ(batches.size(), kOutputCount);
+  EXPECT_EQ(batches.front(), std::make_pair(size_t{0}, size_t{1}));
+  EXPECT_EQ(
+      batches.back(),
+      std::make_pair(kOutputCount - 1, kOutputCount));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcSkipsProjectionCacheForDenseRiscvSurface) {
+  constexpr size_t kSharedTransitionStates = 4096;
+  constexpr size_t kOutputCount = 65;
+  const KInductionProblem problem = buildProjectionSharedImcBatchProblem(
+      kSharedTransitionStates,
+      kOutputCount);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/8,
+                                    /*outputBatchSupportLimit=*/8192});
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // sky130*_riscv32i has 4K+ dual-rail state bits and a 99-output bus
+  // surface.  That sits below the old product cap but still spends minutes
+  // computing transition closures before Craig IMC starts.
   EXPECT_NE(
       stderrOutput.find("imc Craig skips projection support cache"),
       std::string::npos)
@@ -12071,6 +12123,48 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find(" state_limit=32"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcStopsOversizedImageBeforeCraigBuild) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildBootstrapModelGuidedCraigProjectionProblem(
+          /*supportCount=*/96,
+          /*assignSupportBootstrap=*/false);
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxImageTransitionStates = 32;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The transition planner can see the projected image surface before the
+  // Craig solver is allocated.  Trip the strict growth budget there instead of
+  // materializing a proof trace that the caller will discard as inconclusive.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig growth budget exceeded reason=transition_build"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(" transition_support=97"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(" support_limit=32"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig image build begin"),
+      std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
 }

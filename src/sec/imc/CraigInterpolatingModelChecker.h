@@ -53,6 +53,7 @@ struct CraigImcGrowthBudget {
   size_t maxInterpolantAuxiliaries = 0;
   std::int64_t maxImageSolveMilliseconds = 0;
   size_t maxProjectionStates = 0;
+  size_t maxImageTransitionStates = 0;
 };
 
 struct CraigImcOptions {
