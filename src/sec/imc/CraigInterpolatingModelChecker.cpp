@@ -3175,11 +3175,6 @@ bool craigGrowthBudgetExceeded(
   if (!budget.enabled) {
     return false;
   }
-  if (budget.maxImageSolveMilliseconds > 0 &&
-      frontier.solveElapsedMilliseconds > budget.maxImageSolveMilliseconds) {
-    *reason = "solve_time";
-    return true;
-  }
   const size_t qExpansionPassLimit =
       qExpansionPassLimitOverride > 0 ? qExpansionPassLimitOverride
                                       : budget.maxQExpansionPass;
@@ -3304,7 +3299,6 @@ bool shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
       frontierRegionClauseCount(frontier),
       frontierRegionLiteralCount(frontier),
       frontierRegionAuxiliaryCount(frontier),
-      frontier.solveElapsedMilliseconds,
       qExpansionPassLimit);
 }
 
@@ -3321,8 +3315,7 @@ bool shouldAdvanceLookaheadAfterBudgetedFocusedSat(
       budgetReason,
       lookahead,
       maxLookahead,
-      growthBudget,
-      frontier.solveElapsedMilliseconds);
+      growthBudget);
 }
 
 void emitCraigProjectionBudgetExceeded(
@@ -4564,8 +4557,8 @@ bool shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
     size_t interpolantClauses,
     size_t interpolantLiterals,
     size_t interpolantAuxiliaries,
-    std::int64_t imageSolveMilliseconds,
     size_t qExpansionPassLimit) {
+  (void)budget;
   const bool saturatedQPass =
       qExpansionPass >= qExpansionPassLimit;
   const bool largeProof = isLargeFocusedLookaheadAdvanceProof(
@@ -4576,8 +4569,6 @@ bool shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
          lookahead < maxLookahead &&
          focusedTransitionProjection &&
          !hasUntrackedTransitionSupport &&
-         (budget.maxImageSolveMilliseconds == 0 ||
-          imageSolveMilliseconds <= budget.maxImageSolveMilliseconds) &&
          interpolantClauses <= kCraigFocusedLookaheadAdvanceMaxClauses &&
          interpolantLiterals <= kCraigFocusedLookaheadAdvanceMaxLiterals &&
          interpolantAuxiliaries <=
@@ -4590,15 +4581,13 @@ bool shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
     const char* budgetReason,
     size_t lookahead,
     size_t maxLookahead,
-    const CraigImcGrowthBudget& budget,
-    std::int64_t imageSolveMilliseconds) {
+    const CraigImcGrowthBudget& budget) {
+  (void)budget;
   return budgetReason != nullptr &&
          std::strcmp(budgetReason, "q_pass") == 0 &&
          lookahead < maxLookahead &&
          focusedTransitionProjection &&
-         !hasUntrackedTransitionSupport &&
-         (budget.maxImageSolveMilliseconds == 0 ||
-          imageSolveMilliseconds <= budget.maxImageSolveMilliseconds);
+         !hasUntrackedTransitionSupport;
 }
 
 size_t craigBoundedProjectionRefinementLimit(

@@ -47,7 +47,6 @@ constexpr CraigImcGrowthBudget kDefaultLargeDualRailCraigGrowthBudget{
     /*maxInterpolantClauses=*/100000,
     /*maxInterpolantLiterals=*/250000,
     /*maxInterpolantAuxiliaries=*/50000,
-    /*maxImageSolveMilliseconds=*/25000,
     // BP's retained-helper tail exposes an 84,516-state focused support cone.
     // Allow exactly that strict projection surface, with a small power-of-two
     // margin, while staying below the next broad all-support regime.

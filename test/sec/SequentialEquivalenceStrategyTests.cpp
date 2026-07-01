@@ -11840,7 +11840,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   budget.maxInterpolantClauses = 100000;
   budget.maxInterpolantLiterals = 250000;
   budget.maxInterpolantAuxiliaries = 50000;
-  budget.maxImageSolveMilliseconds = 25000;
 
   // The saturated focused q-pass limit is only a proof-size guard.  Strict IMC
   // can still try the next unroll depth from S0 instead of reporting the
@@ -11855,8 +11854,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/82359,
       /*interpolantLiterals=*/192171,
-      /*interpolantAuxiliaries=*/27453,
-      /*imageSolveMilliseconds=*/6862));
+      /*interpolantAuxiliaries=*/27453));
   EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11867,8 +11865,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/214323,
       /*interpolantLiterals=*/500087,
-      /*interpolantAuxiliaries=*/71441,
-      /*imageSolveMilliseconds=*/8494));
+      /*interpolantAuxiliaries=*/71441));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/true,
@@ -11879,8 +11876,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/82359,
       /*interpolantLiterals=*/192171,
-      /*interpolantAuxiliaries=*/27453,
-      /*imageSolveMilliseconds=*/6862));
+      /*interpolantAuxiliaries=*/27453));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11891,8 +11887,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/13443,
       /*interpolantLiterals=*/31367,
-      /*interpolantAuxiliaries=*/4481,
-      /*imageSolveMilliseconds=*/2325));
+      /*interpolantAuxiliaries=*/4481));
   EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11904,7 +11899,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*interpolantClauses=*/2541,
       /*interpolantLiterals=*/5929,
       /*interpolantAuxiliaries=*/847,
-      /*imageSolveMilliseconds=*/1220,
       /*qExpansionPassLimit=*/3));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
@@ -11917,7 +11911,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*interpolantClauses=*/2541,
       /*interpolantLiterals=*/5929,
       /*interpolantAuxiliaries=*/847,
-      /*imageSolveMilliseconds=*/1220,
       /*qExpansionPassLimit=*/6));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
@@ -11929,8 +11922,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/82359,
       /*interpolantLiterals=*/192171,
-      /*interpolantAuxiliaries=*/27453,
-      /*imageSolveMilliseconds=*/6862));
+      /*interpolantAuxiliaries=*/27453));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11941,8 +11933,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/82359,
       /*interpolantLiterals=*/192171,
-      /*interpolantAuxiliaries=*/27453,
-      /*imageSolveMilliseconds=*/6862));
+      /*interpolantAuxiliaries=*/27453));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11953,8 +11944,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/82359,
       /*interpolantLiterals=*/192171,
-      /*interpolantAuxiliaries=*/27453,
-      /*imageSolveMilliseconds=*/6862));
+      /*interpolantAuxiliaries=*/27453));
   EXPECT_TRUE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11965,8 +11955,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/567639,
       /*interpolantLiterals=*/1324491,
-      /*interpolantAuxiliaries=*/189213,
-      /*imageSolveMilliseconds=*/9000));
+      /*interpolantAuxiliaries=*/189213));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
@@ -11977,15 +11966,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
       budget,
       /*interpolantClauses=*/900000,
       /*interpolantLiterals=*/1900000,
-      /*interpolantAuxiliaries=*/260000,
-      /*imageSolveMilliseconds=*/9000));
+      /*interpolantAuxiliaries=*/260000));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
        CraigImcAdvancesFocusedLookaheadAfterBudgetedSatFrontier) {
   CraigImcGrowthBudget budget;
   budget.maxQExpansionPass = 4;
-  budget.maxImageSolveMilliseconds = 25000;
 
   // BP's retained singleton tail reached a fully tracked focused SAT frontier
   // at lookahead 3/q7.  That is strict IMC's cue to try k=4, not a reason to
@@ -11996,40 +11983,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*budgetReason=*/"q_pass",
       /*lookahead=*/3,
       /*maxLookahead=*/32,
-      budget,
-      /*imageSolveMilliseconds=*/7554));
+      budget));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/true,
       /*budgetReason=*/"q_pass",
       /*lookahead=*/3,
       /*maxLookahead=*/32,
-      budget,
-      /*imageSolveMilliseconds=*/7554));
-  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
-      /*focusedTransitionProjection=*/true,
-      /*hasUntrackedTransitionSupport=*/false,
-      /*budgetReason=*/"solve_time",
-      /*lookahead=*/3,
-      /*maxLookahead=*/32,
-      budget,
-      /*imageSolveMilliseconds=*/7554));
+      budget));
   EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
       /*focusedTransitionProjection=*/true,
       /*hasUntrackedTransitionSupport=*/false,
       /*budgetReason=*/"q_pass",
       /*lookahead=*/32,
       /*maxLookahead=*/32,
-      budget,
-      /*imageSolveMilliseconds=*/7554));
-  EXPECT_FALSE(shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
-      /*focusedTransitionProjection=*/true,
-      /*hasUntrackedTransitionSupport=*/false,
-      /*budgetReason=*/"q_pass",
-      /*lookahead=*/3,
-      /*maxLookahead=*/32,
-      budget,
-      /*imageSolveMilliseconds=*/26000));
+      budget));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -51,7 +51,6 @@ struct CraigImcGrowthBudget {
   size_t maxInterpolantClauses = 0;
   size_t maxInterpolantLiterals = 0;
   size_t maxInterpolantAuxiliaries = 0;
-  std::int64_t maxImageSolveMilliseconds = 0;
   size_t maxProjectionStates = 0;
   size_t maxImageTransitionStates = 0;
 };
@@ -110,7 +109,6 @@ bool shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
     size_t interpolantClauses,
     size_t interpolantLiterals,
     size_t interpolantAuxiliaries,
-    std::int64_t imageSolveMilliseconds,
     size_t qExpansionPassLimit = 6);
 
 // SAT on a fully tracked focused frontier is the normal strict-IMC signal to
@@ -122,8 +120,7 @@ bool shouldAdvanceCraigLookaheadAfterBudgetedFocusedSat(
     const char* budgetReason,
     size_t lookahead,
     size_t maxLookahead,
-    const CraigImcGrowthBudget& budget,
-    std::int64_t imageSolveMilliseconds);
+    const CraigImcGrowthBudget& budget);
 
 // Projection refinement policy shared by the checker and tests. Focused Craig
 // image queries encode a narrow transition request; modest focused support
