@@ -46,7 +46,7 @@ namespace KEPLER_FORMAL::SEC {
 // Overall SEC strategy pipeline:
 // 1. Extract both designs into the normalized sequential model used by SEC.
 // 2. Align environment inputs and observed outputs by stable external names.
-// 3. Infer internal state correspondences structurally, not by register names.
+// 3. Optionally infer internal state correspondences when explicitly enabled.
 // 4. Build reset/init reachable-state strengthening for startup anchoring.
 // 5. Remap both designs into one shared SAT symbol space.
 // 6. Build the checked SEC property and the stronger proof invariant.
@@ -1312,6 +1312,9 @@ std::unordered_set<SignalKey, SignalKeyHash> buildInductivelyAnchoredStateSet(
     size_t designIndex,
     const ReachableStateInvariant& reachableInvariant) {
   std::unordered_set<SignalKey, SignalKeyHash> anchoredKeys;
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return anchoredKeys;
+  }
   anchoredKeys.reserve(reachableInvariant.anchoredStateEqualities.names.size());
   addAnchoredStateKeysFromAlignedSignals(
       designIndex == 0 ? reachableInvariant.anchoredStateEqualities.keys0
@@ -1371,11 +1374,16 @@ void filterOutputsRequiringUnanchoredResetState(
       buildInductivelyAnchoredStateSet(0, reachableInvariant);
   const auto anchoredStateKeys1 =
       buildInductivelyAnchoredStateSet(1, reachableInvariant);
+  const AlignedSignals emptyStateEqualities;
+  const AlignedSignals& anchoredStateEqualities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? reachableInvariant.anchoredStateEqualities
+          : emptyStateEqualities;
   const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
       model0,
       model1,
       aligned.inputs,
-      reachableInvariant.anchoredStateEqualities);
+      anchoredStateEqualities);
 
   AlignedSignals filteredOutputs;
   filteredOutputs.names.reserve(aligned.outputs.names.size());
@@ -3877,6 +3885,8 @@ ReachableStateInvariant integrateReachableStateInvariant(
   if (problem.hasExplicitInitialState()) {
     problem.initialCondition = BoolExpr::simplify(initialCondition);
   }
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
 
   const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
       model0,
@@ -3888,10 +3898,14 @@ ReachableStateInvariant integrateReachableStateInvariant(
       SATSolverWrapper::assumptionSolverTypeFor(solverType),
       deriveResetBootstrapEqualities,
       resetBootstrapCandidateStateEqualities);
-  for (size_t i = 0; i < reachableInvariant.initialStateCorrespondence.names.size(); ++i) {
-    problem.initialStateEqualityPairs.emplace_back(
-        state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]),
-        state1Symbols.at(reachableInvariant.initialStateCorrespondence.keys1[i]));
+  if (allowInternalStateCorrespondence) {
+    for (size_t i = 0;
+         i < reachableInvariant.initialStateCorrespondence.names.size();
+         ++i) {
+      problem.initialStateEqualityPairs.emplace_back(
+          state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]),
+          state1Symbols.at(reachableInvariant.initialStateCorrespondence.keys1[i]));
+    }
   }
 
   for (const auto& [key, value] : reachableInvariant.bootstrapValues0) {
@@ -3925,27 +3939,35 @@ ReachableStateInvariant integrateReachableStateInvariant(
     problem.bootstrapStateAssignments.clear();
     problem.bootstrapStateEqualityPairs.clear();
   }
-  for (size_t i = 0; i < reachableInvariant.anchoredStateEqualities.names.size(); ++i) {
-    problem.inductiveStateEqualityPairs.emplace_back(
-        state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
-        state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
-    if (!problem.resetBootstrapInputs.empty()) {
-      problem.bootstrapStateEqualityPairs.emplace_back(
+  if (allowInternalStateCorrespondence) {
+    for (size_t i = 0;
+         i < reachableInvariant.anchoredStateEqualities.names.size();
+         ++i) {
+      problem.inductiveStateEqualityPairs.emplace_back(
           state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
           state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
+      if (!problem.resetBootstrapInputs.empty()) {
+        problem.bootstrapStateEqualityPairs.emplace_back(
+            state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]),
+            state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]));
+      }
     }
-  }
-  for (size_t i = 0;
-       // LCOV_EXCL_START
-       i < reachableInvariant.bootstrapOnlyStateEqualities.names.size();
-       ++i) {
-    if (!problem.resetBootstrapInputs.empty()) {
-    // LCOV_EXCL_STOP
-      problem.bootstrapStateEqualityPairs.emplace_back(
-          // LCOV_EXCL_START
-          state0Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys0[i]),
-          state1Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys1[i]));
+    for (size_t i = 0;
+         // LCOV_EXCL_START
+         i < reachableInvariant.bootstrapOnlyStateEqualities.names.size();
+         ++i) {
+      if (!problem.resetBootstrapInputs.empty()) {
+      // LCOV_EXCL_STOP
+        problem.bootstrapStateEqualityPairs.emplace_back(
+            // LCOV_EXCL_START
+            state0Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys0[i]),
+            state1Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys1[i]));
+      }
     }
+  } else {
+    problem.initialStateEqualityPairs.clear();
+    problem.bootstrapStateEqualityPairs.clear();
+    problem.inductiveStateEqualityPairs.clear();
   }
   return reachableInvariant;
 }
@@ -3963,11 +3985,17 @@ void buildSecPropertiesAndTransitions(
     KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
+  const AlignedSignals emptyStateEqualities;
+  const AlignedSignals& anchoredStateEqualities =
+      allowInternalStateCorrespondence ? reachableInvariant.anchoredStateEqualities
+                                       : emptyStateEqualities;
   const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
       model0,
       model1,
       alignedInputs,
-      reachableInvariant.anchoredStateEqualities);
+      anchoredStateEqualities);
   logSecDiagLine(secDiagEnabled, "SEC diag: built abstract transition maps");
 
   if (problem.lazyTransitions == nullptr) {
@@ -3983,14 +4011,14 @@ void buildSecPropertiesAndTransitions(
   BoolExpr* inductionCore = BoolExpr::createTrue();
   size_t abstractEquivalentOutputCount = 0;
   size_t satImpliedOutputCount = 0;
-  for (size_t i = 0; i < reachableInvariant.anchoredStateEqualities.names.size(); ++i) {
+  for (size_t i = 0; i < anchoredStateEqualities.names.size(); ++i) {
     inductionCore = BoolExpr::And(
         inductionCore,
         makeEqualityExpr(
             BoolExpr::Var(
-                state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i])),
+                state0Symbols.at(anchoredStateEqualities.keys0[i])),
             BoolExpr::Var(
-                state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i]))));
+                state1Symbols.at(anchoredStateEqualities.keys1[i]))));
   }
 
   BoolExpr* inductionProperty = inductionCore;
@@ -4050,6 +4078,7 @@ void buildSecPropertiesAndTransitions(
   // LCOV_EXCL_STOP
   problem.inductionPropertyAssumesInductiveStateEqualities =
       // LCOV_EXCL_START
+      allowInternalStateCorrespondence &&
       !problem.inductiveStateEqualityPairs.empty();
   problem.description = "SEC property with aligned observed outputs";
   // LCOV_EXCL_STOP
@@ -4096,6 +4125,21 @@ KInductionProblem buildDualRailSecProblem(
     KEPLER_FORMAL::Config::SolverType solverType,
     bool secDiagEnabled) {
   KInductionProblem problem;
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
+  const AlignedSignals emptyStateEqualities;
+  const AlignedSignals& initialStateCorrespondence =
+      allowInternalStateCorrespondence
+          ? reachableInvariant.initialStateCorrespondence
+          : emptyStateEqualities;
+  const AlignedSignals& anchoredStateEqualities =
+      allowInternalStateCorrespondence
+          ? reachableInvariant.anchoredStateEqualities
+          : emptyStateEqualities;
+  const AlignedSignals& bootstrapOnlyStateEqualities =
+      allowInternalStateCorrespondence
+          ? reachableInvariant.bootstrapOnlyStateEqualities
+          : emptyStateEqualities;
   problem.environmentInputs = alignedInputs.keys0;
   problem.environmentInputNames = symbolSpace.problem.environmentInputNames;
   problem.inputSymbols = symbolSpace.problem.inputSymbols;
@@ -4130,25 +4174,25 @@ KInductionProblem buildDualRailSecProblem(
   addDualRailBootstrapAssignments(
       model1, reachableInvariant.bootstrapValues1, railMaps.state1ByKey, problem);
   addDualRailEqualityPairs(
-      reachableInvariant.initialStateCorrespondence,
+      initialStateCorrespondence,
       railMaps.state0ByKey,
       railMaps.state1ByKey,
       problem.initialStateEqualityPairs);
   addDualRailEqualityPairs(
-      reachableInvariant.anchoredStateEqualities,
+      anchoredStateEqualities,
       railMaps.state0ByKey,
       railMaps.state1ByKey,
       problem.inductiveStateEqualityPairs);
   if (!problem.resetBootstrapInputs.empty()) {
     addDualRailEqualityPairs(
-        reachableInvariant.anchoredStateEqualities,
+        anchoredStateEqualities,
         // LCOV_EXCL_START
         railMaps.state0ByKey,
         // LCOV_EXCL_STOP
         railMaps.state1ByKey,
         problem.bootstrapStateEqualityPairs);
     addDualRailEqualityPairs(
-        reachableInvariant.bootstrapOnlyStateEqualities,
+        bootstrapOnlyStateEqualities,
         railMaps.state0ByKey,
         railMaps.state1ByKey,
         problem.bootstrapStateEqualityPairs);
@@ -4294,6 +4338,7 @@ KInductionProblem buildDualRailSecProblem(
   problem.inductionProperty = BoolExpr::simplify(inductionProperty);
   problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
   problem.inductionPropertyAssumesInductiveStateEqualities =
+      allowInternalStateCorrespondence &&
       !problem.inductiveStateEqualityPairs.empty();
   problem.description =
       "SEC dual-rail steady-state property with aligned observed outputs";
@@ -4420,6 +4465,9 @@ void addFrameZeroInitialEqualities(
     const FrameVariableStore& variables,
     const std::unordered_set<size_t>& support,
     const KInductionProblem& problem) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return;
+  }
   for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
     if (support.find(lhsSymbol) == support.end() ||  // LCOV_EXCL_LINE
         support.find(rhsSymbol) == support.end()) {  // LCOV_EXCL_LINE
@@ -4440,6 +4488,9 @@ void addFrameZeroBootstrapEqualities(
     const FrameVariableStore& variables,
     const std::unordered_set<size_t>& support,
     const KInductionProblem& problem) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return;
+  }
   for (const auto& [lhsSymbol, rhsSymbol] : problem.bootstrapStateEqualityPairs) {
     if (support.find(lhsSymbol) == support.end() ||
         support.find(rhsSymbol) == support.end()) {
@@ -5017,11 +5068,15 @@ SequentialEquivalenceResult runPdrSecEngine(
 
   auto rebuildPdrBatchStrengthening = [](KInductionProblem& batch) {
     BoolExpr* inductionProperty = BoolExpr::createTrue();
-    for (const auto& [lhsSymbol, rhsSymbol] : batch.inductiveStateEqualityPairs) {
-      inductionProperty = BoolExpr::And(  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-          inductionProperty,  // LCOV_EXCL_LINE
-          makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));  // LCOV_EXCL_LINE
+    const bool allowInternalStateCorrespondence =
+        KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
+    if (allowInternalStateCorrespondence) {
+      for (const auto& [lhsSymbol, rhsSymbol] : batch.inductiveStateEqualityPairs) {
+        inductionProperty = BoolExpr::And(  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+            inductionProperty,  // LCOV_EXCL_LINE
+            makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));  // LCOV_EXCL_LINE
+      }
     }
     for (size_t i = 0; i < batch.observedOutputExprs0.size(); ++i) {
       inductionProperty = BoolExpr::And(
@@ -5039,6 +5094,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     // LCOV_EXCL_START
     batch.inductionPropertyAssumesInductiveStateEqualities =
     // LCOV_EXCL_STOP
+        allowInternalStateCorrespondence &&
         !batch.inductiveStateEqualityPairs.empty();
   };
 
@@ -5122,16 +5178,22 @@ SequentialEquivalenceResult runPdrSecEngine(
     // LCOV_EXCL_STOP
     // keeps those real dependencies without reintroducing the full-design
     // million-symbol relational init surface.
-    filterPairsToSupport(
-        // LCOV_EXCL_START
-        problem.initialStateEqualityPairs, batch.initialStateEqualityPairs, support);
-        // LCOV_EXCL_STOP
-    filterPairsToSupport(
-        // LCOV_EXCL_START
-        problem.bootstrapStateEqualityPairs, batch.bootstrapStateEqualityPairs, support);
-        // LCOV_EXCL_STOP
-    filterPairsToSupport(
-        problem.inductiveStateEqualityPairs, batch.inductiveStateEqualityPairs, support);
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+      filterPairsToSupport(
+          // LCOV_EXCL_START
+          problem.initialStateEqualityPairs, batch.initialStateEqualityPairs, support);
+          // LCOV_EXCL_STOP
+      filterPairsToSupport(
+          // LCOV_EXCL_START
+          problem.bootstrapStateEqualityPairs, batch.bootstrapStateEqualityPairs, support);
+          // LCOV_EXCL_STOP
+      filterPairsToSupport(
+          problem.inductiveStateEqualityPairs, batch.inductiveStateEqualityPairs, support);
+    } else {
+      batch.initialStateEqualityPairs.clear();
+      batch.bootstrapStateEqualityPairs.clear();
+      batch.inductiveStateEqualityPairs.clear();
+    }
     filterPairsToSupport(
         problem.sameFrameStateEqualityPairs0,
         batch.sameFrameStateEqualityPairs0,
@@ -5146,21 +5208,23 @@ SequentialEquivalenceResult runPdrSecEngine(
         // LCOV_EXCL_STOP
     filterAssignmentsToSupport(
         problem.bootstrapStateAssignments, batch.bootstrapStateAssignments, support);
-    for (const auto& pair : batch.initialStateEqualityPairs) {
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+      for (const auto& pair : batch.initialStateEqualityPairs) {
+        // LCOV_EXCL_START
+        support.insert(pair.first);  // LCOV_EXCL_LINE
+        support.insert(pair.second);  // LCOV_EXCL_LINE
+      }
+      for (const auto& pair : batch.bootstrapStateEqualityPairs) {
+        support.insert(pair.first);  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+        support.insert(pair.second);  // LCOV_EXCL_LINE
+      }
       // LCOV_EXCL_START
-      support.insert(pair.first);  // LCOV_EXCL_LINE
-      support.insert(pair.second);  // LCOV_EXCL_LINE
-    }
-    for (const auto& pair : batch.bootstrapStateEqualityPairs) {
-      support.insert(pair.first);  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-      support.insert(pair.second);  // LCOV_EXCL_LINE
-    }
-    // LCOV_EXCL_START
-    for (const auto& pair : batch.inductiveStateEqualityPairs) {
-      support.insert(pair.first);  // LCOV_EXCL_LINE
-      support.insert(pair.second);  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      for (const auto& pair : batch.inductiveStateEqualityPairs) {
+        support.insert(pair.first);  // LCOV_EXCL_LINE
+        support.insert(pair.second);  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+      }
     }
     for (const auto& pair : batch.sameFrameStateEqualityPairs0) {
       support.insert(pair.first);  // LCOV_EXCL_LINE
@@ -6505,16 +6569,25 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // facts to avoid relearning identical state relations one cube at a time.
   const size_t observedOutputSurface =
       std::max(model0.observedOutputs.size(), model1.observedOutputs.size());
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
+  if (secDiagEnabled && !allowInternalStateCorrespondence) {
+    logSecDiagLine(
+        secDiagEnabled,
+        "SEC diag: internal state correspondence disabled");
+  }
   // PDR validates mined state equalities before using them, but medium
   // reset-bootstrap CPU surfaces can spend proof effort on state relations
   // that are not needed for the top-output property and may expose abstract
   // startup counterexamples. Keep this accelerator for focused properties.
   const bool inferInductiveStateEqualities =
+      allowInternalStateCorrespondence &&
       detail::shouldInferPdrInductiveStateEqualities(
           secEngine_, observedOutputSurface);
   // IMC owns reachability through interpolation.  Do not spend pre-engine SAT
   // effort mining cross-design internal state candidates for that engine.
   const bool inferResetBootstrapCandidateEqualities =
+      allowInternalStateCorrespondence &&
       secEngine_ != SecEngine::Imc &&
       (secEngine_ != SecEngine::Pdr ||
        observedOutputSurface >= kMinPdrStartupCertificateOutputs ||
@@ -6577,11 +6650,13 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // that tries to constant-evaluate every state bit before the first PDR query.
   const bool deriveResetBootstrapStrengthening = secEngine_ != SecEngine::Pdr;
   const bool deriveResetBootstrapEqualities =
+      allowInternalStateCorrespondence &&
       (secEngine_ != SecEngine::Pdr ||
        totalStateBits <= kMaxPdrGlobalResetBootstrapEqualityStates) &&
       !detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
           secEngine_, encoding_, observedOutputSurface);
-  if (secDiagEnabled && !deriveResetBootstrapEqualities) {
+  if (secDiagEnabled && allowInternalStateCorrespondence &&
+      !deriveResetBootstrapEqualities) {
     if (secEngine_ == SecEngine::Pdr) {
       fprintf(  // LCOV_EXCL_LINE
           stderr,  // LCOV_EXCL_LINE
@@ -6622,6 +6697,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       deriveResetBootstrapEqualities,
       secDiagEnabled);
   const bool useStartupCertificateFastPath =
+      allowInternalStateCorrespondence &&
       aligned.outputs.names.size() >= kMinPdrStartupCertificateOutputs &&
       !aligned.resetBootstrapCandidateStateEqualities.names.empty() &&
       !symbolSpace.problem.resetBootstrapInputs.empty();

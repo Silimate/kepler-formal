@@ -1566,6 +1566,17 @@ ReachableStateInvariant buildReachableStateInvariant(
     bool deriveResetBootstrapEqualities,
     const AlignedSignals& resetBootstrapCandidateEqualities) {
   ReachableStateInvariant invariant;
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
+  const AlignedSignals emptyStateEqualities;
+  const AlignedSignals& allowedInductiveStateEqualities =
+      allowInternalStateCorrespondence ? inductiveStateEqualities
+                                       : emptyStateEqualities;
+  const AlignedSignals& allowedResetBootstrapCandidateEqualities =
+      allowInternalStateCorrespondence ? resetBootstrapCandidateEqualities
+                                       : emptyStateEqualities;
+  const bool allowResetBootstrapEqualityDerivation =
+      allowInternalStateCorrespondence && deriveResetBootstrapEqualities;
   // First decide which startup model we have: explicit init, reset bootstrap,
   // both, or neither. That determines how strong the frame-0 correspondence
   // may safely be.
@@ -1575,14 +1586,14 @@ ReachableStateInvariant buildReachableStateInvariant(
   invariant.bootstrapCycles = defaultResetBootstrapCycles(
       hasResetBootstrap, hasCompleteInitialState(model0, model1));
   const auto structuralStartupCorrespondence = filterStateEqualitiesByInitialCompatibility(
-      model0, model1, inductiveStateEqualities);
+      model0, model1, allowedInductiveStateEqualities);
   invariant.initialStateCorrespondence = structuralStartupCorrespondence;
 
   if (hasResetBootstrap) {
     const bool hasResetBootstrapCandidates =
-        !resetBootstrapCandidateEqualities.names.empty() &&
+        !allowedResetBootstrapCandidateEqualities.names.empty() &&
         invariant.bootstrapCycles != 0;
-    if (!resetBootstrapCandidateEqualities.names.empty()) {
+    if (!allowedResetBootstrapCandidateEqualities.names.empty()) {
       // Reset bootstrap starts from an arbitrary pre-reset state.  Additional
       // startup correspondence may only come from structurally checked COI
       // candidates rooted at aligned top outputs, never from internal names.
@@ -1591,28 +1602,28 @@ ReachableStateInvariant buildReachableStateInvariant(
       // output cone.
       invariant.initialStateCorrespondence = mergeStartupCorrespondence(
           invariant.initialStateCorrespondence,
-          resetBootstrapCandidateEqualities);
+          allowedResetBootstrapCandidateEqualities);
     }
     auto deriveCandidateBootstrapFacts = [&]() {
       if (!hasResetBootstrapCandidates) {
         return;
       }
-      if (resetBootstrapCandidateEqualities.names.size() <=
+      if (allowedResetBootstrapCandidateEqualities.names.size() <=
           kSelectiveBootstrapValueCandidateBudget) {
         invariant.bootstrapValues0 = deriveResetBootstrapStateValuesForKeys(
             model0,
-            resetBootstrapCandidateEqualities.keys0,
+            allowedResetBootstrapCandidateEqualities.keys0,
             invariant.bootstrapCycles);
         invariant.bootstrapValues1 = deriveResetBootstrapStateValuesForKeys(
             model1,
-            resetBootstrapCandidateEqualities.keys1,
+            allowedResetBootstrapCandidateEqualities.keys1,
             invariant.bootstrapCycles);
       }
       invariant.bootstrapOnlyStateEqualities =
           deriveResetBootstrapStateEqualitiesByDependency(
               model0,
               model1,
-              resetBootstrapCandidateEqualities,
+              allowedResetBootstrapCandidateEqualities,
               invariant.initialStateCorrespondence,
               invariant.bootstrapCycles,
               secDiagEnabled,
@@ -1623,7 +1634,7 @@ ReachableStateInvariant buildReachableStateInvariant(
     // Walk the reset window to find which candidate equalities are true at the
     // first checked frame. The seed includes startup equalities, but a pair is
     // promoted only if reset-specialized transition logic proves it survives.
-    if (!deriveResetBootstrapEqualities) {
+    if (!allowResetBootstrapEqualityDerivation) {
       // PDR validates the concrete reset frontier separately, so it does not
       // need the expensive reset-specialized sweep that mines additional
       // post-reset equality lemmas. It still receives the concrete bootstrap
@@ -1638,8 +1649,8 @@ ReachableStateInvariant buildReachableStateInvariant(
       invariant.anchoredStateEqualities = structuralStartupCorrespondence;
     } else {
       const auto bootstrapCandidateStates = mergeStartupCorrespondence(
-          inductiveStateEqualities,
-          resetBootstrapCandidateEqualities);
+          allowedInductiveStateEqualities,
+          allowedResetBootstrapCandidateEqualities);
       invariant.anchoredStateEqualities = deriveResetBootstrapStateEqualities(
           model0,
           model1,
@@ -1662,7 +1673,7 @@ ReachableStateInvariant buildReachableStateInvariant(
     // Without reset, we can only anchor the state pairs whose explicit init
     // values agree on both sides.
     invariant.anchoredStateEqualities = filterStateEqualitiesByInitialValue(
-        model0, model1, inductiveStateEqualities);
+        model0, model1, allowedInductiveStateEqualities);
   } else {
     // Resetless, init-less SEC may only start from state correspondences that
     // were inferred structurally. Same-named flops are intentionally not used

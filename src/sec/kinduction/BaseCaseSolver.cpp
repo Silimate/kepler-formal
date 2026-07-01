@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../../config/Config.h"
 #include "common/SecDiag.h"
 #include "kinduction/OutputBatching.h"
 #include "kinduction/SatEncoding.h"
@@ -184,7 +185,9 @@ InitialConstraintMode determineInitialConstraintMode(const KInductionProblem& pr
     return InitialConstraintMode::None;
   }
 
-  const bool hasInitialStateRelation = !problem.initialStateEqualityPairs.empty();
+  const bool hasInitialStateRelation =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+      !problem.initialStateEqualityPairs.empty();
   if (problem.hasCompleteInitialState()) {
     return InitialConstraintMode::CompleteInit;
   }
@@ -199,6 +202,11 @@ InitialConstraintMode determineInitialConstraintMode(const KInductionProblem& pr
   }
 
   return InitialConstraintMode::ObservationOnly;
+}
+
+const std::vector<std::pair<size_t, size_t>>& emptySymbolPairs() {
+  static const std::vector<std::pair<size_t, size_t>> pairs;
+  return pairs;
 }
 
 struct BaseCaseCoi {
@@ -290,8 +298,14 @@ struct ResetFrontierReachabilityContextData {
         initialMode(bootstrapFrames == 0 ? determineInitialConstraintMode(problem)
                                          : InitialConstraintMode::None),
         primaryByComplement(buildPrimaryByComplementSymbol(problem)),
-        initialEqualities(problem.initialStateEqualityPairs),
-        bootstrapEqualities(problem.bootstrapStateEqualityPairs) {}
+        initialEqualities(
+            KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+                ? problem.initialStateEqualityPairs
+                : emptySymbolPairs()),
+        bootstrapEqualities(
+            KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+                ? problem.bootstrapStateEqualityPairs
+                : emptySymbolPairs()) {}
 
   const KInductionProblem& problem;
   const TransitionExprResolver& transitionByState;
@@ -494,6 +508,9 @@ FrameSymbolAliases buildBaseCaseFrameAliases(const KInductionProblem& problem,
   // SAT engine the quotient system directly, instead of asking it to rediscover
   // thousands of state correspondences through binary equivalence clauses.
   FrameSymbolAliases aliasesByFrame(numFrames);
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return aliasesByFrame;
+  }
   addEqualityAliasesForFrame(
       aliasesByFrame, problem.initialStateEqualityPairs, coi.solverSymbolSet, 0);
   if (bootstrapFrames != 0 && bootstrapFrames < numFrames) {
@@ -518,6 +535,9 @@ FrameSymbolAliases buildResetFrontierFrameAliases(
   // equality indexes to emit only aliases reachable from this cube's COI
   // instead of scanning all state-equality pairs every time.
   FrameSymbolAliases aliasesByFrame(numFrames);
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return aliasesByFrame;
+  }
   if (!aliasesByFrame.empty()) {
     aliasesByFrame[0] =
         context.initialEqualities.pairsWithin(coi.solverSymbolSet);
@@ -535,6 +555,9 @@ FrameSymbolAliases buildResetSummaryFrameAliases(
     const BaseCaseCoi& coi,
     size_t numFrames) {
   FrameSymbolAliases aliasesByFrame(numFrames);
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return aliasesByFrame;
+  }
   if (!aliasesByFrame.empty()) {
     aliasesByFrame[0] =
         context.bootstrapEqualities.pairsWithin(coi.solverSymbolSet);
@@ -680,7 +703,8 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(internalK);
   for (size_t frame = internalK; frame > 0; --frame) {
-    if (closeStartupEqualityDependencies &&
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+        closeStartupEqualityDependencies &&
         bootstrapFrames != 0 &&
         frame == bootstrapFrames) {
       closeFrameEqualityDependencies(
@@ -696,7 +720,8 @@ BaseCaseCoi buildBaseCaseCoi(const KInductionProblem& problem,
         targets, stateSymbols, requiredStates[frame - 1], solverSymbols);
   }
 
-  if (closeStartupEqualityDependencies) {
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+      closeStartupEqualityDependencies) {
     closeFrameEqualityDependencies(
         problem.initialStateEqualityPairs, requiredStates[0]);
   }
@@ -774,7 +799,8 @@ BaseCaseCoi buildImcCachedBaseCaseCoi(
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(internalK);
   for (size_t frame = internalK; frame > 0; --frame) {
-    if (bootstrapFrames != 0 && frame == bootstrapFrames) {
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+        bootstrapFrames != 0 && frame == bootstrapFrames) {
       closeFrameEqualityDependencies(
           problem.bootstrapStateEqualityPairs, requiredStates[frame]);
     }
@@ -788,8 +814,10 @@ BaseCaseCoi buildImcCachedBaseCaseCoi(
         targets, cache.stateSymbols, requiredStates[frame - 1], solverSymbols);
   }
 
-  closeFrameEqualityDependencies(
-      problem.initialStateEqualityPairs, requiredStates[0]);
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    closeFrameEqualityDependencies(
+        problem.initialStateEqualityPairs, requiredStates[0]);
+  }
   cache.closeSameFrameStateEqualityDependencies(requiredStates[0]);
 
   for (const auto& frameStates : requiredStates) {
@@ -1037,6 +1065,9 @@ void addBootstrapStateEqualities(SATSolverWrapper& solver,
                                  const KInductionProblem& problem,
                                  const std::unordered_set<size_t>& solverSymbols,
                                  size_t frame) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return;
+  }
   for (const auto& [lhsSymbol, rhsSymbol] : problem.bootstrapStateEqualityPairs) {
     if (solverSymbols.find(lhsSymbol) == solverSymbols.end() ||
         solverSymbols.find(rhsSymbol) == solverSymbols.end()) {
@@ -1062,6 +1093,9 @@ void addBootstrapStateEqualities(
     const ResetFrontierReachabilityContextData& context,
     const std::unordered_set<size_t>& solverSymbols,
     size_t frame) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return;
+  }
   for (const auto& [lhsSymbol, rhsSymbol] :
        context.bootstrapEqualities.pairsWithin(solverSymbols)) {
     const int lhs = variables.getLiteral(lhsSymbol, frame);  // LCOV_EXCL_LINE
@@ -1081,6 +1115,9 @@ void addInitialStateEqualities(SATSolverWrapper& solver,
                                const FrameVariableStore& variables,
                                const KInductionProblem& problem,
                                const std::unordered_set<size_t>& solverSymbols) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return;
+  }
   for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
     if (solverSymbols.find(lhsSymbol) == solverSymbols.end() ||
         solverSymbols.find(rhsSymbol) == solverSymbols.end()) {
@@ -1105,6 +1142,9 @@ void addInitialStateEqualities(
     const FrameVariableStore& variables,
     const ResetFrontierReachabilityContextData& context,
     const std::unordered_set<size_t>& solverSymbols) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return;
+  }
   for (const auto& [lhsSymbol, rhsSymbol] :
        context.initialEqualities.pairsWithin(solverSymbols)) {
     const int lhs = variables.getLiteral(lhsSymbol, 0);
@@ -2661,9 +2701,11 @@ knownResetFrontierConflictCore(
   const auto& assignments = usesBootstrapFrontier
                                 ? data.problem.bootstrapStateAssignments
                                 : data.problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? data.problem.bootstrapStateEqualityPairs
-                               : data.problem.initialStateEqualityPairs;
+  const auto& equalities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier ? data.problem.bootstrapStateEqualityPairs
+                                   : data.problem.initialStateEqualityPairs)
+          : emptySymbolPairs();
   if (assignments.empty() && equalities.empty() &&
       data.problem.complementedStatePairs0.empty() &&
       data.problem.complementedStatePairs1.empty() &&

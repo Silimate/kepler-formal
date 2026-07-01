@@ -1608,6 +1608,22 @@ class ScopedSecSteadyFrontierGuard {
   bool previousValue_;
 };
 
+class ScopedSecInternalStateCorrespondence {
+ public:
+  explicit ScopedSecInternalStateCorrespondence(bool enabled)
+      : previousValue_(
+            KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    KEPLER_FORMAL::Config::setSecInternalStateCorrespondence(enabled);
+  }
+
+  ~ScopedSecInternalStateCorrespondence() {
+    KEPLER_FORMAL::Config::setSecInternalStateCorrespondence(previousValue_);
+  }
+
+ private:
+  bool previousValue_;
+};
+
 class ScopedUnsetEnvVar {
  public:
   explicit ScopedUnsetEnvVar(const char* name)
@@ -5216,6 +5232,7 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithI
 }
 
 TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObservation) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5341,6 +5358,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ResetInitializedEquivalentPipelineIsProved) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* library =
@@ -5462,6 +5480,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ResetBootstrapAutomaticallyExtendsForHiddenShiftPipelines) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5485,6 +5504,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ResetBootstrapLongEquivalentPipelineStillClosesAtSmallK) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5526,6 +5546,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantUsesExplicitInitialCompatibilityWithoutReset) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey state0A = makeSignalKey("state0A");
   const SignalKey state0B = makeSignalKey("state0B");
   const SignalKey state1A = makeSignalKey("state1A");
@@ -5559,6 +5580,45 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantIgnoresInternalCorrespondenceByDefault) {
+  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+
+  SequentialDesignModel model0;
+  model0.stateBits = {state0};
+  model0.initialStateValueByKey.emplace(state0, false);
+
+  SequentialDesignModel model1;
+  model1.stateBits = {state1};
+  model1.initialStateValueByKey.emplace(state1, false);
+
+  AlignedSignals candidateStates;
+  candidateStates.names = {"internal_state"};
+  candidateStates.keys0 = {state0};
+  candidateStates.keys1 = {state1};
+
+  const auto disabledInvariant =
+      buildReachableStateInvariant(model0, model1, AlignedSignals{}, candidateStates);
+
+  EXPECT_TRUE(disabledInvariant.initialStateCorrespondence.names.empty());
+  EXPECT_TRUE(disabledInvariant.anchoredStateEqualities.names.empty());
+
+  {
+    ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+    const auto enabledInvariant =
+        buildReachableStateInvariant(model0, model1, AlignedSignals{}, candidateStates);
+    ASSERT_EQ(enabledInvariant.initialStateCorrespondence.names.size(), 1u);
+    EXPECT_EQ(enabledInvariant.initialStateCorrespondence.names[0], "internal_state");
+    ASSERT_EQ(enabledInvariant.anchoredStateEqualities.names.size(), 1u);
+    EXPECT_EQ(enabledInvariant.anchoredStateEqualities.names[0], "internal_state");
+  }
+
+  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantDoesNotInferStartupPairsFromInternalNames) {
   const SignalKey state0 = makeSignalKey("state0");
   const SignalKey state1 = makeSignalKey("state1");
@@ -5583,6 +5643,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantSkipsBootstrapWhenResetAndInitialStateAreComplete) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -5626,6 +5687,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantDerivesBootstrapValuesAndAnchorsFromReset) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -5671,6 +5733,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantCanSkipBootstrapValueSweepForPdr) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -5778,6 +5841,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantEvaluatesXorBootstrapValuesInSourcePath) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("xorRst0");
   const SignalKey rst1 = makeSignalKey("xorRst1");
   const SignalKey lhs0 = makeSignalKey("xorLhs0");
@@ -5975,6 +6039,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantCoversSatRemapFailureForUnalignedBootstrapInput) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey privateInput0 = makeSignalKey("privateInput0");
@@ -6025,6 +6090,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantUsesCheapSatRecoveryPastCandidateBudget) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("satBudgetRst0");
   const SignalKey rst1 = makeSignalKey("satBudgetRst1");
   SequentialDesignModel model0;
@@ -6115,6 +6181,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantSkipsHugeBootstrapSatRecoveryConeBeforeSatCall) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("wideSatRst0");
   const SignalKey rst1 = makeSignalKey("wideSatRst1");
   const SignalKey state0 = makeSignalKey("wideSatState0");
@@ -6184,6 +6251,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantSkipsDeepBootstrapSatRecoveryCone) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   constexpr size_t kDeepConeDepth = 3000;
   const auto testCase =
       makeDeepResetBootstrapCase("deepSat", kDeepConeDepth);
@@ -6206,6 +6274,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantPreservesWideStructuralResetSpecializationCone) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("wideStructuralRst0");
   const SignalKey rst1 = makeSignalKey("wideStructuralRst1");
   const SignalKey state0 = makeSignalKey("wideStructuralState0");
@@ -6279,6 +6348,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantCoversMissingMapBootstrapFallback) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey missingInput0 = makeSignalKey("missingInput0");
@@ -6365,6 +6435,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantReportsSatRecoveredBootstrapEquality) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey data0 = makeSignalKey("data0");
@@ -6430,6 +6501,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantDoesNotUseInternalNamesForResetlessBootstrapState) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey structural0 = makeSignalKey("structural0");
@@ -6502,6 +6574,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantUsesSatToAnchorCommutedBootstrapLogic) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey in0 = makeSignalKey("in0");
@@ -6566,6 +6639,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantBootstrapRecoversEqualitiesAfterMismatchedInitialValues) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -6663,6 +6737,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantFallsBackWhenOnlyOneSideHasResetAssignments) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -6699,6 +6774,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantCoversBootstrapValuePropagationEdgeCases) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey truth0 = makeSignalKey("truth0");
@@ -6789,6 +6865,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantBootstrapValuesEvaluateConstTrueXorAndInvalidExprStates) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey const0 = makeSignalKey("const0");
@@ -8278,6 +8355,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineReusesCachedStateEqualitySubsetAcrossSlices) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem =
       makePartiallyInductiveEqualitySubsetProblemForTest();
   ASSERT_NE(problem.lazyTransitions, nullptr);
@@ -8510,6 +8588,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineTriesSharedStrengtheningBeforeWeakStateSubsetFallback) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   problem.state0Symbols = {2, 3, 4, 5, 6, 7};
   problem.allSymbols = problem.state0Symbols;
@@ -12475,6 +12554,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsCountsSatImpliedOutputEquality) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey out = makeSignalKey("out");
   const SignalKey stateA0 = makeSignalKey("stateA0");
   const SignalKey stateB0 = makeSignalKey("stateB0");
@@ -14322,6 +14402,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsPdrMinesStateEqualitiesForSmallOutputLargeStateSurface) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   constexpr size_t kStateBitsPerDesign = 4097;
   const SignalKey out = makeSignalKey("smallOutputLargeStateOut");
   SequentialDesignModel model0;
@@ -14575,6 +14656,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsKeepsWideStartupCertificateBeforeResetCoverageFilter) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst = makeSignalKey("wideStartupCertificateRst");
   const SignalKey stateA0 = makeSignalKey("wideStartupCertificateStateA0");
   const SignalKey stateB0 = makeSignalKey("wideStartupCertificateStateB0");
@@ -15206,6 +15288,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineCanonicalizesInitialEqualitiesBeforeResetExpressionSatCap) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -15319,6 +15402,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineStructurallyBlocksAffineXorResetExpressionConflict) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -16511,6 +16595,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineUsesResetSpecializedInitialEqualitiesBeforeExactRootResetFrontier) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -16578,6 +16663,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineUsesResetSpecializedBootstrapEqualitiesBeforeExpressionSat) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -16648,6 +16734,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineRewritesBootstrapEqualitiesInsideResetExpressions) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -16724,6 +16811,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineUsesResetExpressionImplicationBeforeExactFrontier) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t guard = 3;
@@ -16799,6 +16887,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineUsesResetSpecializedExpressionSatForWideRootCubes) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -17385,6 +17474,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ResetFrontierReachabilitySkipsDanglingInitialEqualityTails) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t y = 2;
   constexpr size_t x = 3;
@@ -17695,6 +17785,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ResetFrontierReachabilityRejectsTransitiveKnownFactConflictBeforeSat) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t stateA = 2;
   constexpr size_t stateB = 3;
@@ -19104,6 +19195,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineValidatesStateInvariantFromStructuredBootstrapFacts) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t lhs = 2;
   constexpr size_t rhs = 3;
@@ -19144,6 +19236,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineRejectsStateInvariantWhenNoStructuredInitFactsExist) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t lhs = 2;
   constexpr size_t rhs = 3;
@@ -19177,6 +19270,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineRejectsStateInvariantWhenStructuredFactsMissPair) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t lhs = 2;
   constexpr size_t rhs = 3;
@@ -19212,6 +19306,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineValidatesStateOutputInvariantFromStructuredBootstrapFacts) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t lhs = 2;
   constexpr size_t rhs = 3;
@@ -19264,6 +19359,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineUsesOutputPropertyToValidateFullStateInvariant) {
+  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   constexpr size_t lhs = 2;
   constexpr size_t rhs = 3;

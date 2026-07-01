@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <unordered_set>
 
+#include "../../config/Config.h"
 #include "common/BoolExprUtils.h"
 #include "kinduction/SatEncoding.h"
 
@@ -323,12 +324,16 @@ BoolExpr* buildProofInitFormula(const KInductionProblem& problem) {
           init, value ? BoolExpr::Var(symbol) : BoolExpr::Not(BoolExpr::Var(symbol)));
       hasConstraint = true;
     }
-    for (const auto& [lhsSymbol, rhsSymbol] : problem.bootstrapStateEqualityPairs) {
-      init = BoolExpr::And(init, buildEqualityFormula(lhsSymbol, rhsSymbol));
-      hasConstraint = true;
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+      for (const auto& [lhsSymbol, rhsSymbol] :
+           problem.bootstrapStateEqualityPairs) {
+        init = BoolExpr::And(init, buildEqualityFormula(lhsSymbol, rhsSymbol));
+        hasConstraint = true;
+      }
     }
   } else {
     const bool hasInitialStateRelation =
+        KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
         !problem.initialStateEqualityPairs.empty();
     if (problem.initialCondition == BoolExpr::createTrue() &&
         !problem.initialStateAssignments.empty()) {
@@ -342,9 +347,12 @@ BoolExpr* buildProofInitFormula(const KInductionProblem& problem) {
       init = BoolExpr::And(init, problem.initialCondition);
       hasConstraint = true;
     }
-    for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
-      init = BoolExpr::And(init, buildEqualityFormula(lhsSymbol, rhsSymbol));
-      hasConstraint = true;
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+      for (const auto& [lhsSymbol, rhsSymbol] :
+           problem.initialStateEqualityPairs) {
+        init = BoolExpr::And(init, buildEqualityFormula(lhsSymbol, rhsSymbol));
+        hasConstraint = true;
+      }
     }
     const bool needsObservationFrontier =
         problem.hasSequentialState() && problem.property != nullptr &&

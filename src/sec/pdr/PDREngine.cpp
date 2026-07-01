@@ -3651,8 +3651,11 @@ class ResetExpressionCanonicalizer {
          problem.sameFrameStateEqualityPairs0.size() +
          problem.sameFrameStateEqualityPairs1.size()) *
         2);
-    for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
-      unite(lhsSymbol, rhsSymbol);
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+      for (const auto& [lhsSymbol, rhsSymbol] :
+           problem.initialStateEqualityPairs) {
+        unite(lhsSymbol, rhsSymbol);
+      }
     }
     for (const auto& [lhsSymbol, rhsSymbol] :
          problem.sameFrameStateEqualityPairs0) {
@@ -3963,24 +3966,26 @@ ResetBootstrapExpressionRelations* resetBootstrapExpressionRelationsFor(
   auto relations = std::make_shared<ResetBootstrapExpressionRelations>();
   // LCOV_EXCL_STOP
   std::vector<std::pair<BoolExpr*, BoolExpr*>> bootstrapExprPairs;
-  bootstrapExprPairs.reserve(problem.bootstrapStateEqualityPairs.size());
-  for (const auto& [lhsSymbol, rhsSymbol] :
-       problem.bootstrapStateEqualityPairs) {
-    const auto lhsExpr =
-        evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
-    const auto rhsExpr =
-        evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
-    if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
-      if (evaluator.budgetExhausted()) {  // LCOV_EXCL_LINE
-        return nullptr;  // LCOV_EXCL_LINE
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    bootstrapExprPairs.reserve(problem.bootstrapStateEqualityPairs.size());
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.bootstrapStateEqualityPairs) {
+      const auto lhsExpr =
+          evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
+      const auto rhsExpr =
+          evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
+      if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
+        if (evaluator.budgetExhausted()) {  // LCOV_EXCL_LINE
+          return nullptr;  // LCOV_EXCL_LINE
+        }
+        continue;  // LCOV_EXCL_LINE
       }
-      continue;  // LCOV_EXCL_LINE
+      BoolExpr* lhsCanonical = canonicalizer.canonicalize(*lhsExpr);
+      BoolExpr* rhsCanonical = canonicalizer.canonicalize(*rhsExpr);
+      relations->index.unite(lhsCanonical, rhsCanonical);
+      bootstrapExprPairs.emplace_back(lhsCanonical, rhsCanonical);
+      relations->hasRelation = true;
     }
-    BoolExpr* lhsCanonical = canonicalizer.canonicalize(*lhsExpr);
-    BoolExpr* rhsCanonical = canonicalizer.canonicalize(*rhsExpr);
-    relations->index.unite(lhsCanonical, rhsCanonical);
-    bootstrapExprPairs.emplace_back(lhsCanonical, rhsCanonical);
-    relations->hasRelation = true;
   }
 
   if (relations->hasRelation &&
@@ -4249,39 +4254,41 @@ selectRelevantBootstrapEqualityExprs(
   };
 
   std::vector<Candidate> candidates;
-  candidates.reserve(problem.bootstrapStateEqualityPairs.size());
-  for (const auto& [lhsSymbol, rhsSymbol] :
-       problem.bootstrapStateEqualityPairs) {
-    const auto lhsExpr =
-        evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
-    const auto rhsExpr =
-        // LCOV_EXCL_START
-        evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
-        // LCOV_EXCL_STOP
-    if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
-      return std::nullopt;  // LCOV_EXCL_LINE
-    }
-    // LCOV_EXCL_START
-    BoolExpr* lhs = *lhsExpr;
-    // LCOV_EXCL_STOP
-    BoolExpr* rhs = *rhsExpr;
-    if (canonicalizer != nullptr) {
-      lhs = canonicalizer->canonicalize(lhs);
-      rhs = canonicalizer->canonicalize(rhs);
-    }
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    candidates.reserve(problem.bootstrapStateEqualityPairs.size());
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.bootstrapStateEqualityPairs) {
+      const auto lhsExpr =
+          evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
+      const auto rhsExpr =
+          // LCOV_EXCL_START
+          evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
+          // LCOV_EXCL_STOP
+      if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
+        return std::nullopt;  // LCOV_EXCL_LINE
+      }
+      // LCOV_EXCL_START
+      BoolExpr* lhs = *lhsExpr;
+      // LCOV_EXCL_STOP
+      BoolExpr* rhs = *rhsExpr;
+      if (canonicalizer != nullptr) {
+        lhs = canonicalizer->canonicalize(lhs);
+        rhs = canonicalizer->canonicalize(rhs);
+      }
 
-    const auto* lhsSupport = evaluator.cachedSupportVars(lhs);
-    if (lhsSupport == nullptr) {
-      return std::nullopt;  // LCOV_EXCL_LINE
+      const auto* lhsSupport = evaluator.cachedSupportVars(lhs);
+      if (lhsSupport == nullptr) {
+        return std::nullopt;  // LCOV_EXCL_LINE
+      }
+      const auto* rhsSupport = evaluator.cachedSupportVars(rhs);
+      if (rhsSupport == nullptr) {
+        return std::nullopt;  // LCOV_EXCL_LINE
+      }
+      std::set<size_t> support = *lhsSupport;
+      support.insert(rhsSupport->begin(), rhsSupport->end());
+      // LCOV_EXCL_START
+      candidates.push_back({lhs, rhs, std::move(support)});
     }
-    const auto* rhsSupport = evaluator.cachedSupportVars(rhs);
-    if (rhsSupport == nullptr) {
-      return std::nullopt;  // LCOV_EXCL_LINE
-    }
-    std::set<size_t> support = *lhsSupport;
-    support.insert(rhsSupport->begin(), rhsSupport->end());
-    // LCOV_EXCL_START
-    candidates.push_back({lhs, rhs, std::move(support)});
   }
 
   std::vector<std::pair<BoolExpr*, BoolExpr*>> selected;
@@ -5716,13 +5723,17 @@ void addRelevantDualRailPartners(
   addRelevantDualRailPartners(railPairs, symbols);  // LCOV_EXCL_LINE
 }
 
+const std::vector<std::pair<size_t, size_t>>& emptySymbolPairs();
+
 bool hasStructuredInitFacts(const KInductionProblem& problem) {
   if (problem.resetBootstrapCycles != 0) {
     return !problem.bootstrapStateAssignments.empty() ||
-           !problem.bootstrapStateEqualityPairs.empty();
+           (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+            !problem.bootstrapStateEqualityPairs.empty());
   }
   return !problem.initialStateAssignments.empty() ||
-         !problem.initialStateEqualityPairs.empty();
+         (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+          !problem.initialStateEqualityPairs.empty());
 }
 
 void addRelevantInitConstraintSymbols(const KInductionProblem& problem,
@@ -5731,24 +5742,26 @@ void addRelevantInitConstraintSymbols(const KInductionProblem& problem,
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
 
   for (const auto& [symbol, /*value*/ _] : assignments) {
     if (symbols.find(symbol) != symbols.end()) {
       symbols.insert(symbol);
     }
   }
-  for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
-    const bool touchesQuery =
-        symbols.find(lhsSymbol) != symbols.end() ||
-        symbols.find(rhsSymbol) != symbols.end();
-    if (!touchesQuery) {
-      continue;
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    const auto& equalities = usesBootstrapFrontier
+                                 ? problem.bootstrapStateEqualityPairs
+                                 : problem.initialStateEqualityPairs;
+    for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
+      const bool touchesQuery =
+          symbols.find(lhsSymbol) != symbols.end() ||
+          symbols.find(rhsSymbol) != symbols.end();
+      if (!touchesQuery) {
+        continue;
+      }
+      symbols.insert(lhsSymbol);
+      symbols.insert(rhsSymbol);
     }
-    symbols.insert(lhsSymbol);
-    symbols.insert(rhsSymbol);
   }
 }
 
@@ -6045,6 +6058,11 @@ bool contradictsComplements(
   return false;
 }
 
+const std::vector<std::pair<size_t, size_t>>& emptySymbolPairs() {
+  static const std::vector<std::pair<size_t, size_t>> pairs;
+  return pairs;
+}
+
 // LCOV_EXCL_START
 std::optional<bool> cubeIntersectsKnownInitFacts(
 // LCOV_EXCL_STOP
@@ -6056,9 +6074,11 @@ std::optional<bool> cubeIntersectsKnownInitFacts(
                                 ? problem.bootstrapStateAssignments
                                 // LCOV_EXCL_STOP
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
+  const auto& equalities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
+                                   : problem.initialStateEqualityPairs)
+          : emptySymbolPairs();
 
 // LCOV_EXCL_START
 
@@ -6945,9 +6965,11 @@ InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
+  const auto& equalities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
+                                   : problem.initialStateEqualityPairs)
+          : emptySymbolPairs();
 
   InitFactIndex index;
   index.assignments.reserve(assignments.size());
@@ -9334,9 +9356,11 @@ bool addRelevantStructuredInitConstraints(
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
+  const auto& equalities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
+                                   : problem.initialStateEqualityPairs)
+          : emptySymbolPairs();
 
   std::unordered_set<size_t> querySet(querySymbols.begin(), querySymbols.end());
   bool addedConstraint = false;
@@ -10955,10 +10979,13 @@ std::optional<StateCube> growCoreOutsideInit(  // LCOV_EXCL_LINE
                                 ? problem.bootstrapStateAssignments  // LCOV_EXCL_LINE
                                 : problem.initialStateAssignments;  // LCOV_EXCL_LINE
                                 // LCOV_EXCL_STOP
-  const auto& equalities = usesBootstrapFrontier  // LCOV_EXCL_LINE
-                               ? problem.bootstrapStateEqualityPairs  // LCOV_EXCL_LINE
-                               // LCOV_EXCL_START
-                               : problem.initialStateEqualityPairs;  // LCOV_EXCL_LINE
+  const auto& equalities =  // LCOV_EXCL_LINE
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier  // LCOV_EXCL_LINE
+                 ? problem.bootstrapStateEqualityPairs  // LCOV_EXCL_LINE
+                 // LCOV_EXCL_START
+                 : problem.initialStateEqualityPairs)  // LCOV_EXCL_LINE
+          : emptySymbolPairs();  // LCOV_EXCL_LINE
 
   // UNSAT cores from transition assumptions can be too small to be legal PDR
   // frame clauses because a one-bit reason may still overlap Init. Add only
@@ -14004,6 +14031,9 @@ bool blockProofObligations(const KInductionProblem& problem,
 std::vector<StateClause> buildSeedClauses(const KInductionProblem& problem,
                                           const InitFactIndex& initFacts) {
   std::vector<StateClause> seedClauses;
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return seedClauses;
+  }
   // Seed the first learned frame with state equalities that are already
   // guaranteed by Init/bootstrap, so PDR starts from facts that are known
   // reachable-state invariants instead of rediscovering them from scratch.
@@ -14390,6 +14420,9 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
                                   BoolExpr* initFormula,
                                   // LCOV_EXCL_STOP
                                   KEPLER_FORMAL::Config::SolverType solverType) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return nullptr;
+  }
   // PDR can use already inferred SEC facts as a strengthening invariant, but
   // only after validating the same two proof obligations that make any frame
   // invariant sound:

@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "../../config/Config.h"
 #include "common/SecDiag.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/TransitionExprResolver.h"
@@ -183,7 +184,8 @@ FrameSymbolAliases buildInductionFrameAliases(
     size_t numFrames,
     bool aliasInductiveStateEqualities) {
   FrameSymbolAliases aliasesByFrame(numFrames);
-  if (!aliasInductiveStateEqualities) {
+  if (!aliasInductiveStateEqualities ||
+      !KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
     return aliasesByFrame;
   }
 
@@ -296,6 +298,8 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
                                BoolExpr* inductionBad,
                                bool addExtraInductiveEqualities,
                                size_t k) {
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
   // Cone-of-influence reduction for the actual k-induction SAT problem:
   // start from the formulas that are asserted at each frame, then walk
   // backwards through only the transition equations needed to define those
@@ -316,7 +320,8 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(k);
   for (size_t frame = k; frame > 0; --frame) {
-    if (addExtraInductiveEqualities && frame < k) {
+    if (allowInternalStateCorrespondence &&
+        addExtraInductiveEqualities && frame < k) {
       // Output-batched SEC should not carry every design-wide state relation into
       // a local proof.  Close only relations touched by this frame's real output
       // cone before walking one transition step backward.
@@ -338,7 +343,7 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
         requiredStates[frame - 1],
         transitionSupportSymbols);
   }
-  if (addExtraInductiveEqualities) {
+  if (allowInternalStateCorrespondence && addExtraInductiveEqualities) {
     closeStateEqualityDependencies(
         problem.inductiveStateEqualityPairs, requiredStates[0]);
   }
@@ -481,6 +486,9 @@ void addInductiveStateEqualities(SATSolverWrapper& solver,
   if (problem.inductiveStateEqualityPairs.empty() || firstFrame > lastFrame) {
     return;
   }
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return;
+  }
 
   for (size_t frame = firstFrame; frame <= lastFrame; ++frame) {
     for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
@@ -562,14 +570,18 @@ InductionProofStatus proveByInductionStatus(
     size_t k,
     std::optional<unsigned> kissatDecisionLimit) {
   const bool hasExplicitInductionInvariant = problem.inductionProperty != nullptr;
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
   BoolExpr* inductionProperty =
       hasExplicitInductionInvariant ? problem.inductionProperty : problem.property;
   BoolExpr* inductionBad =
       problem.inductionBad != nullptr ? problem.inductionBad : problem.bad;
-  const bool addExtraInductiveEqualities = !hasExplicitInductionInvariant;
+  const bool addExtraInductiveEqualities =
+      allowInternalStateCorrespondence && !hasExplicitInductionInvariant;
   const bool aliasInductiveStateEqualities =
-      addExtraInductiveEqualities ||
-      problem.inductionPropertyAssumesInductiveStateEqualities;
+      allowInternalStateCorrespondence &&
+      (addExtraInductiveEqualities ||
+       problem.inductionPropertyAssumesInductiveStateEqualities);
   const InductionCoi coi = buildInductionCoi(
       problem,
       inductionProperty,
