@@ -47,14 +47,6 @@ public:
     return secTreatUncomputableSeqAsBoundary_;  // LCOV_EXCL_LINE
   }
 
-  static void setSecSteadyFrontierGuard(bool enabled) {
-    secSteadyFrontierGuard_ = enabled;
-  }
-
-  static bool getSecSteadyFrontierGuard() {
-    return secSteadyFrontierGuard_;
-  }
-
   static void setSecInternalStateCorrespondence(bool enabled) {
     secInternalStateCorrespondence_ = enabled;
   }
@@ -70,7 +62,6 @@ private:
   inline static SolverType solverType_ = KISSAT;
   inline static bool reportSkippedPOs_ = false;
   inline static bool secTreatUncomputableSeqAsBoundary_ = true;
-  inline static bool secSteadyFrontierGuard_ = false;
   inline static bool secInternalStateCorrespondence_ = false;
 };
 

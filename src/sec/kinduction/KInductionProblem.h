@@ -226,7 +226,6 @@ struct KInductionProblem {
   std::vector<DualRailSymbolPair> dualRailStatePairs;
   std::vector<BoolExpr*> observedOutputExprs0;
   std::vector<BoolExpr*> observedOutputExprs1;
-  std::vector<bool> outputImpliedByInductionCore;
   std::vector<std::string> dualRailOutputSkipReasons;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
   std::vector<std::pair<size_t, BoolExpr*>> transitions1;

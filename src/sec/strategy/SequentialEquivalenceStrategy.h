@@ -127,11 +127,6 @@ std::vector<std::string> buildSecEngineProofProgressDiagLines(
     size_t totalOutputCount,
     size_t provenOutputCount);
 
-inline bool shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
-    SecEngine secEngine) {
-  return secEngine != SecEngine::Pdr;
-}
-
 inline bool shouldSkipDualRailGlobalBootstrapEqualityMining(
     SecEngine secEngine,
     SecEncoding encoding,

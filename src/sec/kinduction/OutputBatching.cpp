@@ -46,19 +46,6 @@ bool isSmallDualRailBatchingSurface(const KInductionProblem& problem) {
              kMaxSmallDualRailBatchStateSymbols;
 }
 
-bool allSelectedOutputsNeedEngineProof(const KInductionProblem& problem) {
-  if (problem.outputImpliedByInductionCore.size() !=
-      problem.observedOutputExprs0.size()) {
-    return false;
-  }
-  for (const bool implied : problem.outputImpliedByInductionCore) {
-    if (implied) {
-      return false;
-    }
-  }
-  return true;
-}
-
 bool hasSelectedOutputSkips(const KInductionProblem& problem) {
   if (problem.dualRailOutputSkipReasons.size() !=
       problem.observedOutputExprs0.size()) {
@@ -76,7 +63,6 @@ void rememberDualRailResidualPublicHypothesis(const KInductionProblem& problem) 
   if (!problem.usesDualRailStateEncoding || problem.lazyTransitions == nullptr ||
       problem.property == nullptr || problem.bad == nullptr ||
       problem.observedOutputExprs0.size() <= 1 ||
-      !allSelectedOutputsNeedEngineProof(problem) ||
       hasSelectedOutputSkips(problem)) {
     return;
   }
@@ -180,14 +166,6 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   batch.observedOutputExprs1.assign(
       source.observedOutputExprs1.begin() + firstOutput,
       source.observedOutputExprs1.begin() + endOutput);
-  if (source.outputImpliedByInductionCore.size() ==
-      source.observedOutputExprs0.size()) {
-    batch.outputImpliedByInductionCore.assign(
-        source.outputImpliedByInductionCore.begin() + firstOutput,
-        source.outputImpliedByInductionCore.begin() + endOutput);
-  } else {
-    batch.outputImpliedByInductionCore.clear();
-  }
   if (source.dualRailOutputSkipReasons.size() ==
       source.observedOutputExprs0.size()) {
     batch.dualRailOutputSkipReasons.assign(

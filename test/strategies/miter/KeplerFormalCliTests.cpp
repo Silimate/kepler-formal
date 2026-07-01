@@ -303,17 +303,6 @@ struct SecBoundaryAbstractionGuard {
   bool oldValue_;
 };
 
-struct SecSteadyFrontierGuard {
-  SecSteadyFrontierGuard()
-      : oldValue_(KEPLER_FORMAL::Config::getSecSteadyFrontierGuard()) {}
-
-  ~SecSteadyFrontierGuard() {
-    KEPLER_FORMAL::Config::setSecSteadyFrontierGuard(oldValue_);
-  }
-
-  bool oldValue_;
-};
-
 struct CurrentPathGuard {
   CurrentPathGuard(): oldPath_(std::filesystem::current_path()) {}
 
@@ -2027,38 +2016,6 @@ TEST_F(KeplerFormalCliTests,
   EXPECT_FALSE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
-}
-
-TEST_F(KeplerFormalCliTests, ConfigSecCanDisableSteadyFrontierGuard) {
-  SecSteadyFrontierGuard frontierGuard;
-  const auto fixture = createEquivalentSequentialNajaIfFixture();
-  const auto cfgPath = writeTempConfig(
-      "format: naja_if\n"
-      "verification: sec\n"
-      "sec_encoding: dual_rail_steady\n"
-      "sec_engine: pdr\n"
-      "max_k: 1\n"
-      "sec_steady_frontier_guard: false\n"
-      "input_paths:\n"
-      "  - " + fixture.design0IfPath.string() + "\n"
-      "  - " + fixture.design1IfPath.string() + "\n");
-
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
-  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecSteadyFrontierGuard());
-  std::filesystem::remove(cfgPath);
-  std::filesystem::remove_all(fixture.tmpDir);
-}
-
-TEST_F(KeplerFormalCliTests, ConfigSecSteadyFrontierGuardMustBeScalar) {
-  SecSteadyFrontierGuard frontierGuard;
-  const auto cfgPath = writeTempConfig(
-      "format: naja_if\n"
-      "verification: sec\n"
-      "sec_steady_frontier_guard:\n"
-      "  enabled: false\n");
-
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
-  std::filesystem::remove(cfgPath);
 }
 
 TEST_F(KeplerFormalCliTests, ConfigSecIgnoresRenamedInternalState) {
