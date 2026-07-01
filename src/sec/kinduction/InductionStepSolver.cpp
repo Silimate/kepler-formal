@@ -111,7 +111,6 @@ constexpr unsigned kDefaultDualRailLeafInductionDecisionLimit = 5000;
 // samples show Kissat preprocessing can dominate these small-looking rail cones
 // before the decision cap is observed.
 constexpr size_t kDirectDualRailProofProfileSymbolFloor = 4096;
-constexpr size_t kMaxCompactDeferredLeafCoiSymbols = 2048;
 struct InductionCoi {
   std::vector<std::vector<size_t>> transitionTargetsByFrame;
   std::vector<std::vector<size_t>> transitionSupportByFrame;
@@ -166,12 +165,6 @@ bool isLargeDeferredDualRailLeafSurface(const KInductionProblem& problem) {
              kMinDeferredRailStateSymbolsForDirectProfile;
 }
 
-bool hasExplicitDualRailLeafDecisionLimit() {
-  return readUnsignedEnv(
-             "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT")
-      .has_value();
-}
-
 std::optional<unsigned> directInductionDecisionLimit(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType) {
@@ -202,32 +195,6 @@ bool shouldUseDirectDualRailLimitedProofProfile(
   return problem.usesDualRailStateEncoding &&
          solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
          kissatDecisionLimit.has_value() && *kissatDecisionLimit > 0;
-}
-
-bool shouldRelaxDefaultDualRailLeafLimitForCoi(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    const std::optional<unsigned>& kissatDecisionLimit,
-    const InductionCoi& coi) {
-  if (!problem.usesDualRailStateEncoding ||
-      !problem.deferBaseCaseChecks ||
-      problem.observedOutputExprs0.size() > 1 ||
-      solverType != KEPLER_FORMAL::Config::SolverType::KISSAT ||
-      !kissatDecisionLimit.has_value() ||
-      *kissatDecisionLimit != kDefaultDualRailLeafInductionDecisionLimit ||
-      hasExplicitDualRailLeafDecisionLimit()) {
-    return false;
-  }
-
-  // The caller chooses the default cap from the parent rail-state surface before
-  // this exact KI COI exists.  For compact residual public buses, a one-output
-  // leaf can have thousands of unrelated rail flops but a tiny strict
-  // induction cone.  Let those exact cones run normally; wide AES-style
-  // residuals and genuinely large leaf COIs remain capped and uncovered on
-  // UNKNOWN.
-  return originalOutputCountForProblem(problem) <
-             kMinOriginalOutputsForCompactDualRailProfile &&
-         coi.solverSymbols.size() <= kMaxCompactDeferredLeafCoiSymbols;
 }
 
 bool isWideDualRailResidualSurface(const KInductionProblem& problem) {
@@ -933,21 +900,9 @@ InductionProofStatus proveByInductionStatus(
   const bool addSimplePath = shouldAddSimplePathConstraint(problem, coi);
 
   const auto localSolverType = inductionStepSolverType(problem, solverType);
-  const std::optional<unsigned> effectiveKissatDecisionLimit =
-      shouldRelaxDefaultDualRailLeafLimitForCoi(
-          problem, localSolverType, kissatDecisionLimit, coi)
-          ? std::nullopt
-          : kissatDecisionLimit;
-  if (isInductionStepCoiDiagEnabled() && kissatDecisionLimit.has_value() &&
-      !effectiveKissatDecisionLimit.has_value()) {
-    emitSecDiag(
-        "SEC diag: k-induction compact deferred leaf exact coi unbounded ",
-        "solver_symbols=", coi.solverSymbols.size(),
-        " original_outputs=", originalOutputCountForProblem(problem));
-  }
   SATSolverWrapper solver(localSolverType);
   if (shouldUseDirectDualRailLimitedProofProfile(
-          problem, localSolverType, effectiveKissatDecisionLimit)) {
+          problem, localSolverType, kissatDecisionLimit)) {
     // Resource-limited dual-rail induction queries are speculative KI attempts:
     // UNKNOWN just asks the caller to split or try the next k. Keep the UNSAT
     // proof profile, and force the existing no-preprocess branch only for wide
@@ -1051,16 +1006,16 @@ InductionProofStatus proveByInductionStatus(
   solver.addClause({lastFrameEncoder.encode(inductionBad)});
   SATSolverWrapper::SolveStatus solveStatus;
   if (localSolverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
-      effectiveKissatDecisionLimit.has_value()) {
+      kissatDecisionLimit.has_value()) {
     solveStatus = solver.solveWithKissatResourceLimits(
-        std::numeric_limits<unsigned>::max(), *effectiveKissatDecisionLimit);
+        std::numeric_limits<unsigned>::max(), *kissatDecisionLimit);
   } else if (localSolverType == KEPLER_FORMAL::Config::SolverType::CADICAL &&
              // LCOV_EXCL_START
-             effectiveKissatDecisionLimit.has_value()) {  // LCOV_EXCL_LINE
+             kissatDecisionLimit.has_value()) {  // LCOV_EXCL_LINE
     solveStatus = solver.solveWithAssumptionsStatus(  // LCOV_EXCL_LINE
         {},  // LCOV_EXCL_LINE
-        *effectiveKissatDecisionLimit,  // LCOV_EXCL_LINE
-        *effectiveKissatDecisionLimit);  // LCOV_EXCL_LINE
+        *kissatDecisionLimit,  // LCOV_EXCL_LINE
+        *kissatDecisionLimit);  // LCOV_EXCL_LINE
   } else {  // LCOV_EXCL_LINE
   // LCOV_EXCL_STOP
     solveStatus = solver.solveStatus();

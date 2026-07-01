@@ -30,10 +30,9 @@ constexpr size_t kMinOutputsForBatchedProof = 2;
 constexpr size_t kMinOriginalOutputsForBoundedBatch = 64;
 constexpr size_t kMinDeferredRailStateSymbolsForEarlyStop = 512;
 constexpr size_t kMaxCompactDualRailConjunctionOutputs = 32;
-constexpr size_t kMaxCompactFullDualRailPublicHypothesisOutputs = 64;
 constexpr size_t kMaxWideDualRailSplitHypothesisOutputs = 8;
 constexpr size_t kMaxFullDualRailPublicHypothesisOutputs = 256;
-constexpr size_t kMaxStoredPublicSplitHypothesisOutputs = 64;
+constexpr size_t kMaxStoredPublicSplitHypothesisOutputs = 32;
 constexpr size_t kMaxFullDualRailPublicHypothesisStateSymbols = 4096;
 constexpr unsigned kDefaultBatchedInductionDecisionLimit = 200000;
 // Dual-rail SEC is a coverage extension for resetless state.  Residual outputs
@@ -124,20 +123,13 @@ size_t maxDualRailSplitHypothesisOutputs(const KInductionProblem& problem) {
 
 bool canUseFullPublicConjunctionHypothesis(
     const KInductionProblem& problem) {
-  // The full hypothesis is public-output-only.  For compact output buses, let
-  // the exact KI COI decide the real SAT surface instead of rejecting the
-  // hypothesis because the design has many unrelated dual-rail state bits.
-  const bool compactPublicSurface =
-      problem.observedOutputExprs0.size() <=
-      kMaxCompactFullDualRailPublicHypothesisOutputs;
   return problem.usesDualRailStateEncoding &&
          problem.property != nullptr &&
          problem.bad != nullptr &&
          problem.observedOutputExprs0.size() <=
              kMaxFullDualRailPublicHypothesisOutputs &&
-         (compactPublicSurface ||
-          dualRailStateSymbolCount(problem) <=
-              kMaxFullDualRailPublicHypothesisStateSymbols);
+         dualRailStateSymbolCount(problem) <=
+             kMaxFullDualRailPublicHypothesisStateSymbols;
 }
 
 bool shouldApplyPublicConjunctionHypothesis(
@@ -209,22 +201,6 @@ bool shouldTryStoredPublicHypothesisOnStandaloneLeaf(
   // larger strict KI query without sharing coverage. Parent batches still try
   // the full hypothesis before splitting; standalone leaves keep the local
   // strict KI result once the remembered surface is too wide.
-  return hypothesis.outputCount <=
-         kMaxStoredPublicSplitHypothesisOutputs;
-}
-
-bool shouldPreferPublicHypothesisInBatches(
-    const PublicConjunctionHypothesis& hypothesis) {
-  if (hypothesis.property == nullptr) {
-    return false;
-  }
-  if (!hypothesis.completePublicSurface) {
-    return true;
-  }
-  // Compact stored residual surfaces are the intended public KI hypothesis for
-  // split batches.  Prefer them before the capped local probe, while keeping
-  // AES-sized stored surfaces as an optional fallback instead of replaying them
-  // through every recursive slice.
   return hypothesis.outputCount <=
          kMaxStoredPublicSplitHypothesisOutputs;
 }
@@ -327,7 +303,9 @@ PublicConjunctionHypothesis makePublicConjunctionHypothesis(
 
 PublicConjunctionHypothesis storedResidualPublicConjunctionHypothesis(
     const KInductionProblem& problem) {
-  if (!problem.usesDualRailStateEncoding || problem.lazyTransitions == nullptr) {
+  if (!problem.usesDualRailStateEncoding || problem.lazyTransitions == nullptr ||
+      dualRailStateSymbolCount(problem) >
+          kMaxFullDualRailPublicHypothesisStateSymbols) {
     return {};
   }
 
@@ -338,17 +316,6 @@ PublicConjunctionHypothesis storedResidualPublicConjunctionHypothesis(
           kMaxFullDualRailPublicHypothesisOutputs ||
       store.dualRailResidualPublicOutputCount <=
           problem.observedOutputExprs0.size()) {
-    return {};
-  }
-  const bool compactStoredPublicSurface =
-      store.dualRailResidualPublicOutputCount <=
-      kMaxCompactFullDualRailPublicHypothesisOutputs;
-  // Stored hypotheses come from the public residual output set before strategy
-  // batching.  A compact bus should be replayed even when unrelated rail state
-  // is large; AES-sized stored surfaces still need the state guard below.
-  if (!compactStoredPublicSurface &&
-      dualRailStateSymbolCount(problem) >
-          kMaxFullDualRailPublicHypothesisStateSymbols) {
     return {};
   }
 
@@ -895,14 +862,12 @@ KInductionResult runOutputBatchedKInduction(
   KInductionResult combined{KInductionStatus::Equivalent, 0};
   const PublicConjunctionHypothesis publicHypothesis =
       initialPublicConjunctionHypothesis(problem);
-  const bool preferPublicHypothesis =
-      shouldPreferPublicHypothesisInBatches(publicHypothesis);
   const PublicConjunctionHypothesis preferredHypothesis =
-      preferPublicHypothesis ? publicHypothesis : PublicConjunctionHypothesis{};
+      publicHypothesis.completePublicSurface ? PublicConjunctionHypothesis{}
+                                             : publicHypothesis;
   const PublicConjunctionHypothesis fallbackHypothesis =
-      publicHypothesis.completePublicSurface && !preferPublicHypothesis
-          ? publicHypothesis
-          : PublicConjunctionHypothesis{};
+      publicHypothesis.completePublicSurface ? publicHypothesis
+                                             : PublicConjunctionHypothesis{};
   const OutputBatchingLimits batchingLimits =
       defaultOutputBatchingLimitsForProblem(problem);
   // Copy the large shared SEC problem once, then mutate only the small
