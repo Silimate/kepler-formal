@@ -17,7 +17,10 @@ namespace {
 // These limits keep nearby outputs together while preventing one batch from
 // dragging most of the design into one SAT cone.
 constexpr OutputBatchingLimits kDefaultOutputBatchingLimits;
-constexpr OutputBatchingLimits kDualRailOutputBatchingLimits{16, 512};
+constexpr OutputBatchingLimits kDualRailOutputBatchingLimits{8, 256};
+constexpr OutputBatchingLimits kSmallDualRailOutputBatchingLimits{32, 4096};
+constexpr size_t kMaxSmallDualRailBatchOutputs = 32;
+constexpr size_t kMaxSmallDualRailBatchStateSymbols = 512;
 
 void appendOutputSupport(const KInductionProblem& problem,
                          size_t outputIndex,
@@ -28,6 +31,19 @@ void appendOutputSupport(const KInductionProblem& problem,
   for (const auto symbol : problem.observedOutputExprs1[outputIndex]->getSupportVars()) {
     support.insert(symbol);
   }
+}
+
+size_t dualRailStateSymbolCount(const KInductionProblem& problem) {
+  if (!problem.dualRailStatePairs.empty()) {
+    return problem.dualRailStatePairs.size() * 2;
+  }
+  return problem.state0Symbols.size() + problem.state1Symbols.size();
+}
+
+bool isSmallDualRailBatchingSurface(const KInductionProblem& problem) {
+  return problem.observedOutputExprs0.size() <= kMaxSmallDualRailBatchOutputs &&
+         dualRailStateSymbolCount(problem) <=
+             kMaxSmallDualRailBatchStateSymbols;
 }
 
 }  // namespace
@@ -75,9 +91,17 @@ std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
 OutputBatchingLimits defaultOutputBatchingLimitsForProblem(
     const KInductionProblem& problem) {
   if (problem.usesDualRailStateEncoding) {
+    if (isSmallDualRailBatchingSurface(problem)) {
+      // GCD-sized dual-rail designs often need the public output conjunction as
+      // the strict KI property.  Keep those small surfaces together; large
+      // rail-state ASICs still use tiny batches to avoid wide failed probes.
+      return kSmallDualRailOutputBatchingLimits;
+    }
     // Dual-rail output obligations already carry both may-one/may-zero rails.
-    // Start with moderate shared-cone batches, then let KI's recursive
-    // splitter localize only the conjunctions that are actually hard.
+    // Start with small exact OR batches.  Wide dual-rail OR batches often hit
+    // the resource-limited step path only after building a large transition
+    // CNF, and then immediately split; tiny batches keep useful grouping
+    // without paying for the failed wide proof first.
     return kDualRailOutputBatchingLimits;
   }
   return kDefaultOutputBatchingLimits;
@@ -139,13 +163,11 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   batch.property = BoolExpr::simplify(property);
   batch.bad = BoolExpr::simplify(BoolExpr::Not(batch.property));
 
-  // Keep the shared state-equality strengthening as KI hypotheses for sliced
-  // output proofs.  Rebuilding the monolithic induction property here would ask
-  // every tiny output batch to prove all shared state equalities as goals; large
-  // reset-heavy ASICs then spend the run chasing unrelated equality failures
-  // instead of proving the selected output cone.
-  batch.inductionProperty = nullptr;
-  batch.inductionBad = nullptr;
+  // Prove only this output slice in the induction query.  The caller combines
+  // successful slices as the SEC output conjunction, while each slice remains a
+  // normal strict k-induction obligation over its own base and step cases.
+  batch.inductionProperty = batch.property;
+  batch.inductionBad = batch.bad;
   batch.inductionPropertyAssumesInductiveStateEqualities = false;
   batch.description = source.description + " output batch";
 }

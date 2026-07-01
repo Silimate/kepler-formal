@@ -45,6 +45,8 @@ struct PdrStateEqualitySubsetCacheEntry {
   std::vector<std::pair<size_t, size_t>> selectedPairs;
 };
 
+struct InductionTransitionSupportCache;
+
 struct LazyTransitionStore {
   // Large SEC designs can have hundreds of thousands of modeled state bits.
   // K-induction proves one output cone at a time, so eagerly remapping every
@@ -125,6 +127,12 @@ struct KInductionProblem {
   // this flag is set, the slice skips local base checks because the caller will
   // validate the shared full-output base prefix once after all slices prove.
   bool deferBaseCaseChecks = false;
+  // KI output batching and increasing-k retries ask for the same transition
+  // target supports many times.  Keep an exact per-problem cache of those DAG
+  // walks so every retry still builds the same strict KI formula without
+  // re-traversing unchanged transition cones.
+  mutable std::shared_ptr<InductionTransitionSupportCache>
+      inductionTransitionSupportCache;
   std::string description;
 
   bool hasSequentialState() const {
