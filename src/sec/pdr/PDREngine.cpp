@@ -235,11 +235,12 @@ constexpr size_t kMaxPerFrameConcreteValidationCubeLiterals = 8;
 constexpr size_t kCachedConcreteValidationMinDepth = 2;
 constexpr size_t kCachedConcreteValidationMinCubeLiterals = 3;
 // Large dual-rail final PDR slices can reach abstract reset-frontier roots
-// whose concrete validation needs a huge reset-prefix solver.  Once exact
+// whose concrete validation needs a huge reset-prefix solver. BlackParrot final
+// reproduces this with four-literal roots on a 2.6M-rail surface. Once exact
 // reset-frontier repair is already disabled by the global rail-size guard, do
-// not let a wide projected root rebuild that solver anyway; split/skip through
+// not let those projected roots rebuild that solver anyway; split/skip through
 // the caller's existing inconclusive path instead.
-constexpr size_t kMinLargeDualRailRootForConcreteValidationSkip = 16;
+constexpr size_t kMinLargeDualRailRootForConcreteValidationSkip = 4;
 // If cheap reset facts already prove all but a couple of concrete root
 // validation frames, do not open the broad shared-prefix assumption solver.
 // Sampled BlackParrot leaves got stuck in assumption solving on that shape; exact

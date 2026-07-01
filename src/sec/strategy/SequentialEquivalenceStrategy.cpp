@@ -4963,8 +4963,8 @@ SequentialEquivalenceResult runPdrSecEngine(
     if (shouldSkipLargeDualRailResidualSurface(
             problem, dualRailEngineOutputIndices.size())) {
             // LCOV_EXCL_STOP
-      if (auto witness = findSmallDualRailResidualConcreteCounterexample(
-              problem, dualRailEngineOutputIndices, solverType, maxK);
+      if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
+              problem, dualRailEngineOutputIndices, solverType);
           witness.has_value()) {
         KInductionResult witnessResult{  // LCOV_EXCL_LINE
             KInductionStatus::Different,
@@ -5472,8 +5472,10 @@ SequentialEquivalenceResult runPdrSecEngine(
     constexpr size_t kDualRailFinalExactPdrRootGeneralizationAttempts = 4;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputQueryBudget = 64;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrSingleOutputQueryBudget = 1024;  // LCOV_EXCL_LINE
+    constexpr size_t kLargeDualRailFinalExactPdrSingleOutputQueryBudget = 64;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrMultiOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     constexpr size_t kDualRailFinalExactPdrSingleOutputRepairBudget = 8;  // LCOV_EXCL_LINE
+    constexpr size_t kLargeDualRailFinalExactPdrSingleOutputRepairBudget = 2;  // LCOV_EXCL_LINE
     constexpr size_t kMediumDualRailFinalExactPdrPredecessorProjectionLimit = 32;  // LCOV_EXCL_LINE
     constexpr size_t kMediumDualRailFinalExactPdrMultiOutputRepairBudget = 4;  // LCOV_EXCL_LINE
     constexpr size_t kMediumDualRailFinalExactPdrSingleOutputRepairBudget = 8;  // LCOV_EXCL_LINE
@@ -5514,22 +5516,6 @@ SequentialEquivalenceResult runPdrSecEngine(
         !problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
         endOutput - firstOutput <= kMaxPdrConcreteValidationOutputs;  // LCOV_EXCL_LINE
     const bool finalBatchCanRefineProjectedCounterexamples = true;  // LCOV_EXCL_LINE
-    // The bad-formula repair opens exact reset-frontier queries. Keep it away
-    // from broad dual-rail batches, but allow already-split one-output leaves:
-    // their bad predicates are local and this avoids relearning each sibling
-    // rail assignment through the predecessor loop.
-    const bool finalSliceUsesBadFormulaValidation =  // LCOV_EXCL_LINE
-        (!problem.usesDualRailStateEncoding ||  // LCOV_EXCL_LINE
-         endOutput - firstOutput == 1) &&  // LCOV_EXCL_LINE
-        endOutput - firstOutput <=  // LCOV_EXCL_LINE
-            pdrOutputBatchingLimits.maxOutputBatchSize;  // LCOV_EXCL_LINE
-    // Exact reset-frontier checks repair reset-bootstrap dual-rail slices, but
-    // the final stage may split a wide original SEC surface into one-output
-    // leaves.  Keep the original output width in the decision so a wide design
-    // does not re-enter the same reset-frontier wall one leaf at a time.
-    // Medium CPU-style residual buses need exact reset-frontier repair even after
-    // batching splits them. Larger SoC-scale surfaces remain guarded in PDREngine
-    // by the rail-state and transition-source limits.
     constexpr size_t kMaxDualRailFinalResetFrontierOriginalOutputs =  // LCOV_EXCL_LINE
         kMaxDualRailWideLocalImplicationOutputs;  // LCOV_EXCL_LINE
     const size_t originalOutputCount =  // LCOV_EXCL_LINE
@@ -5539,6 +5525,25 @@ SequentialEquivalenceResult runPdrSecEngine(
     const bool mediumDualRailOutputSurface =  // LCOV_EXCL_LINE
         problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
         originalOutputCount <= kMaxDualRailWideLocalImplicationOutputs;  // LCOV_EXCL_LINE
+    const bool largeDualRailOutputSurface =  // LCOV_EXCL_LINE
+        problem.usesDualRailStateEncoding && !mediumDualRailOutputSurface;  // LCOV_EXCL_LINE
+    // The bad-formula repair opens exact reset-frontier queries. Keep it away
+    // from broad dual-rail batches. Also keep already-split one-output leaves
+    // behind the original-output surface guard: BP-scale SoC probes otherwise
+    // repeat this local-looking repair hundreds of times over the same huge
+    // reset-specialized frontier.
+    const bool finalSliceUsesBadFormulaValidation =  // LCOV_EXCL_LINE
+        (!problem.usesDualRailStateEncoding ||  // LCOV_EXCL_LINE
+         (endOutput - firstOutput == 1 && mediumDualRailOutputSurface)) &&  // LCOV_EXCL_LINE
+        endOutput - firstOutput <=  // LCOV_EXCL_LINE
+            pdrOutputBatchingLimits.maxOutputBatchSize;  // LCOV_EXCL_LINE
+    // Exact reset-frontier checks repair reset-bootstrap dual-rail slices, but
+    // the final stage may split a wide original SEC surface into one-output
+    // leaves.  Keep the original output width in the decision so a wide design
+    // does not re-enter the same reset-frontier wall one leaf at a time.
+    // Medium CPU-style residual buses need exact reset-frontier repair even after
+    // batching splits them. Larger SoC-scale surfaces remain guarded in PDREngine
+    // by the rail-state and transition-source limits.
     const bool finalSliceUsesResetFrontier =  // LCOV_EXCL_LINE
         !problem.usesDualRailStateEncoding ||
         originalOutputCount <=
@@ -5550,13 +5555,14 @@ SequentialEquivalenceResult runPdrSecEngine(
     const size_t finalPdrBadCubeStateLimit =  // LCOV_EXCL_LINE
         kFinalExactPdrBadCubeStateLimit;
     // These are per-leaf repair budgets. Keep them modest: wide SoC surfaces
-    // can leave many final single-output dual-rail slices, but isolated memory
-    // handshake leaves may need the ordinary PDR loop to run to frame/max-K
-    // convergence after deterministic reset-conflict repairs. Multi-output
-    // slices keep a finite query cap so broad abstract failures still split.
+    // can leave many final single-output dual-rail slices, while smaller
+    // isolated memory-handshake leaves may need the ordinary PDR loop to run to
+    // frame/max-K convergence after deterministic reset-conflict repairs.
     const size_t defaultFinalDualRailPredecessorQueryBudget =  // LCOV_EXCL_LINE
         endOutput - firstOutput == 1
-            ? kDualRailFinalExactPdrSingleOutputQueryBudget
+            ? (largeDualRailOutputSurface  // LCOV_EXCL_LINE
+                   ? kLargeDualRailFinalExactPdrSingleOutputQueryBudget
+                   : kDualRailFinalExactPdrSingleOutputQueryBudget)
             : kDualRailFinalExactPdrMultiOutputQueryBudget;
     const size_t finalDualRailPredecessorQueryBudget =  // LCOV_EXCL_LINE
         secStrategySizeLimitFromEnv(  // LCOV_EXCL_LINE
@@ -5606,9 +5612,11 @@ SequentialEquivalenceResult runPdrSecEngine(
                        ? (mediumDualRailOutputSurface  // LCOV_EXCL_LINE
                               ? kMediumDualRailFinalExactPdrMultiOutputRepairBudget
                               : kDualRailFinalExactPdrMultiOutputRepairBudget)
-                       : (mediumDualRailOutputSurface  // LCOV_EXCL_LINE
-                              ? kMediumDualRailFinalExactPdrSingleOutputRepairBudget
-                              : kDualRailFinalExactPdrSingleOutputRepairBudget))
+                       : (largeDualRailOutputSurface  // LCOV_EXCL_LINE
+                              ? kLargeDualRailFinalExactPdrSingleOutputRepairBudget
+                              : (mediumDualRailOutputSurface  // LCOV_EXCL_LINE
+                                     ? kMediumDualRailFinalExactPdrSingleOutputRepairBudget
+                                     : kDualRailFinalExactPdrSingleOutputRepairBudget)))
                 : 0);
     // Dual-rail properties are intentionally batched before the reset
     // bootstrap proof, otherwise the frame-0 precheck materializes the entire
@@ -6135,8 +6143,8 @@ SequentialEquivalenceResult runPdrSecEngine(
         skippedOutputIndices.push_back(outputIndex);
       }
     }
-    if (auto witness = findSmallDualRailResidualConcreteCounterexample(
-            problem, skippedOutputIndices, solverType, maxK);
+    if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
+            problem, skippedOutputIndices, solverType);
         witness.has_value()) {
       KInductionResult witnessResult{  // LCOV_EXCL_LINE
           KInductionStatus::Different,

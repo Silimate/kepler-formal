@@ -117,9 +117,9 @@ class PDREngine {
   // strategy. They can skip expensive exact reset-frontier SAT prechecks and
   // escalate on an abstract trace, while final self-refining PDR keeps them.
   bool useExactResetFrontierChecks_ = true;
-  // Zero is unlimited.  SEC uses a finite budget only for multi-output
-  // dual-rail final batches so an abstract-only root loop can be split into
-  // narrower output proofs instead of monopolizing the run.
+  // Zero is unlimited. SEC uses a finite budget for dual-rail final batches so
+  // an abstract-only root loop can be split or skipped instead of monopolizing
+  // the run.
   size_t maxProjectedCounterexampleRefinements_ = 0;
 };
 
