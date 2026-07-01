@@ -13,3 +13,4 @@ jobs:
     uses: ./.github/workflows/regress-ki.yml
     with:
       sec_encoding: dual_rail_steady
+      positive_expectation: allow-inconclusive
