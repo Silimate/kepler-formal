@@ -9771,16 +9771,19 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(0);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The full residual public hypothesis is public-output-only and remains a
-  // strict KI hypothesis when the parent slice splits.  Replaying it may be
-  // inconclusive, but it must not turn the leaf into proven coverage.
+  // The full residual public hypothesis is public-output-only and is tried at
+  // the parent slice.  After that parent failure, children keep the smaller
+  // parent public conjunction instead of replaying the wider stored fallback.
   EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
   EXPECT_NE(
       stderrOutput.find("range [0,2) source_outputs=4"),
       std::string::npos);
   EXPECT_NE(
-      stderrOutput.find("range [0,1) source_outputs=4"),
+      stderrOutput.find("range [0,1) source_outputs=2"),
       std::string::npos);
+  EXPECT_EQ(
+      detail::countTextOccurrences(stderrOutput, "source_outputs=4"),
+      1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14577,7 +14580,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsKiDualRailFindsProductionResidualMismatch) {
-  constexpr size_t kResidualOutputs = 65;
+  constexpr size_t kResidualOutputs = 129;
   constexpr size_t kStateBitsPerDesign = 2049;
   auto testCase = makeLargeDualRailResidualCaseForTest(
       "kiDualRailProductionLargeResidual",
@@ -14596,9 +14599,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result =
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
 
-  // The large-state guard must not become a result assumption. If the selected
-  // KI SEC path can witness a top-output mismatch, report it rather than
-  // skipping the residual surface.
+  // This exceeds the historical large-residual skip threshold.  The selected
+  // KI path must still receive the real obligation and report a top-output
+  // mismatch instead of pre-skipping the surface.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
   EXPECT_EQ(result.coveredOutputs, kResidualOutputs + 1);
   EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);

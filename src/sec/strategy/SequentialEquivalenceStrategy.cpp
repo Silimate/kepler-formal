@@ -1498,9 +1498,16 @@ bool shouldRunDualRailResidualCounterexampleSweep(
 
 bool shouldSkipLargeDualRailResidualProofSurface(
     const KInductionProblem& problem,
-    size_t residualOutputCount) {
+    size_t residualOutputCount,
+    DualRailResidualEngine engine) {
   if (!problem.usesDualRailStateEncoding || residualOutputCount == 0) {
     return false;  // LCOV_EXCL_LINE
+  }
+  if (engine == DualRailResidualEngine::KInduction) {
+    // K-induction must get the actual residual obligation.  Large surfaces may
+    // still finish inconclusive after strict KI splitting, but they must not be
+    // pre-skipped before the selected engine has tried to prove them.
+    return false;
   }
   // This guard is for truly oversized residual surfaces.  It reports
   // inconclusive/skipped coverage instead of accepting unproved outputs.
@@ -1920,7 +1927,7 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
   }
 
   if (shouldSkipLargeDualRailResidualProofSurface(
-          problem, residualOutputIndices.size())) {
+          problem, residualOutputIndices.size(), engine)) {
     emitSecDiag(
         "SEC diag: dual-rail ", dualRailResidualEngineName(engine),
         " skipping large residual surface outputs=",
