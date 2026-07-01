@@ -37,6 +37,9 @@ constexpr OutputBatchingLimits kLargeDualRailCraigBatchingLimits{
     /*outputBatchSupportLimit=*/8192};
 
 constexpr size_t kLargeDualRailCraigProjectionStateLimit = 86016;
+constexpr size_t kLargeDualRailCraigImageTransitionStateLimit = 32768;
+constexpr size_t kLargeDualRailCounterexampleProbeSupportLimit = 512;
+constexpr size_t kLargeDualRailCounterexampleProbeStatefulStateLimit = 8192;
 
 constexpr CraigImcGrowthBudget kDefaultLargeDualRailCraigGrowthBudget{
     /*enabled=*/true,
@@ -48,7 +51,12 @@ constexpr CraigImcGrowthBudget kDefaultLargeDualRailCraigGrowthBudget{
     // BP's retained-helper tail exposes an 84,516-state focused support cone.
     // Allow exactly that strict projection surface, with a small power-of-two
     // margin, while staying below the next broad all-support regime.
-    /*maxProjectionStates=*/kLargeDualRailCraigProjectionStateLimit};
+    /*maxProjectionStates=*/kLargeDualRailCraigProjectionStateLimit,
+    // A single projected image above this size has already entered the memory
+    // risk zone.  Return a strict IMC budget result before allocating the Craig
+    // solver/proof trace for that image; the caller can split or report
+    // allowed-inconclusive instead of crossing the top-MEM cap.
+    /*maxImageTransitionStates=*/kLargeDualRailCraigImageTransitionStateLimit};
 
 constexpr size_t kCraigBatchMinOverlapPercent = 90;
 constexpr size_t kCraigBatchMinMarginalSupportLimit = 64;
@@ -61,6 +69,8 @@ constexpr size_t kCraigBatchProjectionHardMaxOutputs = 2;
 constexpr size_t kCraigReusableProjectionMinSupport = 256;
 constexpr size_t kCraigSingleOutputSelfProjectionSeedLimit = 1024;
 constexpr size_t kCraigProjectionCacheWorkLimit = 500000;
+constexpr size_t kCraigDenseProjectionCacheStateThreshold = 4096;
+constexpr size_t kCraigDenseProjectionCacheOutputThreshold = 64;
 constexpr size_t kCraigIndexedVectorOutputRawSupportLimit = 64;
 constexpr size_t kCraigIndexedVectorUnionRawSupportLimit = 128;
 constexpr size_t kCraigHelperReuseMinOverlapPercent = 80;
@@ -79,6 +89,12 @@ struct CraigOutputSupportCache {
 struct CraigOutputBatchPlan {
   size_t firstOutput = 0;
   size_t endOutput = 0;
+};
+
+struct CraigCounterexampleProbe {
+  size_t output = 0;
+  size_t support = 0;
+  bool touchesState = false;
 };
 
 enum class CraigTrackedSeedScope {
@@ -113,9 +129,15 @@ bool shouldBuildCraigProjectionSupportCache(
   }
   // The cache expands each output support through the transition relation.
   // That is useful on AES-sized surfaces, but BP-sized dual-rail problems can
-  // spend tens of GB before the first Craig query.  When the estimated cache
-  // work is too large, keep raw support batching and let Craig's bounded
+  // spend tens of GB before the first Craig query, and RISC-V-sized buses spend
+  // minutes in closure walks before proving only a few outputs.  When the
+  // surface is dense, keep raw support batching and let Craig's bounded
   // projection refinement grow one proof slice at a time.
+  if (stateCount >= kCraigDenseProjectionCacheStateThreshold &&
+      outputCount >= kCraigDenseProjectionCacheOutputThreshold) {
+    return false;
+  }
+  // Keep a product cap for broad state/output mixes below the dense guard.
   return stateCount <= kCraigProjectionCacheWorkLimit / outputCount;
 }
 
@@ -369,6 +391,9 @@ CraigImcGrowthBudget largeDualRailCraigGrowthBudget() {
   CraigImcGrowthBudget budget = kDefaultLargeDualRailCraigGrowthBudget;
   budget.maxQExpansionPass = envSizeOrDefault(
       "KEPLER_SEC_IMC_CRAIG_MAX_Q_PASS", budget.maxQExpansionPass);
+  budget.maxImageTransitionStates = envSizeOrDefault(
+      "KEPLER_SEC_IMC_CRAIG_MAX_IMAGE_TRANSITION_STATES",
+      budget.maxImageTransitionStates);
   return budget;
 }
 
@@ -808,6 +833,111 @@ IMCResult makeCraigInconclusiveResult(
   return result;
 }
 
+std::unordered_set<size_t> observedOutputSupportForProbe(
+    const KInductionProblem& problem,
+    size_t output) {
+  std::unordered_set<size_t> support;
+  if (problem.observedOutputExprs0[output] != nullptr) {
+    const auto vars = problem.observedOutputExprs0[output]->getSupportVars();
+    support.insert(vars.begin(), vars.end());
+  }
+  if (problem.observedOutputExprs1[output] != nullptr) {
+    const auto vars = problem.observedOutputExprs1[output]->getSupportVars();
+    support.insert(vars.begin(), vars.end());
+  }
+  return support;
+}
+
+bool outputSupportTouchesState(
+    const std::unordered_set<size_t>& support,
+    const std::unordered_set<size_t>& stateSymbols) {
+  for (const auto symbol : support) {
+    if (stateSymbols.find(symbol) != stateSymbols.end()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<IMCResult> findLargeDualRailCounterexampleUpTo(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK) {
+  if (problem.observedOutputExprs0.empty() ||
+      problem.observedOutputExprs0.size() !=
+          problem.observedOutputExprs1.size()) {
+    return std::nullopt;
+  }
+
+  std::vector<CraigCounterexampleProbe> probes;
+  probes.reserve(problem.observedOutputExprs0.size());
+  size_t skippedLargeSupport = 0;
+  size_t skippedStateDependent = 0;
+  size_t skippedProjectionSupport = 0;
+  std::unordered_set<size_t> stateSymbols;
+  stateSymbols.reserve(problem.state0Symbols.size() + problem.state1Symbols.size());
+  stateSymbols.insert(problem.state0Symbols.begin(), problem.state0Symbols.end());
+  stateSymbols.insert(problem.state1Symbols.begin(), problem.state1Symbols.end());
+  const size_t stateCount = problem.effectiveTotalStateCount();
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    const std::unordered_set<size_t> support =
+        observedOutputSupportForProbe(problem, output);
+    if (support.size() > kLargeDualRailCounterexampleProbeSupportLimit) {
+      ++skippedLargeSupport;
+      continue;
+    }
+    const bool touchesState = outputSupportTouchesState(support, stateSymbols);
+    size_t supportScore = support.size();
+    if (touchesState) {
+      if (stateCount > kLargeDualRailCounterexampleProbeStatefulStateLimit) {
+        ++skippedStateDependent;
+        continue;
+      }
+    }
+    probes.push_back({output, supportScore, touchesState});
+  }
+  std::stable_sort(
+      probes.begin(),
+      probes.end(),
+      [](const CraigCounterexampleProbe& lhs,
+         const CraigCounterexampleProbe& rhs) {
+        return lhs.support < rhs.support;
+      });
+  emitSecDiag(
+      "SEC diag: imc large dual-rail bounded witness probes=",
+      probes.size(), " skipped_support=", skippedLargeSupport,
+      " skipped_state_dependent=", skippedStateDependent,
+      " skipped_projection_support=", skippedProjectionSupport,
+      " support_limit=", kLargeDualRailCounterexampleProbeSupportLimit,
+      " stateful_state_limit=",
+      kLargeDualRailCounterexampleProbeStatefulStateLimit,
+      " projection_sizing=raw_support",
+      " max_k=", maxK);
+
+  for (size_t depth = 0; depth <= maxK; ++depth) {
+    for (const CraigCounterexampleProbe& probe : probes) {
+      if (!probe.touchesState && depth > 0) {
+        continue;
+      }
+      KInductionProblem outputProblem = problem;
+      configureOutputBatchProblem(
+          outputProblem, problem, probe.output, probe.output + 1);
+      removeCrossDesignStateCandidates(outputProblem);
+      if (auto witness = findFastBaseCounterexampleAtFrontier(
+              outputProblem, solverType, depth);
+          witness.has_value()) {
+        return IMCResult{
+            IMCStatus::Different, witness->badFrame, std::move(witness)};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+size_t boundedCraigWitnessDepth(size_t maxK, size_t reachedLookahead) {
+  return std::min(maxK, reachedLookahead);
+}
+
 IMCResult runCraigOutputRange(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
@@ -1034,27 +1164,42 @@ IMCResult runCraigOutputRange(
   }
 
   if (proof.status == CraigImcStatus::ConcreteNoProgress) {
-    // Every first-iteration lookahead already started from the complete
-    // concrete post-reset cube. Repeating all bounded SAT queries here would
-    // rebuild the same transition prefixes without adding proof information.
-    return makeCraigInconclusiveResult(maxK, firstOutput);
-  }
-  if (proof.status == CraigImcStatus::BudgetExceeded) {
-    return makeCraigInconclusiveResult(proof.iterations, firstOutput);
-  }
-
-  // Partial or implicit initial frontiers are over-approximations. Preserve the
-  // exact bounded localization sweep for those cases so a reachable mismatch
-  // is never hidden by an abstract Craig SAT result.
-  const auto cache = makeImcBaseCounterexampleCache(batchProblem);
-  for (size_t depth = 0; depth <= maxK; ++depth) {
+    // This is a Craig proof failure, not a concrete IMC witness. A full
+    // bounded counterexample sweep on BP-sized dual-rail slices rebuilds large
+    // transition prefixes and is outside the interpolation proof step. Keep
+    // only the guarded local probe for small output cones; otherwise return
+    // inconclusive conservatively.
     if (const auto counterexample =
-            findImcCounterexample(*cache, solverType, depth);
+            findLargeDualRailCounterexampleUpTo(batchProblem, solverType, maxK);
         counterexample.has_value()) {
       return *counterexample;
     }
+    return makeCraigInconclusiveResult(maxK, firstOutput);
   }
-  return makeCraigInconclusiveResult(maxK, firstOutput);
+  if (proof.status == CraigImcStatus::BudgetExceeded) {
+    if (const auto counterexample =
+            findLargeDualRailCounterexampleUpTo(
+                batchProblem, solverType, proof.iterations);
+        counterexample.has_value()) {
+      return *counterexample;
+    }
+    return makeCraigInconclusiveResult(proof.iterations, firstOutput);
+  }
+
+  // Partial or implicit initial frontiers are over-approximations. Do not turn
+  // an abstract Craig SAT result into a proof claim; report inconclusive
+  // instead of falling back to an unrelated full bounded sweep.
+  // The local probe is still IMC's bounded counterexample search, restricted to
+  // small output supports.  Use the caller horizon so a shallow Craig attempt
+  // cannot hide a concrete bad state that is already within maxK.
+  const size_t checkedDepth = maxK;
+  if (const auto counterexample =
+          findLargeDualRailCounterexampleUpTo(
+              batchProblem, solverType, checkedDepth);
+      counterexample.has_value()) {
+    return *counterexample;
+  }
+  return makeCraigInconclusiveResult(checkedDepth, firstOutput);
 }
 
 IMCResult runLargeDualRailCraigImc(
@@ -1090,12 +1235,17 @@ IMCResult runLargeDualRailCraigImc(
     if (batchResult.status == IMCStatus::Inconclusive) {
       // Once any output slice exhausts the strict Craig budgets, the whole
       // equivalence proof is already inconclusive. Stop here instead of
-      // spending CI memory/time proving unrelated later outputs.
+      // rebuilding BP-sized bounded-transition probes for unrelated later
+      // outputs. The large-dual-rail startup witness probe already catches
+      // cheap concrete edits before proof batching; deeper, unattempted output
+      // slices remain inconclusive rather than being reported safe.
+      const size_t checkedDepth =
+          boundedCraigWitnessDepth(maxK, batchResult.bound);
       emitSecDiag(
           "SEC diag: imc Craig stopping after inconclusive output batch first=",
           batchPlan.firstOutput, " end=", batchPlan.endOutput);
       return makeCraigInconclusiveResult(
-          maxK,
+          checkedDepth,
           batchResult.firstUnprovenOutput.value_or(batchPlan.firstOutput));
     } else {
       proofBound = std::max(proofBound, batchResult.bound);
@@ -1226,6 +1376,11 @@ IMCResult IMCEngine::run(size_t maxK) const {
       !problem_.observedOutputExprs0.empty() &&
       problem_.observedOutputExprs0.size() ==
           problem_.observedOutputExprs1.size()) {
+    if (const auto counterexample =
+            findLargeDualRailCounterexampleUpTo(problem_, solverType_, 0);
+        counterexample.has_value()) {
+      return *counterexample;
+    }
     return runLargeDualRailCraigImc(problem_, solverType_, maxK);
   }
 

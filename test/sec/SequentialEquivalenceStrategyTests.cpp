@@ -2308,19 +2308,25 @@ KInductionProblem buildProjectionSharedImcBatchProblem(
 
   std::vector<size_t> sharedStates;
   sharedStates.reserve(sharedTransitionStates);
+  BoolExpr* init = BoolExpr::createTrue();
   for (size_t index = 0; index < sharedTransitionStates; ++index) {
     const size_t symbol = firstSymbol + index;
     sharedStates.push_back(symbol);
     problem.state0Symbols.push_back(symbol);
     problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.push_back({symbol, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
     problem.transitions0.emplace_back(symbol, BoolExpr::createFalse());
   }
 
   BoolExpr* sharedCone = makeConjunctionOfVars(sharedStates);
+  BoolExpr* property = BoolExpr::createTrue();
   for (size_t output = 0; output < outputCount; ++output) {
     const size_t outputState = firstOutputState + output;
     problem.state0Symbols.push_back(outputState);
     problem.allSymbols.push_back(outputState);
+    problem.initialStateAssignments.push_back({outputState, false});
+    init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(outputState)));
     // Raw output supports are disjoint, but both next-state functions pull in
     // the same transition cone. This mirrors AES text_out bits, where a
     // one-bit bad predicate expands to a much larger shared Craig projection.
@@ -2330,8 +2336,19 @@ KInductionProblem buildProjectionSharedImcBatchProblem(
         "projection_shared_out" + std::to_string(output));
     problem.observedOutputExprs0.push_back(BoolExpr::Var(outputState));
     problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
+    property = BoolExpr::And(
+        property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0.back(),
+            problem.observedOutputExprs1.back()));
   }
+  problem.initialCondition = BoolExpr::simplify(init);
+  problem.initializedStateCount = problem.allSymbols.size();
   problem.totalStateCount = problem.state0Symbols.size();
+  problem.property = BoolExpr::simplify(property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
   return problem;
 }
 
@@ -5232,7 +5249,6 @@ TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithI
 }
 
 TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObservation) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5247,7 +5263,9 @@ TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObserv
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 0u);
+  // Without a cross-design state assumption, the inverted registered output is
+  // first a concrete SEC mismatch after one transition.
+  EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests, NextStateMismatchFailsAtOneStep) {
@@ -5358,7 +5376,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ResetInitializedEquivalentPipelineIsProved) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* library =
@@ -5370,7 +5387,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 1u);
+  // Strict SEC proves the reset-initialized pipeline by unrolling through the
+  // visible output stage instead of assuming matching internal flops.
+  EXPECT_EQ(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -5479,8 +5498,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapAutomaticallyExtendsForHiddenShiftPipelines) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       ResetBootstrapHiddenShiftPipelineDoesNotCloseBelowDepth) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5498,13 +5516,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(1);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  // A one-step proof cannot justify equality of a hidden 20-stage shift chain
+  // unless SEC assumes cross-design internal state correspondence.  Keep the
+  // result inconclusive until the caller supplies a sufficient KI horizon.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapLongEquivalentPipelineStillClosesAtSmallK) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       ResetBootstrapLongEquivalentPipelineDoesNotCloseAtSmallK) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -5521,8 +5541,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(3);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
+  // The removed startup certificate used internal cross-design state facts.
+  // With strict top-output KI/PDR/IMC inputs only, this 12-stage pipe needs a
+  // deeper caller horizon than k=3.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -7235,6 +7258,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   KInductionProblem problem;
   problem.environmentInputNames = {"in"};
   problem.observedOutputNames = {"stable", "out"};
+  problem.usesDualRailStateEncoding = true;
   problem.inputSymbols = {2};
   problem.state0Symbols = {3};
   problem.state1Symbols = {4};
@@ -7254,10 +7278,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto kiCache = makeKInductionBaseCounterexampleCache(problem);
 
   // KI and IMC reuse this cache while sweeping depths and while localizing a
-  // residual output batch. Depth 0 is still before the observation-only bad
-  // frontier, while depth 1 must match the ordinary base validator's witness.
+  // dual-rail residual output batch. Depth 0 is still before the
+  // observation-only bad frontier, while depth 1 must match the public base
+  // validator's witness.
   EXPECT_FALSE(findImcBaseCounterexampleAtFrontier(
       *cache, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
+  EXPECT_FALSE(findBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
   const auto cachedWitness = findImcBaseCounterexampleAtFrontier(
       *cache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
   const auto kiCachedWitness = findKInductionBaseCounterexampleAtFrontier(
@@ -7280,10 +7307,40 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PublicBaseCaseFrontierDoesNotRequireEarlierSafeFrames) {
+  KInductionProblem problem;
+  constexpr size_t state = 2;
+  problem.state0Symbols = {state};
+  problem.allSymbols = {state};
+  problem.initialCondition = BoolExpr::Var(state);
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.transitions0 = {{state, BoolExpr::createTrue()}};
+  problem.observedOutputNames = {"out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(state)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const auto witness = findBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
+
+  // Frontier BMC asks whether bad is reachable at this exact frame.  Requiring
+  // earlier frames to be safe would incorrectly reject this valid frame-1
+  // counterexample and would also widen dual-rail residual sweeps.
+  ASSERT_TRUE(witness.has_value());
+  EXPECT_EQ(witness->badFrame, 1u);
+  ASSERT_EQ(witness->outputMismatches.size(), 1u);
+  EXPECT_EQ(witness->outputMismatches[0].signal, "out");
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LocalBaseCaseCacheProvesSafeMultiOutputFrontier) {
   KInductionProblem problem;
   problem.environmentInputNames = {"in"};
   problem.observedOutputNames = {"stable", "tracked"};
+  problem.usesDualRailStateEncoding = true;
   problem.inputSymbols = {2};
   problem.state0Symbols = {3};
   problem.state1Symbols = {4};
@@ -7303,13 +7360,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto kiCache = makeKInductionBaseCounterexampleCache(problem);
 
   // Multi-output residual batches should prove the whole newest frontier safe
-  // before splitting into per-output witness localization.  This is the fast path
-  // equivalent IMC/KI residual runs need, and it must still agree with the
-  // ordinary uncached base validator.
+  // before splitting into per-output witness localization. This is the exact
+  // fast path dual-rail KI residual runs need, and it must still agree with the
+  // public base validator.
   EXPECT_FALSE(findImcBaseCounterexampleAtFrontier(
       *cache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
   EXPECT_FALSE(findKInductionBaseCounterexampleAtFrontier(
       *kiCache, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
+  EXPECT_FALSE(findBaseCounterexampleAtFrontier(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
   EXPECT_FALSE(findBaseCounterexampleAtFrontier(
       problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
 }
@@ -8461,28 +8520,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrStateEqualityMiningSkipsRiscvSizedOutputSurface) {
-  EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::Pdr,
-      /*observedOutputSurface=*/64));
-
-  // The sky130hs_riscv32i SEC surface has 99 top outputs. Keeping PDR's mined
-  // state equalities out of that medium reset-bootstrap case prevents an
-  // abstract startup state from being reported as a real cycle-0 diff.
-  EXPECT_FALSE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::Pdr,
-      /*observedOutputSurface=*/99));
-
-  EXPECT_TRUE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::KInduction,
-      /*observedOutputSurface=*/99));
-
-  EXPECT_FALSE(detail::shouldInferPdrInductiveStateEqualities(
-      SecEngine::Imc,
-      /*observedOutputSurface=*/1));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        PdrDualRailFrameZeroValidationDefersHugeRailStateSurface) {
   // RISC-V HS has a smaller 99-output surface.  Keep it on the existing exact
   // validation path even if the rail-state surface is large, because the
@@ -9018,6 +9055,313 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailDeferredBaseLeafContinuesAfterResourceLimitedStep) {
+  KInductionProblem problem;
+  constexpr size_t stateA = 2;
+  constexpr size_t stateB = 3;
+  BoolExpr* const badState =
+      BoolExpr::And(BoolExpr::Var(stateA), BoolExpr::Not(BoolExpr::Var(stateB)));
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {stateA, stateB};
+  problem.allSymbols = {stateA, stateB};
+  problem.initialCondition =
+      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(stateA)),
+                    BoolExpr::Not(BoolExpr::Var(stateB)));
+  problem.initializedStateCount = 2;
+  problem.totalStateCount = 2;
+  problem.transitions0 = {
+      {stateA, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateB, BoolExpr::createFalse()}};
+  for (size_t i = 0; i < 2; ++i) {
+    problem.observedOutputNames.push_back("out" + std::to_string(i));
+    problem.observedOutputExprs0.push_back(badState);
+    problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
+  }
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2);
+
+  // Output slices share one concrete base check at the end.  If a capped leaf
+  // step is UNKNOWN at k=1, KI must still try the k=2 obligation instead of
+  // reporting the output uncovered; the final shared base check remains the
+  // gate that makes the sliced proof a real SEC proof.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_EQ(result.bound, 2u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailDeferredBaseLeafContinuesAfterUnknownStep) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  constexpr size_t kXorStateSymbols = 4096;
+  BoolExpr* xorCone = BoolExpr::Var(2);
+  for (size_t symbol = 3; symbol < 2 + kXorStateSymbols; ++symbol) {
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    xorCone = BoolExpr::Xor(xorCone, BoolExpr::Var(symbol));
+  }
+  problem.state0Symbols.insert(problem.state0Symbols.begin(), 2);
+  problem.allSymbols.insert(problem.allSymbols.begin(), 2);
+  problem.observedOutputNames = {"out0", "out1"};
+  problem.observedOutputExprs0 = {xorCone, xorCone};
+  problem.observedOutputExprs1 = {
+      BoolExpr::createFalse(), BoolExpr::createFalse()};
+  problem.outputImpliedByInductionCore = {false, false};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "100");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "100");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // This intentionally hard residual has already lost the original output
+  // count, as happens after SEC residual subsetting.  The rail-state surface
+  // must still stop repeated resource-limited leaves, but only after allowing
+  // later strict KI depths for outputs that first become inductive there.
+  EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 4u);
+  EXPECT_NE(
+      stderrOutput.find("resource-limited; deferred base continues"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("repeated resource-limited deferred leaf"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailDeferredBaseSmallLeafKeepsSearchingAfterUnknownStep) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  constexpr size_t kXorStateSymbols = 64;
+  BoolExpr* xorCone = BoolExpr::Var(2);
+  for (size_t symbol = 3; symbol < 2 + kXorStateSymbols; ++symbol) {
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    xorCone = BoolExpr::Xor(xorCone, BoolExpr::Var(symbol));
+  }
+  problem.state0Symbols.insert(problem.state0Symbols.begin(), 2);
+  problem.allSymbols.insert(problem.allSymbols.begin(), 2);
+  problem.observedOutputNames = {"out0", "out1"};
+  problem.observedOutputExprs0 = {xorCone, xorCone};
+  problem.observedOutputExprs1 = {
+      BoolExpr::createFalse(), BoolExpr::createFalse()};
+  problem.outputImpliedByInductionCore = {false, false};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "100");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "100");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Small residual surfaces are cheap enough to keep the full strict KI depth
+  // search.  The wide-output early stop must not drop coverage for compact
+  // designs that may close at a later k.
+  EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 3u);
+  EXPECT_EQ(
+      stderrOutput.find("repeated resource-limited deferred leaf"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailSmallLeafUsesNormalProofProfileByDefault) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.originalObservedOutputCount = 18;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.observedOutputNames = {"out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Compact designs such as GCD need an unbounded strict KI leaf by default;
+  // otherwise every depth can become UNKNOWN before the useful induction
+  // search.  They also keep the strict simple-path strengthening because the
+  // rail-state surface is small enough for the loop-free clauses to pay off.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("k-induction simple path states="),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("k-induction direct dual-rail capped proof profile"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("profile_symbols=4096"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailConcreteBootstrapStateForbidsUnknownRailValues) {
+  KInductionProblem problem;
+  constexpr size_t mayBeOne = 2;
+  constexpr size_t mayBeZero = 3;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {mayBeOne, mayBeZero};
+  problem.allSymbols = {mayBeOne, mayBeZero};
+  problem.totalStateCount = 2;
+  problem.dualRailStatePairs = {DualRailSymbolPair{mayBeOne, mayBeZero}};
+  problem.property = BoolExpr::Not(
+      BoolExpr::And(BoolExpr::Var(mayBeOne), BoolExpr::Var(mayBeZero)));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  EXPECT_EQ(
+      proveByInductionStatus(
+          problem,
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          1,
+          std::nullopt),
+      InductionProofStatus::NotProved);
+
+  problem.bootstrapStateAssignments = {{mayBeOne, false}, {mayBeZero, true}};
+
+  // Complete bootstrap assignments describe a concrete Boolean rail value.
+  // Induction may forbid the synthetic "unknown" rail state (both rails true)
+  // without assuming any relation between the two compared designs.
+  EXPECT_EQ(
+      proveByInductionStatus(
+          problem,
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          1,
+          std::nullopt),
+      InductionProofStatus::Proved);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailSmallDeferredLeafUsesDirectProofProfileWithoutCdcl) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.deferBaseCaseChecks = true;
+  problem.originalObservedOutputCount = 18;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.observedOutputNames = {"out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "100");
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // A deferred small residual leaf may still use a decision cap when explicitly
+  // requested, but it should avoid Kissat's standalone probe/sweep passes.  It
+  // does not need the SAT-oriented direct-CDCL profile reserved for large
+  // rail-state leaves.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("k-induction direct dual-rail capped proof profile"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("profile_symbols=4096"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("direct_cdcl=0"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailDeferredLeafUsesDirectProofProfileAfterSplitting) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.deferBaseCaseChecks = true;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.observedOutputNames = {"out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
+  problem.bad = BoolExpr::Not(problem.property);
+  for (size_t index = 0; index < 300; ++index) {
+    problem.dualRailStatePairs.push_back(
+        DualRailSymbolPair{1000 + index * 2, 1001 + index * 2});
+  }
+
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "100");
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Deferred leaves come from residual splitting; when an explicit cap is
+  // requested, large rail-state leaves must still use the direct capped profile
+  // without changing the strict KI formula.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("k-induction direct dual-rail capped proof profile"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("profile_symbols=4096"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("direct_cdcl=1"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        DirectDualRailInductionAllowsKissatPropagationUnderLeafLimit) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
@@ -9122,7 +9466,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
        DualRailOutputBatchingStartsWithModerateSharedConeSlices) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
-  for (size_t i = 0; i < 20; ++i) {
+  for (size_t i = 0; i < 80; ++i) {
     problem.observedOutputNames.push_back("out" + std::to_string(i));
     problem.observedOutputExprs0.push_back(BoolExpr::Var(10 + i));
     problem.observedOutputExprs1.push_back(BoolExpr::Var(20 + i));
@@ -9130,9 +9474,404 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   const auto batches = buildSupportBoundedOutputBatches(problem);
 
-  ASSERT_EQ(batches.size(), 2u);
-  EXPECT_EQ(batches[0], (std::pair<size_t, size_t>(0, 16)));
-  EXPECT_EQ(batches[1], (std::pair<size_t, size_t>(16, 20)));
+  ASSERT_EQ(batches.size(), 10u);
+  // Dual-rail KI keeps small exact OR batches together, but avoids the old
+  // 64-output starting slice that built a wide transition CNF before splitting.
+  EXPECT_EQ(batches[0], (std::pair<size_t, size_t>(0, 8)));
+  EXPECT_EQ(batches[9], (std::pair<size_t, size_t>(72, 80)));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailSmallOutputBatchingKeepsPublicConjunctionTogether) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  for (size_t i = 0; i < 18; ++i) {
+    problem.observedOutputNames.push_back("out" + std::to_string(i));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(10 + i));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(100 + i));
+  }
+  for (size_t i = 0; i < 70; ++i) {
+    problem.dualRailStatePairs.push_back(
+        DualRailSymbolPair{1000 + i * 2, 1001 + i * 2});
+  }
+
+  const auto batches = buildSupportBoundedOutputBatches(problem);
+
+  // GCD-sized dual-rail designs often close only when the public output
+  // conjunction is the strict KI property.  Keep those compact surfaces as one
+  // proof obligation instead of prematurely falling into residual leaves.
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_EQ(batches[0], (std::pair<size_t, size_t>(0, 18)));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailSmallOutputBatchUsesDirectCdclProofProfile) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.originalObservedOutputCount = 33;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.observedOutputNames = {"out0", "out1"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3), BoolExpr::Var(3)};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  const auto proofStatus = proveByInductionStatus(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      1,
+      std::nullopt);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The direct profile only changes Kissat options.  The same strict
+  // multi-output k-induction step is encoded and solved, but without the
+  // rephase/local-walk work that can dominate small/medium batches that are too
+  // large for compact simple-path strengthening.
+  EXPECT_EQ(proofStatus, InductionProofStatus::Proved);
+  EXPECT_NE(
+      stderrOutput.find("k-induction compact dual-rail direct profile"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("direct_cdcl=1"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailSmallDeferredLeafUsesSimplePathWithoutLimit) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.deferBaseCaseChecks = true;
+  problem.originalObservedOutputCount = 33;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.observedOutputNames = {"out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0],
+      problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  const auto proofStatus = proveByInductionStatus(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      1,
+      std::nullopt);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Shared-base output batching proves split leaves with the base check
+  // deferred to the full output set.  When the reduced rail cone is small, keep
+  // the strict simple-path strengthening instead of switching to the direct
+  // no-simple-path CDCL profile.
+  EXPECT_EQ(proofStatus, InductionProofStatus::Proved);
+  EXPECT_NE(
+      stderrOutput.find("k-induction simple path states="),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("k-induction compact dual-rail direct profile"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("direct_cdcl=1"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailWideOriginalSmallDeferredLeafUsesDefaultCap) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.deferBaseCaseChecks = true;
+  problem.originalObservedOutputCount = 129;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.observedOutputNames = {"out"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
+  problem.property = makeEqualityExpr(
+      problem.observedOutputExprs0[0],
+      problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // AES residual leaves inherit a wide original output count.  Keep those
+  // leaves resource-bounded by default so a hard output cannot monopolize the
+  // workflow, while still adding loop-free simple-path strengthening when the
+  // reduced rail cone is below the state threshold.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("k-induction direct dual-rail capped proof profile"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("k-induction simple path states="),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailWideDeferredEightOutputBatchUsesDefaultCap) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.deferBaseCaseChecks = true;
+  problem.originalObservedOutputCount = 129;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  for (size_t output = 0; output < 8; ++output) {
+    problem.observedOutputNames.push_back("out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(2));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(3));
+  }
+  problem.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    problem.property = BoolExpr::And(
+        problem.property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0[output],
+            problem.observedOutputExprs1[output]));
+  }
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "");
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // AES residuals arrive as 8-output batches.  The first strict KI attempt is
+  // deliberately bounded; if it is UNKNOWN, recursive splitting continues with
+  // the parent public-output conjunction as the child induction hypothesis.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("k-induction direct dual-rail capped proof profile"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailWideSplitUsesParentPublicConjunctionHypothesis) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.originalObservedOutputCount = 129;
+  constexpr size_t kOutputs = 8;
+  BoolExpr* initial = BoolExpr::createTrue();
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    const size_t next0 = 10 + ((output + 1) % kOutputs);
+    const size_t next1 = 100 + ((output + 1) % kOutputs);
+    problem.state0Symbols.push_back(state0);
+    problem.state1Symbols.push_back(state1);
+    problem.allSymbols.push_back(state0);
+    problem.allSymbols.push_back(state1);
+    problem.transitions0.emplace_back(state0, BoolExpr::Var(next0));
+    problem.transitions1.emplace_back(state1, BoolExpr::Var(next1));
+    problem.observedOutputNames.push_back("out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state0)));
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state1)));
+  }
+  problem.initialCondition = BoolExpr::simplify(initial);
+  problem.initializedStateCount = kOutputs * 2;
+  problem.totalStateCount = kOutputs * 2;
+  problem.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    problem.property = BoolExpr::And(
+        problem.property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0[output],
+            problem.observedOutputExprs1[output]));
+  }
+  problem.property = BoolExpr::simplify(problem.property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Each output equality depends on another public output's previous equality.
+  // Recursive splitting must therefore keep the parent public conjunction as
+  // the induction hypothesis; no cross-design internal state equality is used.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("dual-rail public conjunction hypothesis"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailWideBatchesUseFullPublicConjunctionHypothesis) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  constexpr size_t kOutputs = 40;
+  BoolExpr* initial = BoolExpr::createTrue();
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    const size_t next0 = 10 + ((output + 1) % kOutputs);
+    const size_t next1 = 100 + ((output + 1) % kOutputs);
+    problem.state0Symbols.push_back(state0);
+    problem.state1Symbols.push_back(state1);
+    problem.allSymbols.push_back(state0);
+    problem.allSymbols.push_back(state1);
+    problem.transitions0.emplace_back(state0, BoolExpr::Var(next0));
+    problem.transitions1.emplace_back(state1, BoolExpr::Var(next1));
+    problem.observedOutputNames.push_back("out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state0)));
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state1)));
+  }
+  problem.initialCondition = BoolExpr::simplify(initial);
+  problem.initializedStateCount = kOutputs * 2;
+  problem.totalStateCount = kOutputs * 2;
+  problem.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    problem.property = BoolExpr::And(
+        problem.property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0[output],
+            problem.observedOutputExprs1[output]));
+  }
+  problem.property = BoolExpr::simplify(problem.property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The first 8-output batch depends on equality of output 8 in the previous
+  // frame, so per-batch history is not enough.  Use the full public SEC
+  // conjunction as the strict KI hypothesis across initial batches.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("source_outputs=40"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailCompactSplitUsesPublicConjunctionHypothesis) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.observedOutputNames = {"out0", "out1"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3), BoolExpr::Var(3)};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Decomposed KI for a compact public conjunction is still strict KI: each
+  // split proves the output under the full public-output induction hypothesis,
+  // and the engine accepts only after all splits plus the shared base check.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("dual-rail public conjunction hypothesis"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailCompactBatchUsesBoundedStrictKInductionByDefault) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.observedOutputNames = {"out0", "out1"};
+  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(3), BoolExpr::Var(3)};
+  problem.property = BoolExpr::And(
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]),
+      makeEqualityExpr(problem.observedOutputExprs0[1],
+                       problem.observedOutputExprs1[1]));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "");
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Compact multi-output batches may still prove by propagation, but their
+  // first strict KI attempt must use the bounded batch path so hard conjunctions
+  // split instead of monopolizing the workflow.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("k-induction direct dual-rail capped proof profile"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9273,16 +10012,22 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.bad = BoolExpr::Not(problem.property);
 
   const ScopedEnvVar batchLimit(
-      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "100");
   const ScopedEnvVar leafLimit(
-      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "100");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
   KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // The cap is still applied to decisions, but this small invariant is solved
   // by propagation.  Keep the test as a guard that the KISSAT dual-rail path
   // remains a valid proof route after removing the old CaDiCaL detour.
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("k-induction direct dual-rail capped proof profile"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9350,6 +10095,75 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionReusesTransitionSupportCacheAcrossDepths) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {2};
+  problem.state1Symbols = {3};
+  problem.allSymbols = {2, 3};
+  problem.initialStateEqualityPairs = {{2, 3}};
+  problem.inductiveStateEqualityPairs = {{2, 3}};
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.transitions1 = {{3, BoolExpr::Var(3)}};
+  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  EXPECT_EQ(
+      proveByInductionStatus(
+          problem,
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          1,
+          std::nullopt),
+      InductionProofStatus::Proved);
+  const auto firstCache = problem.inductionTransitionSupportCache;
+  ASSERT_TRUE(firstCache);
+
+  EXPECT_EQ(
+      proveByInductionStatus(
+          problem,
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          2,
+          std::nullopt),
+      InductionProofStatus::Proved);
+
+  // Increasing-k retries on the same strict KI problem should reuse the exact
+  // transition-target support cache; only the SAT formula is rebuilt for the
+  // new depth.
+  EXPECT_EQ(problem.inductionTransitionSupportCache.get(), firstCache.get());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionTracksExactTransitionFrameSupport) {
+  KInductionProblem problem;
+  constexpr size_t state = 2;
+  constexpr size_t complementedState = 3;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {state, complementedState};
+  problem.allSymbols = {state, complementedState};
+  problem.complementedStatePairs0 = {{state, complementedState}};
+  problem.transitions0 = {{state, BoolExpr::createFalse()}};
+  problem.property = BoolExpr::Not(BoolExpr::Var(state));
+  problem.bad = BoolExpr::Var(state);
+
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  const auto proofStatus = proveByInductionStatus(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      1,
+      std::nullopt);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // A constant transition still has a target equality, but it reads no frame
+  // leaves.  KI uses that exact frame support to avoid building wide leaf maps
+  // for unrelated symbols while preserving the same transition obligation.
+  EXPECT_EQ(proofStatus, InductionProofStatus::Proved);
+  EXPECT_NE(
+      stderrOutput.find("transition_targets=1 transition_support=0"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        DualRailBatchedKInductionReturnsInconclusiveOnDecisionBudget) {
   KInductionProblem problem;
   constexpr size_t state0 = 2;
@@ -9395,19 +10209,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
   source.observedOutputNames = {"out0", "out1"};
   source.observedOutputExprs0 = {BoolExpr::Var(4), BoolExpr::Var(6)};
   source.observedOutputExprs1 = {BoolExpr::Var(5), BoolExpr::Var(7)};
-  source.property = BoolExpr::createTrue();
-  source.bad = BoolExpr::createFalse();
+  source.property = BoolExpr::And(
+      makeEqualityExpr(source.observedOutputExprs0[0],
+                       source.observedOutputExprs1[0]),
+      makeEqualityExpr(source.observedOutputExprs0[1],
+                       source.observedOutputExprs1[1]));
+  source.bad = BoolExpr::Not(source.property);
 
   KInductionProblem batch = source;
   configureOutputBatchProblem(batch, source, 0, 1);
 
-  // KI batches prove one output cone at a time.  Shared state equalities stay
-  // in the problem so the induction solver can assert them as hypotheses on
-  // prior frames, but the batch must not turn every shared equality into a goal
-  // for this one output.  That distinction keeps reset-heavy designs from
-  // spending each small batch on unrelated state-equality proof obligations.
-  EXPECT_EQ(batch.inductionProperty, nullptr);
-  EXPECT_EQ(batch.inductionBad, nullptr);
+  // KI batches prove one output cone at a time.  Keeping the induction
+  // hypothesis slice-local prevents a wide public-output surface from being
+  // rebuilt in every k-frame retry.
+  EXPECT_EQ(batch.inductionProperty, batch.property);
+  EXPECT_EQ(batch.inductionBad, batch.bad);
   EXPECT_FALSE(batch.inductionPropertyAssumesInductiveStateEqualities);
   EXPECT_EQ(batch.inductiveStateEqualityPairs.size(), 1u);
   ASSERT_EQ(batch.observedOutputExprs0.size(), 1u);
@@ -10444,8 +11260,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The stable guard is a proven auxiliary constant.  Substitute it before
-  // Tseitin encoding so the large gated cone never enters the Craig proof.
+  // The stable guard is a proven auxiliary constant.  Encode it as a fixed
+  // transition leaf so the large gated cone never enters the Craig proof.
   EXPECT_NE(
       stderrOutput.find("imc Craig auxiliary constants=1"),
       std::string::npos)
@@ -11506,6 +12322,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcStartupProbeUsesRawSupportSizing) {
+  const KInductionProblem problem = buildCraigResetSecProblem(true);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  (void)engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Startup witness probes are concrete bounded SAT checks.  Their ordering
+  // should not spend a full Craig projection-closure walk before the first
+  // proof attempt; RISC-V-sized output sets were dominated by that sizing pass.
+  EXPECT_NE(
+      stderrOutput.find("imc large dual-rail bounded witness probes="),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("projection_sizing=raw_support"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LargeDualRailImcBatchesWideSharedOutputCones) {
   const KInductionProblem problem = buildWideSharedConeImcProblem(3);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -11590,6 +12429,35 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // BP-like dual-rail problems have many outputs over a huge state surface.
   // Avoid materializing one transition-closed projection per output before
   // the first Craig query; raw support batching keeps the cache bounded.
+  EXPECT_NE(
+      stderrOutput.find("imc Craig skips projection support cache"),
+      std::string::npos)
+      << stderrOutput;
+  ASSERT_EQ(batches.size(), kOutputCount);
+  EXPECT_EQ(batches.front(), std::make_pair(size_t{0}, size_t{1}));
+  EXPECT_EQ(
+      batches.back(),
+      std::make_pair(kOutputCount - 1, kOutputCount));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailImcSkipsProjectionCacheForDenseRiscvSurface) {
+  constexpr size_t kSharedTransitionStates = 4096;
+  constexpr size_t kOutputCount = 65;
+  const KInductionProblem problem = buildProjectionSharedImcBatchProblem(
+      kSharedTransitionStates,
+      kOutputCount);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  const auto batches = buildLargeDualRailCraigImcOutputBatches(
+      problem, OutputBatchingLimits{/*maxOutputBatchSize=*/8,
+                                    /*outputBatchSupportLimit=*/8192});
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // sky130*_riscv32i has 4K+ dual-rail state bits and a 99-output bus
+  // surface.  That sits below the old product cap but still spends minutes
+  // computing transition closures before Craig IMC starts.
   EXPECT_NE(
       stderrOutput.find("imc Craig skips projection support cache"),
       std::string::npos)
@@ -12117,11 +12985,56 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // A single hard output cannot be bisected further. Bound projection growth
-  // so strict Craig IMC returns budget-exceeded instead of exhausting memory.
+  // A single hard output cannot be bisected further. The transition build can
+  // complete, but the projection-state guard still reports the strict growth
+  // budget before importing an oversized refinement slice.
   EXPECT_NE(
       stderrOutput.find(
           "imc Craig growth budget exceeded reason=projection_states"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(" state_limit=32"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CraigImcStopsOversizedImageBeforeCraigBuild) {
+  constexpr size_t outputState = 2;
+  const KInductionProblem problem =
+      buildBootstrapModelGuidedCraigProjectionProblem(
+          /*supportCount=*/96,
+          /*assignSupportBootstrap=*/false);
+  const std::unordered_set<size_t> initialTrackedStates = {outputState};
+  CraigImcOptions options;
+  options.enableDirectConcreteCubeSource = true;
+  options.growthBudget.enabled = true;
+  options.growthBudget.maxImageTransitionStates = 32;
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  CraigInterpolatingModelChecker checker(
+      problem,
+      /*helperInvariantRegions=*/nullptr,
+      &initialTrackedStates,
+      options);
+  const CraigImcResult result = checker.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The transition planner can see the projected image surface before the
+  // Craig solver is allocated.  Trip the strict growth budget there instead of
+  // materializing a proof trace that the caller will discard as inconclusive.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig growth budget exceeded reason=transition_build"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(" transition_support=97"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find(" support_limit=32"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("imc Craig image build begin"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(result.status, CraigImcStatus::BudgetExceeded);
@@ -12553,8 +13466,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsCountsSatImpliedOutputEquality) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       RunExtractedModelsRequiresEngineProofWithoutCrossDesignStateCore) {
   const SignalKey out = makeSignalKey("out");
   const SignalKey stateA0 = makeSignalKey("stateA0");
   const SignalKey stateB0 = makeSignalKey("stateB0");
@@ -12605,9 +13517,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.bound, 1u);
-  EXPECT_NE(
-      stdoutOutput.find("sat_implied_outputs=1"),
-      std::string::npos);
+  // The output is still proved by strict k-induction from per-design init and
+  // transition facts, but it is no longer pre-certified by a mined state core.
+  EXPECT_NE(stdoutOutput.find("sat_implied_outputs=0"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13693,8 +14605,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // IMC must enter its own interpolation engine directly.  The old dual-rail
-  // residual helper batched/skipped outputs before IMCEngine saw the problem.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  // residual helper batched/skipped outputs before IMCEngine saw the problem;
+  // strict IMC may return inconclusive on this large state-dependent surface.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
       stderrOutput.find("SEC diag: entering imc engine"),
       std::string::npos);
@@ -14401,8 +15316,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrMinesStateEqualitiesForSmallOutputLargeStateSurface) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       RunExtractedModelsPdrDoesNotMineCrossDesignStateEqualities) {
   constexpr size_t kStateBitsPerDesign = 4097;
   const SignalKey out = makeSignalKey("smallOutputLargeStateOut");
   SequentialDesignModel model0;
@@ -14439,6 +15353,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   }
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -14447,20 +15362,24 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::Pdr,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Large state count alone should not disable validated state-equality mining.
-  // Mock CPU has a small top-output surface but many FIFO state bits; without
-  // this path PDR relearns those relations per cube and can cover no outputs.
+  // SEC engines must not assume that internal state from different designs is
+  // related. Even small-output PDR surfaces may use only top IO, per-design
+  // facts, transitions, and same-design rail consistency.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
-      stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      stderrOutput.find("cross-design internal state equality mining disabled"),
       std::string::npos);
   EXPECT_EQ(
-      stderrOutput.find(
-          "SEC diag: skipping inductive state equality mining for selected engine"),
+      stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find(
+          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
       std::string::npos);
 }
 
@@ -14494,6 +15413,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       BoolExpr::Var(3));
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -14502,20 +15422,68 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::Imc,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Classic IMC should start from interpolation/reachability, not from
-  // optional cross-design internal-state mining before the engine runs.
+  // Classic IMC should start from interpolation/reachability, never from
+  // assumed cross-design internal-state relations before the engine runs.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_NE(
-      stderrOutput.find(
-          "SEC diag: skipping inductive state equality mining for selected engine"),
-      std::string::npos);
-  EXPECT_NE(
-      stderrOutput.find("SEC diag: skipping reset-bootstrap candidate equality mining"),
+      stderrOutput.find("cross-design internal state equality mining disabled"),
       std::string::npos);
   EXPECT_EQ(
       stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find(
+          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsKInductionDoesNotMineCrossDesignStateEqualities) {
+  const SignalKey out = makeSignalKey("kiNoCrossStateOut");
+  const SignalKey state0 = makeSignalKey("kiNoCrossState0");
+  const SignalKey state1 = makeSignalKey("kiNoCrossState1");
+
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+  model0.allObservedOutputs = {out};
+  model0.observedOutputs = {out};
+  model1.allObservedOutputs = {out};
+  model1.observedOutputs = {out};
+  model0.displayNameByKey.emplace(out, "ki_no_cross_state_out[0]");
+  model1.displayNameByKey.emplace(out, "ki_no_cross_state_out[0]");
+  model0.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  model1.observedOutputExprByKey.emplace(out, BoolExpr::createTrue());
+  addStateBitForTest(
+      model0, state0, /*symbol=*/2, "ki_no_cross_state_q0[0]", BoolExpr::Var(2));
+  addStateBitForTest(
+      model1, state1, /*symbol=*/3, "ki_no_cross_state_q1[0]", BoolExpr::Var(3));
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(model0, model1, 1);
+  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("cross-design internal state equality mining disabled"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("SEC diag: inferring inductive state equalities"),
+      std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find(
+          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
       std::string::npos);
 }
 
@@ -14566,6 +15534,34 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // KI residual batching must not bury a concrete input-only top-output edit
   // behind an expensive residual proof.  The pre-batch witness check keeps the
   // counterexample in the selected SEC engine path without using LEC fallback.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, kObservedOutputs);
+  EXPECT_EQ(result.totalOutputs, kObservedOutputs);
+  EXPECT_NE(
+      result.reason.find("wide_frame_zero_probe[0]"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsImcDualRailFindsWideFrameZeroCounterexampleBeforeCraigBatching) {
+  constexpr size_t kObservedOutputs = 133;
+  constexpr size_t kDummyStatesPerDesign = 4100;
+  const auto models = makeWideFrameZeroMismatchModelsForTest(
+      kObservedOutputs, kDummyStatesPerDesign);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Imc,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 1);
+
+  // Large dual-rail IMC uses Craig batching for proof work, but concrete
+  // frame-0 edits still have to be found by the selected IMC base query before
+  // an early inconclusive batch can hide a later edited output.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
   EXPECT_EQ(result.bound, 0u);
   EXPECT_EQ(result.coveredOutputs, kObservedOutputs);
@@ -14655,8 +15651,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsKeepsWideStartupCertificateBeforeResetCoverageFilter) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       RunExtractedModelsRejectsWideStartupCertificateWithoutStateRelations) {
   const SignalKey rst = makeSignalKey("wideStartupCertificateRst");
   const SignalKey stateA0 = makeSignalKey("wideStartupCertificateStateA0");
   const SignalKey stateB0 = makeSignalKey("wideStartupCertificateStateB0");
@@ -14712,14 +15707,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinaryExtractedSecStrategy(SecEngine::Pdr);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
-  // Wide ASIC-style reset proofs use one validated startup certificate instead
-  // of proving each output cone separately.  The conservative reset-unanchored
-  // coverage filter must not run first and collapse the checked surface to zero.
+  // Wide reset/bootstrap state-dependent outputs cannot be certified by a
+  // cross-design startup relation.  Binary SEC reports the conservative skip
+  // surface instead of proving outputs from internal element names.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.bound, 0u);
-  EXPECT_EQ(result.coveredOutputs, kWideStartupCertificateOutputs);
+  EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, kWideStartupCertificateOutputs);
-  EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  EXPECT_EQ(result.skippedObservedOutputs.size(), kWideStartupCertificateOutputs);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("reset-unanchored internal state"),
+      std::string::npos);
 
   SequentialEquivalenceStrategy dualRailKiStrategy(
       nullptr,
@@ -14729,11 +15727,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEncoding::DualRailSteady);
   const auto dualRailKiResult =
       dualRailKiStrategy.runExtractedModels(model0, model1, 1);
-  EXPECT_EQ(dualRailKiResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(dualRailKiResult.bound, 0u);
-  EXPECT_EQ(dualRailKiResult.coveredOutputs, kWideStartupCertificateOutputs);
+  EXPECT_EQ(dualRailKiResult.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(dualRailKiResult.bound, 1u);
+  EXPECT_EQ(dualRailKiResult.coveredOutputs, 0u);
   EXPECT_EQ(dualRailKiResult.totalOutputs, kWideStartupCertificateOutputs);
-  EXPECT_TRUE(dualRailKiResult.skippedObservedOutputs.empty());
+  EXPECT_FALSE(dualRailKiResult.skippedObservedOutputs.empty());
 
   SequentialEquivalenceStrategy dualRailImcStrategy(
       nullptr,

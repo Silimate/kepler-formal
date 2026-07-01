@@ -4,6 +4,7 @@
 #include "kinduction/SatEncoding.h"
 
 #include <algorithm>
+#include <memory>
 #include <stdexcept>
 
 namespace KEPLER_FORMAL::SEC {
@@ -12,12 +13,60 @@ namespace {
 
 constexpr size_t kMaxSolverTseitinReserveHint = 65536;
 constexpr size_t kLargeFormulaReserveLeafMultiplier = 64;
+constexpr size_t kNodeCacheBucketMultiplier = 4;
 
 int newSolverLiteral(SATSolverWrapper& solver) {
   // BoolExpr reserves 0/1 for false/true, so fresh SAT literals start above
   // those special ids.
   return solver.newVar() + 2;
 }
+
+struct EncoderStackFrame {
+  BoolExpr* expr = nullptr;
+  bool visited = false;
+};
+
+class EncoderStack {
+ public:
+  explicit EncoderStack(size_t initialCapacity) {
+    reserve(std::max(initialCapacity, static_cast<size_t>(16)));
+  }
+
+  bool empty() const {
+    return size_ == 0;
+  }
+
+  void push(BoolExpr* expr, bool visited) {
+    if (size_ == capacity_) {
+      grow();
+    }
+    frames_[size_++] = {expr, visited};
+  }
+
+  EncoderStackFrame pop() {
+    return frames_[--size_];
+  }
+
+ private:
+  void reserve(size_t capacity) {
+    frames_ = std::make_unique<EncoderStackFrame[]>(capacity);
+    capacity_ = capacity;
+  }
+
+  void grow() {
+    const size_t newCapacity = capacity_ * 2;
+    auto newFrames = std::make_unique<EncoderStackFrame[]>(newCapacity);
+    for (size_t index = 0; index < size_; ++index) {
+      newFrames[index] = frames_[index];
+    }
+    frames_ = std::move(newFrames);
+    capacity_ = newCapacity;
+  }
+
+  std::unique_ptr<EncoderStackFrame[]> frames_;
+  size_t size_ = 0;
+  size_t capacity_ = 0;
+};
 
 class FrameAliasUnionFind {
  public:
@@ -242,14 +291,119 @@ FrameFormulaEncoder::FrameFormulaEncoder(
       leafLits_(std::move(leafLits)),
       symbolMap_(symbolMap),
       createMissingLeaves_(createMissingLeaves),
-      expectedNodeHint_(expectedNodeHint),
-      nodeArena_(nodeArenaBuffer_.data(), nodeArenaBuffer_.size()),
-      nodeToLit_(&nodeArena_) {
+      expectedNodeHint_(expectedNodeHint) {
   reserveNodeCache();
 }
 
 const std::unordered_map<size_t, int>& FrameFormulaEncoder::leafLits() const {
   return leafLits_;
+}
+
+size_t FrameFormulaEncoder::BoolExprPtrHash::operator()(
+    const BoolExpr* node) const noexcept {
+  auto value = reinterpret_cast<std::uintptr_t>(node);
+  // BoolExpr nodes are pointer-identity DAG nodes. Hash the address directly
+  // after dropping alignment bits so ASAN builds do not spend hot encoder time
+  // in libc++'s generic pointer byte hashing path. The flat cache uses a
+  // power-of-two table, so use one multiplicative mix to spread allocator
+  // stride patterns without making every encoder lookup pay for a full hash
+  // finalizer.
+  value >>= 4;
+  value *= 11400714819323198485ULL;
+  return static_cast<size_t>(value);
+}
+
+bool FrameFormulaEncoder::BoolExprPtrEqual::operator()(
+    const BoolExpr* lhs,
+    const BoolExpr* rhs) const noexcept {
+  return lhs == rhs;
+}
+
+size_t FrameFormulaEncoder::nodeCacheBucketCountFor(size_t desiredEntries) {
+  size_t bucketCount = 16;
+  // Wide dual-rail transition encodings call findCachedLiteral millions of
+  // times.  Spend a little more table memory to keep the open-addressing probe
+  // chains short while emitting the same Tseitin clauses.
+  const size_t minBuckets =
+      std::max(desiredEntries * kNodeCacheBucketMultiplier, bucketCount);
+  while (bucketCount < minBuckets) {
+    bucketCount <<= 1;
+  }
+  return bucketCount;
+}
+
+size_t FrameFormulaEncoder::nodeCacheSlotFor(BoolExpr* node, size_t mask) {
+  return BoolExprPtrHash{}(node) & mask;
+}
+
+void FrameFormulaEncoder::reserveNodeCacheSlots(size_t desiredEntries) {
+  if (desiredEntries <= nodeMapReservedEntries_) {
+    return;
+  }
+
+  std::vector<CachedNodeLit> oldEntries = std::move(nodeToLit_);
+  nodeToLit_.assign(nodeCacheBucketCountFor(desiredEntries), CachedNodeLit{});
+  nodeToLitData_ = nodeToLit_.data();
+  nodeToLitConstData_ = nodeToLit_.data();
+  nodeToLitMask_ = nodeToLit_.size() - 1;
+  nodeToLitSize_ = 0;
+  nodeMapReservedEntries_ =
+      nodeToLit_.size() / kNodeCacheBucketMultiplier;
+
+  for (const auto& entry : oldEntries) {
+    if (entry.node != nullptr) {
+      insertCachedLiteral(entry.node, entry.lit);
+    }
+  }
+}
+
+void FrameFormulaEncoder::insertCachedLiteral(BoolExpr* node, int lit) {
+  if (nodeToLitData_ == nullptr) {
+    reserveNodeCacheSlots(1);
+  }
+
+  auto* entries = nodeToLitData_;
+  for (size_t slot = nodeCacheSlotFor(node, nodeToLitMask_);;
+       slot = (slot + 1) & nodeToLitMask_) {
+    auto& entry = entries[slot];
+    if (entry.node == nullptr) {
+      entry.node = node;
+      entry.lit = lit;
+      ++nodeToLitSize_;
+      return;
+    }
+    if (entry.node == node) {
+      entry.lit = lit;
+      return;
+    }
+  }
+}
+
+int FrameFormulaEncoder::findCachedLiteral(BoolExpr* node) const {
+  if (nodeToLitConstData_ == nullptr) {
+    return 0;
+  }
+
+  const auto* entries = nodeToLitConstData_;
+  for (size_t slot = nodeCacheSlotFor(node, nodeToLitMask_);;
+       slot = (slot + 1) & nodeToLitMask_) {
+    const auto& entry = entries[slot];
+    if (entry.node == nullptr) {
+      return 0;
+    }
+    if (entry.node == node) {
+      return entry.lit;
+    }
+  }
+}
+
+int FrameFormulaEncoder::cachedLiteral(BoolExpr* node) const {
+  if (const int lit = findCachedLiteral(node); lit != 0) {
+    return lit;
+  }
+  // LCOV_EXCL_START
+  throw std::runtime_error("Missing cached BoolExpr literal");  // LCOV_EXCL_LINE
+  // LCOV_EXCL_STOP
 }
 
 size_t FrameFormulaEncoder::mappedSymbol(size_t symbol) const {
@@ -287,8 +441,7 @@ void FrameFormulaEncoder::reserveNodeCache() {
         expectedNodeHint_ + std::max(expectedNodeHint_ / 8, static_cast<size_t>(256));
     expectedNodes = std::max(expectedNodes, hintedNodes);
   }
-  nodeToLit_.reserve(expectedNodes);
-  nodeMapReservedEntries_ = expectedNodes;
+  reserveNodeCacheSlots(expectedNodes);
   // Do not mirror this full DAG estimate into Kissat.  A PDR predecessor query
   // creates a fresh solver for one local cube, and Kissat's reserve call zeros
   // several internal arrays up to the requested variable count.  On wide ASIC
@@ -305,7 +458,7 @@ void FrameFormulaEncoder::reserveNodeCache() {
 }
 
 void FrameFormulaEncoder::cacheEncodedLiteral(BoolExpr* node, int lit) {
-  const size_t desiredEntries = nodeToLit_.size() + 1;
+  const size_t desiredEntries = nodeToLitSize_ + 1;
   if (desiredEntries > nodeMapReservedEntries_) {
     // Grow the encoder DAG cache geometrically. This keeps large memory
     // transition encodings from rehashing on every small increment while also
@@ -314,10 +467,10 @@ void FrameFormulaEncoder::cacheEncodedLiteral(BoolExpr* node, int lit) {
     nodeMapReservedEntries_ =  // LCOV_EXCL_LINE
         desiredEntries +  // LCOV_EXCL_LINE
         std::max(desiredEntries / 2, static_cast<size_t>(4096));  // LCOV_EXCL_LINE
-    nodeToLit_.reserve(nodeMapReservedEntries_);  // LCOV_EXCL_LINE
+    reserveNodeCacheSlots(nodeMapReservedEntries_);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   // LCOV_EXCL_STOP
-  nodeToLit_.emplace(node, lit);
+  insertCachedLiteral(node, lit);
 }
 
 int FrameFormulaEncoder::getConstLit(bool value) {
@@ -339,22 +492,17 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
     throw std::invalid_argument("FrameFormulaEncoder::encode: null expr");
   }
 
-  struct StackFrame {
-    BoolExpr* expr = nullptr;
-    bool visited = false;
-  };
-
   // Encode iteratively so large BoolExpr DAGs do not rely on recursion depth.
-  std::vector<StackFrame> stack;
-  stack.reserve(256);
-  stack.push_back({expr, false});
+  // A raw stack avoids libc++ vector's ASAN container annotations on every
+  // push/pop, which dominate wide dual-rail transition encodings.
+  EncoderStack stack(512);
+  stack.push(expr, false);
 
   while (!stack.empty()) {
-    auto current = stack.back();
-    stack.pop_back();
+    auto current = stack.pop();
     BoolExpr* node = current.expr;
 
-    if (nodeToLit_.find(node) != nodeToLit_.end()) {
+    if (findCachedLiteral(node) != 0) {
       continue;
     }
 
@@ -379,18 +527,18 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
     }
 
     if (!current.visited) {
-      stack.push_back({node, true});
+      stack.push(node, true);
       if (node->getRight()) {
-        stack.push_back({node->getRight(), false});
+        stack.push(node->getRight(), false);
       }
       if (node->getLeft()) {
-        stack.push_back({node->getLeft(), false});
+        stack.push(node->getLeft(), false);
       }
       continue;
     }
 
-    const int leftLit = node->getLeft() ? nodeToLit_.at(node->getLeft()) : 0;
-    const int rightLit = node->getRight() ? nodeToLit_.at(node->getRight()) : 0;
+    const int leftLit = node->getLeft() ? cachedLiteral(node->getLeft()) : 0;
+    const int rightLit = node->getRight() ? cachedLiteral(node->getRight()) : 0;
     int lit = 0;
 
     // Standard Tseitin clauses for the BoolExpr node at this frame.  Before we
@@ -474,7 +622,7 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
     cacheEncodedLiteral(node, lit);
   }
 
-  return nodeToLit_.at(expr);
+  return cachedLiteral(expr);
 }
 
 void addLiteralEquivalence(SATSolverWrapper& solver, int lhs, int rhs) {

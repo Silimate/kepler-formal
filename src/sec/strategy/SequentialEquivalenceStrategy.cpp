@@ -3349,12 +3349,9 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
   const auto localValidationSolverType =
       SATSolverWrapper::assumptionSolverTypeFor(solverType);
   if (!inferInductiveStateEqualities) {
-    // PDR proves top-output properties directly.  Broad cross-design state
-    // mining is only a strengthening hint, and on large ASICs it can dominate
-    // runtime before the selected engine starts doing useful proof work.
     logSecDiagLine(
         secDiagEnabled,
-        "SEC diag: skipping inductive state equality mining for selected engine");
+        "SEC diag: cross-design internal state equality mining disabled");
   } else {
     logSecDiagLine(secDiagEnabled, "SEC diag: inferring inductive state equalities");
     aligned.inductiveStateEqualities = inferStructurallyEquivalentStatePairs(
@@ -3362,9 +3359,6 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
     logSecDiagLine(secDiagEnabled, "SEC diag: inferred inductive state equalities");
   }
   if (!inferResetBootstrapCandidateEqualities) {
-    // PDR proves top-output properties directly.  Output-rooted startup
-    // candidates are useful for the wide startup certificate, but on smaller
-    // sequential ASICs this pre-engine SAT mining can dominate runtime.
     logSecDiagLine(
         secDiagEnabled,
         "SEC diag: skipping reset-bootstrap candidate equality mining");
@@ -3888,16 +3882,25 @@ ReachableStateInvariant integrateReachableStateInvariant(
   const bool allowInternalStateCorrespondence =
       KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
 
+  const AlignedSignals noCrossDesignStateEqualities;
+  const AlignedSignals& allowedInductiveStateEqualities =
+      allowInternalStateCorrespondence
+          ? inductiveStateEqualities
+          : noCrossDesignStateEqualities;
+  const AlignedSignals& allowedResetBootstrapCandidateStateEqualities =
+      allowInternalStateCorrespondence
+          ? resetBootstrapCandidateStateEqualities
+          : noCrossDesignStateEqualities;
   const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
       model0,
       model1,
       alignedInputs,
-      inductiveStateEqualities,
+      allowedInductiveStateEqualities,
       deriveResetBootstrapStrengthening,
       secDiagEnabled,
       SATSolverWrapper::assumptionSolverTypeFor(solverType),
-      deriveResetBootstrapEqualities,
-      resetBootstrapCandidateStateEqualities);
+      allowInternalStateCorrespondence && deriveResetBootstrapEqualities,
+      allowedResetBootstrapCandidateStateEqualities);
   if (allowInternalStateCorrespondence) {
     for (size_t i = 0;
          i < reachableInvariant.initialStateCorrespondence.names.size();
@@ -6429,6 +6432,17 @@ std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
 }  // namespace
 
 namespace detail {
+
+bool shouldInferPdrInductiveStateEqualities(SecEngine secEngine,
+                                            size_t observedOutputSurface) {
+  if (secEngine == SecEngine::Imc) {
+    return false;
+  }
+  if (secEngine != SecEngine::Pdr) {
+    return true;
+  }
+  return observedOutputSurface < kMinPdrStartupCertificateOutputs;
+}
 
 SequentialEquivalenceProofProgress buildSecEngineProofProgress(
     const std::string& engineLabel,

@@ -1821,8 +1821,13 @@ TEST_F(MiterTests, TestMiterANDNonConstantWithSequentialElements) {
     for (const auto& po : pc.getPOs()) {
       std::cout << "PO: " << po->toString() << std::endl;
     }
-    printf("%s\n", pc.getPOs()[0]->toString().c_str());
-    EXPECT_TRUE(pc.getPOs()[0]->toString() == std::string("2 AND 4"));
+    ASSERT_GE(pc.getPOs().size(), 4u);
+    const std::string firstPo = pc.getPOs()[0]->toString();
+    printf("%s\n", firstPo.c_str());
+    // AND operands can be visited in either order on sanitizer builds; the
+    // reduction is the same, so keep this test focused on the clause content.
+    EXPECT_TRUE(firstPo == std::string("2 AND 4") ||
+                firstPo == std::string("4 AND 2"));
     printf("%s\n", pc.getPOs()[1]->toString().c_str());
     EXPECT_TRUE(pc.getPOs()[1]->toString() == std::string("4"));
     printf("%s\n", pc.getPOs()[2]->toString().c_str());

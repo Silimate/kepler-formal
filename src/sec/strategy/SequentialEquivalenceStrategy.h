@@ -110,7 +110,6 @@ class SequentialEquivalenceStrategy {
 
 namespace detail {
 
-constexpr size_t kMaxPdrInductiveStateEqualityOutputs = 64;
 constexpr size_t kMinPdrDualRailFrameZeroValidationOutputs = 256;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationOutputs = 384;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationStateSymbols = 1000000;
@@ -127,18 +126,6 @@ std::vector<std::string> buildSecEngineProofProgressDiagLines(
     const std::vector<std::string>& observedOutputNames,
     size_t totalOutputCount,
     size_t provenOutputCount);
-
-inline bool shouldInferPdrInductiveStateEqualities(
-    SecEngine secEngine,
-    size_t observedOutputSurface) {
-  // Classic IMC should derive its reachable over-approximation from Craig
-  // interpolants, not from pre-mined cross-design internal state equalities.
-  if (secEngine == SecEngine::Imc) {
-    return false;
-  }
-  return secEngine != SecEngine::Pdr ||
-         observedOutputSurface <= kMaxPdrInductiveStateEqualityOutputs;
-}
 
 inline bool shouldAcceptDualRailResetFrontierCoverageAsFinalResult(
     SecEngine secEngine) {
