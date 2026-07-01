@@ -12,7 +12,10 @@ namespace KEPLER_FORMAL::SEC {
 namespace {
 
 constexpr size_t kMaxSolverTseitinReserveHint = 65536;
-constexpr size_t kLargeFormulaReserveLeafMultiplier = 64;
+constexpr size_t kSmallFormulaNodeReserve = 256;
+constexpr size_t kLargeFormulaInitialLeafMultiplier = 4;
+constexpr size_t kMaxInitialNodeCacheReserve = 65536;
+constexpr size_t kMaxHintedInitialNodeCacheReserve = 262144;
 constexpr size_t kNodeCacheBucketMultiplier = 4;
 
 int newSolverLiteral(SATSolverWrapper& solver) {
@@ -425,21 +428,24 @@ size_t FrameFormulaEncoder::mappedSymbol(size_t symbol) const {
 
 void FrameFormulaEncoder::reserveNodeCache() {
   // The support leaf count is a useful lower bound for the number of formula
-  // DAG nodes this encoder will touch. Wide reset-prefix and dual-rail
-  // transition encodings share many leaves but still create much larger DAGs,
-  // so reserve generously up front and keep small unit-test encoders compact.
-  size_t expectedNodes =
-      leafLits_.size() < 80
-          ? 256
-          : leafLits_.size() * kLargeFormulaReserveLeafMultiplier;
+  // DAG nodes this encoder will touch, but ASIC-sized SEC frames can have very
+  // wide leaf maps while the query touches only a small local cone. Keep the
+  // initial flat table bounded and grow from actual inserted nodes.
+  size_t expectedNodes = std::max(
+      kSmallFormulaNodeReserve,
+      std::min(
+          leafLits_.size() * kLargeFormulaInitialLeafMultiplier,
+          kMaxInitialNodeCacheReserve));
   if (expectedNodeHint_ != 0) {
     // PDR often encodes deep transition cones with a relatively small leaf
     // support.  When the caller already knows the DAG size, reserve for that
-    // shape up front so the monotonic per-query arena does not accumulate old
-    // bucket arrays through repeated unordered_map rehashes.
+    // shape up front, but keep the initial flat table bounded so one broad SEC
+    // query cannot spend minutes zero-filling cache slots before encoding.
     const size_t hintedNodes =
         expectedNodeHint_ + std::max(expectedNodeHint_ / 8, static_cast<size_t>(256));
-    expectedNodes = std::max(expectedNodes, hintedNodes);
+    expectedNodes =
+        std::max(expectedNodes,
+                 std::min(hintedNodes, kMaxHintedInitialNodeCacheReserve));
   }
   reserveNodeCacheSlots(expectedNodes);
   // Do not mirror this full DAG estimate into Kissat.  A PDR predecessor query
@@ -464,10 +470,10 @@ void FrameFormulaEncoder::cacheEncodedLiteral(BoolExpr* node, int lit) {
     // transition encodings from rehashing on every small increment while also
     // avoiding a separate full-DAG prepass before every PDR target.
     // LCOV_EXCL_START
-    nodeMapReservedEntries_ =  // LCOV_EXCL_LINE
+    const size_t reserveEntries =  // LCOV_EXCL_LINE
         desiredEntries +  // LCOV_EXCL_LINE
         std::max(desiredEntries / 2, static_cast<size_t>(4096));  // LCOV_EXCL_LINE
-    reserveNodeCacheSlots(nodeMapReservedEntries_);  // LCOV_EXCL_LINE
+    reserveNodeCacheSlots(reserveEntries);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   // LCOV_EXCL_STOP
   insertCachedLiteral(node, lit);

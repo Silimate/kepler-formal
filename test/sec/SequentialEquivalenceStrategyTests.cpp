@@ -7061,6 +7061,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
   addSimplePathConstraint(solver, variables, {}, 2);
 }
 
+TEST_F(SequentialEquivalenceStrategyTests, SatEncodingFlatCacheGrows) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  std::unordered_map<size_t, int> leafLits;
+  leafLits.emplace(2, solver.newVar() + 2);
+  leafLits.emplace(3, solver.newVar() + 2);
+
+  BoolExpr* expr = BoolExpr::Var(2);
+  for (size_t index = 0; index < 1500; ++index) {
+    expr = BoolExpr::Xor(expr, BoolExpr::Var(3));
+  }
+
+  FrameFormulaEncoder encoder(solver, std::move(leafLits));
+  EXPECT_NE(encoder.encode(expr), 0);
+}
+
 TEST_F(SequentialEquivalenceStrategyTests,
        SatSolverWrapperGetLiteralValueHandlesConstantsUnknownModelsAndErrors) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
@@ -9505,7 +9520,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       DualRailSmallOutputBatchUsesDirectCdclProofProfile) {
+       DualRailSmallOutputBatchKeepsSimplePathBeforeDirectCdclProfile) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
   problem.originalObservedOutputCount = 33;
@@ -9535,15 +9550,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::nullopt);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The direct profile only changes Kissat options.  The same strict
-  // multi-output k-induction step is encoded and solved, but without the
-  // rephase/local-walk work that can dominate small/medium batches that are too
-  // large for compact simple-path strengthening.
+  // Tiny strict dual-rail batches still fit the simple-path strengthening. Do
+  // not switch them to the direct-CDCL profile that is reserved for compact
+  // cones after simple-path has been suppressed.
   EXPECT_EQ(proofStatus, InductionProofStatus::Proved);
   EXPECT_NE(
+      stderrOutput.find("k-induction simple path states="),
+      std::string::npos);
+  EXPECT_EQ(
       stderrOutput.find("k-induction compact dual-rail direct profile"),
       std::string::npos);
-  EXPECT_NE(
+  EXPECT_EQ(
       stderrOutput.find("direct_cdcl=1"),
       std::string::npos);
 }
@@ -12507,11 +12524,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const CraigImcResult result = checker.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The first projected SAT model contradicts all 96 reset-known support
-  // states, but Craig IMC should refine by a bounded model-guided slice rather
-  // than immediately expanding to the full transition cone.
+  // The first projected SAT model leaves only a small near-saturated remainder,
+  // so Craig IMC imports that full remainder instead of spending another
+  // bounded refinement pass on the same support.
   EXPECT_NE(
       stderrOutput.find("imc Craig projection round=0 states=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig imports near-saturated projection remainder "
+          "selected=96 tracked_states=1 full=97"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
@@ -12521,7 +12544,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("imc Craig refines transition projection states=1->65"),
+      stderrOutput.find("imc Craig refines transition projection states=1->97"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(result.status, CraigImcStatus::CounterexampleCandidate);
@@ -12551,8 +12574,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // Missing dual-rail partners make the projected query an over-approximation,
-  // so proof soundness is preserved.  Keep them out of the tracked interpolant
-  // state set unless they are actual transition targets.
+  // so proof soundness is preserved.  The near-saturated import pulls the whole
+  // remaining transition surface, including partners, in one pass.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig imports near-saturated projection remainder "
+          "selected=192 tracked_states=1 full=193"),
+      std::string::npos)
+      << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
           "imc Craig model-guided projection refinement "
@@ -12560,11 +12589,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("imc Craig refines transition projection states=1->65"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("imc Craig refines transition projection states=1->129"),
+      stderrOutput.find("imc Craig refines transition projection states=1->193"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(result.status, CraigImcStatus::CounterexampleCandidate);
@@ -12592,8 +12617,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // When the SAT model does not contradict reset-known support states, Craig
-  // still refines the projection incrementally instead of importing a large
-  // support cone in one step.
+  // still recognizes the small near-saturated remainder and imports it in one
+  // pass instead of iterating a bounded 64-state slice.
+  EXPECT_NE(
+      stderrOutput.find(
+          "imc Craig imports near-saturated projection remainder "
+          "selected=96 tracked_states=1 full=97"),
+      std::string::npos)
+      << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
           "imc Craig bounded projection refinement "
@@ -12601,7 +12632,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("imc Craig refines transition projection states=1->65"),
+      stderrOutput.find("imc Craig refines transition projection states=1->97"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(result.status, CraigImcStatus::CounterexampleCandidate);
@@ -14445,7 +14476,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailFindsMismatchBeforeResidualSkip) {
+       RunExtractedModelsPdrDualRailSkipsLargeResidualWithoutStateRelation) {
   constexpr size_t kResidualOutputs = 6;
   const auto testCase =
       makeLargeDualRailResidualCaseForTest("pdrDualRailLargeResidual",
@@ -14467,14 +14498,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // A residual-size guard is only a proof-cost control. It must not mask a
-  // concrete top-output difference that the selected PDR SEC path can witness.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.coveredOutputs, kResidualOutputs + 1);
+  // With cross-design internal correspondence disabled, these resetless
+  // state-dependent residual outputs are not concrete reportable differences.
+  // The large-surface guard may leave them explicitly skipped, but must not
+  // count them as proven coverage.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, kResidualOutputs + 1);
-  EXPECT_TRUE(result.skippedObservedOutputs.empty());
-  EXPECT_NE(result.reason.find("large_residual_out[0]"), std::string::npos);
-  EXPECT_EQ(
+  EXPECT_EQ(result.skippedObservedOutputs.size(), kResidualOutputs);
+  EXPECT_TRUE(result.reason.empty());
+  EXPECT_NE(
       stderrOutput.find("PDR skipping large dual-rail residual surface"),
       std::string::npos);
 }
@@ -15259,7 +15292,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailFindsLeafCounterexampleAboveSmallLimit) {
+       RunExtractedModelsPdrDualRailDoesNotReportResetlessStateLeafMismatch) {
   constexpr size_t kDummyStatesPerDesign = 1024;
   const auto models =
       makeDelayedRailMismatchModelsForTest(kDummyStatesPerDesign);
@@ -15274,13 +15307,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(models.model0, models.model1, 4);
 
   // The unrelated resetless dummies push the rail-state count above the small
-  // PDR certificate fast path. Direct dual-rail PDR must still be guarded by an
-  // exact bounded precheck so concrete rail mismatches cannot be proved away.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  // PDR certificate fast path. The observable edit is driven by unanchored
+  // internal state, so the direct dual-rail PDR path must not report it as a
+  // concrete SEC counterexample without a public startup relation.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.bound, 1u);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(result.reason.find("delayed_out[0]"), std::string::npos);
+  EXPECT_TRUE(result.reason.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -15540,7 +15574,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsImcDualRailFindsResidualCounterexampleBeforeDeferredProof) {
+       RunExtractedModelsImcDualRailLeavesResetlessStateLeafInconclusive) {
   constexpr size_t kDummyStatesPerDesign = 1024;
   const auto models =
       makeDelayedRailMismatchModelsForTest(kDummyStatesPerDesign);
@@ -15554,14 +15588,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 4);
 
-  // Large dual-rail IMC residuals may use deferred induction for proof work,
-  // but they must still run the selected engine's concrete top-output base
-  // search first so delayed observable edits are reported as SEC differences.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 1u);
+  // Large dual-rail IMC residuals may use Craig/deferred proof work, but a
+  // resetless state-dependent edit is not a concrete top-output mismatch unless
+  // startup state is publicly anchored. Keep it inconclusive instead of
+  // reporting a difference through an internal-state relation.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 4u);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(result.reason.find("delayed_out[0]"), std::string::npos);
+  EXPECT_EQ(result.reason.find("delayed_out[0]"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

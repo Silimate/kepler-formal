@@ -1554,6 +1554,7 @@ constexpr size_t kMaxDualRailWideLocalImplicationStateRails = 20000;
 constexpr size_t kMaxDualRailResidualOutputs = 128;
 constexpr size_t kMaxDualRailResidualProofStateSymbols = 4096;
 constexpr size_t kMaxDualRailResidualStateSymbols = 20000;
+constexpr size_t kMaxDualRailResidualConcretePrecheckOutputs = 16;
 constexpr size_t kDefaultDualRailFlushCertificateDepth = 4;
 constexpr size_t kMaxDualRailFlushCertificateOutputs = 64;
 constexpr size_t kMaxDualRailFlushCertificateStateRails = 12000;
@@ -2492,6 +2493,41 @@ findInputOnlyFrameZeroResidualCounterexample(
       inputOnlyProblem, solverType, 0);
 }
 
+std::optional<KInductionResult::CounterexampleWitness>
+findSmallDualRailResidualConcreteCounterexample(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK) {
+  if (!problem.usesDualRailStateEncoding || outputIndices.empty()) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+
+  if (auto witness =
+          findInputOnlyFrameZeroResidualCounterexample(
+              problem, outputIndices, solverType);
+      witness.has_value()) {
+    return witness;
+  }
+
+  if (outputIndices.size() > kMaxDualRailResidualConcretePrecheckOutputs) {
+    return std::nullopt;
+  }
+
+  for (const size_t outputIndex : outputIndices) {
+    const KInductionProblem singleOutputProblem =
+        makeOutputSubsetProblem(problem, {outputIndex});
+    for (size_t depth = 0; depth <= maxK; ++depth) {
+      if (auto witness = SEC::findBaseCounterexampleAtFrontier(
+              singleOutputProblem, solverType, depth);
+          witness.has_value()) {
+        return witness;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 void recordDualRailResidualCounterexample(
     KInductionResult::CounterexampleWitness witness,
     const SequentialDesignModel& model0,
@@ -2770,10 +2806,8 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
     proofState.coveredOutputs[i] = problem.outputImpliedByInductionCore[i];
   }
 
-  if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
-          // LCOV_EXCL_START
-          problem, residualOutputIndices, solverType);
-          // LCOV_EXCL_STOP
+  if (auto witness = findSmallDualRailResidualConcreteCounterexample(
+          problem, residualOutputIndices, solverType, maxK);
       witness.has_value()) {
     recordDualRailResidualCounterexample(
         std::move(*witness),
@@ -4929,8 +4963,8 @@ SequentialEquivalenceResult runPdrSecEngine(
     if (shouldSkipLargeDualRailResidualSurface(
             problem, dualRailEngineOutputIndices.size())) {
             // LCOV_EXCL_STOP
-      if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
-              problem, dualRailEngineOutputIndices, solverType);
+      if (auto witness = findSmallDualRailResidualConcreteCounterexample(
+              problem, dualRailEngineOutputIndices, solverType, maxK);
           witness.has_value()) {
         KInductionResult witnessResult{  // LCOV_EXCL_LINE
             KInductionStatus::Different,
@@ -6101,8 +6135,8 @@ SequentialEquivalenceResult runPdrSecEngine(
         skippedOutputIndices.push_back(outputIndex);
       }
     }
-    if (auto witness = findInputOnlyFrameZeroResidualCounterexample(
-            problem, skippedOutputIndices, solverType);
+    if (auto witness = findSmallDualRailResidualConcreteCounterexample(
+            problem, skippedOutputIndices, solverType, maxK);
         witness.has_value()) {
       KInductionResult witnessResult{  // LCOV_EXCL_LINE
           KInductionStatus::Different,
