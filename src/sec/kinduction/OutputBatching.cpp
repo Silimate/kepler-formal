@@ -46,6 +46,54 @@ bool isSmallDualRailBatchingSurface(const KInductionProblem& problem) {
              kMaxSmallDualRailBatchStateSymbols;
 }
 
+bool allSelectedOutputsNeedEngineProof(const KInductionProblem& problem) {
+  if (problem.outputImpliedByInductionCore.size() !=
+      problem.observedOutputExprs0.size()) {
+    return false;
+  }
+  for (const bool implied : problem.outputImpliedByInductionCore) {
+    if (implied) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool hasSelectedOutputSkips(const KInductionProblem& problem) {
+  if (problem.dualRailOutputSkipReasons.size() !=
+      problem.observedOutputExprs0.size()) {
+    return false;
+  }
+  for (const auto& reason : problem.dualRailOutputSkipReasons) {
+    if (!reason.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void rememberDualRailResidualPublicHypothesis(const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding || problem.lazyTransitions == nullptr ||
+      problem.property == nullptr || problem.bad == nullptr ||
+      problem.observedOutputExprs0.size() <= 1 ||
+      !allSelectedOutputsNeedEngineProof(problem) ||
+      hasSelectedOutputSkips(problem)) {
+    return;
+  }
+
+  LazyTransitionStore& store = *problem.lazyTransitions;
+  if (store.dualRailResidualPublicOutputCount >=
+      problem.observedOutputExprs0.size()) {
+    return;
+  }
+
+  // Store only the public residual output conjunction.  Later KI slices use it
+  // as their induction hypothesis; no internal cross-design relation is added.
+  store.dualRailResidualPublicProperty = problem.property;
+  store.dualRailResidualPublicBad = problem.bad;
+  store.dualRailResidualPublicOutputCount = problem.observedOutputExprs0.size();
+}
+
 }  // namespace
 
 std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
@@ -91,6 +139,7 @@ std::vector<std::pair<size_t, size_t>> buildSupportBoundedOutputBatches(
 OutputBatchingLimits defaultOutputBatchingLimitsForProblem(
     const KInductionProblem& problem) {
   if (problem.usesDualRailStateEncoding) {
+    rememberDualRailResidualPublicHypothesis(problem);
     if (isSmallDualRailBatchingSurface(problem)) {
       // GCD-sized dual-rail designs often need the public output conjunction as
       // the strict KI property.  Keep those small surfaces together; large

@@ -78,6 +78,8 @@ constexpr int64_t kFastCounterexampleSearchConflictLimit = 5000;
 constexpr int64_t kFastCounterexampleSearchDecisionLimit = 20000;
 constexpr size_t kMaxImcAssumptionFrontierBatchOutputs = 64;
 constexpr size_t kDualRailPublicBasePrefixWindow = 8;
+constexpr size_t kLargeDualRailPublicBasePrefixWindow = 32;
+constexpr size_t kMinLargeDualRailPublicBasePrefixStateSymbols = 512;
 // Transition node counts are only reserve hints for FrameFormulaEncoder.
 // BlackParrot reset-frontier sampling showed exact counting across ~86k
 // transition targets dominating the whole query before any CNF was emitted.
@@ -2347,11 +2349,48 @@ bool canUseDualRailPublicBasePrefixCache(const KInductionProblem& problem) {
          problem.observedOutputExprs0.size() == problem.observedOutputExprs1.size();
 }
 
+size_t dualRailBaseStateSymbolCount(const KInductionProblem& problem) {
+  return problem.dualRailStatePairs.empty()
+      ? problem.state0Symbols.size() + problem.state1Symbols.size()
+      : problem.dualRailStatePairs.size() * 2;
+}
+
+bool shouldUseMonolithicDualRailPublicBasePrefix(
+    const KInductionProblem& problem) {
+  return dualRailBaseStateSymbolCount(problem) >=
+         kMinLargeDualRailPublicBasePrefixStateSymbols;
+}
+
+size_t dualRailPublicBasePrefixWindow(const KInductionProblem& problem) {
+  const size_t stateSymbols = dualRailBaseStateSymbolCount(problem);
+  if (stateSymbols >= kMinLargeDualRailPublicBasePrefixStateSymbols) {
+    // ASIC-sized dual-rail residual sweeps revisit the same public base prefix
+    // for every frontier.  Proving the normal SEC horizon once is still the
+    // exact cumulative base case, but avoids rebuilding the AES-sized prefix at
+    // k=8,17,26,35.
+    return kLargeDualRailPublicBasePrefixWindow;
+  }
+  return kDualRailPublicBasePrefixWindow;
+}
+
 std::optional<KInductionResult::CounterexampleWitness>
 findDualRailBatchedBaseCounterexampleUpTo(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k) {
+  if (shouldUseMonolithicDualRailPublicBasePrefix(problem)) {
+    // For large dual-rail SEC prefixes, one exact public bad query is cheaper
+    // than rebuilding the same transition prefix for every output batch.  This
+    // remains the normal cumulative KI base case: SAT yields a real public
+    // counterexample, UNSAT proves the whole public-output prefix safe.
+    return findBaseCounterexampleImpl(
+        problem,
+        solverType,
+        k,
+        /*exactPublicBadFrame=*/std::nullopt,
+        /*localizeMultiOutputFrontier=*/false);
+  }
+
   for (const auto& [firstOutput, endOutput] :
        buildSupportBoundedOutputBatches(problem)) {
     KInductionProblem batch = problem;
@@ -2385,7 +2424,7 @@ DualRailPublicBasePrefixResult tryDualRailPublicBasePrefixCache(
     return {true, std::nullopt};
   }
 
-  const size_t prefixK = k + kDualRailPublicBasePrefixWindow;
+  const size_t prefixK = k + dualRailPublicBasePrefixWindow(problem);
   auto witness =
       findDualRailBatchedBaseCounterexampleUpTo(problem, solverType, prefixK);
   if (!witness.has_value()) {

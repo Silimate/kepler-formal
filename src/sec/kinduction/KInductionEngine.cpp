@@ -32,6 +32,7 @@ constexpr size_t kMinDeferredRailStateSymbolsForEarlyStop = 512;
 constexpr size_t kMaxCompactDualRailConjunctionOutputs = 32;
 constexpr size_t kMaxWideDualRailSplitHypothesisOutputs = 8;
 constexpr size_t kMaxFullDualRailPublicHypothesisOutputs = 256;
+constexpr size_t kMaxStoredPublicSplitHypothesisOutputs = 32;
 constexpr size_t kMaxFullDualRailPublicHypothesisStateSymbols = 4096;
 constexpr unsigned kDefaultBatchedInductionDecisionLimit = 200000;
 // Dual-rail SEC is a coverage extension for resetless state.  Residual outputs
@@ -110,6 +111,7 @@ struct PublicConjunctionHypothesis {
   BoolExpr* property = nullptr;
   BoolExpr* bad = nullptr;
   size_t outputCount = 0;
+  bool completePublicSurface = false;
 };
 
 size_t maxDualRailSplitHypothesisOutputs(const KInductionProblem& problem) {
@@ -142,9 +144,152 @@ bool shouldApplyPublicConjunctionHypothesis(
          hypothesis.property != nullptr &&
          hypothesis.bad != nullptr &&
          hypothesis.outputCount > batchProblem.observedOutputExprs0.size() &&
-         (isFullPublicHypothesis ||
+         (hypothesis.completePublicSurface ||
+          isFullPublicHypothesis ||
           hypothesis.outputCount <=
               maxDualRailSplitHypothesisOutputs(sourceProblem));
+}
+
+bool samePublicConjunctionHypothesis(
+    const PublicConjunctionHypothesis& lhs,
+    const PublicConjunctionHypothesis& rhs) {
+  return lhs.property == rhs.property &&
+         lhs.bad == rhs.bad &&
+         lhs.outputCount == rhs.outputCount &&
+         lhs.completePublicSurface == rhs.completePublicSurface;
+}
+
+bool shouldTryFallbackHypothesisAtRange(
+    const PublicConjunctionHypothesis& preferredHypothesis,
+    const PublicConjunctionHypothesis& fallbackHypothesis,
+    size_t outputCount) {
+  if (fallbackHypothesis.property == nullptr ||
+      samePublicConjunctionHypothesis(preferredHypothesis, fallbackHypothesis)) {
+    return false;
+  }
+  if (fallbackHypothesis.completePublicSurface &&
+      fallbackHypothesis.outputCount >
+          kMaxStoredPublicSplitHypothesisOutputs) {
+    // The remembered full residual surface can dwarf the current strategy
+    // batch.  Let the current strict KI range split and carry its own smaller
+    // public conjunction instead of replaying an AES-sized hypothesis at every
+    // recursive level.
+    return false;
+  }
+  if (outputCount <= 1 && preferredHypothesis.property != nullptr &&
+      fallbackHypothesis.outputCount > preferredHypothesis.outputCount) {
+    // Once a split leaf has failed under its parent public-output conjunction,
+    // a strictly wider remembered residual conjunction only rebuilds a larger
+    // version of the same strict KI leaf.  Keep the wider fallback for parent
+    // batches and for standalone one-output residual calls that have no smaller
+    // parent hypothesis.
+    return false;
+  }
+  return true;
+}
+
+bool shouldTryStoredPublicHypothesisOnStandaloneLeaf(
+    const PublicConjunctionHypothesis& hypothesis) {
+  if (hypothesis.property == nullptr) {
+    return false;
+  }
+  if (!hypothesis.completePublicSurface) {
+    return true;
+  }
+  // A full residual public hypothesis is useful for compact buses, but replaying
+  // a 100+ output AES conjunction after every one-output UNKNOWN leaf rebuilds a
+  // larger strict KI query without sharing coverage. Parent batches still try
+  // the full hypothesis before splitting; standalone leaves keep the local
+  // strict KI result once the remembered surface is too wide.
+  return hypothesis.outputCount <=
+         kMaxStoredPublicSplitHypothesisOutputs;
+}
+
+size_t solverTypeCacheValue(KEPLER_FORMAL::Config::SolverType solverType) {
+  return static_cast<size_t>(solverType);
+}
+
+bool canMemoizeDualRailResidualLeafAttempt(
+    const KInductionProblem& leafProblem,
+    const PublicConjunctionHypothesis& hypothesis) {
+  return leafProblem.usesDualRailStateEncoding &&
+         leafProblem.lazyTransitions != nullptr &&
+         leafProblem.observedOutputExprs0.size() == 1 &&
+         leafProblem.observedOutputExprs1.size() == 1 &&
+         hypothesis.property != nullptr &&
+         hypothesis.bad != nullptr;
+}
+
+bool publicHypothesisWasAppliedToLeaf(
+    const KInductionProblem& leafProblem,
+    const PublicConjunctionHypothesis& hypothesis) {
+  return leafProblem.inductionProperty == hypothesis.property &&
+         leafProblem.inductionBad == leafProblem.bad;
+}
+
+PublicConjunctionHypothesis activeLeafAttemptHypothesis(
+    const KInductionProblem& leafProblem,
+    const PublicConjunctionHypothesis& requestedHypothesis) {
+  if (requestedHypothesis.property != nullptr &&
+      publicHypothesisWasAppliedToLeaf(leafProblem, requestedHypothesis)) {
+    return requestedHypothesis;
+  }
+
+  // configureOutputBatchProblem installs the selected output predicate as the
+  // local induction property.  Cache that exact leaf too; replaying UNKNOWN only
+  // saves runtime and never turns the output into coverage.
+  return PublicConjunctionHypothesis{
+      leafProblem.inductionProperty != nullptr ? leafProblem.inductionProperty
+                                               : leafProblem.property,
+      leafProblem.inductionBad != nullptr ? leafProblem.inductionBad
+                                          : leafProblem.bad,
+      leafProblem.observedOutputExprs0.size(),
+      false};
+}
+
+std::optional<size_t> inconclusiveDualRailLeafAttemptBound(
+    const KInductionProblem& leafProblem,
+    const PublicConjunctionHypothesis& hypothesis,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK) {
+  if (!canMemoizeDualRailResidualLeafAttempt(leafProblem, hypothesis)) {
+    return std::nullopt;
+  }
+  size_t resultBound = 0;
+  if (!leafProblem.lazyTransitions
+           ->findInconclusiveDualRailResidualPublicKiAttempt(
+               leafProblem.observedOutputExprs0[0],
+               leafProblem.observedOutputExprs1[0],
+               hypothesis.property,
+               hypothesis.bad,
+               hypothesis.outputCount,
+               solverTypeCacheValue(solverType),
+               maxK,
+               resultBound)) {
+    return std::nullopt;
+  }
+  return resultBound;
+}
+
+void rememberInconclusiveDualRailLeafAttempt(
+    const KInductionProblem& leafProblem,
+    const PublicConjunctionHypothesis& hypothesis,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK,
+    size_t resultBound) {
+  if (!canMemoizeDualRailResidualLeafAttempt(leafProblem, hypothesis)) {
+    return;
+  }
+  leafProblem.lazyTransitions
+      ->rememberInconclusiveDualRailResidualPublicKiAttempt(
+          leafProblem.observedOutputExprs0[0],
+          leafProblem.observedOutputExprs1[0],
+          hypothesis.property,
+          hypothesis.bad,
+          hypothesis.outputCount,
+          solverTypeCacheValue(solverType),
+          maxK,
+          resultBound);
 }
 
 PublicConjunctionHypothesis makePublicConjunctionHypothesis(
@@ -152,11 +297,46 @@ PublicConjunctionHypothesis makePublicConjunctionHypothesis(
   return PublicConjunctionHypothesis{
       problem.property,
       problem.bad,
-      problem.observedOutputExprs0.size()};
+      problem.observedOutputExprs0.size(),
+      false};
+}
+
+PublicConjunctionHypothesis storedResidualPublicConjunctionHypothesis(
+    const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding || problem.lazyTransitions == nullptr ||
+      dualRailStateSymbolCount(problem) >
+          kMaxFullDualRailPublicHypothesisStateSymbols) {
+    return {};
+  }
+
+  const LazyTransitionStore& store = *problem.lazyTransitions;
+  if (store.dualRailResidualPublicProperty == nullptr ||
+      store.dualRailResidualPublicBad == nullptr ||
+      store.dualRailResidualPublicOutputCount >
+          kMaxFullDualRailPublicHypothesisOutputs ||
+      store.dualRailResidualPublicOutputCount <=
+          problem.observedOutputExprs0.size()) {
+    return {};
+  }
+
+  return PublicConjunctionHypothesis{
+      store.dualRailResidualPublicProperty,
+      store.dualRailResidualPublicBad,
+      store.dualRailResidualPublicOutputCount,
+      true};
 }
 
 PublicConjunctionHypothesis initialPublicConjunctionHypothesis(
     const KInductionProblem& problem) {
+  if (const PublicConjunctionHypothesis stored =
+          storedResidualPublicConjunctionHypothesis(problem);
+      stored.property != nullptr) {
+    // The strategy may split the residual output set before entering KI.  Use
+    // the remembered residual public conjunction as the strict KI hypothesis for
+    // each slice; acceptance still requires every slice proof plus concrete base
+    // validation by the caller.
+    return stored;
+  }
   if (!canUseFullPublicConjunctionHypothesis(problem)) {
     return {};
   }
@@ -184,7 +364,7 @@ void applyDualRailSplitHypothesis(
   // outputs through the final frontier.  No cross-design internal relation is
   // introduced.
   batchProblem.inductionProperty = hypothesis.property;
-  batchProblem.inductionBad = hypothesis.bad;
+  batchProblem.inductionBad = batchProblem.bad;
   batchProblem.inductionPropertyAssumesInductiveStateEqualities = false;
   if (isKInductionDiagEnabled()) {
     emitSecDiag(
@@ -554,7 +734,8 @@ KInductionResult combineBatchResults(KInductionResult lhs,
 KInductionResult runOutputRangeKInduction(
     KInductionProblem& batchProblem,
     const KInductionProblem& sourceProblem,
-    const PublicConjunctionHypothesis& hypothesis,
+    const PublicConjunctionHypothesis& preferredHypothesis,
+    const PublicConjunctionHypothesis& fallbackHypothesis,
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK,
     size_t firstOutput,
@@ -563,7 +744,7 @@ KInductionResult runOutputRangeKInduction(
     // LCOV_EXCL_STOP
   configureOutputBatchProblem(batchProblem, sourceProblem, firstOutput, endOutput);
   applyDualRailSplitHypothesis(
-      batchProblem, sourceProblem, hypothesis, firstOutput, endOutput);
+      batchProblem, sourceProblem, preferredHypothesis, firstOutput, endOutput);
   if (isKInductionDiagEnabled()) {
     // LCOV_EXCL_START
     emitSecDiag(
@@ -571,13 +752,67 @@ KInductionResult runOutputRangeKInduction(
         "SEC diag: k-induction output range [", firstOutput, ",", endOutput,
         ") outputs=", endOutput - firstOutput);
   }
+  const PublicConjunctionHypothesis activePreferredHypothesis =
+      activeLeafAttemptHypothesis(batchProblem, preferredHypothesis);
+  if (endOutput - firstOutput <= 1) {
+    if (const std::optional<size_t> cachedBound =
+            inconclusiveDualRailLeafAttemptBound(
+                batchProblem, activePreferredHypothesis, solverType, maxK);
+        cachedBound.has_value()) {
+      return {KInductionStatus::Inconclusive, *cachedBound};
+    }
+  }
   const KInductionResult result =
       runMonolithicKInduction(batchProblem, solverType, maxK);
+  if (result.status == KInductionStatus::Inconclusive &&
+      endOutput - firstOutput <= 1) {
+    rememberInconclusiveDualRailLeafAttempt(
+        batchProblem,
+        activePreferredHypothesis,
+        solverType,
+        maxK,
+        result.bound);
+  }
   if (isKInductionDiagEnabled()) {
     emitSecDiag(
         "SEC diag: k-induction output range [", firstOutput, ",", endOutput,
         ") status=", static_cast<int>(result.status),
         " bound=", result.bound);
+  }
+  if (result.status == KInductionStatus::Inconclusive &&
+      shouldTryFallbackHypothesisAtRange(
+          preferredHypothesis,
+          fallbackHypothesis,
+          endOutput - firstOutput)) {
+    // Try the complete residual public-output hypothesis at the current slice
+    // before splitting.  The final-frame bad predicate remains this slice, so
+    // this is still the strict decomposed KI obligation P_full[0..k-1] => P_i[k].
+    configureOutputBatchProblem(batchProblem, sourceProblem, firstOutput, endOutput);
+    if (const std::optional<size_t> cachedBound =
+            inconclusiveDualRailLeafAttemptBound(
+                batchProblem, fallbackHypothesis, solverType, maxK);
+        cachedBound.has_value()) {
+      return {KInductionStatus::Inconclusive, *cachedBound};
+    }
+    applyDualRailSplitHypothesis(
+        batchProblem, sourceProblem, fallbackHypothesis, firstOutput, endOutput);
+    const PublicConjunctionHypothesis activeFallbackHypothesis =
+        activeLeafAttemptHypothesis(batchProblem, fallbackHypothesis);
+    const KInductionResult fallbackResult =
+        runMonolithicKInduction(batchProblem, solverType, maxK);
+    if (fallbackResult.status == KInductionStatus::Inconclusive &&
+        endOutput - firstOutput <= 1) {
+      rememberInconclusiveDualRailLeafAttempt(
+          batchProblem,
+          activeFallbackHypothesis,
+          solverType,
+          maxK,
+          fallbackResult.bound);
+    }
+    if (fallbackResult.status != KInductionStatus::Inconclusive ||
+        endOutput - firstOutput <= 1) {
+      return fallbackResult;
+    }
   }
   if (result.status != KInductionStatus::Inconclusive ||
       endOutput - firstOutput <= 1) {
@@ -589,14 +824,16 @@ KInductionResult runOutputRangeKInduction(
   // conjunction as their induction hypothesis, which is the decomposed strict
   // KI step for proving that parent conjunction invariant.
   const PublicConjunctionHypothesis childHypothesis =
-      hypothesis.property != nullptr ? hypothesis
-                                     : makePublicConjunctionHypothesis(batchProblem);
+      preferredHypothesis.property != nullptr
+          ? preferredHypothesis
+          : makePublicConjunctionHypothesis(batchProblem);
   const size_t middle = firstOutput + (endOutput - firstOutput) / 2;
   KInductionResult combined =
       runOutputRangeKInduction(
           batchProblem,
           sourceProblem,
           childHypothesis,
+          fallbackHypothesis,
           solverType,
           maxK,
           firstOutput,
@@ -610,6 +847,7 @@ KInductionResult runOutputRangeKInduction(
           batchProblem,
           sourceProblem,
           childHypothesis,
+          fallbackHypothesis,
           solverType,
           maxK,
           middle,
@@ -624,6 +862,12 @@ KInductionResult runOutputBatchedKInduction(
   KInductionResult combined{KInductionStatus::Equivalent, 0};
   const PublicConjunctionHypothesis publicHypothesis =
       initialPublicConjunctionHypothesis(problem);
+  const PublicConjunctionHypothesis preferredHypothesis =
+      publicHypothesis.completePublicSurface ? PublicConjunctionHypothesis{}
+                                             : publicHypothesis;
+  const PublicConjunctionHypothesis fallbackHypothesis =
+      publicHypothesis.completePublicSurface ? publicHypothesis
+                                             : PublicConjunctionHypothesis{};
   const OutputBatchingLimits batchingLimits =
       defaultOutputBatchingLimitsForProblem(problem);
   // Copy the large shared SEC problem once, then mutate only the small
@@ -645,7 +889,8 @@ KInductionResult runOutputBatchedKInduction(
     const KInductionResult result = runOutputRangeKInduction(
         batchProblem,
         problem,
-        publicHypothesis,
+        preferredHypothesis,
+        fallbackHypothesis,
         solverType,
         maxK,
         firstOutput,
@@ -668,6 +913,91 @@ KInductionResult runOutputBatchedKInduction(
     }
   }
   return combined;
+}
+
+KInductionResult runSingleOutputKInduction(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t maxK) {
+  const PublicConjunctionHypothesis publicHypothesis =
+      initialPublicConjunctionHypothesis(problem);
+  if (publicHypothesis.property == nullptr) {
+    const PublicConjunctionHypothesis localHypothesis =
+        activeLeafAttemptHypothesis(problem, PublicConjunctionHypothesis{});
+    if (const std::optional<size_t> cachedBound =
+            inconclusiveDualRailLeafAttemptBound(
+                problem, localHypothesis, solverType, maxK);
+        cachedBound.has_value()) {
+      return {KInductionStatus::Inconclusive, *cachedBound};
+    }
+    const KInductionResult localOnlyResult =
+        runMonolithicKInduction(problem, solverType, maxK);
+    if (localOnlyResult.status == KInductionStatus::Inconclusive) {
+      rememberInconclusiveDualRailLeafAttempt(
+          problem,
+          localHypothesis,
+          solverType,
+          maxK,
+          localOnlyResult.bound);
+    }
+    return localOnlyResult;
+  }
+
+  const PublicConjunctionHypothesis localHypothesis =
+      activeLeafAttemptHypothesis(problem, PublicConjunctionHypothesis{});
+  KInductionResult localResult;
+  if (const std::optional<size_t> cachedBound =
+          inconclusiveDualRailLeafAttemptBound(
+              problem, localHypothesis, solverType, maxK);
+      cachedBound.has_value()) {
+    localResult = {KInductionStatus::Inconclusive, *cachedBound};
+  } else {
+    localResult = runMonolithicKInduction(problem, solverType, maxK);
+    if (localResult.status == KInductionStatus::Inconclusive) {
+      rememberInconclusiveDualRailLeafAttempt(
+          problem,
+          localHypothesis,
+          solverType,
+          maxK,
+          localResult.bound);
+    }
+  }
+  if (localResult.status != KInductionStatus::Inconclusive) {
+    return localResult;
+  }
+  if (!shouldTryStoredPublicHypothesisOnStandaloneLeaf(publicHypothesis)) {
+    return localResult;
+  }
+
+  KInductionProblem strengthenedProblem = problem;
+  if (const std::optional<size_t> cachedBound =
+          inconclusiveDualRailLeafAttemptBound(
+              strengthenedProblem, publicHypothesis, solverType, maxK);
+      cachedBound.has_value()) {
+    // The identical public-output KI leaf already returned UNKNOWN under the
+    // same residual public hypothesis.  Reusing UNKNOWN is only a runtime cache:
+    // it never marks this output covered.
+    return {KInductionStatus::Inconclusive, *cachedBound};
+  }
+  applyDualRailSplitHypothesis(
+      strengthenedProblem,
+      problem,
+      publicHypothesis,
+      0,
+      problem.observedOutputExprs0.size());
+  const PublicConjunctionHypothesis activePublicHypothesis =
+      activeLeafAttemptHypothesis(strengthenedProblem, publicHypothesis);
+  KInductionResult strengthenedResult =
+      runMonolithicKInduction(strengthenedProblem, solverType, maxK);
+  if (strengthenedResult.status == KInductionStatus::Inconclusive) {
+    rememberInconclusiveDualRailLeafAttempt(
+        strengthenedProblem,
+        activePublicHypothesis,
+        solverType,
+        maxK,
+        strengthenedResult.bound);
+  }
+  return strengthenedResult;
 }
 
 }  // namespace
@@ -694,7 +1024,7 @@ KInductionResult KInductionEngine::run(size_t maxK) const {
   if (problem_.observedOutputExprs0.size() >= kMinOutputsForBatchedProof) {
     return runOutputBatchedKInduction(problem_, solverType_, maxK);
   }
-  return runMonolithicKInduction(problem_, solverType_, maxK);
+  return runSingleOutputKInduction(problem_, solverType_, maxK);
 }
 
 }  // namespace KEPLER_FORMAL::SEC

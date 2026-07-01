@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <set>
@@ -47,6 +48,31 @@ struct PdrStateEqualitySubsetCacheEntry {
 
 struct InductionTransitionSupportCache;
 
+struct DualRailResidualPublicKiAttempt {
+  BoolExpr* outputExpr0 = nullptr;
+  BoolExpr* outputExpr1 = nullptr;
+  BoolExpr* inductionProperty = nullptr;
+  BoolExpr* inductionBad = nullptr;
+  size_t inductionOutputCount = 0;
+  size_t solverType = 0;
+  size_t attemptedMaxK = 0;
+  size_t resultBound = 0;
+
+  bool matches(BoolExpr* candidateOutputExpr0,
+               BoolExpr* candidateOutputExpr1,
+               BoolExpr* candidateInductionProperty,
+               BoolExpr* candidateInductionBad,
+               size_t candidateInductionOutputCount,
+               size_t candidateSolverType) const {
+    return outputExpr0 == candidateOutputExpr0 &&
+           outputExpr1 == candidateOutputExpr1 &&
+           inductionProperty == candidateInductionProperty &&
+           inductionBad == candidateInductionBad &&
+           inductionOutputCount == candidateInductionOutputCount &&
+           solverType == candidateSolverType;
+  }
+};
+
 struct LazyTransitionStore {
   // Large SEC designs can have hundreds of thousands of modeled state bits.
   // K-induction proves one output cone at a time, so eagerly remapping every
@@ -74,6 +100,100 @@ struct LazyTransitionStore {
   // source BoolExpr DAGs across batches.
   mutable std::unordered_map<size_t, std::set<size_t>> supportByStateSymbol;
   mutable std::unordered_map<size_t, size_t> nodeCountByStateSymbol;
+  // Residual dual-rail KI slices are created outside the KI engine.  Remember
+  // the full residual public-output conjunction here so later one-output leaves
+  // can still use the same public induction hypothesis without adding any
+  // cross-design internal-state relation.
+  BoolExpr* dualRailResidualPublicProperty = nullptr;
+  BoolExpr* dualRailResidualPublicBad = nullptr;
+  size_t dualRailResidualPublicOutputCount = 0;
+  // A cached UNKNOWN is never accepted as coverage.  It only avoids rerunning
+  // the same strict one-output KI attempt after a residual batch has already
+  // failed under the same public-output induction hypothesis.
+  std::vector<DualRailResidualPublicKiAttempt>
+      inconclusiveDualRailResidualPublicKiAttempts;
+
+  bool findInconclusiveDualRailResidualPublicKiAttempt(
+      BoolExpr* outputExpr0,
+      BoolExpr* outputExpr1,
+      BoolExpr* inductionProperty,
+      BoolExpr* inductionBad,
+      size_t inductionOutputCount,
+      size_t solverType,
+      size_t requestedMaxK,
+      size_t& resultBound) const {
+    for (const DualRailResidualPublicKiAttempt& attempt :
+         inconclusiveDualRailResidualPublicKiAttempts) {
+      if (attempt.matches(
+              outputExpr0,
+              outputExpr1,
+              inductionProperty,
+              inductionBad,
+              inductionOutputCount,
+              solverType) &&
+          attempt.attemptedMaxK >= requestedMaxK) {
+        resultBound = attempt.resultBound;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool hasInconclusiveDualRailResidualPublicKiAttempt(
+      BoolExpr* outputExpr0,
+      BoolExpr* outputExpr1,
+      BoolExpr* inductionProperty,
+      BoolExpr* inductionBad,
+      size_t inductionOutputCount,
+      size_t solverType,
+      size_t requestedMaxK) const {
+    size_t ignoredBound = 0;
+    return findInconclusiveDualRailResidualPublicKiAttempt(
+        outputExpr0,
+        outputExpr1,
+        inductionProperty,
+        inductionBad,
+        inductionOutputCount,
+        solverType,
+        requestedMaxK,
+        ignoredBound);
+  }
+
+  void rememberInconclusiveDualRailResidualPublicKiAttempt(
+      BoolExpr* outputExpr0,
+      BoolExpr* outputExpr1,
+      BoolExpr* inductionProperty,
+      BoolExpr* inductionBad,
+      size_t inductionOutputCount,
+      size_t solverType,
+      size_t attemptedMaxK,
+      size_t resultBound) {
+    for (DualRailResidualPublicKiAttempt& attempt :
+         inconclusiveDualRailResidualPublicKiAttempts) {
+      if (attempt.matches(
+              outputExpr0,
+              outputExpr1,
+              inductionProperty,
+              inductionBad,
+              inductionOutputCount,
+              solverType)) {
+        attempt.attemptedMaxK =
+            std::max(attempt.attemptedMaxK, attemptedMaxK);
+        attempt.resultBound = std::max(attempt.resultBound, resultBound);
+        return;
+      }
+    }
+    inconclusiveDualRailResidualPublicKiAttempts.push_back(
+        DualRailResidualPublicKiAttempt{
+            outputExpr0,
+            outputExpr1,
+            inductionProperty,
+            inductionBad,
+            inductionOutputCount,
+            solverType,
+            attemptedMaxK,
+            resultBound});
+  }
 };
 
 struct KInductionProblem {

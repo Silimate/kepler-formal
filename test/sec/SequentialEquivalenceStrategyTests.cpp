@@ -7389,6 +7389,51 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       LargeDualRailPublicBaseCacheCoversDefaultHorizon) {
+  auto problem = std::make_unique<KInductionProblem>();
+  problem->usesDualRailStateEncoding = true;
+  problem->observedOutputNames = {"out0", "out1"};
+  problem->state0Symbols = {2};
+  problem->state1Symbols = {3};
+  problem->allSymbols = {2, 3};
+  problem->observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(2)};
+  problem->observedOutputExprs1 = {BoolExpr::Var(3), BoolExpr::Var(3)};
+  problem->transitions0 = {{2, BoolExpr::Var(2)}};
+  problem->transitions1 = {{3, BoolExpr::Var(3)}};
+  for (size_t index = 0; index < 300; ++index) {
+    problem->dualRailStatePairs.push_back(
+        DualRailSymbolPair{1000 + index * 2, 1001 + index * 2});
+  }
+  problem->property = BoolExpr::And(
+      makeEqualityExpr(
+          problem->observedOutputExprs0[0], problem->observedOutputExprs1[0]),
+      makeEqualityExpr(
+          problem->observedOutputExprs0[1], problem->observedOutputExprs1[1]));
+  problem->bad = BoolExpr::Not(problem->property);
+
+  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  EXPECT_FALSE(findBaseCounterexampleAtFrontier(
+      *problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0));
+  EXPECT_FALSE(findBaseCounterexampleAtFrontier(
+      *problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 31));
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Large dual-rail residual sweeps should prove the normal default SEC
+  // horizon once, then answer later safe frontiers from the exact prefix cache
+  // instead of rebuilding the same AES-sized public base proof at 8,17,26,35.
+  EXPECT_NE(
+      stderrOutput.find("k-induction base coi k=32"),
+      std::string::npos);
+  EXPECT_EQ(
+      detail::countTextOccurrences(stderrOutput, "k-induction base coi k=32"),
+      1u);
+  EXPECT_EQ(
+      stderrOutput.find("k-induction base coi k=8"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        LocalBaseCaseCacheChecksExactFrontierWithoutSafePrefixAssumption) {
   KInductionProblem problem;
   constexpr size_t stickyBadState = 2;
@@ -9286,6 +9331,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
           1,
           std::nullopt),
       InductionProofStatus::Proved);
+
+  problem.deferBaseCaseChecks = true;
+  // Deferring the local base check for an output slice must not widen the
+  // induction step beyond the same concrete dual-rail state domain.
+  EXPECT_EQ(
+      proveByInductionStatus(
+          problem,
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          1,
+          std::nullopt),
+      InductionProofStatus::Proved);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9316,9 +9372,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // A deferred small residual leaf may still use a decision cap when explicitly
-  // requested, but it should avoid Kissat's standalone probe/sweep passes.  It
-  // does not need the SAT-oriented direct-CDCL profile reserved for large
-  // rail-state leaves.
+  // requested.  Use the direct dual-rail proof profile, but reserve the
+  // SAT-oriented direct-CDCL mix for genuinely large parent rail-state leaves.
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find("k-induction direct dual-rail capped proof profile"),
@@ -9361,9 +9416,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Deferred leaves come from residual splitting; when an explicit cap is
-  // requested, large rail-state leaves must still use the direct capped profile
-  // without changing the strict KI formula.
+  // Deferred leaves come from residual splitting; the large parent rail-state
+  // surface should keep Kissat on the direct capped profile even when the
+  // reduced strict-KI cone for this leaf is small.
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find("k-induction direct dual-rail capped proof profile"),
@@ -9517,6 +9572,480 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // proof obligation instead of prematurely falling into residual leaves.
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_EQ(batches[0], (std::pair<size_t, size_t>(0, 18)));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailResidualBatchingCarriesPublicHypothesisToSingleLeaf) {
+  KInductionProblem residual;
+  residual.usesDualRailStateEncoding = true;
+  residual.deferBaseCaseChecks = true;
+  residual.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  constexpr size_t kOutputs = 4;
+  BoolExpr* initial = BoolExpr::createTrue();
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    const size_t next0 = 10 + ((output + 1) % kOutputs);
+    const size_t next1 = 100 + ((output + 1) % kOutputs);
+    residual.state0Symbols.push_back(state0);
+    residual.state1Symbols.push_back(state1);
+    residual.allSymbols.push_back(state0);
+    residual.allSymbols.push_back(state1);
+    residual.transitions0.emplace_back(state0, BoolExpr::Var(next0));
+    residual.transitions1.emplace_back(state1, BoolExpr::Var(next1));
+    residual.observedOutputNames.push_back("out" + std::to_string(output));
+    residual.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    residual.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    residual.outputImpliedByInductionCore.push_back(false);
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state0)));
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state1)));
+  }
+  residual.initialCondition = BoolExpr::simplify(initial);
+  residual.initializedStateCount = kOutputs * 2;
+  residual.totalStateCount = kOutputs * 2;
+  residual.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < residual.observedOutputExprs0.size(); ++output) {
+    residual.property = BoolExpr::And(
+        residual.property,
+        makeEqualityExpr(
+            residual.observedOutputExprs0[output],
+            residual.observedOutputExprs1[output]));
+  }
+  residual.property = BoolExpr::simplify(residual.property);
+  residual.bad = BoolExpr::simplify(BoolExpr::Not(residual.property));
+
+  defaultOutputBatchingLimitsForProblem(residual);
+  EXPECT_EQ(
+      residual.lazyTransitions->dualRailResidualPublicOutputCount,
+      kOutputs);
+  EXPECT_EQ(
+      residual.lazyTransitions->dualRailResidualPublicProperty,
+      residual.property);
+
+  KInductionProblem leaf = residual;
+  configureOutputBatchProblem(leaf, residual, 0, 1);
+  leaf.deferBaseCaseChecks = true;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Strategy residual batching may eventually call KI on one public output.  The
+  // one-output leaf still proves a strict step from the remembered residual
+  // public conjunction; no internal cross-design state equality is introduced.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("source_outputs=4"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailPublicHypothesisKeepsLeafBadPredicate) {
+  KInductionProblem residual;
+  residual.usesDualRailStateEncoding = true;
+  residual.deferBaseCaseChecks = true;
+  residual.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  residual.state0Symbols = {10, 11};
+  residual.state1Symbols = {20, 21};
+  residual.allSymbols = {10, 11, 20, 21};
+  residual.transitions0 = {
+      {10, BoolExpr::Var(11)},
+      {11, BoolExpr::createTrue()}};
+  residual.transitions1 = {
+      {20, BoolExpr::Var(21)},
+      {21, BoolExpr::createFalse()}};
+  residual.observedOutputNames = {"out0", "out1"};
+  residual.observedOutputExprs0 = {BoolExpr::Var(10), BoolExpr::Var(11)};
+  residual.observedOutputExprs1 = {BoolExpr::Var(20), BoolExpr::Var(21)};
+  residual.outputImpliedByInductionCore = {false, false};
+  residual.property = BoolExpr::And(
+      makeEqualityExpr(
+          residual.observedOutputExprs0[0],
+          residual.observedOutputExprs1[0]),
+      makeEqualityExpr(
+          residual.observedOutputExprs0[1],
+          residual.observedOutputExprs1[1]));
+  residual.property = BoolExpr::simplify(residual.property);
+  residual.bad = BoolExpr::simplify(BoolExpr::Not(residual.property));
+
+  defaultOutputBatchingLimitsForProblem(residual);
+
+  KInductionProblem leaf = residual;
+  configureOutputBatchProblem(leaf, residual, 0, 1);
+  leaf.deferBaseCaseChecks = true;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The public conjunction is only the induction hypothesis.  The final-frame
+  // bad predicate must remain the selected leaf output; otherwise this case
+  // would try to prove the intentionally non-inductive second output too.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("source_outputs=2"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailResidualBatchTriesStoredPublicHypothesisBeforeSplit) {
+  KInductionProblem residual;
+  residual.usesDualRailStateEncoding = true;
+  residual.deferBaseCaseChecks = true;
+  residual.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  constexpr size_t kOutputs = 4;
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    const size_t next0 = 10 + ((output + 1) % kOutputs);
+    const size_t next1 = 100 + ((output + 1) % kOutputs);
+    residual.state0Symbols.push_back(state0);
+    residual.state1Symbols.push_back(state1);
+    residual.allSymbols.push_back(state0);
+    residual.allSymbols.push_back(state1);
+    residual.transitions0.emplace_back(state0, BoolExpr::Var(next0));
+    residual.transitions1.emplace_back(state1, BoolExpr::Var(next1));
+    residual.observedOutputNames.push_back("out" + std::to_string(output));
+    residual.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    residual.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    residual.outputImpliedByInductionCore.push_back(false);
+  }
+  residual.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < residual.observedOutputExprs0.size(); ++output) {
+    residual.property = BoolExpr::And(
+        residual.property,
+        makeEqualityExpr(
+            residual.observedOutputExprs0[output],
+            residual.observedOutputExprs1[output]));
+  }
+  residual.property = BoolExpr::simplify(residual.property);
+  residual.bad = BoolExpr::simplify(BoolExpr::Not(residual.property));
+
+  defaultOutputBatchingLimitsForProblem(residual);
+
+  KInductionProblem slice = residual;
+  configureOutputBatchProblem(slice, residual, 0, 2);
+  slice.deferBaseCaseChecks = true;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(slice, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The two-output slice needs the full four-output previous-frame public
+  // hypothesis, but it can prove as a batch.  Trying that hypothesis before
+  // recursive splitting avoids one-output proof repetition on AES-like groups.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("source_outputs=4"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("output range [0,1)"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailSplitLeafSkipsLargerStoredFallbackAfterParentFailure) {
+  KInductionProblem residual;
+  residual.usesDualRailStateEncoding = true;
+  residual.deferBaseCaseChecks = true;
+  residual.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  constexpr size_t kOutputs = 4;
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    const size_t next0 = 10 + ((output + 1) % kOutputs);
+    const size_t next1 = 100 + ((output + 1) % kOutputs);
+    residual.state0Symbols.push_back(state0);
+    residual.state1Symbols.push_back(state1);
+    residual.allSymbols.push_back(state0);
+    residual.allSymbols.push_back(state1);
+    residual.transitions0.emplace_back(state0, BoolExpr::Var(next0));
+    residual.transitions1.emplace_back(state1, BoolExpr::Var(next1));
+    residual.observedOutputNames.push_back("out" + std::to_string(output));
+    residual.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    residual.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    residual.outputImpliedByInductionCore.push_back(false);
+  }
+  residual.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < residual.observedOutputExprs0.size(); ++output) {
+    residual.property = BoolExpr::And(
+        residual.property,
+        makeEqualityExpr(
+            residual.observedOutputExprs0[output],
+            residual.observedOutputExprs1[output]));
+  }
+  residual.property = BoolExpr::simplify(residual.property);
+  residual.bad = BoolExpr::simplify(BoolExpr::Not(residual.property));
+
+  defaultOutputBatchingLimitsForProblem(residual);
+
+  KInductionProblem slice = residual;
+  configureOutputBatchProblem(slice, residual, 0, 2);
+  slice.deferBaseCaseChecks = true;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(slice, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The full residual public hypothesis is still tried at the parent slice.
+  // After that slice fails and splits, each leaf should use the already-failed
+  // parent conjunction as its strict KI hypothesis and avoid replaying the
+  // larger remembered residual conjunction.
+  EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+  EXPECT_NE(
+      stderrOutput.find("range [0,2) source_outputs=4"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("range [0,1) source_outputs=2"),
+      std::string::npos);
+  EXPECT_EQ(
+      stderrOutput.find("range [0,1) source_outputs=4"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailResidualBatchSkipsOversizedStoredPublicHypothesis) {
+  KInductionProblem residual;
+  residual.usesDualRailStateEncoding = true;
+  residual.deferBaseCaseChecks = true;
+  residual.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  constexpr size_t kOutputs = 4;
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    residual.state0Symbols.push_back(state0);
+    residual.state1Symbols.push_back(state1);
+    residual.allSymbols.push_back(state0);
+    residual.allSymbols.push_back(state1);
+    residual.transitions0.emplace_back(state0, BoolExpr::Var(state0));
+    residual.transitions1.emplace_back(state1, BoolExpr::Var(state1));
+    residual.observedOutputNames.push_back("out" + std::to_string(output));
+    residual.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    residual.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    residual.outputImpliedByInductionCore.push_back(false);
+  }
+  residual.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < residual.observedOutputExprs0.size(); ++output) {
+    residual.property = BoolExpr::And(
+        residual.property,
+        makeEqualityExpr(
+            residual.observedOutputExprs0[output],
+            residual.observedOutputExprs1[output]));
+  }
+  residual.property = BoolExpr::simplify(residual.property);
+  residual.bad = BoolExpr::simplify(BoolExpr::Not(residual.property));
+  residual.lazyTransitions->dualRailResidualPublicProperty = residual.property;
+  residual.lazyTransitions->dualRailResidualPublicBad = residual.bad;
+  residual.lazyTransitions->dualRailResidualPublicOutputCount = 129;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(residual, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Oversized remembered residual surfaces are not replayed at every recursive
+  // AES-style batch.  The split still uses the smaller strict public
+  // conjunction from the current four-output range.
+  EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(
+      stderrOutput.find("source_outputs=129"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("range [0,2) source_outputs=4"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailResidualLeafKeepsLocalPublicHypothesisWhenEnough) {
+  KInductionProblem residual;
+  residual.usesDualRailStateEncoding = true;
+  residual.deferBaseCaseChecks = true;
+  residual.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  constexpr size_t kOutputs = 4;
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    residual.state0Symbols.push_back(state0);
+    residual.state1Symbols.push_back(state1);
+    residual.allSymbols.push_back(state0);
+    residual.allSymbols.push_back(state1);
+    residual.transitions0.emplace_back(state0, BoolExpr::Var(state0));
+    residual.transitions1.emplace_back(state1, BoolExpr::Var(state1));
+    residual.observedOutputNames.push_back("out" + std::to_string(output));
+    residual.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    residual.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    residual.outputImpliedByInductionCore.push_back(false);
+  }
+  residual.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < residual.observedOutputExprs0.size(); ++output) {
+    residual.property = BoolExpr::And(
+        residual.property,
+        makeEqualityExpr(
+            residual.observedOutputExprs0[output],
+            residual.observedOutputExprs1[output]));
+  }
+  residual.property = BoolExpr::simplify(residual.property);
+  residual.bad = BoolExpr::simplify(BoolExpr::Not(residual.property));
+
+  defaultOutputBatchingLimitsForProblem(residual);
+
+  KInductionProblem leaf = residual;
+  configureOutputBatchProblem(leaf, residual, 0, 1);
+  leaf.deferBaseCaseChecks = true;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // If the selected public output is already inductive by itself, keep that
+  // smaller strict KI proof.  The full residual public conjunction remains only
+  // a fallback for leaves that really need cross-output public history.
+  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
+  EXPECT_EQ(
+      stderrOutput.find("source_outputs=4"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailResidualLeafCachesInconclusiveStoredPublicHypothesis) {
+  KInductionProblem residual;
+  residual.usesDualRailStateEncoding = true;
+  residual.deferBaseCaseChecks = true;
+  residual.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  constexpr size_t kOutputs = 4;
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    residual.state0Symbols.push_back(state0);
+    residual.state1Symbols.push_back(state1);
+    residual.allSymbols.push_back(state0);
+    residual.allSymbols.push_back(state1);
+    residual.transitions0.emplace_back(state0, BoolExpr::Var(state0));
+    residual.transitions1.emplace_back(state1, BoolExpr::Var(state1));
+    residual.observedOutputNames.push_back("out" + std::to_string(output));
+    residual.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    residual.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    residual.outputImpliedByInductionCore.push_back(false);
+  }
+  residual.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < residual.observedOutputExprs0.size(); ++output) {
+    residual.property = BoolExpr::And(
+        residual.property,
+        makeEqualityExpr(
+            residual.observedOutputExprs0[output],
+            residual.observedOutputExprs1[output]));
+  }
+  residual.property = BoolExpr::simplify(residual.property);
+  residual.bad = BoolExpr::simplify(BoolExpr::Not(residual.property));
+
+  defaultOutputBatchingLimitsForProblem(residual);
+
+  KInductionProblem leaf = residual;
+  configureOutputBatchProblem(leaf, residual, 0, 1);
+  leaf.deferBaseCaseChecks = true;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine firstEngine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto firstResult = firstEngine.run(0);
+  KInductionEngine secondEngine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto secondResult = secondEngine.run(0);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The cache is only for repeated UNKNOWN leaves.  It must suppress the second
+  // identical strengthened KI attempt without marking the output equivalent.
+  EXPECT_EQ(firstResult.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(secondResult.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(
+      detail::countTextOccurrences(stderrOutput, "source_outputs=4"),
+      1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailStandaloneLeafSkipsOversizedStoredPublicHypothesis) {
+  KInductionProblem leaf;
+  leaf.usesDualRailStateEncoding = true;
+  leaf.deferBaseCaseChecks = true;
+  leaf.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  leaf.state0Symbols = {10};
+  leaf.state1Symbols = {20};
+  leaf.allSymbols = {10, 20};
+  leaf.transitions0 = {{10, BoolExpr::Not(BoolExpr::Var(10))}};
+  leaf.transitions1 = {{20, BoolExpr::Var(20)}};
+  leaf.observedOutputNames = {"out0"};
+  leaf.observedOutputExprs0 = {BoolExpr::Var(10)};
+  leaf.observedOutputExprs1 = {BoolExpr::Var(20)};
+  leaf.outputImpliedByInductionCore = {false};
+  leaf.property = makeEqualityExpr(
+      leaf.observedOutputExprs0[0], leaf.observedOutputExprs1[0]);
+  leaf.bad = BoolExpr::simplify(BoolExpr::Not(leaf.property));
+  leaf.lazyTransitions->dualRailResidualPublicProperty = leaf.property;
+  leaf.lazyTransitions->dualRailResidualPublicBad = leaf.bad;
+  leaf.lazyTransitions->dualRailResidualPublicOutputCount = 129;
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine engine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The local leaf is still strict KI.  Once it is UNKNOWN, do not replay an
+  // oversized remembered AES-style public conjunction for every standalone
+  // residual bit; that only returns UNKNOWN and dominates the workflow.
+  EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(
+      stderrOutput.find("source_outputs=129"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailResidualLeafCachesLocalInconclusiveAttempt) {
+  KInductionProblem leaf;
+  leaf.usesDualRailStateEncoding = true;
+  leaf.deferBaseCaseChecks = true;
+  leaf.lazyTransitions = std::make_shared<LazyTransitionStore>();
+  leaf.state0Symbols = {10};
+  leaf.state1Symbols = {20};
+  leaf.allSymbols = {10, 20};
+  leaf.transitions0 = {{10, BoolExpr::Not(BoolExpr::Var(10))}};
+  leaf.transitions1 = {{20, BoolExpr::Var(20)}};
+  leaf.observedOutputNames = {"out0"};
+  leaf.observedOutputExprs0 = {BoolExpr::Var(10)};
+  leaf.observedOutputExprs1 = {BoolExpr::Var(20)};
+  leaf.outputImpliedByInductionCore = {false};
+  leaf.property = makeEqualityExpr(
+      leaf.observedOutputExprs0[0], leaf.observedOutputExprs1[0]);
+  leaf.bad = BoolExpr::simplify(BoolExpr::Not(leaf.property));
+
+  const ScopedEnvVar secDiag("KEPLER_SEC_KI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  KInductionEngine firstEngine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto firstResult = firstEngine.run(1);
+  KInductionEngine secondEngine(leaf, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto secondResult = secondEngine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Reusing a cached inconclusive leaf is a runtime cache only.  The second
+  // identical strict KI attempt should not rebuild the induction step, and it
+  // must still report inconclusive rather than covered.
+  EXPECT_EQ(firstResult.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(firstResult.bound, 1u);
+  EXPECT_EQ(secondResult.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(secondResult.bound, 1u);
+  EXPECT_EQ(
+      detail::countTextOccurrences(stderrOutput, "k-induction step k=1 begin"),
+      1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

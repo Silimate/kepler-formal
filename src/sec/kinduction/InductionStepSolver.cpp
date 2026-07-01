@@ -204,7 +204,6 @@ bool isWideDualRailResidualSurface(const KInductionProblem& problem) {
 
 bool requiresConcreteDualRailStateDomain(const KInductionProblem& problem) {
   return problem.usesDualRailStateEncoding &&
-         !problem.deferBaseCaseChecks &&
          (problem.hasCompleteBootstrapStateAssignments() ||
           problem.hasCompleteInitialState());
 }
@@ -222,11 +221,13 @@ size_t directDualRailProofProfileSymbols(const KInductionProblem& problem,
 }
 
 bool shouldUseDirectCdclProfileForLimitedDualRailLeaf(
-    const KInductionProblem& problem) {
+    const KInductionProblem& problem,
+    const InductionCoi& coi) {
+  (void)coi;
   // Deferred leaves are residual coverage attempts created after output
-  // splitting.  Use the direct CDCL option mix only when the leaf is already
-  // large enough to get a default decision cap; UNKNOWN still means "not
-  // proved" and never becomes coverage.
+  // splitting.  Use the direct CDCL option mix only when the parent rail-state
+  // surface is large enough to get a default decision cap; UNKNOWN still means
+  // "not proved" and never becomes coverage.
   return isLargeDeferredDualRailLeafSurface(problem);
 }
 
@@ -823,9 +824,10 @@ void addDualRailStateValidity(
           variables.getLiteral(rails.mayBeZero, frame)});
       if (requireExactRails) {
         // Complete bootstrap/initial assignments describe concrete Boolean
-        // states, not an unknown value set.  The dual-rail transition encoding
-        // preserves exact rails for concrete inputs, so keep induction inside
-        // that exact state domain instead of allowing synthetic unknown rails.
+        // states, not an unknown value set.  Even deferred output slices owe
+        // the same shared concrete base prefix, so keep strict KI inside the
+        // per-design exact rail domain instead of proving over synthetic
+        // unknown rails.
         solver.addClause({
             -variables.getLiteral(rails.mayBeOne, frame),
             -variables.getLiteral(rails.mayBeZero, frame)});
@@ -910,7 +912,9 @@ InductionProofStatus proveByInductionStatus(
         directDualRailProofProfileSymbols(problem, coi.solverSymbols.size());
     solver.configureForSecDualRailConeProof(
         profileSymbols);
-    if (shouldUseDirectCdclProfileForLimitedDualRailLeaf(problem)) {
+    const bool useDirectCdcl =
+        shouldUseDirectCdclProfileForLimitedDualRailLeaf(problem, coi);
+    if (useDirectCdcl) {
       solver.configureForSecLocalBooleanCheck(profileSymbols);
     }
     if (isInductionStepCoiDiagEnabled()) {
@@ -920,7 +924,7 @@ InductionProofStatus proveByInductionStatus(
           " solver_symbols=", coi.solverSymbols.size(),
           " profile_symbols=", profileSymbols,
           " direct_cdcl=",
-          shouldUseDirectCdclProfileForLimitedDualRailLeaf(problem) ? 1 : 0);
+          useDirectCdcl ? 1 : 0);
     }
   } else if (problem.usesDualRailStateEncoding) {
     // Deferred residual leaves are rebuilt one output at a time.  Even when a
