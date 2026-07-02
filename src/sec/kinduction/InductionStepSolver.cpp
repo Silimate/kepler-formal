@@ -105,6 +105,8 @@ namespace {
 constexpr size_t kMaxSimplePathStateSymbols = 4096;
 constexpr size_t kMinOriginalOutputsForCompactDualRailProfile = 64;
 constexpr size_t kMinDeferredRailStateSymbolsForDirectProfile = 512;
+constexpr size_t kMaxExactTransitionNodeCountHintTargets = 2048;
+constexpr size_t kMaxTransitionNodeCountHint = 262144;
 constexpr unsigned kDefaultDualRailLeafInductionDecisionLimit = 5000;
 // Matches SATSolverWrapper's dual-rail no-preprocess cutoff.  Batched
 // resource-limited probes still need the UNSAT-oriented proof profile, but
@@ -258,6 +260,31 @@ size_t countFrameSupportSymbols(
     count += support.size();
   }
   return count;
+}
+
+size_t boundedAddForReserveHint(size_t lhs, size_t rhs, size_t limit) {
+  if (lhs >= limit || rhs >= limit - lhs) {
+    return limit;
+  }
+  return lhs + rhs;
+}
+
+size_t transitionRelationNodeReserveHint(
+    const TransitionExprResolver& transitionByState,
+    const std::vector<size_t>& targets,
+    const std::vector<size_t>& supportSymbols) {
+  if (targets.size() > kMaxExactTransitionNodeCountHintTargets) {
+    return supportSymbols.size();
+  }
+
+  size_t exactNodeHint = 0;
+  for (const auto stateSymbol : targets) {
+    exactNodeHint = boundedAddForReserveHint(
+        exactNodeHint,
+        transitionByState.nodeCount(stateSymbol),
+        kMaxTransitionNodeCountHint);
+  }
+  return std::max(supportSymbols.size(), exactNodeHint);
 }
 
 size_t countStateEqualityPairsInCoi(
@@ -756,10 +783,19 @@ void addTransitionRelation(SATSolverWrapper& solver,
   // transition read-set computed by the strict KI COI pass instead of every
   // solver symbol; this emits the same transition clauses while avoiding a wide
   // per-frame leaf table for unrelated state and output cones.
+  const size_t reserveHint =
+      transitionRelationNodeReserveHint(transitionByState, targets, supportSymbols);
+  if (isInductionStepCoiDiagEnabled() && reserveHint > supportSymbols.size()) {
+    emitSecDiag(
+        "SEC diag: k-induction transition node reserve targets=",
+        targets.size(),
+        " support=", supportSymbols.size(),
+        " expected_nodes=", reserveHint);
+  }
   FrameFormulaEncoder encoder(
       solver,
       variables.makeLeafLits(frame, supportSymbols),
-      supportSymbols.size());
+      reserveHint);
   for (const auto stateSymbol : targets) {
     BoolExpr* expr = transitionByState.at(stateSymbol);
     addLiteralEquivalence(

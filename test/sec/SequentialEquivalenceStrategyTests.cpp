@@ -10849,6 +10849,45 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       KInductionUsesTransitionNodeCountReserveHint) {
+  KInductionProblem problem;
+  constexpr size_t state0 = 2;
+  constexpr size_t state1 = 3;
+  constexpr size_t inputA = 4;
+  constexpr size_t inputB = 5;
+  BoolExpr* sharedCone =
+      makeRepeatedSmallSupportCone(inputA, inputB, /*depth=*/24);
+  problem.state0Symbols = {state0};
+  problem.state1Symbols = {state1};
+  problem.inputSymbols = {inputA, inputB};
+  problem.allSymbols = {state0, state1, inputA, inputB};
+  problem.transitions0 = {{state0, sharedCone}};
+  problem.transitions1 = {{state1, sharedCone}};
+  problem.property = makeEqualityExpr(BoolExpr::Var(state0), BoolExpr::Var(state1));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
+  testing::internal::CaptureStderr();
+  const auto proofStatus = proveByInductionStatus(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      1,
+      std::nullopt);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The strict KI transition relation still uses the exact frame support for
+  // leaves, but the encoder now reserves from the transition DAG node count so
+  // deep small-support cones do not repeatedly grow their SAT-side cache.
+  EXPECT_EQ(proofStatus, InductionProofStatus::Proved);
+  EXPECT_NE(
+      stderrOutput.find("k-induction transition node reserve"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("support=2"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        DualRailBatchedKInductionReturnsInconclusiveOnDecisionBudget) {
   KInductionProblem problem;
   constexpr size_t state0 = 2;
