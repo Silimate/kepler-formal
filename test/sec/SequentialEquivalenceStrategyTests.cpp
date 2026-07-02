@@ -8209,7 +8209,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineSkipsPredecessorCoresForHugeBroadDualRailBlockedCubes) {
+       PDREngineUsesCachedCoreForHugeBroadDualRailBlockedCubes) {
   KInductionProblem problem;
   constexpr size_t kTargetStateCount = 12;
   constexpr size_t kSupportStateCount = 160;
@@ -8265,8 +8265,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  // The fresh predecessor-core oracle must still be skipped on this broad
+  // dual-rail surface, but the already-run cached predecessor query now gives
+  // us the failed-assumption core for free.
   EXPECT_NE(
       stderrOutput.find("skipped dual-rail predecessor core"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor cached core target=12->1 source_level=0"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("predecessor core target="), std::string::npos)
@@ -8555,6 +8562,255 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << "test data must expose non-sorted unordered_set traversal";
 
   EXPECT_EQ(detail::makeDeterministicPdrWorklist(symbols), expected);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrOrderedClauseFingerprintSeparatesProjectedRetries) {
+  struct ClauseLiteralForFingerprintTest {
+    size_t symbol = 0;
+    bool positive = false;
+  };
+  using ClauseForFingerprintTest =
+      std::vector<ClauseLiteralForFingerprintTest>;
+  const std::vector<ClauseForFingerprintTest> emptyClauses;
+  const std::vector<ClauseForFingerprintTest> retryClauses = {
+      {{2, true}, {3, false}}, {{5, true}}};
+  const std::vector<ClauseForFingerprintTest> sameClauses = {
+      {{2, true}, {3, false}}, {{5, true}}};
+  const std::vector<ClauseForFingerprintTest> reorderedClauses = {
+      {{5, true}}, {{2, true}, {3, false}}};
+  const std::vector<ClauseForFingerprintTest> polarityChangedClauses = {
+      {{2, true}, {3, true}}, {{5, true}}};
+
+  // Projected PDR retries use this fingerprint in the predecessor result-cache
+  // key. Empty means "no extra retry clauses"; every real local refinement must
+  // remain distinct so cached UNSAT/SAT answers cannot leak across retries.
+  EXPECT_EQ(detail::pdrOrderedClauseFingerprint(emptyClauses), 0u);
+  EXPECT_EQ(
+      detail::pdrOrderedClauseFingerprint(retryClauses),
+      detail::pdrOrderedClauseFingerprint(sameClauses));
+  EXPECT_NE(
+      detail::pdrOrderedClauseFingerprint(retryClauses),
+      detail::pdrOrderedClauseFingerprint(reorderedClauses));
+  EXPECT_NE(
+      detail::pdrOrderedClauseFingerprint(retryClauses),
+      detail::pdrOrderedClauseFingerprint(polarityChangedClauses));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrMergeSortedSymbolVectorsKeepsStableSurfaceSortedUnique) {
+  const std::vector<size_t> stableSurface = {2, 4, 8, 16};
+  const std::vector<size_t> localSymbols = {3, 4, 16, 32};
+
+  const std::vector<size_t> merged =
+      detail::mergeSortedPdrSymbolVectors(stableSurface, localSymbols);
+
+  // Local dual-rail predecessor caching uses this instead of rebuilding a
+  // large unordered_set and sorting it on every query. The result must still be
+  // the exact sorted union used by FrameVariableStore.
+  const std::vector<size_t> expected = {2, 3, 4, 8, 16, 32};
+  EXPECT_EQ(merged, expected);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrWidenSortedSymbolSurfaceOnlyAddsMissingSymbols) {
+  std::vector<size_t> stableSurface = {2, 4, 8};
+
+  EXPECT_FALSE(
+      detail::widenSortedPdrSymbolSurface(stableSurface, {2, 8}));
+  EXPECT_EQ(stableSurface, (std::vector<size_t>{2, 4, 8}));
+
+  // Local dual-rail predecessor caches use this to keep one solver alive when
+  // neighboring target cubes add a few non-state support symbols. The widened
+  // surface must stay sorted/unique because it becomes the SAT variable list.
+  EXPECT_TRUE(
+      detail::widenSortedPdrSymbolSurface(stableSurface, {3, 4, 9}));
+  EXPECT_EQ(stableSurface, (std::vector<size_t>{2, 3, 4, 8, 9}));
+
+  EXPECT_FALSE(
+      detail::widenSortedPdrSymbolSurface(stableSurface, {2, 3, 9}));
+  EXPECT_EQ(stableSurface, (std::vector<size_t>{2, 3, 4, 8, 9}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrStableLocalPredecessorCacheSurfaceIsLevelZeroOnly) {
+  // The stable solver surface is only a cache optimization for startup/frontier
+  // local leaves. Level-1+ predecessor retries must stay on their exact local
+  // symbol surface so Swerv does not spend budgets on broad SAT instances.
+  EXPECT_TRUE(
+      detail::shouldUseStableLocalPredecessorCacheSurface(true, true, 0));
+  EXPECT_FALSE(
+      detail::shouldUseStableLocalPredecessorCacheSurface(true, true, 1));
+  EXPECT_FALSE(
+      detail::shouldUseStableLocalPredecessorCacheSurface(true, false, 0));
+  EXPECT_FALSE(
+      detail::shouldUseStableLocalPredecessorCacheSurface(false, true, 0));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrPredecessorUnsatCoreSharingUsesBaseContextOnly) {
+  // A predecessor UNSAT core can be reused for stronger target cubes only when
+  // it came from the monotonic base frame context. Selector assumptions and
+  // projected retry clauses stay target-local.
+  EXPECT_TRUE(detail::shouldSharePredecessorUnsatCore(
+      /*frameFingerprint=*/0,
+      /*extraFrameFingerprint=*/0,
+      /*excludeTargetOnCurrentFrame=*/false));
+  EXPECT_FALSE(detail::shouldSharePredecessorUnsatCore(
+      /*frameFingerprint=*/7,
+      /*extraFrameFingerprint=*/0,
+      /*excludeTargetOnCurrentFrame=*/false));
+  EXPECT_FALSE(detail::shouldSharePredecessorUnsatCore(
+      /*frameFingerprint=*/0,
+      /*extraFrameFingerprint=*/11,
+      /*excludeTargetOnCurrentFrame=*/false));
+  EXPECT_FALSE(detail::shouldSharePredecessorUnsatCore(
+      /*frameFingerprint=*/0,
+      /*extraFrameFingerprint=*/0,
+      /*excludeTargetOnCurrentFrame=*/true));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrLargeDualRailPredecessorResetFrontierRepairUsesLocalF0Only) {
+  EXPECT_TRUE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
+      /*usesDualRailStateEncoding=*/true,
+      /*exactResetFrontierChecksEnabled=*/false,
+      /*observedOutputCount=*/1,
+      /*level=*/0,
+      /*targetCubeSize=*/32,
+      /*transitionSupportSize=*/4096,
+      /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_TRUE(
+      detail::shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
+          /*usesDualRailStateEncoding=*/true,
+          /*exactResetFrontierChecksEnabled=*/false,
+          /*observedOutputCount=*/1,
+          /*level=*/0,
+          /*targetCubeSize=*/32,
+          /*transitionSupportSize=*/4096,
+          /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_FALSE(
+      detail::shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
+          /*usesDualRailStateEncoding=*/true,
+          /*exactResetFrontierChecksEnabled=*/false,
+          /*observedOutputCount=*/1,
+          /*level=*/0,
+          /*targetCubeSize=*/16,
+          /*transitionSupportSize=*/4096,
+          /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_FALSE(
+      detail::shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
+          /*usesDualRailStateEncoding=*/true,
+          /*exactResetFrontierChecksEnabled=*/false,
+          /*observedOutputCount=*/1,
+          /*level=*/0,
+          /*targetCubeSize=*/32,
+          /*transitionSupportSize=*/3999,
+          /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_FALSE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
+      /*usesDualRailStateEncoding=*/true,
+      /*exactResetFrontierChecksEnabled=*/true,
+      /*observedOutputCount=*/1,
+      /*level=*/0,
+      /*targetCubeSize=*/32,
+      /*transitionSupportSize=*/4096,
+      /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_FALSE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
+      /*usesDualRailStateEncoding=*/true,
+      /*exactResetFrontierChecksEnabled=*/false,
+      /*observedOutputCount=*/2,
+      /*level=*/0,
+      /*targetCubeSize=*/32,
+      /*transitionSupportSize=*/4096,
+      /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_FALSE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
+      /*usesDualRailStateEncoding=*/true,
+      /*exactResetFrontierChecksEnabled=*/false,
+      /*observedOutputCount=*/1,
+      /*level=*/1,
+      /*targetCubeSize=*/32,
+      /*transitionSupportSize=*/4096,
+      /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_FALSE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
+      /*usesDualRailStateEncoding=*/true,
+      /*exactResetFrontierChecksEnabled=*/false,
+      /*observedOutputCount=*/1,
+      /*level=*/0,
+      /*targetCubeSize=*/33,
+      /*transitionSupportSize=*/4096,
+      /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_FALSE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
+      /*usesDualRailStateEncoding=*/true,
+      /*exactResetFrontierChecksEnabled=*/false,
+      /*observedOutputCount=*/1,
+      /*level=*/0,
+      /*targetCubeSize=*/32,
+      /*transitionSupportSize=*/8193,
+      /*exactResetPrecheckSupportLimit=*/8192));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrExactResetPredecessorSiblingSeedingCoversResidualCubeSize) {
+  // Swerv residual dual-rail leaves produce 32-literal cubes whose exact reset
+  // proof often minimizes to one singleton.  Seeding sibling singletons from
+  // that same reset context avoids rediscovering the bus one full cube at a
+  // time, while 33+ literal broad cubes stay outside this bounded shortcut.
+  EXPECT_TRUE(
+      detail::shouldSeedExactResetPredecessorSiblingCores(
+          /*cubeSize=*/32,
+          /*knownCoreSize=*/1));
+  EXPECT_FALSE(
+      detail::shouldSeedExactResetPredecessorSiblingCores(
+          /*cubeSize=*/33,
+          /*knownCoreSize=*/1));
+  EXPECT_FALSE(
+      detail::shouldSeedExactResetPredecessorSiblingCores(
+          /*cubeSize=*/32,
+          /*knownCoreSize=*/2));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrResidualDualRailPredecessorBudgetCoversLocalLeafShape) {
+  // Swerv final dual-rail leaves can produce 28-32 literal residual targets
+  // with a local 9k-15k symbol solver surface. Those are not broad batches, so
+  // they should use the restored residual predecessor budget instead of the
+  // lightweight batch retry cap.
+  EXPECT_TRUE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          true, /*observedOutputCount=*/1, /*level=*/0,
+          /*targetCubeSize=*/32,
+          /*solverSymbolCount=*/16 * 1024));
+  EXPECT_TRUE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          true, /*observedOutputCount=*/1, /*level=*/1,
+          /*targetCubeSize=*/16,
+          /*solverSymbolCount=*/8192));
+
+  EXPECT_FALSE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          true, /*observedOutputCount=*/2, /*level=*/0,
+          /*targetCubeSize=*/32,
+          /*solverSymbolCount=*/16 * 1024));
+  EXPECT_FALSE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          true, /*observedOutputCount=*/1, /*level=*/1,
+          /*targetCubeSize=*/32,
+          /*solverSymbolCount=*/16 * 1024));
+  EXPECT_FALSE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          true, /*observedOutputCount=*/1, /*level=*/0,
+          /*targetCubeSize=*/33,
+          /*solverSymbolCount=*/16 * 1024));
+  EXPECT_FALSE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          true, /*observedOutputCount=*/1, /*level=*/0,
+          /*targetCubeSize=*/32,
+          /*solverSymbolCount=*/16 * 1024 + 1));
+  EXPECT_FALSE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          false, /*observedOutputCount=*/1, /*level=*/0,
+          /*targetCubeSize=*/32,
+          /*solverSymbolCount=*/16 * 1024));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -15196,9 +15452,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
       // hidden fallback.
       EXPECT_EQ(
           budgetedPdrResult.status, SequentialEquivalenceStatus::Equivalent);
-      EXPECT_EQ(budgetedPdrResult.coveredOutputs, 3u);
+      EXPECT_EQ(budgetedPdrResult.coveredOutputs, 1u);
       EXPECT_EQ(budgetedPdrResult.totalOutputs, 3u);
-      EXPECT_TRUE(budgetedPdrResult.skippedObservedOutputs.empty());
+      ASSERT_EQ(budgetedPdrResult.skippedObservedOutputs.size(), 2u);
+      EXPECT_NE(
+          budgetedPdrResult.skippedObservedOutputs[0].find(
+              "dual-rail PDR repair was inconclusive"),
+          std::string::npos);
+      EXPECT_NE(
+          budgetedPdrResult.skippedObservedOutputs[1].find(
+              "dual-rail PDR repair was inconclusive"),
+          std::string::npos);
       EXPECT_NE(stderrOutput.find("closure_limit=1"), std::string::npos);
       EXPECT_EQ(stderrOutput.find("trying k-induction"), std::string::npos);
     }
@@ -16092,6 +16356,88 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // top-level SEC strategy immediately validates every PDR difference with the
   // exact bounded base-case query above before accepting it.
   EXPECT_EQ(result.status, PDRStatus::Different);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailLocalF0SkipsResetFrontierPrecheckForMediumCube) {
+  KInductionProblem problem;
+  constexpr size_t reset = 100;
+  problem.usesDualRailStateEncoding = true;
+  std::vector<size_t> xs;
+  std::vector<size_t> ys;
+  xs.reserve(16);
+  ys.reserve(16);
+  for (size_t bit = 0; bit < 16; ++bit) {
+    xs.push_back(2 + bit);
+    ys.push_back(32 + bit);
+  }
+  problem.state0Symbols = xs;
+  problem.state0Symbols.insert(
+      problem.state0Symbols.end(), ys.begin(), ys.end());
+  problem.inputSymbols = {reset};
+  problem.allSymbols = problem.state0Symbols;
+  problem.allSymbols.push_back(reset);
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  // The abstract bootstrap summary leaves every y bit unconstrained, but the
+  // concrete reset unroll below forces all y bits to 0.  A local dual-rail F0
+  // predecessor query can therefore invent the all-ones y vector. This medium
+  // cube is still cheaper to try through ordinary PDR first; the early exact
+  // reset-frontier repair is reserved for larger, high-support residual cubes.
+  for (const size_t x : xs) {
+    problem.bootstrapStateAssignments.emplace_back(x, false);
+  }
+  for (size_t bit = 0; bit < xs.size(); ++bit) {
+    problem.transitions0.emplace_back(
+        xs[bit],
+        BoolExpr::And(
+            BoolExpr::Not(BoolExpr::Var(reset)), BoolExpr::Var(ys[bit])));
+    problem.transitions0.emplace_back(ys[bit], BoolExpr::createFalse());
+  }
+  BoolExpr* bad = BoolExpr::createTrue();
+  for (const size_t x : xs) {
+    bad = BoolExpr::And(bad, BoolExpr::Var(x));
+  }
+  problem.bad = BoolExpr::simplify(bad);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {problem.bad};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"dual_rail_local_reset_frontier"};
+
+  ASSERT_FALSE(
+      findBaseCounterexample(
+          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
+          .has_value());
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/false);
+  const auto result = engine.run(3);
+  (void)result;
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(
+      stderrOutput.find("predecessor reset-frontier precheck"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("predecessor query budget exhausted"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17224,6 +17570,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
   addLargeDualRailResetFrontierSurfaceForTest(problem);
+  auto lazyTransitions = std::make_shared<LazyTransitionStore>();
+  lazyTransitions->remappedByStateSymbol.emplace(state, BoolExpr::Var(state));
+  lazyTransitions->remapMemoByDesign[0].emplace(
+      BoolExpr::Var(state), BoolExpr::Var(state));
+  lazyTransitions->dualRailRemapMemoByDesign[0].emplace(
+      BoolExpr::Var(state),
+      DualRailBoolExpr{BoolExpr::Var(state), BoolExpr::Not(BoolExpr::Var(state))});
+  lazyTransitions->supportByStateSymbol.emplace(
+      state, std::set<size_t>{state, reset});
+  lazyTransitions->nodeCountByStateSymbol.emplace(state, 2);
+  problem.lazyTransitions = lazyTransitions;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   testing::internal::CaptureStderr();
@@ -17243,6 +17600,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
           "released large dual-rail reset-frontier memory reason=pdr_run_exit"),
       std::string::npos)
       << stderrOutput;
+  // The release hook must drop materialized BoolExpr remaps, but keep compact
+  // support metadata so sibling dual-rail PDR batches do not repeat the same
+  // lazy transition DAG walks.
+  EXPECT_TRUE(lazyTransitions->remappedByStateSymbol.empty());
+  EXPECT_TRUE(lazyTransitions->remapMemoByDesign[0].empty());
+  EXPECT_TRUE(lazyTransitions->dualRailRemapMemoByDesign[0].empty());
+  EXPECT_FALSE(lazyTransitions->supportByStateSymbol.empty());
+  EXPECT_FALSE(lazyTransitions->nodeCountByStateSymbol.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -19696,8 +20061,58 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("bad cube cached frame clauses added="),
       std::string::npos)
       << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("source=frame_log"),
+      std::string::npos)
+      << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("repeated projected bad cube exhausted"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailBadCubeSkipsUnchangedFrameClauseSync) {
+  KInductionProblem problem;
+  constexpr size_t state = 2;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {state};
+  problem.allSymbols = {state};
+  problem.totalStateCount = 1;
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(state));
+  problem.initialStateAssignments = {{state, false}};
+  problem.initializedStateCount = 1;
+  problem.transitions0.emplace_back(state, BoolExpr::Var(state));
+  problem.observedOutputExprs0 = {
+      BoolExpr::Var(state),
+      BoolExpr::Not(BoolExpr::Var(state))};
+  problem.observedOutputExprs1 = {
+      BoolExpr::createFalse(),
+      BoolExpr::createFalse()};
+  problem.observedOutputNames = {"state_is_one", "state_is_zero"};
+  problem.bad = BoolExpr::Or(
+      BoolExpr::Var(state), BoolExpr::Not(BoolExpr::Var(state)));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
+      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0);
+  (void)engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Two output-bad formulas share the same frame and symbol surface. The
+  // cached bad-cube solver should not rescan already synchronized frame clauses
+  // before asking the second formula.
+  EXPECT_NE(
+      stderrOutput.find("bad cube cached frame clauses unchanged"),
       std::string::npos)
       << stderrOutput;
 }
@@ -20651,6 +21066,58 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailPredecessorReusesCachedFallback) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB};
+  problem.allSymbols = {targetState, stateA, stateB};
+  problem.totalStateCount = 3;
+
+  problem.transitions0 = {
+      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"single_output_cached_retry"};
+
+  const ScopedEnvVar decisionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  // The fallback should spend its retry budget in the already encoded cached
+  // predecessor solver instead of reconstructing the same frame and transition
+  // cone as a fresh SAT instance.
+  EXPECT_NE(
+      stderrOutput.find("cached_assumptions=unknown retry=cached_solver"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("cached_solver_retry=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDualRailSingleOutputResidualRaisesPredecessorBudget) {
   KInductionProblem problem;
   constexpr size_t targetState = 2;
@@ -20682,9 +21149,79 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // Final single-output dual-rail repairs are still ordinary PDR predecessor
-  // checks, but BP needs a deeper local SAT budget than broad batches do.
+  // checks, and the residual predecessor budget must stay at the original
+  // proof-search bound. Runtime fixes should reduce rebuild cost instead of
+  // shrinking this legal PDR search budget.
   EXPECT_NE(
       stderrOutput.find("conflict_limit=200000"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailSingleOutputUsesStableCachedPredecessorSurface) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  constexpr size_t decoyState = 5;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB, decoyState};
+  problem.allSymbols = {targetState, stateA, stateB, decoyState};
+  problem.totalStateCount = 4;
+
+  problem.transitions0 = {
+      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)},
+      {decoyState, BoolExpr::Var(decoyState)}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"single_output_stable_cache"};
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true);
+  (void)engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Single-output dual-rail leaves should build the reusable cached
+  // predecessor solver on the stable local surface. The unrelated decoy state
+  // must not be pulled in merely because this is a dual-rail leaf.
+  EXPECT_NE(
+      stderrOutput.find("solver_symbols=3 cached_solver_symbols=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "predecessor cached solver created level=0 symbols=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor frame symbol cache built level=0"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor transition encoder cached"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor closed symbol cache seed="),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor target surface cached"),
       std::string::npos)
       << stderrOutput;
 }

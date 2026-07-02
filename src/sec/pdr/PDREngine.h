@@ -6,6 +6,9 @@
 #include "../../config/Config.h"
 #include "kinduction/KInductionProblem.h"
 
+#include <algorithm>
+#include <functional>
+#include <iterator>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -51,6 +54,172 @@ bool pdrCubeLiteralOrderLess(size_t lhsSymbol,
 bool pdrCubeAssignmentOrderLess(
     const std::vector<std::pair<size_t, bool>>& lhs,
     const std::vector<std::pair<size_t, bool>>& rhs);
+
+inline void mixPdrClauseFingerprintValue(size_t& seed, size_t value) {
+  seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+}
+
+template <typename ClauseRange>
+size_t pdrOrderedClauseFingerprint(const ClauseRange& clauses) {
+  if (clauses.empty()) {
+    return 0;
+  }
+  // This is used for cache identity only. Keep order in the hash so two retry
+  // clause vectors with the same clauses in different order do not require
+  // normalization on the hot predecessor path.
+  size_t seed = std::hash<size_t>()(clauses.size());
+  for (const auto& clause : clauses) {
+    size_t clauseSeed = 0x517cc1b727220a95ULL;
+    for (const auto& literal : clause) {
+      mixPdrClauseFingerprintValue(
+          clauseSeed, std::hash<size_t>()(literal.symbol));
+      mixPdrClauseFingerprintValue(
+          clauseSeed, std::hash<bool>()(literal.positive));
+    }
+    mixPdrClauseFingerprintValue(seed, clauseSeed);
+  }
+  return seed;
+}
+
+inline std::vector<size_t> mergeSortedPdrSymbolVectors(
+    const std::vector<size_t>& lhs,
+    const std::vector<size_t>& rhs) {
+  std::vector<size_t> merged;
+  merged.reserve(lhs.size() + rhs.size());
+  std::set_union(
+      lhs.begin(),
+      lhs.end(),
+      rhs.begin(),
+      rhs.end(),
+      std::back_inserter(merged));
+  return merged;
+}
+
+inline bool widenSortedPdrSymbolSurface(
+    std::vector<size_t>& stableSurface,
+    const std::vector<size_t>& requestedSurface) {
+  if (std::includes(
+          stableSurface.begin(),
+          stableSurface.end(),
+          requestedSurface.begin(),
+          requestedSurface.end())) {
+    return false;
+  }
+  // Keep the widened surface sorted and unique so it can be reused directly as
+  // a FrameVariableStore symbol list and as part of the cache key.
+  stableSurface =
+      mergeSortedPdrSymbolVectors(stableSurface, requestedSurface);
+  return true;
+}
+
+inline bool shouldUseStableLocalPredecessorCacheSurface(
+    bool hasLocalDualRailLeafRepairSurface,
+    bool exactFrameClauses,
+    size_t level) {
+  // Stable local-leaf caches are a startup/frontier optimization. Higher PDR
+  // levels already carry learned-frame context; keeping those queries on their
+  // exact local surface avoids turning a small predecessor retry into a broad
+  // SAT instance.
+  return hasLocalDualRailLeafRepairSurface && exactFrameClauses && level == 0;
+}
+
+inline bool shouldUseResidualDualRailPredecessorBudget(
+    bool usesDualRailStateEncoding,
+    size_t observedOutputCount,
+    size_t level,
+    size_t targetCubeSize,
+    size_t solverSymbolCount) {
+  constexpr size_t kMaxOriginalResidualTargetCubeLiterals = 16;
+  constexpr size_t kMaxOriginalResidualSolverSymbols = 8192;
+  constexpr size_t kMaxResidualTargetCubeLiterals = 32;
+  constexpr size_t kMaxResidualSolverSymbols = 16 * 1024;
+  // Residual one-output dual-rail leaves are still local proof obligations even
+  // when a rail-expanded output predicate reaches 28-32 literals. Keep broad
+  // batches on the cheap limit, but let these local leaves spend the intended
+  // residual predecessor budget instead of splitting on the 10k retry cap. The
+  // wider Swerv shape is startup-only; higher PDR levels can enumerate many
+  // sibling cubes, so they keep the historical small residual guard.
+  const bool originalSmallResidualShape =
+      targetCubeSize <= kMaxOriginalResidualTargetCubeLiterals &&
+      solverSymbolCount <= kMaxOriginalResidualSolverSymbols;
+  const bool localStartupResidualShape =
+      level == 0 &&
+      targetCubeSize <= kMaxResidualTargetCubeLiterals &&
+      solverSymbolCount <= kMaxResidualSolverSymbols;
+  return usesDualRailStateEncoding &&
+         observedOutputCount == 1 &&
+         targetCubeSize != 0 &&
+         (originalSmallResidualShape || localStartupResidualShape);
+}
+
+inline bool shouldSharePredecessorUnsatCore(
+    size_t frameFingerprint,
+    size_t extraFrameFingerprint,
+    bool excludeTargetOnCurrentFrame) {
+  // A predecessor core is reusable for stronger target cubes only in the base
+  // PDR context.  Do not share proofs that may have depended on selector
+  // assumptions or one-off projected retry clauses.
+  return frameFingerprint == 0 &&
+         extraFrameFingerprint == 0 &&
+         !excludeTargetOnCurrentFrame;
+}
+
+inline bool shouldRetryLargeDualRailPredecessorWithResetFrontier(
+    bool usesDualRailStateEncoding,
+    bool exactResetFrontierChecksEnabled,
+    size_t observedOutputCount,
+    size_t level,
+    size_t targetCubeSize,
+    size_t transitionSupportSize,
+    size_t exactResetPrecheckSupportLimit) {
+  constexpr size_t kMaxRetryTargetCubeLiterals = 32;
+  // This exact proof is a local repair for hard one-output dual-rail leaves.
+  // Keep the broad reset-frontier path off for batches and higher frames; the
+  // caller may use it either before the expensive predecessor SAT attempt or as
+  // a last-chance proof after a resource-limited SAT query returns unknown.
+  return usesDualRailStateEncoding &&
+         !exactResetFrontierChecksEnabled &&
+         observedOutputCount == 1 &&
+         level == 0 &&
+         targetCubeSize != 0 &&
+         targetCubeSize <= kMaxRetryTargetCubeLiterals &&
+         transitionSupportSize <= exactResetPrecheckSupportLimit;
+}
+
+inline bool shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
+    bool usesDualRailStateEncoding,
+    bool exactResetFrontierChecksEnabled,
+    size_t observedOutputCount,
+    size_t level,
+    size_t targetCubeSize,
+    size_t transitionSupportSize,
+    size_t exactResetPrecheckSupportLimit) {
+  constexpr size_t kMinPrecheckTargetCubeLiterals = 28;
+  constexpr size_t kMinPrecheckTransitionSupport = 4000;
+  // Small local cubes are usually cheaper as ordinary predecessor SAT queries.
+  // Spend the exact reset-frontier query up front only on the residual cube
+  // shape that otherwise burns the restored predecessor budget first.
+  return targetCubeSize >= kMinPrecheckTargetCubeLiterals &&
+         transitionSupportSize >= kMinPrecheckTransitionSupport &&
+         shouldRetryLargeDualRailPredecessorWithResetFrontier(
+             usesDualRailStateEncoding,
+             exactResetFrontierChecksEnabled,
+             observedOutputCount,
+             level,
+             targetCubeSize,
+             transitionSupportSize,
+             exactResetPrecheckSupportLimit);
+}
+
+inline bool shouldSeedExactResetPredecessorSiblingCores(
+    size_t cubeSize,
+    size_t knownCoreSize) {
+  constexpr size_t kMaxSiblingSeedCubeLiterals = 32;
+  // Seeding singleton siblings is a bounded reuse of an already-built exact
+  // reset-frontier context.  Keep it aligned with the PDR bad-cube cap so
+  // whole-chip rail surfaces cannot trigger an unbounded sweep.
+  return cubeSize <= kMaxSiblingSeedCubeLiterals && knownCoreSize == 1;
+}
 
 }  // namespace detail
 
