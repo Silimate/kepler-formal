@@ -22,7 +22,11 @@ constexpr OutputBatchingLimits kDualRailOutputBatchingLimits{8, 256};
 constexpr OutputBatchingLimits kSmallDualRailOutputBatchingLimits{32, 4096};
 constexpr size_t kMaxSmallDualRailBatchOutputs = 32;
 constexpr size_t kMaxSmallDualRailBatchStateSymbols = 512;
-constexpr size_t kMinHugeDualRailBatchStateSymbols = 100000;
+// Swerv has 45,096 same-design rail pairs, i.e. 90,192 rail symbols after
+// dual-rail expansion.  Treat that surface like BP-sized residuals so strict KI
+// starts directly at one-output leaves instead of rebuilding broad UNKNOWN
+// batches only to split them.
+constexpr size_t kMinHugeDualRailBatchStateSymbols = 65536;
 
 void appendOutputSupport(const KInductionProblem& problem,
                          size_t outputIndex,

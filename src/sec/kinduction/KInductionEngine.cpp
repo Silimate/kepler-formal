@@ -29,7 +29,10 @@ bool isKInductionDiagEnabled() {
 constexpr size_t kMinOutputsForBatchedProof = 2;
 constexpr size_t kMinOriginalOutputsForBoundedBatch = 64;
 constexpr size_t kMinDeferredRailStateSymbolsForEarlyStop = 512;
-constexpr size_t kHugeDeferredRailStateSymbolsForEarlyStop = 100000;
+// Swerv-scale dual-rail residuals have about 90k rail symbols.  Once a strict
+// one-output deferred leaf hits the SAT decision cap, more k-depth rebuilds do
+// not add proof strength; they only delay reporting that leaf as uncovered.
+constexpr size_t kHugeDeferredRailStateSymbolsForEarlyStop = 65536;
 constexpr size_t kDefaultDeferredDualRailLeafResourceLimitStops = 4;
 constexpr size_t kHugeDeferredDualRailLeafResourceLimitStops = 1;
 constexpr size_t kMaxCompactDualRailConjunctionOutputs = 32;

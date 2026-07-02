@@ -9206,7 +9206,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("resource-limited; deferred base continues"),
       std::string::npos);
   EXPECT_NE(
-      stderrOutput.find("repeated resource-limited deferred leaf"),
+      stderrOutput.find(
+          "resource-limited deferred leaf limit reached; reporting inconclusive"),
       std::string::npos);
 }
 
@@ -9250,7 +9251,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
   EXPECT_EQ(result.bound, 3u);
   EXPECT_EQ(
-      stderrOutput.find("repeated resource-limited deferred leaf"),
+      stderrOutput.find(
+          "resource-limited deferred leaf limit reached; reporting inconclusive"),
       std::string::npos);
 }
 
@@ -9555,22 +9557,23 @@ TEST_F(SequentialEquivalenceStrategyTests,
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailHugeOutputBatchingStartsAtStrictLeaves) {
   KInductionProblem problem;
+  constexpr size_t kSwervRailStatePairs = 45096;
   problem.usesDualRailStateEncoding = true;
   for (size_t i = 0; i < 16; ++i) {
     problem.observedOutputNames.push_back("huge_out" + std::to_string(i));
     problem.observedOutputExprs0.push_back(BoolExpr::Var(10 + i));
     problem.observedOutputExprs1.push_back(BoolExpr::Var(100 + i));
   }
-  for (size_t i = 0; i < 50000; ++i) {
+  for (size_t i = 0; i < kSwervRailStatePairs; ++i) {
     problem.dualRailStatePairs.push_back(
         DualRailSymbolPair{1000 + i * 2, 1001 + i * 2});
   }
 
   const auto batches = buildSupportBoundedOutputBatches(problem);
 
-  // A BP-sized rail surface should not first rebuild broad UNKNOWN batches that
-  // immediately split.  Each returned slice is still a normal one-output strict
-  // k-induction obligation.
+  // A Swerv/BP-sized rail surface should not first rebuild broad UNKNOWN
+  // batches that immediately split.  Each returned slice is still a normal
+  // one-output strict k-induction obligation.
   ASSERT_EQ(batches.size(), 16u);
   EXPECT_EQ(batches.front(), (std::pair<size_t, size_t>(0, 1)));
   EXPECT_EQ(batches.back(), (std::pair<size_t, size_t>(15, 16)));
@@ -10973,7 +10976,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailHugeDeferredLeafStopsAtFirstResourceLimit) {
   KInductionProblem problem;
-  constexpr size_t kStatePairs = 50001;
+  constexpr size_t kStatePairs = 45096;
   constexpr size_t kFirstOneRail = 2;
   constexpr size_t kSecondOneRail = 4;
   problem.usesDualRailStateEncoding = true;
@@ -11005,9 +11008,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(8);
 
-  // A capped UNKNOWN on a BP-sized deferred residual leaf is not a proof.  It
-  // should be reported as uncovered immediately instead of rebuilding the same
-  // huge strict-KI obligation at larger k values.
+  // A capped UNKNOWN on a Swerv/BP-sized deferred residual leaf is not a proof.
+  // It should be reported as uncovered immediately instead of rebuilding the
+  // same huge strict-KI obligation at larger k values.
   EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
   EXPECT_EQ(result.bound, 1u);
 }
