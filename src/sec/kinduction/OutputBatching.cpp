@@ -17,10 +17,12 @@ namespace {
 // These limits keep nearby outputs together while preventing one batch from
 // dragging most of the design into one SAT cone.
 constexpr OutputBatchingLimits kDefaultOutputBatchingLimits;
+constexpr OutputBatchingLimits kHugeDualRailOutputBatchingLimits{1, 1};
 constexpr OutputBatchingLimits kDualRailOutputBatchingLimits{8, 256};
 constexpr OutputBatchingLimits kSmallDualRailOutputBatchingLimits{32, 4096};
 constexpr size_t kMaxSmallDualRailBatchOutputs = 32;
 constexpr size_t kMaxSmallDualRailBatchStateSymbols = 512;
+constexpr size_t kMinHugeDualRailBatchStateSymbols = 100000;
 
 void appendOutputSupport(const KInductionProblem& problem,
                          size_t outputIndex,
@@ -44,6 +46,11 @@ bool isSmallDualRailBatchingSurface(const KInductionProblem& problem) {
   return problem.observedOutputExprs0.size() <= kMaxSmallDualRailBatchOutputs &&
          dualRailStateSymbolCount(problem) <=
              kMaxSmallDualRailBatchStateSymbols;
+}
+
+bool isHugeDualRailBatchingSurface(const KInductionProblem& problem) {
+  return dualRailStateSymbolCount(problem) >=
+         kMinHugeDualRailBatchStateSymbols;
 }
 
 bool hasSelectedOutputSkips(const KInductionProblem& problem) {
@@ -131,6 +138,12 @@ OutputBatchingLimits defaultOutputBatchingLimitsForProblem(
       // the strict KI property.  Keep those small surfaces together; large
       // rail-state ASICs still use tiny batches to avoid wide failed probes.
       return kSmallDualRailOutputBatchingLimits;
+    }
+    if (isHugeDualRailBatchingSurface(problem)) {
+      // BP-sized residuals repeatedly hit UNKNOWN on 8/4/2-output probes before
+      // reaching the same one-output strict KI leaf. Start at that leaf size so
+      // no proof strength changes and no UNKNOWN batch is rebuilt only to split.
+      return kHugeDualRailOutputBatchingLimits;
     }
     // Dual-rail output obligations already carry both may-one/may-zero rails.
     // Start with small exact OR batches.  Wide dual-rail OR batches often hit

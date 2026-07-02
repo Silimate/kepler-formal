@@ -11,11 +11,11 @@ namespace KEPLER_FORMAL::SEC {
 
 namespace {
 
-constexpr size_t kMaxSolverTseitinReserveHint = 65536;
+constexpr size_t kMaxSolverTseitinReserveHint = 1'048'576;
 constexpr size_t kSmallFormulaNodeReserve = 256;
 constexpr size_t kLargeFormulaInitialLeafMultiplier = 4;
 constexpr size_t kMaxInitialNodeCacheReserve = 65536;
-constexpr size_t kMaxHintedInitialNodeCacheReserve = 262144;
+constexpr size_t kMaxHintedInitialNodeCacheReserve = 1'048'576;
 constexpr size_t kNodeCacheBucketMultiplier = 4;
 
 int newSolverLiteral(SATSolverWrapper& solver) {
@@ -454,11 +454,10 @@ void FrameFormulaEncoder::reserveNodeCache() {
   // transition cones the estimate can be millions of nodes, so eager solver
   // reservation spent more time clearing memory than proving the query.
   //
-  // Still give Kissat a bounded Tseitin head start.  BlackParrot PDR profiles
-  // showed the opposite extreme after removing the full reserve: the encoder
-  // spent most of its time growing Kissat vectors one variable at a time while
-  // streaming a large-but-local transition cone.  Capping the hint preserves
-  // the memory fix while avoiding the hottest incremental-growth path.
+  // Still give Kissat a bounded Tseitin head start.  BlackParrot dual-rail KI
+  // profiles show large transition cones spending most of their time growing
+  // Kissat vectors one variable at a time while streaming strict KI clauses.
+  // Capping the hint preserves the memory fix while avoiding that hot path.
   solver_.reserveAdditionalVars(
       std::min(expectedNodes, kMaxSolverTseitinReserveHint));
 }

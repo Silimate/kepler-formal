@@ -29,6 +29,9 @@ bool isKInductionDiagEnabled() {
 constexpr size_t kMinOutputsForBatchedProof = 2;
 constexpr size_t kMinOriginalOutputsForBoundedBatch = 64;
 constexpr size_t kMinDeferredRailStateSymbolsForEarlyStop = 512;
+constexpr size_t kHugeDeferredRailStateSymbolsForEarlyStop = 100000;
+constexpr size_t kDefaultDeferredDualRailLeafResourceLimitStops = 4;
+constexpr size_t kHugeDeferredDualRailLeafResourceLimitStops = 1;
 constexpr size_t kMaxCompactDualRailConjunctionOutputs = 32;
 constexpr size_t kMaxWideDualRailSplitHypothesisOutputs = 8;
 constexpr size_t kMaxFullDualRailPublicHypothesisOutputs = 256;
@@ -484,12 +487,17 @@ bool shouldStopDeferredDualRailLeafAfterResourceLimit(
   if (!isLargeDeferredDualRailLeafSurface(problem)) {
     return false;
   }
-  // Wide deferred dual-rail leaves are residual coverage attempts.  Repeated
-  // resource-limited KI steps are not proofs, and rebuilding larger k-step
-  // instances for each hard leaf only delays reporting it as unproven.  Small
-  // designs keep the full maxK search because the extra strict KI depths are
-  // cheap and often recover complete coverage.
-  return consecutiveResourceLimitedSteps >= 4;
+  // Wide deferred dual-rail leaves are residual coverage attempts. Resource-
+  // limited KI steps are not proofs, and rebuilding larger k-step instances for
+  // each hard BP-scale leaf only delays reporting it as unproven. Small designs
+  // keep the deeper strict KI search because those extra depths are cheap and
+  // often recover complete coverage.
+  const size_t stopAfterResourceLimits =
+      dualRailStateSymbolCount(problem) >=
+              kHugeDeferredRailStateSymbolsForEarlyStop
+          ? kHugeDeferredDualRailLeafResourceLimitStops
+          : kDefaultDeferredDualRailLeafResourceLimitStops;
+  return consecutiveResourceLimitedSteps >= stopAfterResourceLimits;
 }
 
 std::optional<KInductionResult> validateConcreteBasePrefix(
@@ -646,7 +654,7 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
                   consecutiveResourceLimitedDeferredLeafSteps)) {  // LCOV_EXCL_LINE
             emitSecDiag(  // LCOV_EXCL_LINE
                 "SEC diag: k-induction step k=", k,
-                " repeated resource-limited deferred leaf; reporting inconclusive");
+                " resource-limited deferred leaf limit reached; reporting inconclusive");
           }  // LCOV_EXCL_LINE
         } else {  // LCOV_EXCL_LINE
           return {KInductionStatus::Inconclusive, k};  // LCOV_EXCL_LINE

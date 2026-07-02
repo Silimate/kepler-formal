@@ -7062,6 +7062,27 @@ TEST_F(SequentialEquivalenceStrategyTests, SatEncodingFlatCacheGrows) {
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SatEncodingHonorsLargeHintedFrameFormulaReserve) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
+  std::unordered_map<size_t, int> leafLits;
+  leafLits.emplace(2, solver.newVar() + 2);
+  leafLits.emplace(3, solver.newVar() + 2);
+
+  BoolExpr* expr = BoolExpr::Var(2);
+  constexpr size_t kDepthAboveOldSolverReserve = 70000;
+  for (size_t index = 0; index < kDepthAboveOldSolverReserve; ++index) {
+    expr = BoolExpr::Xor(expr, BoolExpr::Var(3));
+  }
+
+  // BP-sized strict KI frames provide an exact transition-DAG hint. Encoding a
+  // cone above the old 64K solver reserve keeps this optimization covered
+  // without changing any Tseitin clauses or SAT result.
+  FrameFormulaEncoder encoder(
+      solver, std::move(leafLits), kDepthAboveOldSolverReserve + 1);
+  EXPECT_NE(encoder.encode(expr), 0);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SatSolverWrapperGetLiteralValueHandlesConstantsUnknownModelsAndErrors) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::GLUCOSE);
   const int symbol = solver.newVar() + 2;
@@ -9532,6 +9553,30 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailHugeOutputBatchingStartsAtStrictLeaves) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  for (size_t i = 0; i < 16; ++i) {
+    problem.observedOutputNames.push_back("huge_out" + std::to_string(i));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(10 + i));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(100 + i));
+  }
+  for (size_t i = 0; i < 50000; ++i) {
+    problem.dualRailStatePairs.push_back(
+        DualRailSymbolPair{1000 + i * 2, 1001 + i * 2});
+  }
+
+  const auto batches = buildSupportBoundedOutputBatches(problem);
+
+  // A BP-sized rail surface should not first rebuild broad UNKNOWN batches that
+  // immediately split.  Each returned slice is still a normal one-output strict
+  // k-induction obligation.
+  ASSERT_EQ(batches.size(), 16u);
+  EXPECT_EQ(batches.front(), (std::pair<size_t, size_t>(0, 1)));
+  EXPECT_EQ(batches.back(), (std::pair<size_t, size_t>(15, 16)));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        DualRailSmallOutputBatchingKeepsPublicConjunctionTogether) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
@@ -10923,6 +10968,48 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Hard residual dual-rail outputs are allowed to stay uncovered, but they
   // must not block the workflow once the configured SAT decision budget is hit.
   EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       DualRailHugeDeferredLeafStopsAtFirstResourceLimit) {
+  KInductionProblem problem;
+  constexpr size_t kStatePairs = 50001;
+  constexpr size_t kFirstOneRail = 2;
+  constexpr size_t kSecondOneRail = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.deferBaseCaseChecks = true;
+  problem.state0Symbols.reserve(kStatePairs * 2);
+  problem.allSymbols.reserve(kStatePairs * 2);
+  for (size_t index = 0; index < kStatePairs; ++index) {
+    const size_t oneRail = 2 + index * 2;
+    const size_t zeroRail = oneRail + 1;
+    problem.state0Symbols.push_back(oneRail);
+    problem.state0Symbols.push_back(zeroRail);
+    problem.allSymbols.push_back(oneRail);
+    problem.allSymbols.push_back(zeroRail);
+    problem.dualRailStatePairs.push_back(DualRailSymbolPair{oneRail, zeroRail});
+    problem.transitions0.emplace_back(oneRail, BoolExpr::Var(oneRail));
+    problem.transitions0.emplace_back(zeroRail, BoolExpr::Var(zeroRail));
+  }
+  problem.observedOutputExprs0 = {BoolExpr::Var(kFirstOneRail)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(kSecondOneRail)};
+  problem.property =
+      makeEqualityExpr(problem.observedOutputExprs0[0],
+                       problem.observedOutputExprs1[0]);
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
+  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(8);
+
+  // A capped UNKNOWN on a BP-sized deferred residual leaf is not a proof.  It
+  // should be reported as uncovered immediately instead of rebuilding the same
+  // huge strict-KI obligation at larger k values.
+  EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
+  EXPECT_EQ(result.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
