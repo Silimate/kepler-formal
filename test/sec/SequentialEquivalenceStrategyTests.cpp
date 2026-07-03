@@ -14955,16 +14955,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierStillBlocksSmallMediumOutputSurface) {
+       PdrDualRailExactResetFrontierAllowsAesSizedMediumOutputSurface) {
   KInductionProblem problem =
       makeDualRailResetFrontierGuardProblemForTest(
-          /*railPairs=*/2047,
-          /*transitionSources=*/4094);
-  while (problem.observedOutputExprs0.size() < 99) {
+          /*railPairs=*/1124,
+          /*transitionSources=*/2248);
+  while (problem.observedOutputExprs0.size() < 129) {
     problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
     problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
   }
-  problem.originalObservedOutputCount = 99;
+  problem.originalObservedOutputCount = 129;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   testing::internal::CaptureStderr();
@@ -14981,13 +14981,50 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*useExactResetFrontierChecks=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Keep the exact reset-prefix SAT repair reserved for CPU-sized bus surfaces;
-  // smaller medium-output cases should still rely on the cheaper PDR path.
+  // ASAP7 AES has a small rail surface but a 129-output residual bus.  It still
+  // needs exact reset-frontier repair; otherwise isolated one-output leaves
+  // exhaust the ordinary PDR predecessor budget and regress to partial
+  // coverage.
+  EXPECT_EQ(
+      stderrOutput.find(
+          "exact reset-frontier checks disabled for large dual-rail problem"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrDualRailExactResetFrontierStillBlocksTooWideOutputSurface) {
+  KInductionProblem problem =
+      makeDualRailResetFrontierGuardProblemForTest(
+          /*railPairs=*/1124,
+          /*transitionSources=*/2248);
+  while (problem.observedOutputExprs0.size() < 385) {
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
+    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+  }
+  problem.originalObservedOutputCount = 385;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/1,
+      /*preciseBadCubeStateLimit=*/1,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      /*maxBoundedRootGeneralizationAttempts=*/0,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The broad-output guard still prevents SoC-scale dual-rail runs from
+  // rebuilding exact reset-prefix solvers for every residual leaf.
   EXPECT_NE(
       stderrOutput.find(
           "exact reset-frontier checks disabled for large dual-rail problem"),
       std::string::npos);
-  EXPECT_NE(stderrOutput.find("medium_state_min=4096"), std::string::npos);
+  EXPECT_NE(stderrOutput.find("original_outputs=385"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -344,8 +344,6 @@ constexpr size_t kMaxExactResetFrontierDualRailTransitionSources = 20000;
 constexpr size_t kMaxExactResetFrontierDualRailMediumOutputs = 384;
 constexpr size_t kMaxExactResetFrontierDualRailObservedOutputs =
     kMaxExactResetFrontierDualRailMediumOutputs;
-constexpr size_t kMaxExactResetFrontierDualRailSmallOriginalOutputs = 64;
-constexpr size_t kMinExactResetFrontierDualRailMediumStateSymbols = 4096;
 constexpr size_t kMaxExactResetFrontierDualRailOriginalOutputs =
     kMaxExactResetFrontierDualRailMediumOutputs;
 // The broad frame-0 reset-bootstrap BMC precheck materializes the whole output
@@ -1604,13 +1602,15 @@ bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
   }
   const size_t railStateSymbols = pdrDualRailStateSymbolCount(problem);
   const size_t originalOutputs = pdrOriginalObservedOutputCount(problem);
+  // Exact reset-frontier repair is bounded by the hard rail-state,
+  // transition-source, and output-surface caps below. Do not require a minimum
+  // rail count: AES-sized medium-output surfaces are cheaper than the CPU
+  // cases this guard already permits, and they rely on this exact repair to
+  // avoid one-output PDR budget exhaustion.
   const bool outputSurfaceAllowed =
       problem.observedOutputExprs0.size() <=
           kMaxExactResetFrontierDualRailObservedOutputs &&
-      originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs &&
-      (originalOutputs <= kMaxExactResetFrontierDualRailSmallOriginalOutputs ||
-       railStateSymbols >=
-           kMinExactResetFrontierDualRailMediumStateSymbols);
+      originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs;
 
   return railStateSymbols <= dualRailResetFrontierStateSymbolLimit() &&
          pdrTransitionSourceCount(problem) <=
@@ -16886,9 +16886,7 @@ PDREngine::PDREngine(const KInductionProblem& problem,
         " outputs=", problem.observedOutputExprs0.size(),
         " original_outputs=", pdrOriginalObservedOutputCount(problem),
         " output_limit=", kMaxExactResetFrontierDualRailObservedOutputs,
-        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs,
-        " medium_state_min=",
-        kMinExactResetFrontierDualRailMediumStateSymbols);
+        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs);
   }
 }
 
