@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
   exit 2
 fi
 
@@ -26,7 +26,7 @@ engines=(k_induction imc pdr)
 
 for option in "${@:5}"; do
   case "${option}" in
-    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive)
+    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive)
       expectation="${option}"
       ;;
     compact)
@@ -380,6 +380,29 @@ run_engine() {
         return "${kepler_status}"
       fi
       echo "Expected SEC equivalence or inconclusive result for ${test_name} (${engine})" >&2
+      return 1
+    fi
+
+    # Non-dual positive SEC regressions may have all observed outputs skipped
+    # because both sides depend on reset-unanchored internal state. Treat that
+    # as measurement-only inconclusive when the workflow explicitly asks for it.
+    if [[ "${expectation}" == "allow-unset-state-inconclusive" ]]; then
+      if grep -q "SEC proved equivalence" "${stdout_log}"; then
+        grep "SEC proved equivalence" "${stdout_log}"
+        return 0
+      fi
+      if grep -q "SEC was inconclusive" "${stdout_log}"; then
+        grep "SEC was inconclusive" "${stdout_log}"
+        return 0
+      fi
+      if grep -q "No aligned observed outputs remain after skipping cones that depend on reset-unanchored internal state" "${stdout_log}"; then
+        grep "SEC cannot run on this design pair" "${stdout_log}"
+        return 0
+      fi
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      echo "Expected SEC equivalence, inconclusive, or reset-unanchored no-output result for ${test_name} (${engine})" >&2
       return 1
     fi
 

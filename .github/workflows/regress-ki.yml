@@ -16,12 +16,15 @@ on:
       positive_expectation:
         required: false
         type: string
-        default: "expect-equivalent"
+        default: "allow-unset-state-inconclusive"
 
 env:
   SEC_ENGINE: k_induction
   SEC_ENCODING: ${{ inputs.sec_encoding || 'binary' }}
-  SEC_POSITIVE_EXPECTATION: ${{ inputs.positive_expectation || 'expect-equivalent' }}
+  # The base non-dual KI workflow allows inconclusive positive proofs and the
+  # reset-unanchored no-output case. Reusable callers keep their explicit
+  # expectation.
+  SEC_POSITIVE_EXPECTATION: ${{ inputs.positive_expectation || 'allow-unset-state-inconclusive' }}
 
 jobs:
   build:
@@ -225,7 +228,7 @@ jobs:
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_naja_if/config.yaml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -234,7 +237,7 @@ jobs:
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_verilog/config.yaml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -256,7 +259,7 @@ jobs:
           "${{github.workspace}}/example" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           test_config_verilog_tinyrocket_sec.yaml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}

@@ -16,14 +16,15 @@ on:
       positive_expectation:
         required: false
         type: string
-        default: "allow-inconclusive"
+        default: "allow-unset-state-inconclusive"
 
 env:
   SEC_ENGINE: imc
   SEC_ENCODING: ${{ inputs.sec_encoding || 'binary' }}
-  # Positive IMC regressions are in measurement mode while optimization work
-  # continues; edited negative cases below still require a counterexample.
-  SEC_POSITIVE_EXPECTATION: ${{ inputs.positive_expectation || 'allow-inconclusive' }}
+  # The base non-dual IMC workflow allows inconclusive positive proofs and the
+  # reset-unanchored no-output case. Reusable callers keep their explicit
+  # expectation.
+  SEC_POSITIVE_EXPECTATION: ${{ inputs.positive_expectation || 'allow-unset-state-inconclusive' }}
 
 jobs:
   build:

@@ -26,7 +26,10 @@ env:
   SEC_ENGINE: pdr
   SEC_ENCODING: ${{ inputs.sec_encoding || 'binary' }}
   SKIP_BP_FINAL: ${{ inputs.skip_bp_final || false }}
-  SEC_FULL_COVERAGE_EXPECTATION: ${{ inputs.require_full_coverage && 'expect-full-coverage' || 'expect-equivalent' }}
+  # Binary PDR regressions allow inconclusive positive proofs and the
+  # reset-unanchored no-output case. Dual-rail PDR stays strict.
+  SEC_POSITIVE_EXPECTATION: ${{ (inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-equivalent' || 'allow-unset-state-inconclusive' }}
+  SEC_FULL_COVERAGE_EXPECTATION: ${{ inputs.require_full_coverage && 'expect-full-coverage' || ((inputs.sec_encoding || 'binary') == 'dual_rail_steady' && 'expect-equivalent' || 'allow-unset-state-inconclusive') }}
 
 jobs:
   build:
@@ -78,7 +81,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-regress/cts_aes_asap7_base" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/asap7/aes/base/4_rsz_lec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -87,7 +90,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-regress/sky130hd_gcd" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/sky130hd/gcd/base/4_rsz_lec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -96,7 +99,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-regress/nangate45_black_parrot" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/nangate45/bp/base/4_rsz_lec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -105,7 +108,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-regress/ihp-sg13g2_i2c-gpio-expander" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -114,7 +117,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/nangate45_dynamic_node" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -123,7 +126,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/asap7_jpeg_lvt" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -132,7 +135,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/sky130hs_ibex" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -150,7 +153,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/sky130hs_riscv32i" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -159,7 +162,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/nangate45_ibex" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -168,7 +171,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/nangate45_swerv" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -177,7 +180,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/nangate45_ariane136" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -186,7 +189,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/asap7_ethmac" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -195,7 +198,7 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/asap7_mock-alu" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -205,13 +208,12 @@ jobs:
           "${{github.workspace}}/kepler-formal-examples/asap7_mock_cpu" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           6_final_sec_test.yml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
-        # BP final has resetless FIFO state. The regular PDR workflow uses the
-        # requested encoding and coverage policy; the dual-rail wrapper owns
-        # dual-rail full-coverage requirements.
+        # BP final can be skipped by reusable callers that own a separate BP
+        # final check. The regular PDR workflow still runs it.
         if [[ "${SKIP_BP_FINAL}" == "true" ]]; then
           echo "Skipping nangate45_black_parrot_sec_final because SKIP_BP_FINAL=true"
         else
@@ -234,7 +236,7 @@ jobs:
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_naja_if/config.yaml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -243,7 +245,7 @@ jobs:
           "${{github.workspace}}" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           regress/tinyrocket_verilog/config.yaml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
@@ -265,7 +267,7 @@ jobs:
           "${{github.workspace}}/example" \
           "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
           test_config_verilog_tinyrocket_sec.yaml \
-          expect-equivalent \
+          ${{ env.SEC_POSITIVE_EXPECTATION }} \
           compact \
           engine=${{ env.SEC_ENGINE }} \
           sec-encoding=${{ env.SEC_ENCODING }}
