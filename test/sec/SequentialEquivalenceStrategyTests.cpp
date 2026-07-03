@@ -8807,22 +8807,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
                 /*configuredSupportLimit=*/0,
                 kLocalSupportLimit),
             0);
-  EXPECT_TRUE(detail::shouldUseCachedResetPredecessorCore(
-      /*hasResetBootstrap=*/true,
-      /*level=*/0,
-      /*hasCachedCore=*/true));
-  EXPECT_FALSE(detail::shouldUseCachedResetPredecessorCore(
-      /*hasResetBootstrap=*/false,
-      /*level=*/0,
-      /*hasCachedCore=*/true));
-  EXPECT_FALSE(detail::shouldUseCachedResetPredecessorCore(
-      /*hasResetBootstrap=*/true,
-      /*level=*/1,
-      /*hasCachedCore=*/true));
-  EXPECT_FALSE(detail::shouldUseCachedResetPredecessorCore(
-      /*hasResetBootstrap=*/true,
-      /*level=*/0,
-      /*hasCachedCore=*/false));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -15040,6 +15024,49 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesConservativeFrontierWhenResetBmcSkipsEmptyDualRailSlice) {
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.resetBootstrapCycles = 1;
+  problem.originalObservedOutputCount = 385;
+  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
+  problem.observedOutputExprs1 = {BoolExpr::Var(2)};
+  problem.property = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Empty pruned reset-bootstrap slices should still let PDR prove properties
+  // that hold over all states.  Returning inconclusive before the PDR loop
+  // leaves harmless one-output dual-rail leaves uncovered.
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("skipped dual-rail reset-bootstrap BMC precheck"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("max frame budget exhausted"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsKiDualRailFindsProductionResidualMismatch) {
   constexpr size_t kResidualOutputs = 129;
   constexpr size_t kStateBitsPerDesign = 2049;
@@ -16481,6 +16508,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = problem.bad;
   problem.observedOutputExprs0 = {problem.bad};
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
   problem.observedOutputNames = {"dual_rail_local_reset_frontier"};
 
   ASSERT_FALSE(
@@ -18710,6 +18738,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineMinimizesExactResetPredecessorCoreAfterRelaxedPrecheck) {
+  ScopedSecInternalStateCorrespondence disableInternalStateCorrespondence(false);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t q = 3;
@@ -18747,6 +18776,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.property = BoolExpr::Not(problem.bad);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {problem.bad};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
@@ -18781,6 +18813,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
+          "seeded exact reset-predecessor sibling cores cube=4 seeded=1 "
+          "post_bootstrap_steps=1 cached=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
           "learned exact reset-predecessor singleton clauses level=1 added=1"),
       std::string::npos)
       << stderrOutput;
@@ -18788,6 +18826,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("generalized blocked cube level=1 size=4->2"),
       std::string::npos)
       << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("remembered process reset-predecessor cores added="),
+      std::string::npos)
+      << stderrOutput;
+
+  testing::internal::CaptureStderr();
+  PDREngine cachedEngine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      /*preciseBadCubeStateLimit=*/2,
+      /*useExactFrameClauses=*/false,
+      /*maxPredecessorQueries=*/0,
+      /*refineProjectedCounterexamples=*/true,
+      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
+      /*learnValidatedBadFormulaClauses=*/false,
+      /*useExactResetFrontierChecks=*/true);
+  const auto cachedResult = cachedEngine.run(3);
+  const std::string cachedStderrOutput =
+      testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(cachedResult.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      cachedStderrOutput.find("imported process reset-predecessor cores cores="),
+      std::string::npos)
+      << cachedStderrOutput;
+  EXPECT_NE(
+      cachedStderrOutput.find(
+          "seeded imported reset-predecessor clauses level=1 added="),
+      std::string::npos)
+      << cachedStderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -20428,6 +20497,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find("refined projected counterexample bad_frame=2 root_cube=2->1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("concrete cube reachability begin cube=0"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(

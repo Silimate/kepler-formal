@@ -621,6 +621,7 @@ constexpr size_t kMaxPredecessorQueryResultCacheEntries = 64 * 1024;
 constexpr size_t kMaxPredecessorUnsatCoresPerContext = 4096;
 constexpr size_t kMaxPredecessorClosedSymbolCacheEntries = 4096;
 constexpr size_t kMaxPredecessorTargetSurfaceCacheEntries = 4096;
+constexpr size_t kMaxProcessResetUnreachableCoreCacheEntries = 4;
 // FrameFormulaEncoder already makes a small generic Tseitin reservation, but
 // sampled dual-rail PDR leaves still spent most time growing CaDiCaL variable
 // vectors while streaming known-large transition cones. Reserve a larger,
@@ -2478,44 +2479,42 @@ bool cubeContainsCube(const StateCube& cube, const StateCube& core) {
 ResetFrontierCubeKey resetFrontierCacheKey(const StateCube& cube,
                                            size_t postBootstrapSteps);
 
+bool rememberResetUnreachableCoreInVector(std::vector<StateCube>& cores,
+                                          StateCube core) {
+  normalizeCube(core);
+  if (core.empty()) {
+    return false;  // LCOV_EXCL_LINE
+  }
+
+  for (const auto& existing : cores) {
+    if (cubeContainsCube(core, existing)) {
+      return false;
+    }
+  }
+  for (auto it = cores.begin(); it != cores.end();) {
+    if (cubeContainsCube(*it, core)) {
+      it = cores.erase(it);
+      continue;
+    }
+    ++it;
+  }
+  cores.push_back(std::move(core));
+  sortStateCubesDeterministically(cores);
+  if (cores.size() > kMaxPdrResetUnreachableCoresPerStep) {
+    cores.pop_back();  // LCOV_EXCL_LINE
+  }
+  return true;
+}
+
 // LCOV_EXCL_START
 void rememberPdrResetUnreachableCore(
 // LCOV_EXCL_STOP
     ResetFrontierCache& cache,
     StateCube core,
     size_t postBootstrapSteps) {
-  normalizeCube(core);
-  if (core.empty()) {
-    return;  // LCOV_EXCL_LINE
-  }
-
   auto& cores =
       cache.resetUnreachableCoresByPostBootstrapStep[postBootstrapSteps];
-  for (const auto& existing : cores) {
-    // LCOV_EXCL_START
-    if (cubeContainsCube(core, existing)) {
-      return;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-  }
-  cores.erase(
-      // LCOV_EXCL_START
-      std::remove_if(
-      // LCOV_EXCL_STOP
-          cores.begin(),
-          cores.end(),
-          // LCOV_EXCL_START
-          [&](const StateCube& existing) {
-            return cubeContainsCube(existing, core);
-          }),
-          // LCOV_EXCL_STOP
-      cores.end());
-  cores.push_back(std::move(core));
-  sortStateCubesDeterministically(cores);
-  if (cores.size() > kMaxPdrResetUnreachableCoresPerStep) {
-    // LCOV_EXCL_START
-    cores.pop_back();  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
+  (void)rememberResetUnreachableCoreInVector(cores, std::move(core));
 }
 
 
@@ -2589,6 +2588,156 @@ std::vector<StateCube> findPdrResetUnreachableSingletonCoresForCube(
   }
   sortStateCubesDeterministically(cores);
   return cores;
+}
+
+struct ProcessResetUnreachableCoreCacheKey {
+  const LazyTransitionStore* lazyTransitions = nullptr;
+  size_t resetBootstrapCycles = 0;
+  size_t state0Symbols = 0;
+  size_t state1Symbols = 0;
+  size_t transitions0 = 0;
+  size_t transitions1 = 0;
+
+  bool operator==(const ProcessResetUnreachableCoreCacheKey& other) const {
+    return lazyTransitions == other.lazyTransitions &&
+           resetBootstrapCycles == other.resetBootstrapCycles &&
+           state0Symbols == other.state0Symbols &&
+           state1Symbols == other.state1Symbols &&
+           transitions0 == other.transitions0 &&
+           transitions1 == other.transitions1;
+  }
+};
+
+struct ProcessResetUnreachableCoreCacheEntry {
+  ProcessResetUnreachableCoreCacheKey key;
+  std::unordered_map<size_t, std::vector<StateCube>>
+      coresByPostBootstrapStep;
+};
+
+std::vector<ProcessResetUnreachableCoreCacheEntry>&
+processResetUnreachableCoreCache() {
+  static std::vector<ProcessResetUnreachableCoreCacheEntry> cache;
+  return cache;
+}
+
+ProcessResetUnreachableCoreCacheKey processResetUnreachableCoreCacheKey(
+    const KInductionProblem& problem) {
+  return {
+      problem.lazyTransitions.get(),
+      problem.resetBootstrapCycles,
+      problem.state0Symbols.size(),
+      problem.state1Symbols.size(),
+      problem.transitions0.size(),
+      problem.transitions1.size()};
+}
+
+bool canUseProcessResetUnreachableCoreCache(
+    const KInductionProblem& problem,
+    BoolExpr* frameInvariant) {
+  // The cached cores are concrete reset-frontier facts.  Do not share cores
+  // learned under an extra PDR frame invariant; that invariant may be local to
+  // one proof slice even when the reset/transition system is otherwise shared.
+  return frameInvariant == nullptr &&
+         problem.usesDualRailStateEncoding &&
+         problem.lazyTransitions != nullptr &&
+         problem.resetBootstrapCycles != 0 &&
+         (hasLocalDualRailFinalLeafRepairSurface(problem) ||
+          hasLargeDualRailResetFrontierSurface(problem));
+}
+
+ProcessResetUnreachableCoreCacheEntry*
+findProcessResetUnreachableCoreCacheEntry(
+    const ProcessResetUnreachableCoreCacheKey& key) {
+  auto& cache = processResetUnreachableCoreCache();
+  for (auto& entry : cache) {
+    if (entry.key == key) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+void importProcessResetUnreachableCores(
+    const KInductionProblem& problem,
+    ResetFrontierCache& cache,
+    BoolExpr* frameInvariant) {
+  if (!canUseProcessResetUnreachableCoreCache(problem, frameInvariant)) {
+    return;
+  }
+  const auto key = processResetUnreachableCoreCacheKey(problem);
+  const auto* entry = findProcessResetUnreachableCoreCacheEntry(key);
+  if (entry == nullptr) {
+    return;
+  }
+
+  size_t imported = 0;
+  for (const auto& [postBootstrapSteps, cores] :
+       entry->coresByPostBootstrapStep) {
+    for (const auto& core : cores) {
+      if (findPdrResetUnreachableCoreForCube(
+              cache, core, postBootstrapSteps)
+          .has_value()) {
+        continue;
+      }
+      rememberPdrResetUnreachableCore(cache, core, postBootstrapSteps);
+      cache.outsideByCubeKey.emplace(
+          resetFrontierCacheKey(core, postBootstrapSteps), true);
+      ++imported;
+    }
+  }
+  if (imported != 0 && pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: imported process reset-predecessor cores ",
+        "cores=", imported,
+        " steps=", entry->coresByPostBootstrapStep.size());
+  }
+}
+
+void rememberProcessResetUnreachableCores(
+    const KInductionProblem& problem,
+    const ResetFrontierCache& cache,
+    BoolExpr* frameInvariant) {
+  if (!canUseProcessResetUnreachableCoreCache(problem, frameInvariant) ||
+      cache.resetUnreachableCoresByPostBootstrapStep.empty()) {
+    return;
+  }
+  const auto key = processResetUnreachableCoreCacheKey(problem);
+  auto& processCache = processResetUnreachableCoreCache();
+  ProcessResetUnreachableCoreCacheEntry* entry =
+      findProcessResetUnreachableCoreCacheEntry(key);
+  if (entry == nullptr) {
+    if (processCache.size() >= kMaxProcessResetUnreachableCoreCacheEntries) {
+      processCache.erase(processCache.begin());
+    }
+    ProcessResetUnreachableCoreCacheEntry nextEntry;
+    nextEntry.key = key;
+    processCache.push_back(std::move(nextEntry));
+    entry = &processCache.back();
+  }
+
+  size_t added = 0;
+  size_t total = 0;
+  for (const auto& [postBootstrapSteps, cores] :
+       cache.resetUnreachableCoresByPostBootstrapStep) {
+    auto& retained = entry->coresByPostBootstrapStep[postBootstrapSteps];
+    for (const auto& core : cores) {
+      if (rememberResetUnreachableCoreInVector(retained, core)) {
+        ++added;
+      }
+    }
+  }
+  for (const auto& [postBootstrapSteps, cores] :
+       entry->coresByPostBootstrapStep) {
+    (void)postBootstrapSteps;
+    total += cores.size();
+  }
+  if (added != 0 && pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: remembered process reset-predecessor cores ",
+        "added=", added,
+        " total=", total,
+        " entries=", processCache.size());
+  }
 }
 
 void rememberPdrAndResetFrontierUnreachableCore(
@@ -2710,6 +2859,14 @@ size_t seedExactResetPredecessorSiblingCores(
         postBootstrapSteps,
         /*usePostBootstrapPrechecks=*/false);
     if (!reachable) {
+      // This exact singleton proof is useful to both reset-frontier callers:
+      // PDR checks the core list, while concrete reachability checks first
+      // consult the exact cube-answer map and the reachability context.
+      const auto siblingAssignments = cubeAssignments(siblingCore);
+      rememberResetFrontierUnreachableCube(
+          reachabilityContext, siblingAssignments, postBootstrapSteps);
+      cache.outsideByCubeKey.emplace(
+          resetFrontierCacheKey(siblingCore, postBootstrapSteps), true);
       rememberPdrResetUnreachableCore(
           cache, std::move(siblingCore), postBootstrapSteps);
       ++seeded;
@@ -8458,8 +8615,11 @@ struct LargeDualRailPdrTransientCacheReleaseGuard {
   PredecessorAssumptionCache& predecessorCache;
   PdrFormulaSupportCache& supportCache;
   const KInductionProblem& problem;
+  BoolExpr* frameInvariant = nullptr;
 
   ~LargeDualRailPdrTransientCacheReleaseGuard() {
+    rememberProcessResetUnreachableCores(
+        problem, resetCache, frameInvariant);
     releaseLargeDualRailPdrTransientCaches(
         resetCache,
         &badCubeCache,
@@ -12013,38 +12173,6 @@ std::optional<StateCube> findPredecessorCube(
       return std::nullopt;
     }
   }
-  std::optional<StateCube> cachedResetPredecessorCore;
-  if (resetFrontierCache != nullptr && problem.resetBootstrapCycles != 0) {
-    cachedResetPredecessorCore =
-        findPdrResetUnreachableCoreForCube(
-            *resetFrontierCache,
-            targetCube,
-            /*postBootstrapSteps=*/1);
-  }
-  if (detail::shouldUseCachedResetPredecessorCore(
-          problem.resetBootstrapCycles != 0,
-          level,
-          cachedResetPredecessorCore.has_value())) {
-    if (pdrStatsEnabled()) {
-      emitSecDiag(
-          "SEC PDR stats: predecessor cached reset-frontier core ",
-          "level=", level,
-          " target_cube=", targetCube.size(),
-          " core_cube=", cachedResetPredecessorCore->size(),
-          " target_hash=", cubeFingerprint(targetCube),
-          " core_hash=", cubeFingerprint(*cachedResetPredecessorCore));
-    }
-    if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() &&
-        predecessorAssumptionCache != nullptr) {
-      rememberPredecessorQueryResult(
-          *predecessorAssumptionCache,
-          *exactCacheKey,
-          *stableUnsatCacheKey,
-          std::nullopt,
-          &*cachedResetPredecessorCore);
-    }
-    return std::nullopt;
-  }
   if (!consumePdrPredecessorQueryBudget(predecessorQueryBudget)) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
@@ -13818,6 +13946,38 @@ size_t learnExactResetPredecessorSingletonClauses(
   return added;
 }
 
+size_t seedImportedResetPredecessorClauses(
+    std::vector<FrameClauses>& frames,
+    const ResetFrontierCache& resetFrontierCache) {
+  if (frames.size() <= 1) {
+    return 0;  // LCOV_EXCL_LINE
+  }
+  const auto stepCores =
+      resetFrontierCache.resetUnreachableCoresByPostBootstrapStep.find(1);
+  if (stepCores ==
+      resetFrontierCache.resetUnreachableCoresByPostBootstrapStep.end()) {
+    return 0;
+  }
+
+  size_t added = 0;
+  for (const StateCube& core : stepCores->second) {
+    // Imported reset-predecessor cores are exact F1 facts. Seeding them before
+    // the first bad-state query lets later output slices consume concrete reset
+    // knowledge learned by earlier slices without re-solving the same
+    // reset-frontier obligations.
+    if (!core.empty() &&
+        addClauseToFrames(frames, clauseFromCube(core), /*maxLevel=*/1)) {
+      ++added;
+    }
+  }
+  if (pdrStatsEnabled() && added != 0) {
+    emitSecDiag(
+        "SEC PDR stats: seeded imported reset-predecessor clauses ",
+        "level=1 added=", added);
+  }
+  return added;
+}
+
 BoolExpr* boundedResetReachabilityFrameInvariant(BoolExpr* frameInvariant) {
   if (frameInvariant == nullptr) {
     return nullptr;
@@ -13896,7 +14056,8 @@ void rememberExactResetFrontierUnreachableCore(
         "SEC PDR stats: seeded exact reset-predecessor sibling cores ",
         "cube=", cube.size(),
         " seeded=", seededSiblingCores,
-        " post_bootstrap_steps=", postBootstrapSteps);
+        " post_bootstrap_steps=", postBootstrapSteps,
+        " cached=", seededSiblingCores);
   }
 }
 
@@ -15006,6 +15167,13 @@ StateCube generalizeBoundedUnreachableRootCube(
   while (index < candidate.size() && attempts < maxAttempts) {
     StateCube reduced = candidate;
     reduced.erase(reduced.begin() + static_cast<std::ptrdiff_t>(index));
+    if (reduced.empty()) {
+      // The empty cube is the whole state space, so it cannot be a useful
+      // unreachable-root generalization.  Avoid a concrete reachability query
+      // that only proves that trivial fact after rebuilding the reset prefix.
+      ++index;
+      continue;
+    }
     ++attempts;
     const bool preferShallowPerFrameValidation =
         maxPostBootstrapSteps <= kMaxPerFrameConcreteValidationDepth &&
@@ -16650,6 +16818,14 @@ BoolExpr* buildPdrInitFormula(const KInductionProblem& problem,
   BoolExpr* initFormula = hasStructuredInitFacts(problem)
                               ? BoolExpr::createTrue()
                               : buildProofInitFormula(problem);
+  if (initFormula == nullptr && problem.resetBootstrapCycles != 0) {
+    // A pruned dual-rail reset slice may have no local bootstrap facts after
+    // the broad reset-BMC precheck is skipped.  Running PDR from `true` is a
+    // conservative all-state frontier: any convergence proof is stronger than
+    // the concrete reset frontier, while abstract bad states are still handled
+    // by the normal blocking/validation path.
+    initFormula = BoolExpr::createTrue();
+  }
   if (problem.resetBootstrapCycles == 0 ||
       !resetBootstrapFrameCheckedSafe ||
       problem.property == nullptr) {
@@ -16797,6 +16973,7 @@ PDRResult PDREngine::run(size_t maxFrames,
       badCubeStateLimit,
       transitionByState.stateSymbols());
   ResetFrontierCache resetFrontierCache;
+  importProcessResetUnreachableCores(problem_, resetFrontierCache, frameInvariant);
   BadCubeAssumptionCache badCubeAssumptionCache;
   PredecessorAssumptionCache predecessorAssumptionCache;
   LargeDualRailPdrTransientCacheReleaseGuard cacheReleaseGuard{
@@ -16804,7 +16981,8 @@ PDRResult PDREngine::run(size_t maxFrames,
       badCubeAssumptionCache,
       predecessorAssumptionCache,
       formulaSupportCache,
-      problem_};
+      problem_,
+      frameInvariant};
   size_t remainingPredecessorQueries = effectiveMaxPredecessorQueries;
   size_t* predecessorQueryBudget =
       effectiveMaxPredecessorQueries == 0 ? nullptr : &remainingPredecessorQueries;
@@ -16853,6 +17031,7 @@ PDRResult PDREngine::run(size_t maxFrames,
   const InitFactIndex initFacts = buildInitFactIndex(problem_);
   const auto seedClauses = buildSeedClauses(problem_, initFacts);
   frames.emplace_back(FrameClauses{seedClauses});
+  seedImportedResetPredecessorClauses(frames, resetFrontierCache);
   emitPdrTraceFrames("seeded_frames", frames);
   for (size_t level = 1; level <= maxFrames; ++level) {
     // Phase 1: exhaust the proof obligations created by bad states that still

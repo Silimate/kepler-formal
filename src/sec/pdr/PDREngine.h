@@ -237,16 +237,6 @@ inline size_t effectiveLocalDualRailExactResetPrecheckSupportLimit(
   return std::max(configuredSupportLimit, localSupportLimit);
 }
 
-inline bool shouldUseCachedResetPredecessorCore(
-    bool hasResetBootstrap,
-    size_t level,
-    bool hasCachedCore) {
-  // Cached reset-predecessor cores come from exact concrete reset-frontier
-  // proofs.  Reusing them is only a level-0 predecessor shortcut; higher PDR
-  // frames still need ordinary frame-relative predecessor checks.
-  return hasResetBootstrap && level == 0 && hasCachedCore;
-}
-
 inline bool shouldSeedExactResetPredecessorSiblingCores(
     size_t cubeSize,
     size_t knownCoreSize) {
