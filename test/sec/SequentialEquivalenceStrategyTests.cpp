@@ -8671,7 +8671,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrLargeDualRailPredecessorResetFrontierRepairUsesLocalF0Only) {
+       PdrLargeDualRailPredecessorResetFrontierRepairModePolicy) {
   constexpr size_t kDefaultSupportLimit = 8192;
   constexpr size_t kLocalSupportLimit = 16 * 1024;
   EXPECT_TRUE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
@@ -8682,6 +8682,31 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*targetCubeSize=*/32,
       /*transitionSupportSize=*/4096,
       /*exactResetPrecheckSupportLimit=*/8192));
+  EXPECT_TRUE(detail::shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+      /*hasLargeDualRailResetFrontierSurface=*/true,
+      /*hasLocalDualRailLeafRepairSurface=*/false));
+  EXPECT_FALSE(detail::shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+      /*hasLargeDualRailResetFrontierSurface=*/true,
+      /*hasLocalDualRailLeafRepairSurface=*/true));
+  EXPECT_FALSE(detail::shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+      /*hasLargeDualRailResetFrontierSurface=*/false,
+      /*hasLocalDualRailLeafRepairSurface=*/false));
+  EXPECT_FALSE(detail::shouldRunLargeDualRailResetFrontierQuery(
+      /*resetFrontierQueryAllowed=*/true,
+      /*hasLargeDualRailResetFrontierSurface=*/true,
+      /*hasLocalDualRailLeafRepairSurface=*/false));
+  EXPECT_TRUE(detail::shouldRunLargeDualRailResetFrontierQuery(
+      /*resetFrontierQueryAllowed=*/true,
+      /*hasLargeDualRailResetFrontierSurface=*/true,
+      /*hasLocalDualRailLeafRepairSurface=*/true));
+  EXPECT_TRUE(detail::shouldRunLargeDualRailResetFrontierQuery(
+      /*resetFrontierQueryAllowed=*/true,
+      /*hasLargeDualRailResetFrontierSurface=*/false,
+      /*hasLocalDualRailLeafRepairSurface=*/false));
+  EXPECT_FALSE(detail::shouldRunLargeDualRailResetFrontierQuery(
+      /*resetFrontierQueryAllowed=*/false,
+      /*hasLargeDualRailResetFrontierSurface=*/false,
+      /*hasLocalDualRailLeafRepairSurface=*/false));
   EXPECT_TRUE(
       detail::shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
           /*usesDualRailStateEncoding=*/true,
@@ -20325,6 +20350,52 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailHugeStateSurfaceAvoidsRetainedBadCubeCache) {
+  KInductionProblem problem;
+  constexpr size_t state = 2;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {state};
+  problem.allSymbols = {state};
+  // Ariane has a multi-million-bit rail surface. Model only the cache-policy
+  // signal here so the unit test stays tiny while still protecting that shape.
+  problem.totalStateCount = 300000;
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(state));
+  problem.initialStateAssignments = {{state, false}};
+  problem.initializedStateCount = 1;
+  problem.transitions0.emplace_back(state, BoolExpr::Var(state));
+  problem.observedOutputExprs0 = {BoolExpr::Var(state)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"huge_state_bad_cube_cache"};
+  problem.originalObservedOutputCount = 278;
+  problem.bad = BoolExpr::Var(state);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
+      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true,
+      /*maxPredecessorQueries=*/0);
+  (void)engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
+      stderrOutput.find("bad cube cached solver disabled"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("bad cube cached frame clauses"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineFallsBackWhenStructuralBadCubeIsEmpty) {
   KInductionProblem problem;
   constexpr size_t a = 2;
@@ -21559,6 +21630,66 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find("predecessor target surface cached"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailHugeStateSurfaceAvoidsRetainedPredecessorCaches) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  constexpr size_t decoyState = 5;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB, decoyState};
+  problem.allSymbols = {targetState, stateA, stateB, decoyState};
+  // Model Ariane's multi-million-bit rail surface without allocating it in the
+  // unit test. The real query surface stays tiny, but the PDR cache policy must
+  // still choose the low-retention path for this shape.
+  problem.totalStateCount = 300000;
+
+  problem.transitions0 = {
+      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)},
+      {decoyState, BoolExpr::Var(decoyState)}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"huge_state_uncached_surface"};
+  problem.originalObservedOutputCount = 278;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true);
+  (void)engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(
+      stderrOutput.find("predecessor target surface uncached"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("predecessor cached solver disabled"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("predecessor target surface cached"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("predecessor cached solver created"),
       std::string::npos)
       << stderrOutput;
 }

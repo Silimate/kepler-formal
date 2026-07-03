@@ -224,6 +224,30 @@ inline bool shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
              exactResetPrecheckSupportLimit); // LCOV_EXCL_LINE
 }
 
+inline bool shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+    bool hasLargeDualRailResetFrontierSurface,
+    bool hasLocalDualRailLeafRepairSurface) {
+  // If an exact reset-frontier query runs on a huge non-local leaf, avoid
+  // pinning the reset-prefix SAT solver that can dominate top MEM there.
+  return hasLargeDualRailResetFrontierSurface &&
+         !hasLocalDualRailLeafRepairSurface;
+}
+
+inline bool shouldRunLargeDualRailResetFrontierQuery(
+    bool resetFrontierQueryAllowed,
+    bool hasLargeDualRailResetFrontierSurface,
+    bool hasLocalDualRailLeafRepairSurface) {
+  // The exact reset-frontier query is an optional PDR accelerator used before
+  // or after the local predecessor query.  On huge non-local leaves, one-shot
+  // mode protects memory but rebuilding the reset transition dominates runtime;
+  // keep the exact query for cached/local repair and let ordinary PDR splitting
+  // handle the non-local hot path.
+  return resetFrontierQueryAllowed &&
+         !shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+             hasLargeDualRailResetFrontierSurface,
+             hasLocalDualRailLeafRepairSurface);
+}
+
 inline size_t effectiveLocalDualRailExactResetPrecheckSupportLimit(
     bool hasLocalDualRailLeafRepairSurface,
     size_t observedOutputCount,

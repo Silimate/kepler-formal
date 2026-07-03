@@ -621,6 +621,24 @@ constexpr size_t kMaxPredecessorQueryResultCacheEntries = 64 * 1024;
 constexpr size_t kMaxPredecessorUnsatCoresPerContext = 4096;
 constexpr size_t kMaxPredecessorClosedSymbolCacheEntries = 4096;
 constexpr size_t kMaxPredecessorTargetSurfaceCacheEntries = 4096;
+// The target-surface cache saves recomputing local transition supports on
+// AES/Swerv-sized leaves, but Ariane-scale dual-rail memory arrays can generate
+// thousands of unique target cubes over a multi-million-symbol state surface.
+// In that shape, retaining target-derived vectors is pure memory pressure.
+constexpr size_t kMaxDualRailTargetSurfaceCacheStateSymbols = 256 * 1024;
+// The reusable predecessor solver is also a memory/perf cache.  Keep it for
+// local AES/Swerv-sized dual-rail leaves, but let giant Ariane-scale leaves use
+// one-shot predecessor queries so released solver pages do not accumulate in
+// the process footprint across many unique target surfaces.
+constexpr size_t kMaxDualRailPredecessorSolverCacheStateSymbols =
+    kMaxDualRailTargetSurfaceCacheStateSymbols;
+// The bad-cube cached solver permanently absorbs learned frame clauses.  That
+// is useful for AES/Swerv-sized leaves, but Ariane-scale dual-rail batches can
+// learn many neighboring F[0] clauses and inflate one long-lived SAT instance.
+// Keep the proof query identical there, but rebuild it as a one-shot solver so
+// each wave can release its frame-clause encoding promptly.
+constexpr size_t kMaxDualRailBadCubeSolverCacheStateSymbols =
+    kMaxDualRailTargetSurfaceCacheStateSymbols;
 constexpr size_t kMaxProcessResetUnreachableCoreCacheEntries = 4;
 // FrameFormulaEncoder already makes a small generic Tseitin reservation, but
 // sampled dual-rail PDR leaves still spent most time growing CaDiCaL variable
@@ -1709,6 +1727,19 @@ std::string_view concreteCubeReachabilityModeName(
   return "unknown";  // LCOV_EXCL_LINE
 }
 
+ConcreteCubeReachabilityMode predecessorResetFrontierMode(
+    const KInductionProblem& problem) {
+  // If a reset-frontier query runs on a huge non-local leaf, use a one-shot
+  // solver so the reset-prefix SAT instance is released promptly. Local
+  // residual leaves keep cached assumptions because they repeatedly probe
+  // neighboring cubes and stay below the local guard.
+  return detail::shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+             hasLargeDualRailResetFrontierSurface(problem),
+             hasLocalDualRailFinalLeafRepairSurface(problem))
+             ? ConcreteCubeReachabilityMode::OneShotUnitClauses
+             : ConcreteCubeReachabilityMode::CachedAssumptions;
+}
+
 size_t pdrStatsInterval() {
   const char* intervalText = std::getenv("KEPLER_SEC_PDR_STATS_INTERVAL");
   if (intervalText == nullptr || *intervalText == '\0') {
@@ -1870,6 +1901,11 @@ size_t nextPdrPredecessorQueryNumber() {
 size_t nextPdrProjectedBlockedRetryNumber() {
   static size_t retryNumber = 0;
   return ++retryNumber;
+}
+
+size_t nextPdrBadCubeQueryNumber() {
+  static size_t queryNumber = 0;
+  return ++queryNumber;
 }
 
 size_t nextPdrDualRailPredecessorCoreSkipNumber() {
@@ -2203,6 +2239,25 @@ PredecessorTargetSurface buildPredecessorTargetSurface(
   surface.transitionEncodingNodes =
       estimateTransitionEncodingNodes(transitionByState, surface.encodedTargets);
   return surface;
+}
+
+bool shouldRetainPredecessorTargetSurfaceCache(
+    const KInductionProblem& problem) {
+  return !problem.usesDualRailStateEncoding ||
+         problem.totalStateCount <=
+             kMaxDualRailTargetSurfaceCacheStateSymbols;
+}
+
+bool shouldUsePredecessorSolverCache(const KInductionProblem& problem) {
+  return !problem.usesDualRailStateEncoding ||
+         problem.totalStateCount <=
+             kMaxDualRailPredecessorSolverCacheStateSymbols;
+}
+
+bool shouldUseBadCubeSolverCache(const KInductionProblem& problem) {
+  return !problem.usesDualRailStateEncoding ||
+         problem.totalStateCount <=
+             kMaxDualRailBadCubeSolverCacheStateSymbols;
 }
 
 const PredecessorTargetSurface& predecessorTargetSurfaceFor(
@@ -11888,10 +11943,27 @@ std::optional<StateCube> findBadCubeForFormula(
       // LCOV_EXCL_START
       problem.usesDualRailStateEncoding ? dualRailBadCubeConflictLimit() : 0;
       // LCOV_EXCL_STOP
-  if (problem.usesDualRailStateEncoding && badCubeAssumptionCache != nullptr) {
+  const size_t badCubeStatsQueryNumber = nextPdrBadCubeQueryNumber();
+  const bool emitStatsForBadCubeQuery =
+      shouldEmitPdrStats(badCubeStatsQueryNumber);
+  BadCubeAssumptionCache* solverCache =
+      shouldUseBadCubeSolverCache(problem) ? badCubeAssumptionCache : nullptr;
+  if (problem.usesDualRailStateEncoding && badCubeAssumptionCache != nullptr &&
+      solverCache == nullptr && emitStatsForBadCubeQuery) {
+    emitSecDiag(
+        "SEC PDR stats: bad cube cached solver disabled state_symbols=",
+        problem.totalStateCount,
+        " state_limit=",
+        kMaxDualRailBadCubeSolverCacheStateSymbols,
+        " symbols=",
+        solverSymbols.size(),
+        " level=",
+        level);
+  }
+  if (problem.usesDualRailStateEncoding && solverCache != nullptr) {
     BadCubeAssumptionSolver* solvedCache = nullptr;
     const auto badSolveStatus = solveBadCubeWithCachedAssumption(
-        *badCubeAssumptionCache,
+        *solverCache,
         problem,
         solverType,
         initFormula,
@@ -12077,19 +12149,44 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
     size_t exactResetPrecheckSupportLimit,
     ResetFrontierCache* resetFrontierCache,
     const char* phase) {
-  if (resetFrontierCache == nullptr ||
-      problem.resetBootstrapCycles == 0 ||
-      !detail::shouldRetryLargeDualRailPredecessorWithResetFrontier( // LCOV_EXCL_LINE
+  if (resetFrontierCache == nullptr || problem.resetBootstrapCycles == 0) {
+    return std::nullopt;
+  }
+  const bool resetFrontierQueryAllowed =
+      detail::shouldRetryLargeDualRailPredecessorWithResetFrontier( // LCOV_EXCL_LINE
           problem.usesDualRailStateEncoding, // LCOV_EXCL_LINE
           exactResetFrontierChecksEnabled, // LCOV_EXCL_LINE
           problem.observedOutputExprs0.size(), // LCOV_EXCL_LINE
           level, // LCOV_EXCL_LINE
           targetCube.size(), // LCOV_EXCL_LINE
           transitionSupportSymbols.size(), // LCOV_EXCL_LINE
-          exactResetPrecheckSupportLimit)) { // LCOV_EXCL_LINE
+          exactResetPrecheckSupportLimit); // LCOV_EXCL_LINE
+  if (!resetFrontierQueryAllowed) { // LCOV_EXCL_LINE
     return std::nullopt;
   }
+  const bool hasLargeResetFrontierSurface =
+      hasLargeDualRailResetFrontierSurface(problem);
+  const bool hasLocalLeafRepairSurface =
+      hasLocalDualRailFinalLeafRepairSurface(problem);
+  if (!detail::shouldRunLargeDualRailResetFrontierQuery( // LCOV_EXCL_LINE
+          resetFrontierQueryAllowed, // LCOV_EXCL_LINE
+          hasLargeResetFrontierSurface, // LCOV_EXCL_LINE
+          hasLocalLeafRepairSurface)) { // LCOV_EXCL_LINE
+    if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
+      emitSecDiag( // LCOV_EXCL_LINE
+          "SEC PDR stats: skipped large dual-rail reset-frontier query",
+          " phase=", phase,
+          " reason=one_shot_hot_path",
+          " level=", level,
+          " target_cube=", targetCube.size(), // LCOV_EXCL_LINE
+          " target_hash=", cubeFingerprint(targetCube), // LCOV_EXCL_LINE
+          " transition_support=", transitionSupportSymbols.size()); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    return std::nullopt; // LCOV_EXCL_LINE
+  }
 
+  const ConcreteCubeReachabilityMode resetFrontierMode =
+      predecessorResetFrontierMode(problem);
   const bool outsideConcreteResetFrontier = // LCOV_EXCL_LINE
       cubeOutsideConcreteResetFrontier( // LCOV_EXCL_LINE
           problem, // LCOV_EXCL_LINE
@@ -12099,7 +12196,7 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
           /*postBootstrapSteps=*/1,
           *resetFrontierCache, // LCOV_EXCL_LINE
           /*useResetConstantShortcut=*/false,
-          ConcreteCubeReachabilityMode::CachedAssumptions,
+          resetFrontierMode,
           frameInvariant, // LCOV_EXCL_LINE
           /*resourceLimitStartupExactQuery=*/false);
   if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
@@ -12111,6 +12208,8 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
         " target_cube=", targetCube.size(), // LCOV_EXCL_LINE
         " target_hash=", cubeFingerprint(targetCube), // LCOV_EXCL_LINE
         " transition_support=", transitionSupportSymbols.size(), // LCOV_EXCL_LINE
+        " mode=", concreteCubeReachabilityModeName(
+                       resetFrontierMode), // LCOV_EXCL_LINE
         " result=", outsideConcreteResetFrontier ? "unsat" : "not_proved"); // LCOV_EXCL_LINE
   } // LCOV_EXCL_LINE
   return outsideConcreteResetFrontier; // LCOV_EXCL_LINE
@@ -12216,15 +12315,31 @@ std::optional<StateCube> findPredecessorCube(
   if (!consumePdrPredecessorQueryBudget(predecessorQueryBudget)) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
+  const size_t statsQueryNumber = nextPdrPredecessorQueryNumber();
+  const bool emitStatsForQuery = shouldEmitPdrStats(statsQueryNumber);
   PredecessorTargetSurface uncachedTargetSurface;
   const PredecessorTargetSurface* targetSurface = nullptr;
-  if (predecessorAssumptionCache != nullptr) {
+  if (predecessorAssumptionCache != nullptr &&
+      shouldRetainPredecessorTargetSurfaceCache(problem)) {
     targetSurface = &predecessorTargetSurfaceFor(
         *predecessorAssumptionCache, problem, transitionByState, targetCube);
   } else {
-    uncachedTargetSurface = // LCOV_EXCL_LINE
-        buildPredecessorTargetSurface(problem, transitionByState, targetCube); // LCOV_EXCL_LINE
-    targetSurface = &uncachedTargetSurface; // LCOV_EXCL_LINE
+    uncachedTargetSurface =
+        buildPredecessorTargetSurface(problem, transitionByState, targetCube);
+    targetSurface = &uncachedTargetSurface;
+    if (predecessorAssumptionCache != nullptr && emitStatsForQuery) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor target surface uncached target=",
+          targetCube.size(),
+          " encoded_targets=",
+          uncachedTargetSurface.encodedTargets.size(),
+          " transition_support=",
+          uncachedTargetSurface.transitionSupportSymbols.size(),
+          " state_symbols=",
+          problem.totalStateCount,
+          " state_limit=",
+          kMaxDualRailTargetSurfaceCacheStateSymbols);
+    }
   }
   const std::vector<size_t>& encodedTargets =
       targetSurface->encodedTargets;
@@ -12232,8 +12347,6 @@ std::optional<StateCube> findPredecessorCube(
       targetSurface->transitionSupportSymbols;
   const size_t transitionEncodingNodes =
       targetSurface->transitionEncodingNodes;
-  const size_t statsQueryNumber = nextPdrPredecessorQueryNumber();
-  const bool emitStatsForQuery = shouldEmitPdrStats(statsQueryNumber);
   // LCOV_EXCL_START
   const bool predecessorQueryIsAlreadyExact = predecessorProjectionLimit == 0;
   // LCOV_EXCL_STOP
@@ -12342,6 +12455,8 @@ std::optional<StateCube> findPredecessorCube(
     // reset states one refinement clause at a time. The exact reset-frontier
     // check answers the real level-0 question first: can any concrete
     // post-reset state reach this target cube in one PDR transition?
+    const ConcreteCubeReachabilityMode resetFrontierMode =
+        predecessorResetFrontierMode(problem);
     const bool hasConcreteResetPredecessor =
         !cubeOutsideConcreteResetFrontier(
             problem,
@@ -12351,12 +12466,7 @@ std::optional<StateCube> findPredecessorCube(
             1,
             *resetFrontierCache,
             false,
-            // These prechecks appear in waves of neighboring PDR cubes. AES
-            // sampling showed the one-shot query rebuilding and solving the
-            // same reset-prefix shape for each neighbor; the cached assumption
-            // path can reuse the wider solver plus failed cores across that
-            // wave.
-            ConcreteCubeReachabilityMode::CachedAssumptions,
+            resetFrontierMode,
             frameInvariant);
     if (emitStatsForQuery) {
       emitSecDiag(
@@ -12368,7 +12478,9 @@ std::optional<StateCube> findPredecessorCube(
           " transition_support=", transitionSupportSymbols.size(),
           " projection_limit=", predecessorProjectionLimit,
           " support_limit=", localExactResetPrecheckSupportLimit,
-          " exact_reset_frontier=1 result=",
+          " exact_reset_frontier=1 mode=",
+          concreteCubeReachabilityModeName(resetFrontierMode),
+          " result=",
           hasConcreteResetPredecessor ? "sat" : "unsat");
     }
     if (!hasConcreteResetPredecessor) {
@@ -12403,6 +12515,9 @@ std::optional<StateCube> findPredecessorCube(
       complementPartners,
       transitionSupportSymbols,
       supportCache);
+  PredecessorAssumptionCache* solverCache =
+      shouldUsePredecessorSolverCache(problem) ? predecessorAssumptionCache
+                                               : nullptr;
   const std::vector<size_t> solverSymbols = predecessorCurrentFrameQuerySymbols(
       problem,
       initFormula,
@@ -12416,7 +12531,7 @@ std::optional<StateCube> findPredecessorCube(
       complementPartners,
       exactFrameClauses,
       extraFrameClauses,
-      predecessorAssumptionCache,
+      solverCache,
       supportCache);
   const std::vector<size_t> cachedSolverSymbols =
       predecessorAssumptionCacheSymbols(
@@ -12425,7 +12540,7 @@ std::optional<StateCube> findPredecessorCube(
           solverSymbols,
           exactFrameClauses,
           level,
-          predecessorAssumptionCache);
+          solverCache);
   const unsigned predecessorConflictLimit =
       problem.usesDualRailStateEncoding
           ? dualRailPredecessorConflictLimitForQuery(
@@ -12452,13 +12567,20 @@ std::optional<StateCube> findPredecessorCube(
         level < frames.size() ? frames[level].clauses.size() : 0,
         " exclude_target=", excludeTargetOnCurrentFrame ? 1 : 0);
   }
-  if (problem.usesDualRailStateEncoding &&
-      predecessorAssumptionCache != nullptr) {
+  if (problem.usesDualRailStateEncoding && predecessorAssumptionCache != nullptr &&
+      solverCache == nullptr && emitStatsForQuery) {
+    emitSecDiag(
+        "SEC PDR stats: predecessor cached solver disabled state_symbols=",
+        problem.totalStateCount,
+        " state_limit=",
+        kMaxDualRailPredecessorSolverCacheStateSymbols);
+  }
+  if (problem.usesDualRailStateEncoding && solverCache != nullptr) {
     PredecessorAssumptionSolver* solvedPredecessorCache = nullptr;
     std::vector<int> cachedAssumptions;
     StateCube cachedUnsatCore;
     auto cachedStatus = solvePredecessorCubeWithCachedAssumptions(
-        *predecessorAssumptionCache,
+        *solverCache,
         problem,
         solverType,
         transitionByState,
