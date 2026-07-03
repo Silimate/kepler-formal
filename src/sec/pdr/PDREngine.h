@@ -123,6 +123,19 @@ inline bool shouldUseStableLocalPredecessorCacheSurface(
   return hasLocalDualRailLeafRepairSurface && exactFrameClauses && level == 0;
 }
 
+inline bool isBroadDualRailResidualOutputSurface(
+    bool usesDualRailStateEncoding,
+    size_t observedOutputCount,
+    size_t originalObservedOutputCount,
+    size_t broadOutputLimit) {
+  // A one-output residual leaf split from a broad public bus may use the local
+  // memory/perf shortcuts. AES-sized leaves also have one output after
+  // splitting, but keep the reference PDR repair route.
+  return usesDualRailStateEncoding &&
+         observedOutputCount == 1 &&
+         originalObservedOutputCount > broadOutputLimit;
+}
+
 inline bool shouldUseResidualDualRailPredecessorBudget(
     bool usesDualRailStateEncoding,
     size_t observedOutputCount,

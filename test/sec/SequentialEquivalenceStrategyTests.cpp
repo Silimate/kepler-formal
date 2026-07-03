@@ -8874,6 +8874,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PdrBroadDualRailResidualSurfaceExcludesAesSizedLeaf) {
+  constexpr size_t kDualRailMediumOutputLimit = 384;
+
+  // AES-sized designs become one-output residual leaves after splitting, but
+  // they must keep the 376a017 partial reset-conflict and fresh predecessor
+  // route instead of broad-output residual shortcuts.
+  EXPECT_FALSE(
+      detail::isBroadDualRailResidualOutputSurface(
+          /*usesDualRailStateEncoding=*/true,
+          /*observedOutputCount=*/1,
+          /*originalObservedOutputCount=*/129,
+          kDualRailMediumOutputLimit));
+  EXPECT_TRUE(
+      detail::isBroadDualRailResidualOutputSurface(
+          /*usesDualRailStateEncoding=*/true,
+          /*observedOutputCount=*/1,
+          /*originalObservedOutputCount=*/1266,
+          kDualRailMediumOutputLimit));
+  EXPECT_FALSE(
+      detail::isBroadDualRailResidualOutputSurface(
+          /*usesDualRailStateEncoding=*/true,
+          /*observedOutputCount=*/128,
+          /*originalObservedOutputCount=*/1266,
+          kDualRailMediumOutputLimit));
+  EXPECT_FALSE(
+      detail::isBroadDualRailResidualOutputSurface(
+          /*usesDualRailStateEncoding=*/false,
+          /*observedOutputCount=*/1,
+          /*originalObservedOutputCount=*/1266,
+          kDualRailMediumOutputLimit));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PdrDeterministicCubeOrderingSortsResetCoreCandidates) {
   using CubeKey = std::vector<std::pair<size_t, bool>>;
   std::vector<CubeKey> cubes = {
@@ -14955,7 +14988,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierAllowsAesSizedMediumOutputSurface) {
+       PdrDualRailExactResetFrontierBlocksAesSizedMediumOutputSurface) {
   KInductionProblem problem =
       makeDualRailResetFrontierGuardProblemForTest(
           /*railPairs=*/1124,
@@ -14981,14 +15014,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*useExactResetFrontierChecks=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // ASAP7 AES has a small rail surface but a 129-output residual bus.  It still
-  // needs exact reset-frontier repair; otherwise isolated one-output leaves
-  // exhaust the ordinary PDR predecessor budget and regress to partial
-  // coverage.
-  EXPECT_EQ(
+  // AES-sized residual leaves are medium-width by original output count but
+  // too small by rail-state surface to justify exact reset-frontier context.
+  // Keep them on the lower-memory predecessor/reset-conflict path from the
+  // known-good 376a017 behavior.
+  EXPECT_NE(
       stderrOutput.find(
           "exact reset-frontier checks disabled for large dual-rail problem"),
       std::string::npos);
+  EXPECT_NE(stderrOutput.find("medium_state_min=4096"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -15592,17 +15626,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       // hidden fallback.
       EXPECT_EQ(
           budgetedPdrResult.status, SequentialEquivalenceStatus::Equivalent);
-      EXPECT_EQ(budgetedPdrResult.coveredOutputs, 1u);
+      // If the tightened budgets still let PDR prove all residual leaves, that
+      // is the preferred result.  The regression guard is engine isolation, not
+      // forcing PDR to stay partial.
+      EXPECT_EQ(budgetedPdrResult.coveredOutputs, 3u);
       EXPECT_EQ(budgetedPdrResult.totalOutputs, 3u);
-      ASSERT_EQ(budgetedPdrResult.skippedObservedOutputs.size(), 2u);
-      EXPECT_NE(
-          budgetedPdrResult.skippedObservedOutputs[0].find(
-              "dual-rail PDR repair was inconclusive"),
-          std::string::npos);
-      EXPECT_NE(
-          budgetedPdrResult.skippedObservedOutputs[1].find(
-              "dual-rail PDR repair was inconclusive"),
-          std::string::npos);
+      EXPECT_TRUE(budgetedPdrResult.skippedObservedOutputs.empty());
       EXPECT_NE(stderrOutput.find("closure_limit=1"), std::string::npos);
       EXPECT_EQ(stderrOutput.find("trying k-induction"), std::string::npos);
     }
@@ -18863,10 +18892,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("generalized blocked cube level=1 size=4->2"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("remembered process reset-predecessor cores added="),
-      std::string::npos)
-      << stderrOutput;
 
   testing::internal::CaptureStderr();
   PDREngine cachedEngine(
@@ -18886,12 +18911,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(cachedResult.status, PDRStatus::Equivalent);
   EXPECT_NE(
-      cachedStderrOutput.find("imported process reset-predecessor cores cores="),
+      cachedStderrOutput.find("exact reset-predecessor core cube=4->1"),
       std::string::npos)
       << cachedStderrOutput;
   EXPECT_NE(
       cachedStderrOutput.find(
-          "seeded imported reset-predecessor clauses level=1 added="),
+          "learned exact reset-predecessor singleton clauses level=1 added=1"),
       std::string::npos)
       << cachedStderrOutput;
 }
@@ -21274,6 +21299,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
   problem.observedOutputNames = {"single_output_cached_retry"};
+  problem.originalObservedOutputCount = 1266;
 
   const ScopedEnvVar decisionLimit(
       "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
@@ -21299,6 +21325,130 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find("cached_solver_retry=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailAesSizedLeafUsesReferencePredecessorFallback) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB};
+  problem.allSymbols = {targetState, stateA, stateB};
+  problem.totalStateCount = 3;
+
+  problem.transitions0 = {
+      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"single_output_aes_sized_fallback"};
+  problem.originalObservedOutputCount = 129;
+
+  const ScopedEnvVar decisionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  // AES residual leaves have a one-output local shape after splitting, but the
+  // original design is still inside the medium-output guard. Keep the
+  // 376a017-style fresh predecessor fallback and do not retain the cached retry
+  // solver that caused available-memory spikes on AES.
+  EXPECT_NE(
+      stderrOutput.find("cached_assumptions=unknown fallback=exact"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("cached_assumptions=unknown retry=cached_solver"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("cached_solver_retry=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("predecessor result cache hit"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("predecessor cached core"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailAesSizedSatLeafUsesFreshPredecessorFallback) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB};
+  problem.allSymbols = {targetState, stateA, stateB};
+  problem.totalStateCount = 3;
+
+  problem.transitions0 = {
+      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"single_output_aes_sized_sat_fallback"};
+  problem.originalObservedOutputCount = 129;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      PDREngine::kDefaultPredecessorProjectionLimit,
+      PDREngine::kDefaultPreciseBadCubeStateLimit,
+      /*useExactFrameClauses=*/true);
+  (void)engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The good AES path used the cached solver only as a cheap probe.  A cached
+  // SAT answer still falls through to the ordinary exact predecessor solver so
+  // AES-sized leaves do not keep the broad residual-leaf cached model path.
+  EXPECT_NE(
+      stderrOutput.find("cached_assumptions=sat fallback=exact"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("result=sat cached_assumptions=1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("predecessor result cache hit"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("predecessor cached core"),
       std::string::npos)
       << stderrOutput;
 }
@@ -21369,6 +21519,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
   problem.observedOutputNames = {"single_output_stable_cache"};
+  problem.originalObservedOutputCount = 1266;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");

@@ -344,6 +344,8 @@ constexpr size_t kMaxExactResetFrontierDualRailTransitionSources = 20000;
 constexpr size_t kMaxExactResetFrontierDualRailMediumOutputs = 384;
 constexpr size_t kMaxExactResetFrontierDualRailObservedOutputs =
     kMaxExactResetFrontierDualRailMediumOutputs;
+constexpr size_t kMaxExactResetFrontierDualRailSmallOriginalOutputs = 64;
+constexpr size_t kMinExactResetFrontierDualRailMediumStateSymbols = 4096;
 constexpr size_t kMaxExactResetFrontierDualRailOriginalOutputs =
     kMaxExactResetFrontierDualRailMediumOutputs;
 // The broad frame-0 reset-bootstrap BMC precheck materializes the whole output
@@ -1525,9 +1527,16 @@ size_t pdrOriginalObservedOutputCount(const KInductionProblem& problem) {
              : problem.originalObservedOutputCount;
 }
 
+bool hasBroadDualRailResidualOutputSurface(const KInductionProblem& problem) {
+  return detail::isBroadDualRailResidualOutputSurface(
+      problem.usesDualRailStateEncoding,
+      problem.observedOutputExprs0.size(),
+      pdrOriginalObservedOutputCount(problem),
+      kMaxExactResetFrontierDualRailOriginalOutputs);
+}
+
 bool hasLocalDualRailFinalLeafRepairSurface(const KInductionProblem& problem) {
-  return problem.usesDualRailStateEncoding &&
-         problem.observedOutputExprs0.size() == 1 &&
+  return hasBroadDualRailResidualOutputSurface(problem) &&
          pdrDualRailStateSymbolCount(problem) <=
              kMaxLocalDualRailFinalLeafRepairStateSymbols;
 }
@@ -1549,7 +1558,29 @@ bool usesLocalDualRailFinalLeafRepairBudgets(
 
 bool canRetryDualRailPredecessorInCachedSolver(
     const KInductionProblem& problem) {
-  return problem.usesDualRailStateEncoding;
+  return hasLocalDualRailFinalLeafRepairSurface(problem);
+}
+
+bool canUsePredecessorQueryResultCache(const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding) {
+    return false;
+  }
+  const size_t observedOutputs = problem.observedOutputExprs0.size();
+  const size_t originalOutputs = pdrOriginalObservedOutputCount(problem);
+  // Medium residual slices, such as AES 129->1 output leaves, must stay on the
+  // 376a017 path: cached assumptions may probe cheaply, but the predecessor
+  // answer/core itself is recomputed by the ordinary exact query. Non-residual
+  // unit fixtures and broad residual leaves keep the cache path.
+  return !(originalOutputs > observedOutputs &&
+           originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs);
+}
+
+bool canUseResidualExactResetCubeBatch(const KInductionProblem& problem) {
+  // The residual exact reset-cube batch is a memory/perf shortcut for leaves
+  // split from broad output buses. AES also becomes a one-output leaf, but the
+  // good 376a017 route uses partial reset-conflict refinement there; batching
+  // the residual exact check changed the learned-frame shape and regressed AES.
+  return hasBroadDualRailResidualOutputSurface(problem);
 }
 
 size_t effectiveLocalDualRailFinalLeafBudget(size_t configuredBudget,
@@ -1602,15 +1633,17 @@ bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
   }
   const size_t railStateSymbols = pdrDualRailStateSymbolCount(problem);
   const size_t originalOutputs = pdrOriginalObservedOutputCount(problem);
-  // Exact reset-frontier repair is bounded by the hard rail-state,
-  // transition-source, and output-surface caps below. Do not require a minimum
-  // rail count: AES-sized medium-output surfaces are cheaper than the CPU
-  // cases this guard already permits, and they rely on this exact repair to
-  // avoid one-output PDR budget exhaustion.
+  // Keep the shared 129f390/376a017 guard: small output surfaces can use exact
+  // reset-frontier directly, while medium output surfaces must also have a
+  // large enough rail-state surface to amortize the exact frontier context.
+  // This keeps AES-sized residual leaves on the lower-memory PDR path.
   const bool outputSurfaceAllowed =
       problem.observedOutputExprs0.size() <=
           kMaxExactResetFrontierDualRailObservedOutputs &&
-      originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs;
+      originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs &&
+      (originalOutputs <= kMaxExactResetFrontierDualRailSmallOriginalOutputs ||
+       railStateSymbols >=
+           kMinExactResetFrontierDualRailMediumStateSymbols);
 
   return railStateSymbols <= dualRailResetFrontierStateSymbolLimit() &&
          pdrTransitionSourceCount(problem) <=
@@ -9056,13 +9089,16 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
   std::vector<StateCube> residualExactValidationCubes;  // LCOV_EXCL_LINE
   // LCOV_EXCL_START
   bool residualExactValidationOverflow = false;  // LCOV_EXCL_LINE
+  const bool allowResidualExactBatch =  // LCOV_EXCL_LINE
+      canUseResidualExactResetCubeBatch(problem);  // LCOV_EXCL_LINE
   const bool deepPartialResetRepair =  // LCOV_EXCL_LINE
       targetFrame > kMaxResetSpecializedBadFormulaValidationFrame &&  // LCOV_EXCL_LINE
       // LCOV_EXCL_STOP
       !allowExactResetFrontierQueries;  // LCOV_EXCL_LINE
   // LCOV_EXCL_START
   auto rememberResidualExactValidationCube = [&](const StateCube& cube) {  // LCOV_EXCL_LINE
-    if (allowExactResetFrontierQueries ||  // LCOV_EXCL_LINE
+    if (!allowResidualExactBatch ||  // LCOV_EXCL_LINE
+        allowExactResetFrontierQueries ||  // LCOV_EXCL_LINE
         targetFrame >  // LCOV_EXCL_LINE
             kMaxResidualExactResetCubeValidatedBadFormulaFrame ||  // LCOV_EXCL_LINE
         validationSupportCube.size() > kMaxResetCubeValidationPrimeSupport) {  // LCOV_EXCL_LINE
@@ -9313,7 +9349,8 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
 
   // Mixed repairs can learn some clauses from cheap reset-specialized checks
   // and still need a bounded exact batch for the remaining shallow cubes.
-  if (!allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
+  if (allowResidualExactBatch &&  // LCOV_EXCL_LINE
+      !allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
       // LCOV_EXCL_STOP
       !residualExactValidationOverflow &&  // LCOV_EXCL_LINE
       // LCOV_EXCL_START
@@ -12102,7 +12139,10 @@ std::optional<StateCube> findPredecessorCube(
   // state in F[level] transition into the target cube on the next frame?
   std::optional<PredecessorQueryResultKey> exactCacheKey;
   std::optional<PredecessorQueryResultKey> stableUnsatCacheKey;
-  if (predecessorAssumptionCache != nullptr) {
+  const bool usePredecessorQueryResultCache =
+      predecessorAssumptionCache != nullptr &&
+      canUsePredecessorQueryResultCache(problem);
+  if (usePredecessorQueryResultCache) {
     const size_t frameFingerprint = frameClausesFingerprint(frames, level);
     const size_t extraFrameFingerprint =
         extraFrameClausesFingerprint(extraFrameClauses);
@@ -12517,7 +12557,8 @@ std::optional<StateCube> findPredecessorCube(
         return std::nullopt;
       }
       if (*cachedStatus == SATSolverWrapper::SolveStatus::Sat &&
-          solvedPredecessorCache != nullptr) {
+          solvedPredecessorCache != nullptr &&
+          hasLocalDualRailFinalLeafRepairSurface(problem)) {
         if (emitStatsForQuery) {
           emitSecDiag(
               "SEC PDR stats: predecessor #", statsQueryNumber,
@@ -13642,7 +13683,7 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
   }
   if (skipDualRailPredecessorCore &&
       predecessorAssumptionCache != nullptr &&
-      problem.usesDualRailStateEncoding) {
+      canUsePredecessorQueryResultCache(problem)) {
     // The predecessor query that proved this obligation blocked already ran
     // through the cached assumption solver. Reuse its exact failed-assumption
     // core before the broad dual-rail guard below gives up on strengthening.
@@ -16886,7 +16927,9 @@ PDREngine::PDREngine(const KInductionProblem& problem,
         " outputs=", problem.observedOutputExprs0.size(),
         " original_outputs=", pdrOriginalObservedOutputCount(problem),
         " output_limit=", kMaxExactResetFrontierDualRailObservedOutputs,
-        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs);
+        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs,
+        " medium_state_min=",
+        kMinExactResetFrontierDualRailMediumStateSymbols);
   }
 }
 
