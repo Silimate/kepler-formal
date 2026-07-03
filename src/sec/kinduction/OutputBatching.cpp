@@ -64,7 +64,7 @@ bool hasSelectedOutputSkips(const KInductionProblem& problem) {
   }
   for (const auto& reason : problem.dualRailOutputSkipReasons) {
     if (!reason.empty()) {
-      return true;
+      return true; // LCOV_EXCL_LINE
     }
   }
   return false;

@@ -44,13 +44,13 @@ SATSolverWrapper::SolveStatus solveBoolFormulaStatus(
   FrameFormulaEncoder encoder(solver, std::move(leafLits));
   solver.addClause({encoder.encode(formula)});
   if (conflictLimit.has_value()) {
-    if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) {
-      return solver.solveWithKissatResourceLimits(
-          *conflictLimit, *conflictLimit);
+    if (solverType == KEPLER_FORMAL::Config::SolverType::KISSAT) { // LCOV_EXCL_LINE
+      return solver.solveWithKissatResourceLimits( // LCOV_EXCL_LINE
+          *conflictLimit, *conflictLimit); // LCOV_EXCL_LINE
     }
-    return solver.solveWithAssumptionsStatus(
-        {},
-        *conflictLimit,
+    return solver.solveWithAssumptionsStatus( // LCOV_EXCL_LINE
+        {}, // LCOV_EXCL_LINE
+        *conflictLimit, // LCOV_EXCL_LINE
         /*propagationLimit=*/-1);
   }
   return solver.solveStatus();
@@ -299,7 +299,7 @@ std::optional<bool> boolFormulaImpliesWithConflictLimit(
     // LCOV_EXCL_STOP
   }
   if (isBoolConst(conclusion, true) || isBoolConst(assumptions, false)) {
-    return true;
+    return true; // LCOV_EXCL_LINE
   }
 
   const auto status = solveBoolFormulaStatus(

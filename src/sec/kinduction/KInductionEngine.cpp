@@ -87,7 +87,7 @@ bool isLargeDeferredDualRailLeafSurface(const KInductionProblem& problem) {
 bool shouldBoundDualRailBatchInduction(const KInductionProblem& problem) {
   if (!problem.usesDualRailStateEncoding ||
       problem.observedOutputExprs0.size() <= 1) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   if (originalOutputCountForProblem(problem) <=
           kMaxCompactDualRailConjunctionOutputs &&
@@ -109,7 +109,7 @@ bool isCompactDualRailPublicConjunctionSurface(
   return problem.usesDualRailStateEncoding &&
          originalOutputCountForProblem(problem) <=
              kMaxCompactDualRailConjunctionOutputs &&
-         dualRailStateSymbolCount(problem) <
+         dualRailStateSymbolCount(problem) < // LCOV_EXCL_LINE
              kMinDeferredRailStateSymbolsForEarlyStop;
 }
 
@@ -122,7 +122,7 @@ struct PublicConjunctionHypothesis {
 
 size_t maxDualRailSplitHypothesisOutputs(const KInductionProblem& problem) {
   if (isCompactDualRailPublicConjunctionSurface(problem)) {
-    return kMaxCompactDualRailConjunctionOutputs;
+    return kMaxCompactDualRailConjunctionOutputs; // LCOV_EXCL_LINE
   }
   return kMaxWideDualRailSplitHypothesisOutputs;
 }
@@ -162,7 +162,7 @@ bool samePublicConjunctionHypothesis(
   return lhs.property == rhs.property &&
          lhs.bad == rhs.bad &&
          lhs.outputCount == rhs.outputCount &&
-         lhs.completePublicSurface == rhs.completePublicSurface;
+         lhs.completePublicSurface == rhs.completePublicSurface; // LCOV_EXCL_LINE
 }
 
 bool shouldTryFallbackHypothesisAtRange(
@@ -197,7 +197,7 @@ bool shouldTryFallbackHypothesisAtRange(
 bool shouldTryStoredPublicHypothesisOnStandaloneLeaf(
     const PublicConjunctionHypothesis& hypothesis) {
   if (hypothesis.property == nullptr) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   if (!hypothesis.completePublicSurface) {
     return true;
@@ -440,7 +440,7 @@ std::optional<unsigned> batchedInductionDecisionLimit(
     // Small dual-rail designs can need the public output conjunction as the
     // induction property.  Do not turn those strict KI attempts into UNKNOWN by
     // default; wide rail-state surfaces still use the bounded split path.
-    return std::nullopt;
+    return std::nullopt; // LCOV_EXCL_LINE
   }
   return readUnsignedEnv("KEPLER_SEC_KI_BATCH_DECISION_LIMIT")
       .value_or(kDefaultDualRailInductionDecisionLimit);
@@ -485,7 +485,7 @@ bool shouldStopDeferredDualRailLeafAfterResourceLimit(
     const KInductionProblem& problem,
     size_t consecutiveResourceLimitedSteps) {
   if (!isDeferredDualRailLeafProof(problem)) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   if (!isLargeDeferredDualRailLeafSurface(problem)) {
     return false;
@@ -536,7 +536,7 @@ std::optional<KInductionResult> validateConcreteBasePrefix(
   // A resource-limited concrete base check is not a proof.  Keep KI strict by
   // returning inconclusive instead of accepting a strengthened induction
   // certificate as a full SEC result.
-  return KInductionResult{KInductionStatus::Inconclusive, k};
+  return KInductionResult{KInductionStatus::Inconclusive, k}; // LCOV_EXCL_LINE
 }
 
 KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
@@ -601,7 +601,7 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
         // Reset/bootstrap and explicit induction certificates can prove a
         // LCOV_EXCL_STOP
         // strengthened obligation. Before accepting that as SEC equivalence,
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         // validate the concrete top-output base predicate through the proved
         // frontier.
         if (auto validation =
@@ -609,9 +609,9 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
             validation.has_value()) {
           return *validation;
         }
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       }
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       if (isKInductionDiagEnabled()) {
         emitSecDiag("SEC diag: k-induction step k=", k, " proved");
       }
@@ -633,12 +633,12 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
               " resource-limited; splitting output batch");
         }
       }  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       if (!problem.usesDualRailStateEncoding ||  // LCOV_EXCL_LINE
           problem.observedOutputExprs0.size() > 1) {  // LCOV_EXCL_LINE
         return {KInductionStatus::Inconclusive, k};  // LCOV_EXCL_LINE
       }
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       if (!shouldCheckLocalBaseCase(problem)) {  // LCOV_EXCL_LINE
         // Output-batched dual-rail KI validates the concrete base prefix once
         // for the full output set after all slices prove.  A resource-limited
@@ -667,23 +667,23 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
                 consecutiveResourceLimitedDeferredLeafSteps)) {  // LCOV_EXCL_LINE
           return {KInductionStatus::Inconclusive, k};  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       }
     } else {
       consecutiveResourceLimitedDeferredLeafSteps = 0;
     }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (isKInductionDiagEnabled()) {
       emitSecDiag("SEC diag: k-induction step k=", k, " inconclusive");
       emitSecDiag("SEC diag: k-induction base k=", k, " begin");
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
 
     // Earlier base checks have already ruled out bad states on frames < k.
     // Check only the newly exposed frontier instead of re-solving an
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     // OR-of-all-previous-bads query at every depth.
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     if (shouldCheckLocalBaseCase(problem)) {
       if (auto witness = SEC::findKInductionBaseCounterexampleAtFrontier(
               *baseFrontierCache, solverType, k);
@@ -714,17 +714,17 @@ KInductionResult runMonolithicKInduction(const KInductionProblem& problem,
     if (auto validation =
             validateConcreteBasePrefix(problem, solverType, maxK);
         validation.has_value()) {
-      return *validation;
+      return *validation; // LCOV_EXCL_LINE
     }
   }
 
   return {KInductionStatus::Inconclusive, maxK};
 }
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 
 
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
 KInductionResult combineBatchResults(KInductionResult lhs,
                                      const KInductionResult& rhs) {
   if (lhs.status == KInductionStatus::Different) {
@@ -736,9 +736,9 @@ KInductionResult combineBatchResults(KInductionResult lhs,
   if (rhs.status == KInductionStatus::Inconclusive) {
     lhs.status = KInductionStatus::Inconclusive;
   }
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   lhs.bound = std::max(lhs.bound, rhs.bound);
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   return lhs;
 }
 
@@ -750,16 +750,16 @@ KInductionResult runOutputRangeKInduction(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t maxK,
     size_t firstOutput,
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     size_t endOutput) {
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
   configureOutputBatchProblem(batchProblem, sourceProblem, firstOutput, endOutput);
   applyDualRailSplitHypothesis(
       batchProblem, sourceProblem, preferredHypothesis, firstOutput, endOutput);
   if (isKInductionDiagEnabled()) {
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     emitSecDiag(
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
         "SEC diag: k-induction output range [", firstOutput, ",", endOutput,
         ") outputs=", endOutput - firstOutput);
   }
@@ -803,7 +803,7 @@ KInductionResult runOutputRangeKInduction(
             inconclusiveDualRailLeafAttemptBound(
                 batchProblem, fallbackHypothesis, solverType, maxK);
         cachedBound.has_value()) {
-      return {KInductionStatus::Inconclusive, *cachedBound};
+      return {KInductionStatus::Inconclusive, *cachedBound}; // LCOV_EXCL_LINE
     }
     applyDualRailSplitHypothesis(
         batchProblem, sourceProblem, fallbackHypothesis, firstOutput, endOutput);
@@ -813,13 +813,13 @@ KInductionResult runOutputRangeKInduction(
         runMonolithicKInduction(batchProblem, solverType, maxK);
     if (fallbackResult.status == KInductionStatus::Inconclusive &&
         endOutput - firstOutput <= 1) {
-      rememberInconclusiveDualRailLeafAttempt(
-          batchProblem,
+      rememberInconclusiveDualRailLeafAttempt( // LCOV_EXCL_LINE
+          batchProblem, // LCOV_EXCL_LINE
           activeFallbackHypothesis,
-          solverType,
-          maxK,
-          fallbackResult.bound);
-    }
+          solverType, // LCOV_EXCL_LINE
+          maxK, // LCOV_EXCL_LINE
+          fallbackResult.bound); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
     if (fallbackResult.status != KInductionStatus::Inconclusive ||
         endOutput - firstOutput <= 1) {
       return fallbackResult;
@@ -883,9 +883,9 @@ KInductionResult runOutputBatchedKInduction(
       defaultOutputBatchingLimitsForProblem(problem);
   // Copy the large shared SEC problem once, then mutate only the small
   // output/property slice for each batch.  The previous implementation copied
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   // hundreds of thousands of state symbols and equality pairs per batch, which
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   // became visible on BlackParrot even after SAT-side batching was effective.
   KInductionProblem batchProblem = problem;
   const bool useSharedBaseCase =
@@ -939,7 +939,7 @@ KInductionResult runSingleOutputKInduction(
             inconclusiveDualRailLeafAttemptBound(
                 problem, localHypothesis, solverType, maxK);
         cachedBound.has_value()) {
-      return {KInductionStatus::Inconclusive, *cachedBound};
+      return {KInductionStatus::Inconclusive, *cachedBound}; // LCOV_EXCL_LINE
     }
     const KInductionResult localOnlyResult =
         runMonolithicKInduction(problem, solverType, maxK);

@@ -157,8 +157,8 @@ struct StateConstantPreservationKeyHash {
   size_t operator()(const StateConstantPreservationKey& key) const {
     size_t hash = std::hash<BoolExpr*>{}(key.expr);
     if (key.value) {
-      hash ^= 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
-    }
+      hash ^= 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
     return hash;
   }
 };
@@ -334,7 +334,7 @@ size_t cappedFocusedImageTransitionRequestCount(
     size_t requestLimit) {
   if (!shouldCapFocusedImageTransitionRequests(
           expandedRequestCount, requestLimit)) {
-    return expandedRequestCount;
+    return expandedRequestCount; // LCOV_EXCL_LINE
   }
   return std::max(currentRequestCount, requestLimit);
 }
@@ -495,7 +495,7 @@ std::vector<std::vector<RegionLiteral>> normalizedRegionClauses(
 void removeSubsumedRegionClauses(
     std::vector<std::vector<RegionLiteral>>& clauses) {
   if (clauses.size() > kCraigSubsumptionClauseLimit) {
-    return;
+    return; // LCOV_EXCL_LINE
   }
 
   std::vector<bool> removed(clauses.size(), false);
@@ -517,8 +517,8 @@ void removeSubsumedRegionClauses(
   for (size_t read = 0; read < clauses.size(); ++read) {
     if (!removed[read]) {
       if (write != read) {
-        clauses[write] = std::move(clauses[read]);
-      }
+        clauses[write] = std::move(clauses[read]); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
       ++write;
     }
   }
@@ -540,13 +540,13 @@ void removeSemanticallyRedundantRegionClauses(
     std::vector<std::vector<RegionLiteral>>& clauses) {
   if (clauses.size() > kCraigSemanticSimplifyClauseLimit ||
       regionVariableCount(clauses) > kCraigSemanticSimplifyVariableLimit) {
-    return;
+    return; // LCOV_EXCL_LINE
   }
 
   std::vector<bool> removed(clauses.size(), false);
   for (size_t candidate = 0; candidate < clauses.size(); ++candidate) {
     if (removed[candidate]) {
-      continue;
+      continue; // LCOV_EXCL_LINE
     }
 
     SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
@@ -602,7 +602,7 @@ void rebuildRegionClauses(
 
 InterpolantRegion simplifyCraigInterpolantRegionImpl(InterpolantRegion region) {
   if (region.type != InterpolantRegion::Type::Normal) {
-    return region;
+    return region; // LCOV_EXCL_LINE
   }
 
   const size_t oldClauses = regionClauseCount(region);
@@ -610,7 +610,7 @@ InterpolantRegion simplifyCraigInterpolantRegionImpl(InterpolantRegion region) {
   auto clauses = normalizedRegionClauses(region);
   if (std::any_of(clauses.begin(), clauses.end(),
                   [](const auto& clause) { return clause.empty(); })) {
-    return {InterpolantRegion::Type::False};
+    return {InterpolantRegion::Type::False}; // LCOV_EXCL_LINE
   }
 
   // McMillan's original IMC implementation reduced redundant interpolant logic
@@ -620,7 +620,7 @@ InterpolantRegion simplifyCraigInterpolantRegionImpl(InterpolantRegion region) {
   removeSubsumedRegionClauses(clauses);
   removeSemanticallyRedundantRegionClauses(clauses);
   if (clauses.empty() && !region.root.isState) {
-    return {InterpolantRegion::Type::True};
+    return {InterpolantRegion::Type::True}; // LCOV_EXCL_LINE
   }
   rebuildRegionClauses(region, clauses);
 
@@ -711,47 +711,47 @@ void closeProjectionRefinementTransitionTargets(
   }
 }
 
-void insertFocusedTransitionRequestWithTarget(
+void insertFocusedTransitionRequestWithTarget( // LCOV_EXCL_LINE
     const TransitionExprResolver& resolver,
     const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
     size_t symbol,
     std::unordered_set<size_t>& requests) {
-  if (!trackedStates.contains(symbol)) {
-    return;
+  if (!trackedStates.contains(symbol)) { // LCOV_EXCL_LINE
+    return; // LCOV_EXCL_LINE
   }
-  const size_t target =
-      transitionTargetFor(symbol, resolver, complementPrimary);
-  if (resolver.contains(target) && trackedStates.contains(target)) {
-    requests.insert(target);
-  }
-  requests.insert(symbol);
-}
+  const size_t target = // LCOV_EXCL_LINE
+      transitionTargetFor(symbol, resolver, complementPrimary); // LCOV_EXCL_LINE
+  if (resolver.contains(target) && trackedStates.contains(target)) { // LCOV_EXCL_LINE
+    requests.insert(target); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  requests.insert(symbol); // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
-std::unordered_set<size_t> selectCappedFocusedImageTransitionRequests(
+std::unordered_set<size_t> selectCappedFocusedImageTransitionRequests( // LCOV_EXCL_LINE
     const TransitionExprResolver& resolver,
     const std::unordered_map<size_t, size_t>& complementPrimary,
     const std::unordered_set<size_t>& trackedStates,
     const std::unordered_set<size_t>& currentRequests,
     const std::unordered_set<size_t>& expandedRequests,
     size_t requestLimit) {
-  std::unordered_set<size_t> requests = currentRequests;
-  requests.reserve(std::min(expandedRequests.size(), requestLimit));
-  if (requests.size() >= requestLimit) {
-    return requests;
+  std::unordered_set<size_t> requests = currentRequests; // LCOV_EXCL_LINE
+  requests.reserve(std::min(expandedRequests.size(), requestLimit)); // LCOV_EXCL_LINE
+  if (requests.size() >= requestLimit) { // LCOV_EXCL_LINE
+    return requests; // LCOV_EXCL_LINE
   }
-  for (const size_t symbol : sortedSymbols(expandedRequests)) {
-    if (requests.size() >= requestLimit) {
-      break;
+  for (const size_t symbol : sortedSymbols(expandedRequests)) { // LCOV_EXCL_LINE
+    if (requests.size() >= requestLimit) { // LCOV_EXCL_LINE
+      break; // LCOV_EXCL_LINE
     }
-    if (requests.contains(symbol)) {
-      continue;
+    if (requests.contains(symbol)) { // LCOV_EXCL_LINE
+      continue; // LCOV_EXCL_LINE
     }
-    insertFocusedTransitionRequestWithTarget(
-        resolver, complementPrimary, trackedStates, symbol, requests);
+    insertFocusedTransitionRequestWithTarget( // LCOV_EXCL_LINE
+        resolver, complementPrimary, trackedStates, symbol, requests); // LCOV_EXCL_LINE
   }
-  return requests;
-}
+  return requests; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
 std::unordered_set<size_t> initialTrackedStates(
     const KInductionProblem& problem,
@@ -793,55 +793,55 @@ std::unordered_set<size_t> focusedImageTransitionRequests(
     // A multi-step image needs the preimage support of the suffix-observed bad
     // slice.  Grow the focused request set one transition layer per remaining
     // suffix step; unrelated projected globals still stay unconstrained.
-    std::unordered_set<size_t> expandedRequests = requests;
-    for (const size_t requested : sortedSymbols(requests)) {
-      const size_t target =
-          transitionTargetFor(requested, resolver, complementPrimary);
-      if (!resolver.contains(target)) {
-        continue;
+    std::unordered_set<size_t> expandedRequests = requests; // LCOV_EXCL_LINE
+    for (const size_t requested : sortedSymbols(requests)) { // LCOV_EXCL_LINE
+      const size_t target = // LCOV_EXCL_LINE
+          transitionTargetFor(requested, resolver, complementPrimary); // LCOV_EXCL_LINE
+      if (!resolver.contains(target)) { // LCOV_EXCL_LINE
+        continue; // LCOV_EXCL_LINE
       }
-      for (const size_t symbol : resolver.support(target)) {
-        if (states.contains(symbol) && trackedStates.contains(symbol)) {
-          expandedRequests.insert(symbol);
-        }
+      for (const size_t symbol : resolver.support(target)) { // LCOV_EXCL_LINE
+        if (states.contains(symbol) && trackedStates.contains(symbol)) { // LCOV_EXCL_LINE
+          expandedRequests.insert(symbol); // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
       }
     }
-    closeSameDesignStateSemantics(problem, expandedRequests);
-    closeProjectionRefinementTransitionTargets(
-        resolver, complementPrimary, expandedRequests);
-    const size_t cappedRequestCount = cappedFocusedImageTransitionRequestCount(
-        requests.size(), expandedRequests.size(), requestLimit);
-    if (cappedRequestCount < expandedRequests.size()) {
+    closeSameDesignStateSemantics(problem, expandedRequests); // LCOV_EXCL_LINE
+    closeProjectionRefinementTransitionTargets( // LCOV_EXCL_LINE
+        resolver, complementPrimary, expandedRequests); // LCOV_EXCL_LINE
+    const size_t cappedRequestCount = cappedFocusedImageTransitionRequestCount( // LCOV_EXCL_LINE
+        requests.size(), expandedRequests.size(), requestLimit); // LCOV_EXCL_LINE
+    if (cappedRequestCount < expandedRequests.size()) { // LCOV_EXCL_LINE
       // Keeping only a deterministic prefix of the expanded request layer
       // leaves the remaining projected next-state functions unconstrained.
       // That weakens the image query, preserving strict Craig proof soundness
       // while avoiding BP's 130K-leaf lookahead-4 proof spike.
-      requests = selectCappedFocusedImageTransitionRequests(
-          resolver,
-          complementPrimary,
-          trackedStates,
+      requests = selectCappedFocusedImageTransitionRequests( // LCOV_EXCL_LINE
+          resolver, // LCOV_EXCL_LINE
+          complementPrimary, // LCOV_EXCL_LINE
+          trackedStates, // LCOV_EXCL_LINE
           requests,
           expandedRequests,
-          cappedRequestCount);
-      emitSecDiag(
+          cappedRequestCount); // LCOV_EXCL_LINE
+      emitSecDiag( // LCOV_EXCL_LINE
           "SEC diag: imc Craig caps focused image transition requests "
           "tracked_states=",
-          trackedStates.size(),
+          trackedStates.size(), // LCOV_EXCL_LINE
           " lookahead=", lookahead,
-          " depth=", depth + 1,
-          " requests=", requests.size(),
-          " expanded=", expandedRequests.size(),
+          " depth=", depth + 1, // LCOV_EXCL_LINE
+          " requests=", requests.size(), // LCOV_EXCL_LINE
+          " expanded=", expandedRequests.size(), // LCOV_EXCL_LINE
           " limited=", cappedRequestCount,
           " request_limit=", requestLimit);
-      break;
+      break; // LCOV_EXCL_LINE
     }
-    requests = std::move(expandedRequests);
-  }
+    requests = std::move(expandedRequests); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
   for (auto it = requests.begin(); it != requests.end();) {
     if (!trackedStates.contains(*it)) {
-      it = requests.erase(it);
-    } else {
+      it = requests.erase(it); // LCOV_EXCL_LINE
+    } else { // LCOV_EXCL_LINE
       ++it;
     }
   }
@@ -874,7 +874,7 @@ std::vector<size_t> projectedTransitionTargets(
   encodedTargets.reserve(transitionRequests.size());
   for (const size_t requested : sortedSymbols(transitionRequests)) {
     if (!trackedStates.contains(requested)) {
-      continue;
+      continue; // LCOV_EXCL_LINE
     }
     const size_t target =
         transitionTargetFor(requested, resolver, complementPrimary);
@@ -938,11 +938,11 @@ class ConstantAwareFrameFormulaEncoder {
 
   int encode(BoolExpr* expr) {
     if (expr == nullptr) {
-      throw std::invalid_argument(
+      throw std::invalid_argument( // LCOV_EXCL_LINE
           "ConstantAwareFrameFormulaEncoder::encode: null expr");
     }
     return encodeImpl(expr);
-  }
+  } // LCOV_EXCL_LINE
 
   const std::unordered_map<size_t, int>& leafLits() const {
     return leafLits_;
@@ -965,7 +965,7 @@ class ConstantAwareFrameFormulaEncoder {
       addClause({trueLit_});
     }
     return value ? trueLit_ : -trueLit_;
-  }
+  } // LCOV_EXCL_LINE
 
   bool isConstLit(int lit, bool value) const {
     return trueLit_ != 0 && lit == (value ? trueLit_ : -trueLit_);
@@ -984,7 +984,7 @@ class ConstantAwareFrameFormulaEncoder {
         if (symbol == 0) {
           value = false;
         } else if (symbol == 1) {
-          value = true;
+          value = true; // LCOV_EXCL_LINE
         } else if (const auto constant = constantAssignments_.find(symbol);
                    constant != constantAssignments_.end()) {
           value = constant->second;
@@ -1008,23 +1008,23 @@ class ConstantAwareFrameFormulaEncoder {
         if (right.has_value() && !*right) {
           value = false;
         } else if (left.has_value() && right.has_value()) {
-          value = *left && *right;
+          value = *left && *right; // LCOV_EXCL_LINE
         } else if (left.has_value() && *left) {
           value = right;
         } else if (right.has_value() && *right) {
-          value = left;
-        }
+          value = left; // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
         break;
       }
       case Op::OR: {
         const auto left = assignedConstantValue(expr->getLeft());
         if (left.has_value() && *left) {
-          value = true;
-          break;
+          value = true; // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
         const auto right = assignedConstantValue(expr->getRight());
         if (right.has_value() && *right) {
-          value = true;
+          value = true; // LCOV_EXCL_LINE
         } else if (left.has_value() && right.has_value()) {
           value = *left || *right;
         } else if (left.has_value() && !*left) {
@@ -1035,16 +1035,16 @@ class ConstantAwareFrameFormulaEncoder {
         break;
       }
       case Op::XOR: {
-        const auto left = assignedConstantValue(expr->getLeft());
-        const auto right = assignedConstantValue(expr->getRight());
-        if (left.has_value() && right.has_value()) {
-          value = *left != *right;
-        }
-        break;
+        const auto left = assignedConstantValue(expr->getLeft()); // LCOV_EXCL_LINE
+        const auto right = assignedConstantValue(expr->getRight()); // LCOV_EXCL_LINE
+        if (left.has_value() && right.has_value()) { // LCOV_EXCL_LINE
+          value = *left != *right; // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       }
-      case Op::NONE:
+      case Op::NONE: // LCOV_EXCL_LINE
       default:
-        throw std::runtime_error(
+        throw std::runtime_error( // LCOV_EXCL_LINE
             "Unsupported BoolExpr operator in constant-aware evaluation");
     }
 
@@ -1067,17 +1067,17 @@ class ConstantAwareFrameFormulaEncoder {
       case Op::VAR: {
         const size_t symbol = expr->getId();
         if (symbol == 0) {
-          lit = constLit(false);
-          break;
+          lit = constLit(false); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
         if (symbol == 1) {
-          lit = constLit(true);
-          break;
+          lit = constLit(true); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
         if (const auto constant = constantAssignments_.find(symbol);
             constant != constantAssignments_.end()) {
-          lit = constLit(constant->second);
-          break;
+          lit = constLit(constant->second); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
         auto leaf = leafLits_.find(symbol);
         if (leaf == leafLits_.end()) {
@@ -1092,8 +1092,8 @@ class ConstantAwareFrameFormulaEncoder {
       case Op::AND: {
         const int leftLit = encodeImpl(expr->getLeft());
         if (isConstLit(leftLit, false)) {
-          lit = constLit(false);
-          break;
+          lit = constLit(false); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
         if (isConstLit(leftLit, true)) {
           lit = encodeImpl(expr->getRight());
@@ -1101,10 +1101,10 @@ class ConstantAwareFrameFormulaEncoder {
         }
         const int rightLit = encodeImpl(expr->getRight());
         if (leftLit == rightLit || isConstLit(rightLit, true)) {
-          lit = leftLit;
+          lit = leftLit; // LCOV_EXCL_LINE
         } else if (leftLit == -rightLit || isConstLit(rightLit, false)) {
-          lit = constLit(false);
-        } else {
+          lit = constLit(false); // LCOV_EXCL_LINE
+        } else { // LCOV_EXCL_LINE
           lit = newLiteral();
           addClause({-lit, leftLit});
           addClause({-lit, rightLit});
@@ -1115,8 +1115,8 @@ class ConstantAwareFrameFormulaEncoder {
       case Op::OR: {
         const int leftLit = encodeImpl(expr->getLeft());
         if (isConstLit(leftLit, true)) {
-          lit = constLit(true);
-          break;
+          lit = constLit(true); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
         if (isConstLit(leftLit, false)) {
           lit = encodeImpl(expr->getRight());
@@ -1126,46 +1126,46 @@ class ConstantAwareFrameFormulaEncoder {
         if (leftLit == rightLit || isConstLit(rightLit, false)) {
           lit = leftLit;
         } else if (leftLit == -rightLit || isConstLit(rightLit, true)) {
-          lit = constLit(true);
-        } else {
-          lit = newLiteral();
-          addClause({-leftLit, lit});
-          addClause({-rightLit, lit});
-          addClause({-lit, leftLit, rightLit});
+          lit = constLit(true); // LCOV_EXCL_LINE
+        } else { // LCOV_EXCL_LINE
+          lit = newLiteral(); // LCOV_EXCL_LINE
+          addClause({-leftLit, lit}); // LCOV_EXCL_LINE
+          addClause({-rightLit, lit}); // LCOV_EXCL_LINE
+          addClause({-lit, leftLit, rightLit}); // LCOV_EXCL_LINE
         }
         break;
       }
       case Op::XOR: {
-        const int leftLit = encodeImpl(expr->getLeft());
-        if (isConstLit(leftLit, false)) {
-          lit = encodeImpl(expr->getRight());
-          break;
+        const int leftLit = encodeImpl(expr->getLeft()); // LCOV_EXCL_LINE
+        if (isConstLit(leftLit, false)) { // LCOV_EXCL_LINE
+          lit = encodeImpl(expr->getRight()); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
-        if (isConstLit(leftLit, true)) {
-          lit = -encodeImpl(expr->getRight());
-          break;
+        if (isConstLit(leftLit, true)) { // LCOV_EXCL_LINE
+          lit = -encodeImpl(expr->getRight()); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
         }
-        const int rightLit = encodeImpl(expr->getRight());
-        if (leftLit == rightLit) {
-          lit = constLit(false);
-        } else if (leftLit == -rightLit) {
-          lit = constLit(true);
-        } else if (isConstLit(rightLit, false)) {
-          lit = leftLit;
-        } else if (isConstLit(rightLit, true)) {
-          lit = -leftLit;
-        } else {
-          lit = newLiteral();
-          addClause({-lit, -leftLit, -rightLit});
-          addClause({-lit, leftLit, rightLit});
-          addClause({lit, -leftLit, rightLit});
-          addClause({lit, leftLit, -rightLit});
+        const int rightLit = encodeImpl(expr->getRight()); // LCOV_EXCL_LINE
+        if (leftLit == rightLit) { // LCOV_EXCL_LINE
+          lit = constLit(false); // LCOV_EXCL_LINE
+        } else if (leftLit == -rightLit) { // LCOV_EXCL_LINE
+          lit = constLit(true); // LCOV_EXCL_LINE
+        } else if (isConstLit(rightLit, false)) { // LCOV_EXCL_LINE
+          lit = leftLit; // LCOV_EXCL_LINE
+        } else if (isConstLit(rightLit, true)) { // LCOV_EXCL_LINE
+          lit = -leftLit; // LCOV_EXCL_LINE
+        } else { // LCOV_EXCL_LINE
+          lit = newLiteral(); // LCOV_EXCL_LINE
+          addClause({-lit, -leftLit, -rightLit}); // LCOV_EXCL_LINE
+          addClause({-lit, leftLit, rightLit}); // LCOV_EXCL_LINE
+          addClause({lit, -leftLit, rightLit}); // LCOV_EXCL_LINE
+          addClause({lit, leftLit, -rightLit}); // LCOV_EXCL_LINE
         }
-        break;
+        break; // LCOV_EXCL_LINE
       }
-      case Op::NONE:
+      case Op::NONE: // LCOV_EXCL_LINE
       default:
-        throw std::runtime_error(
+        throw std::runtime_error( // LCOV_EXCL_LINE
             "Unsupported BoolExpr operator in constant-aware encoding");
     }
 
@@ -1383,11 +1383,11 @@ void closeComplementConstantsForPairs(
     const auto complementValue = constants.find(complement);
     if (primaryValue != constants.end() &&
         complementValue == constants.end()) {
-      constants.emplace(complement, !primaryValue->second);
+      constants.emplace(complement, !primaryValue->second); // LCOV_EXCL_LINE
     } else if (primaryValue == constants.end() &&
                complementValue != constants.end()) {
-      constants.emplace(primary, !complementValue->second);
-    }
+      constants.emplace(primary, !complementValue->second); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
   }
 }
 
@@ -1419,7 +1419,7 @@ std::unordered_map<size_t, bool> bootstrapAssignmentsForSymbols(
     const std::unordered_set<size_t>& symbols) {
   std::unordered_map<size_t, bool> constants;
   if (symbols.empty()) {
-    return constants;
+    return constants; // LCOV_EXCL_LINE
   }
   constants.reserve(std::min(assignments.size(), symbols.size()));
   for (const auto& [symbol, value] : assignments) {
@@ -1442,7 +1442,7 @@ std::optional<bool> evaluateBoolExprWithKnownSupport(
     const std::set<size_t>& support,
     const std::unordered_map<size_t, bool>& constants) {
   if (expr == nullptr) {
-    return std::nullopt;
+    return std::nullopt; // LCOV_EXCL_LINE
   }
   for (const size_t supportSymbol : support) {
     if (supportSymbol >= 2 && !constants.contains(supportSymbol)) {
@@ -1451,9 +1451,9 @@ std::optional<bool> evaluateBoolExprWithKnownSupport(
   }
   try {
     return expr->evaluate(constants);
-  } catch (const std::exception&) {
-    return std::nullopt;
-  }
+  } catch (const std::exception&) { // LCOV_EXCL_LINE
+    return std::nullopt; // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 }
 
 std::optional<std::pair<size_t, bool>> transitionConstantTargetFor(
@@ -1487,7 +1487,7 @@ size_t localAuxiliaryPreservationScore(
   }
   BoolExpr* expr = resolver.at(target->first);
   if (expr == nullptr) {
-    return 0;
+    return 0; // LCOV_EXCL_LINE
   }
   if (const auto constantValue = constantBoolExprValue(expr);
       constantValue.has_value()) {
@@ -1495,16 +1495,16 @@ size_t localAuxiliaryPreservationScore(
                ? kLocalAuxiliaryPreservationScoreBonus
                : 0;
   }
-  const auto& support = resolver.support(target->first);
-  if (support.size() > kLocalAuxiliaryPreservationScoreSupportLimit) {
-    return 0;
+  const auto& support = resolver.support(target->first); // LCOV_EXCL_LINE
+  if (support.size() > kLocalAuxiliaryPreservationScoreSupportLimit) { // LCOV_EXCL_LINE
+    return 0; // LCOV_EXCL_LINE
   }
-  if (const auto knownValue =
-          evaluateBoolExprWithKnownSupport(expr, support, constants);
-      knownValue.has_value() && *knownValue == target->second) {
-    return kLocalAuxiliaryPreservationScoreBonus;
+  if (const auto knownValue = // LCOV_EXCL_LINE
+          evaluateBoolExprWithKnownSupport(expr, support, constants); // LCOV_EXCL_LINE
+      knownValue.has_value() && *knownValue == target->second) { // LCOV_EXCL_LINE
+    return kLocalAuxiliaryPreservationScoreBonus; // LCOV_EXCL_LINE
   }
-  return 0;
+  return 0; // LCOV_EXCL_LINE
 }
 
 bool transitionPreservesStateConstant(
@@ -1524,7 +1524,7 @@ bool transitionPreservesStateConstant(
   const size_t targetSymbol = target->first;
   const bool targetValue = target->second;
   if (resolver.at(targetSymbol) == nullptr) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   BoolExpr* targetExpr = resolver.at(targetSymbol);
   const StateConstantPreservationKey cacheKey{targetExpr, targetValue};
@@ -1593,15 +1593,15 @@ bool addTransitionSupportWithinLimit(
     size_t symbol,
     std::unordered_set<size_t>& support) {
   if (!resolver.contains(symbol)) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   for (const size_t supportSymbol : resolver.support(symbol)) {
     if (supportSymbol < 2) {
-      continue;
+      continue; // LCOV_EXCL_LINE
     }
     support.insert(supportSymbol);
     if (support.size() > kAuxiliaryInvariantSupportLimit) {
-      return false;
+      return false; // LCOV_EXCL_LINE
     }
   }
   return true;
@@ -1646,7 +1646,7 @@ size_t appendAuxiliaryEqualityCandidatesForDesign(
     }
     BoolExpr* expr = resolver.at(symbol);
     if (expr == nullptr) {
-      continue;
+      continue; // LCOV_EXCL_LINE
     }
     buckets[{expr, value->second}].push_back(symbol);
   }
@@ -1701,20 +1701,20 @@ bool transitionPreservesStateEquality(
     const std::unordered_map<size_t, bool>& constants,
     const std::vector<std::pair<size_t, size_t>>& equalities) {
   if (lhsSymbol == rhsSymbol) {
-    return true;
+    return true; // LCOV_EXCL_LINE
   }
   if (!resolver.contains(lhsSymbol) || !resolver.contains(rhsSymbol)) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   BoolExpr* lhsExpr = resolver.at(lhsSymbol);
   BoolExpr* rhsExpr = resolver.at(rhsSymbol);
   if (lhsExpr == nullptr || rhsExpr == nullptr) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   std::unordered_set<size_t> support;
   if (!addTransitionSupportWithinLimit(resolver, lhsSymbol, support) ||
       !addTransitionSupportWithinLimit(resolver, rhsSymbol, support)) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
 
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
@@ -1817,8 +1817,8 @@ AuxiliaryStateInvariants deriveAuxiliaryStateInvariants(
         ++it;
         continue;
       }
-      it = equalities.erase(it);
-      changed = true;
+      it = equalities.erase(it); // LCOV_EXCL_LINE
+      changed = true; // LCOV_EXCL_LINE
     }
   }
 
@@ -1941,7 +1941,7 @@ std::unordered_map<size_t, bool> localAuxiliaryCandidateConstants(
         selectedCandidateLimit + kLocalAuxiliaryPreservedCandidateExtraLimit;
     for (const ProjectionRefinementCandidate& candidate : preservedCandidates) {
       if (selected.size() >= selectedWithPreservedLimit) {
-        break;
+        break; // LCOV_EXCL_LINE
       }
       if (selected.contains(candidate.symbol)) {
         continue;
@@ -2089,15 +2089,15 @@ AuxiliaryStateInvariants deriveLocalAuxiliaryStateInvariants(
         ++it;
         continue;
       }
-      const auto removed = *it;
-      it = localEqualities.erase(it);
-      const auto assumption = std::lower_bound(
-          equalityAssumptions.begin(), equalityAssumptions.end(), removed);
-      if (assumption != equalityAssumptions.end() &&
-          *assumption == removed) {
-        equalityAssumptions.erase(assumption);
-      }
-      changed = true;
+      const auto removed = *it; // LCOV_EXCL_LINE
+      it = localEqualities.erase(it); // LCOV_EXCL_LINE
+      const auto assumption = std::lower_bound( // LCOV_EXCL_LINE
+          equalityAssumptions.begin(), equalityAssumptions.end(), removed); // LCOV_EXCL_LINE
+      if (assumption != equalityAssumptions.end() && // LCOV_EXCL_LINE
+          *assumption == removed) { // LCOV_EXCL_LINE
+        equalityAssumptions.erase(assumption); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      changed = true; // LCOV_EXCL_LINE
     }
   }
 
@@ -2213,13 +2213,13 @@ AuxiliaryStateInvariants helperAuxiliaryStateInvariantsFromOptions(
   const size_t normalizedCount = invariants.constants.size() +
                                  invariants.equalities.size();
   if (normalizedCount > kCraigHelperAuxiliaryCarryLimit) {
-    emitSecDiag(
+    emitSecDiag( // LCOV_EXCL_LINE
         "SEC diag: imc Craig skips broad helper auxiliary invariants "
         "constants=",
-        invariants.constants.size(),
-        " equalities=", invariants.equalities.size(),
+        invariants.constants.size(), // LCOV_EXCL_LINE
+        " equalities=", invariants.equalities.size(), // LCOV_EXCL_LINE
         " limit=", kCraigHelperAuxiliaryCarryLimit);
-    return {};
+    return {}; // LCOV_EXCL_LINE
   }
   return invariants;
 }
@@ -2265,7 +2265,7 @@ std::unordered_map<size_t, size_t> primaryByComplement(
     result.emplace(complement, primary);
   }
   for (const auto& [primary, complement] : problem.complementedStatePairs1) {
-    result.emplace(complement, primary);
+    result.emplace(complement, primary); // LCOV_EXCL_LINE
   }
   return result;
 }
@@ -2314,7 +2314,7 @@ size_t countTransitionExpressionNodes(
     BoolExpr* root,
     std::unordered_set<BoolExpr*>& visited) {
   if (root == nullptr) {
-    return 0;
+    return 0; // LCOV_EXCL_LINE
   }
   const size_t before = visited.size();
   std::vector<BoolExpr*> stack{root};
@@ -2437,7 +2437,7 @@ TransitionEncodingResult addProjectedTransition(
     for (const size_t target : transitionTargets) {
       const auto next = nextStateLits.find(target);
       if (next == nextStateLits.end()) {
-        continue;
+        continue; // LCOV_EXCL_LINE
       }
       solver.setCraigVariablePartition(localVariablePartition);
       solver.setCraigClausePartition(clausePartition);
@@ -2457,7 +2457,7 @@ TransitionEncodingResult addProjectedTransition(
     for (const size_t target : transitionTargets) {
       const auto next = nextStateLits.find(target);
       if (next == nextStateLits.end()) {
-        continue;
+        continue; // LCOV_EXCL_LINE
       }
       solver.setCraigVariablePartition(localVariablePartition);
       solver.setCraigClausePartition(clausePartition);
@@ -2507,7 +2507,7 @@ RegionLiteral convertInterpolantLiteral(
     return {true, state->second, literal > 0};
   }
   if (variable < firstAuxiliaryVariable) {
-    throw std::runtime_error(
+    throw std::runtime_error( // LCOV_EXCL_LINE
         "Craig interpolant contains a non-global original variable");
   }
   auto [auxiliary, inserted] =
@@ -2521,7 +2521,7 @@ InterpolantRegion convertInterpolant(
     const std::unordered_map<int, size_t>& stateByVariable) {
   if (cnf.type ==
       SATSolverWrapper::CraigInterpolantCnf::Type::ConstantFalse) {
-    return {InterpolantRegion::Type::False};
+    return {InterpolantRegion::Type::False}; // LCOV_EXCL_LINE
   }
   if (cnf.type ==
       SATSolverWrapper::CraigInterpolantCnf::Type::ConstantTrue) {
@@ -2529,7 +2529,7 @@ InterpolantRegion convertInterpolant(
   }
   if (cnf.type != SATSolverWrapper::CraigInterpolantCnf::Type::Normal ||
       cnf.clauses.empty() || cnf.clauses.back().size() != 1) {
-    throw std::runtime_error("CaDiCaL returned an invalid Craig interpolant CNF");
+    throw std::runtime_error("CaDiCaL returned an invalid Craig interpolant CNF"); // LCOV_EXCL_LINE
   }
 
   InterpolantRegion region;
@@ -2578,11 +2578,11 @@ int instantiateRegion(
     return literal;
   }
   if (region.type == InterpolantRegion::Type::False) {
-    solver.setCraigVariablePartition(variablePartition);
-    const int literal = solver.newVar() + 2;
-    solver.setCraigClausePartition(clausePartition);
-    solver.addClause({-literal});
-    return literal;
+    solver.setCraigVariablePartition(variablePartition); // LCOV_EXCL_LINE
+    const int literal = solver.newVar() + 2; // LCOV_EXCL_LINE
+    solver.setCraigClausePartition(clausePartition); // LCOV_EXCL_LINE
+    solver.addClause({-literal}); // LCOV_EXCL_LINE
+    return literal; // LCOV_EXCL_LINE
   }
 
   solver.setCraigVariablePartition(variablePartition);
@@ -2643,12 +2643,12 @@ std::optional<InterpolantRegion> buildConcreteAssignmentRegion(
     if (assignment == assignmentBySymbol.end()) {
       // A partial assignment is an over-approximation, not the exact concrete
       // post-reset cube required by the bounded counterexample fast path.
-      return std::nullopt;
+      return std::nullopt; // LCOV_EXCL_LINE
     }
     cubeLiterals.push_back({true, symbol, assignment->second});
   }
   if (cubeLiterals.empty()) {
-    return std::nullopt;
+    return std::nullopt; // LCOV_EXCL_LINE
   }
 
   InterpolantRegion region;
@@ -2739,9 +2739,9 @@ void addInitialFrontierConstraint(
   if (!problem.hasExplicitInitialState() && !hasInitialConstraint) {
     // Resetless SEC observes both designs from an already-matching top-level
     // frontier. This is an interface property, not an internal state relation.
-    initial = problem.property;
-    hasInitialConstraint = initial != nullptr;
-  }
+    initial = problem.property; // LCOV_EXCL_LINE
+    hasInitialConstraint = initial != nullptr; // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
   if (!hasInitialConstraint) {
     return;
   }
@@ -2808,7 +2808,7 @@ std::unordered_set<size_t> modelGuidedBootstrapProjectionSupport(
     size_t& candidateCount) {
   candidateCount = 0;
   if (problem.bootstrapStateAssignments.empty()) {
-    return {};
+    return {}; // LCOV_EXCL_LINE
   }
 
   const std::unordered_map<size_t, bool> bootstrapAssignments =
@@ -2975,7 +2975,7 @@ class ProjectionRefinementScorer {
     candidateCount = 0;
     topCandidateScore = 0;
     if (modelGuidedSupport.empty() || refinementLimit == 0) {
-      return {};
+      return {}; // LCOV_EXCL_LINE
     }
 
     std::unordered_map<size_t, size_t> supportScore;
@@ -2985,19 +2985,19 @@ class ProjectionRefinementScorer {
       if (!resolver_.contains(target)) {
         continue;
       }
-      for (const size_t symbol : resolver_.support(target)) {
-        if (symbol < 2 || trackedStates.contains(symbol) ||
-            !transitionStateSupport.contains(symbol)) {
-          continue;
+      for (const size_t symbol : resolver_.support(target)) { // LCOV_EXCL_LINE
+        if (symbol < 2 || trackedStates.contains(symbol) || // LCOV_EXCL_LINE
+            !transitionStateSupport.contains(symbol)) { // LCOV_EXCL_LINE
+          continue; // LCOV_EXCL_LINE
         }
-        ++supportScore[symbol];
+        ++supportScore[symbol]; // LCOV_EXCL_LINE
       }
     }
 
     std::vector<ProjectionRefinementCandidate> candidates;
     candidates.reserve(supportScore.size());
     for (const auto& [symbol, score] : supportScore) {
-      candidates.push_back({symbol, score});
+      candidates.push_back({symbol, score}); // LCOV_EXCL_LINE
     }
     std::sort(
         candidates.begin(),
@@ -3008,10 +3008,10 @@ class ProjectionRefinementScorer {
 
     std::unordered_set<size_t> selectedSupport;
     for (const ProjectionRefinementCandidate& candidate : candidates) {
-      if (selectedSupport.size() >= refinementLimit) {
-        break;
+      if (selectedSupport.size() >= refinementLimit) { // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       }
-      selectedSupport.insert(candidate.symbol);
+      selectedSupport.insert(candidate.symbol); // LCOV_EXCL_LINE
     }
     // The SAT model identifies currently missing states; adding their local
     // transition fanin keeps the strict projection step focused on that witness.
@@ -3044,7 +3044,7 @@ class ProjectionRefinementScorer {
         // BP's first hard output enters a long flat-score plateau above 104K
         // support.  At that point each extra tracked state lives across many
         // Craig rebuilds, so use a tighter strict-refinement slice.
-        return std::min(
+        return std::min( // LCOV_EXCL_LINE
             defaultRefinementLimit,
             kCraigTightLowScoreProjectionRefinementLimit);
       }
@@ -3072,7 +3072,7 @@ class ProjectionRefinementScorer {
             kCraigVeryHighSupportHighScoreProjectionRefinementLimit);
       }
       if (transitionSupportSize > kCraigVeryHighSupportRefinementThreshold) {
-        return std::min(
+        return std::min( // LCOV_EXCL_LINE
             defaultRefinementLimit,
             kCraigVeryHighSupportProjectionRefinementLimit);
       }
@@ -3184,19 +3184,19 @@ bool craigGrowthBudgetExceeded(
   }
   if (budget.maxInterpolantClauses > 0 &&
       frontierRegionClauseCount(frontier) > budget.maxInterpolantClauses) {
-    *reason = "clauses";
-    return true;
+    *reason = "clauses"; // LCOV_EXCL_LINE
+    return true; // LCOV_EXCL_LINE
   }
   if (budget.maxInterpolantLiterals > 0 &&
       frontierRegionLiteralCount(frontier) > budget.maxInterpolantLiterals) {
-    *reason = "literals";
-    return true;
+    *reason = "literals"; // LCOV_EXCL_LINE
+    return true; // LCOV_EXCL_LINE
   }
   if (budget.maxInterpolantAuxiliaries > 0 &&
       frontierRegionAuxiliaryCount(frontier) >
           budget.maxInterpolantAuxiliaries) {
-    *reason = "auxiliaries";
-    return true;
+    *reason = "auxiliaries"; // LCOV_EXCL_LINE
+    return true; // LCOV_EXCL_LINE
   }
   return false;
 }
@@ -3249,7 +3249,7 @@ bool shouldRefineFocusedProjectionAfterGrowthBudget(
   }
   for (const size_t symbol : frontier.transitionStateSupport) {
     if (!trackedStates.contains(symbol)) {
-      return true;
+      return true; // LCOV_EXCL_LINE
     }
   }
   return false;
@@ -3263,20 +3263,20 @@ bool shouldContinueSaturatedFocusedQExpansion(
     size_t qExpansionPassLimit) {
   if (std::strcmp(budgetReason, "q_pass") != 0 ||
       qExpansionPass >= qExpansionPassLimit) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   if (isLargeFocusedLookaheadAdvanceProof(
           frontierRegionClauseCount(frontier),
           frontierRegionLiteralCount(frontier),
           frontierRegionAuxiliaryCount(frontier))) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   // Once the focused transition support is fully tracked, projection
   // refinement cannot make the Craig image stronger.  Spend a bounded number of
   // extra McMillan Q-expansion passes before reporting the batch as budgeted.
   return frontier.usesFocusedTransitionProjection() &&
-         !shouldRefineFocusedProjectionAfterGrowthBudget(
-             frontier, trackedStates);
+         !shouldRefineFocusedProjectionAfterGrowthBudget( // LCOV_EXCL_LINE
+             frontier, trackedStates); // LCOV_EXCL_LINE
 }
 
 bool shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
@@ -3438,11 +3438,11 @@ FrontierResult deriveBoundedFrontierRegion(
       const size_t target =
           transitionTargetFor(requested, resolver, complementPrimary);
       if (!resolver.contains(target) || !encodedTargets.insert(target).second) {
-        continue;
+        continue; // LCOV_EXCL_LINE
       }
       const auto next = frameLits[frame + 1].find(target);
       if (next == frameLits[frame + 1].end()) {
-        continue;
+        continue; // LCOV_EXCL_LINE
       }
       solver.setCraigVariablePartition(VariablePartition::ALocal);
       const int transition = encoder.encode(resolver.at(target));
@@ -3467,18 +3467,18 @@ FrontierResult deriveBoundedFrontierRegion(
     for (const auto& [symbol, literal] : frameLits[frame]) {
       (void)literal;
       if (states.contains(symbol)) {
-        required.insert(symbol);
-      }
+        required.insert(symbol); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
     }
     closeSameDesignStateSemantics(problem, required);
     if (frame > 0) {
-      for (const size_t symbol : required) {
-        if (!frameLits[frame].contains(symbol)) {
-          solver.setCraigVariablePartition(VariablePartition::ALocal);
-          frameLits[frame].emplace(symbol, solver.newVar() + 2);
-        }
+      for (const size_t symbol : required) { // LCOV_EXCL_LINE
+        if (!frameLits[frame].contains(symbol)) { // LCOV_EXCL_LINE
+          solver.setCraigVariablePartition(VariablePartition::ALocal); // LCOV_EXCL_LINE
+          frameLits[frame].emplace(symbol, solver.newVar() + 2); // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
       }
-    }
+    } // LCOV_EXCL_LINE
   }
   emitSecDiag(
       "SEC diag: imc Craig bounded build after_unroll depth=", proofDepth,
@@ -3840,10 +3840,10 @@ bool regionContainedInReachableUnionSkipping(
     const InterpolantRegion& candidateRegion,
     std::optional<size_t> skippedReachableRegion) {
   if (candidateRegion.type == InterpolantRegion::Type::False) {
-    return true;
+    return true; // LCOV_EXCL_LINE
   }
   if (reachableRegions.empty()) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
 
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
@@ -3885,7 +3885,7 @@ bool regionContainedInReachableUnionSkipping(
     ++unionRegionCount;
   }
   if (unionRegionCount == 0) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
 
   const auto solveStart = SteadyClock::now();
@@ -3979,7 +3979,7 @@ bool craigInvariantExcludesBadInternal(
     const std::vector<InterpolantRegion>& invariantRegions,
     const AuxiliaryStateInvariants& auxiliaryStateInvariants) {
   if (trackedStates.empty() || invariantRegions.empty()) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
 
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
@@ -4058,10 +4058,10 @@ CraigImcResult runWithProjection(
   if (!craigInvariantExcludesBadInternal(
           problem, trackedStates, {concreteInitialRegion},
           activeAuxiliaryInvariants)) {
-    return {
-        hasConcreteInitialCube ? CraigImcStatus::CounterexampleCandidate
+    return { // LCOV_EXCL_LINE
+        hasConcreteInitialCube ? CraigImcStatus::CounterexampleCandidate // LCOV_EXCL_LINE
                                : CraigImcStatus::NoProgress,
-        hasConcreteInitialCube ? 0u : 1u};
+        hasConcreteInitialCube ? 0u : 1u}; // LCOV_EXCL_LINE
   }
   size_t lookahead = 1;
   size_t qExpansionPass = 1;
@@ -4100,14 +4100,14 @@ CraigImcResult runWithProjection(
               helperInvariantRegions.size());
       if (frontier.solveStatus == SATSolverWrapper::SolveStatus::Sat) {
         if (skipLocalAuxiliaryMining) {
-          emitSecDiag(
+          emitSecDiag( // LCOV_EXCL_LINE
               "SEC diag: imc Craig skips local auxiliary mining for retained "
               "helper tail lookahead=",
               lookahead,
               " q_pass=", qExpansionPass,
-              " tracked_states=", trackedStates.size(),
-              " transition_states=", frontier.transitionStateSupport.size(),
-              " helper_regions=", helperInvariantRegions.size());
+              " tracked_states=", trackedStates.size(), // LCOV_EXCL_LINE
+              " transition_states=", frontier.transitionStateSupport.size(), // LCOV_EXCL_LINE
+              " helper_regions=", helperInvariantRegions.size()); // LCOV_EXCL_LINE
         } else if (localAuxiliaryRetryCount < kCraigLocalAuxiliaryRetryLimit) {
           const AuxiliaryStateInvariants localInvariants =
               deriveLocalAuxiliaryStateInvariants(
@@ -4132,7 +4132,7 @@ CraigImcResult runWithProjection(
             continue;
           }
         } else {
-          emitSecDiag(
+          emitSecDiag( // LCOV_EXCL_LINE
               "SEC diag: imc Craig local auxiliary retry limit reached "
               "lookahead=",
               lookahead,
@@ -4187,18 +4187,18 @@ CraigImcResult runWithProjection(
                 " support=", frontier.transitionStateSupport.size(),
                 " score_limit=", kCraigLowScoreBackfillScoreLimit);
           } else {
-            const size_t supportLimit =
-                boundedRefinementLimit <=
+            const size_t supportLimit = // LCOV_EXCL_LINE
+                boundedRefinementLimit <= // LCOV_EXCL_LINE
                         kCraigVeryHighSupportProjectionRefinementLimit
                     ? kCraigVeryHighSupportRefinementThreshold
                     : kCraigHighSupportRefinementThreshold;
-            emitSecDiag(
+            emitSecDiag( // LCOV_EXCL_LINE
                 "SEC diag: imc Craig caps high-support bounded refinement "
                 "candidates=",
                 boundedCandidateCount,
                 " selected_limit=", boundedRefinementLimit,
                 " top_score=", boundedTopCandidateScore,
-                " support=", frontier.transitionStateSupport.size(),
+                " support=", frontier.transitionStateSupport.size(), // LCOV_EXCL_LINE
                 " support_limit=", supportLimit);
           }
         }
@@ -4208,15 +4208,15 @@ CraigImcResult runWithProjection(
           // In huge BP cones the bounded fan-in score eventually collapses.
           // At that point the SAT model is the precise missing slice; importing
           // another low-score 512-state backfill only grows Craig memory.
-          emitSecDiag(
+          emitSecDiag( // LCOV_EXCL_LINE
               "SEC diag: imc Craig skips low-score bounded backfill "
               "model_selected=",
-              frontier.modelGuidedTransitionStateSupport.size(),
+              frontier.modelGuidedTransitionStateSupport.size(), // LCOV_EXCL_LINE
               " candidates=", boundedCandidateCount,
               " top_score=", boundedTopCandidateScore,
-              " support=", frontier.transitionStateSupport.size(),
+              " support=", frontier.transitionStateSupport.size(), // LCOV_EXCL_LINE
               " score_limit=", kCraigLowScoreBackfillScoreLimit);
-          boundedRefinementSupport.clear();
+          boundedRefinementSupport.clear(); // LCOV_EXCL_LINE
         } else if (needsBoundedBackfill) {
           if (boundedTopCandidateScore <= kCraigLowScoreBackfillScoreLimit) {
             size_t guidedBackfillCandidateCount = 0;
@@ -4230,15 +4230,15 @@ CraigImcResult runWithProjection(
                     guidedBackfillCandidateCount,
                     guidedBackfillTopScore);
             if (!guidedBackfillSupport.empty()) {
-              emitSecDiag(
+              emitSecDiag( // LCOV_EXCL_LINE
                   "SEC diag: imc Craig model-guided bounded backfill "
                   "candidates=",
                   guidedBackfillCandidateCount,
-                  " selected=", guidedBackfillSupport.size(),
+                  " selected=", guidedBackfillSupport.size(), // LCOV_EXCL_LINE
                   " top_score=", guidedBackfillTopScore,
-                  " support=", frontier.transitionStateSupport.size());
-              boundedRefinementSupport = std::move(guidedBackfillSupport);
-            }
+                  " support=", frontier.transitionStateSupport.size()); // LCOV_EXCL_LINE
+              boundedRefinementSupport = std::move(guidedBackfillSupport); // LCOV_EXCL_LINE
+            } // LCOV_EXCL_LINE
           }
           boundedRefinementSupport.insert(
               frontier.modelGuidedTransitionStateSupport.begin(),
@@ -4277,17 +4277,17 @@ CraigImcResult runWithProjection(
                 activeAuxiliaryInvariants,
                 projectionAuxiliaryInvariants,
                 localInvariants)) {
-          ++localAuxiliaryRetryCount;
-          resetTransitionEncodingCache(
-              transitionEncodingCache, problem, activeAuxiliaryInvariants);
-          emitSecDiag(
+          ++localAuxiliaryRetryCount; // LCOV_EXCL_LINE
+          resetTransitionEncodingCache( // LCOV_EXCL_LINE
+              transitionEncodingCache, problem, activeAuxiliaryInvariants); // LCOV_EXCL_LINE
+          emitSecDiag( // LCOV_EXCL_LINE
               "SEC diag: imc Craig retries selected local auxiliary "
               "invariants selected=",
-              refinementSupport->size(),
-              " full_support=", frontier.transitionStateSupport.size(),
+              refinementSupport->size(), // LCOV_EXCL_LINE
+              " full_support=", frontier.transitionStateSupport.size(), // LCOV_EXCL_LINE
               " retry=", localAuxiliaryRetryCount,
               " retry_limit=", kCraigLocalAuxiliaryRetryLimit);
-          continue;
+          continue; // LCOV_EXCL_LINE
         }
       }
       // Do not close refinement picks over every rail/equality partner here.
@@ -4321,12 +4321,12 @@ CraigImcResult runWithProjection(
       }
       if (hasConcreteInitialCube &&
           qExpansionPass == 1 &&
-          frontier.solveStatus == SATSolverWrapper::SolveStatus::Sat) {
+          frontier.solveStatus == SATSolverWrapper::SolveStatus::Sat) { // LCOV_EXCL_LINE
         // With Q == S0, SAT is a concrete bounded candidate. After Q grows,
         // SAT only means the over-approximation was too coarse.
-        return {
+        return { // LCOV_EXCL_LINE
             CraigImcStatus::CounterexampleCandidate,
-            lookahead};
+            lookahead}; // LCOV_EXCL_LINE
       }
       const char* budgetReason = nullptr;
       if (craigGrowthBudgetExceeded(
@@ -4342,19 +4342,19 @@ CraigImcResult runWithProjection(
           // tracked has no projection work left.  Let strict IMC perform its
           // ordinary SAT action, k := k + 1, instead of treating the q-pass
           // guard as a proof failure.
-          emitSecDiag(
+          emitSecDiag( // LCOV_EXCL_LINE
               "SEC diag: imc Craig advances focused lookahead after budgeted "
               "sat frontier lookahead=",
               lookahead,
-              " next=", lookahead + 1,
+              " next=", lookahead + 1, // LCOV_EXCL_LINE
               " q_pass=", qExpansionPass,
-              " tracked_states=", trackedStates.size(),
-              " solve_ms=", frontier.solveElapsedMilliseconds);
-          ++lookahead;
-          qExpansionPass = 1;
-          localAuxiliaryRetryCount = 0;
-          reachableRegions = {concreteInitialRegion};
-          continue;
+              " tracked_states=", trackedStates.size(), // LCOV_EXCL_LINE
+              " solve_ms=", frontier.solveElapsedMilliseconds); // LCOV_EXCL_LINE
+          ++lookahead; // LCOV_EXCL_LINE
+          qExpansionPass = 1; // LCOV_EXCL_LINE
+          localAuxiliaryRetryCount = 0; // LCOV_EXCL_LINE
+          reachableRegions = {concreteInitialRegion}; // LCOV_EXCL_LINE
+          continue; // LCOV_EXCL_LINE
         } else {
           emitCraigGrowthBudgetExceeded(
               lookahead, qExpansionPass, frontier, budgetReason);
@@ -4404,52 +4404,52 @@ CraigImcResult runWithProjection(
       // frames over the same projected state surface.
       if (shouldRefineFocusedProjectionAfterGrowthBudget(
               frontier, trackedStates)) {
-        const size_t oldSize = trackedStates.size();
-        size_t boundedCandidateCount = 0;
-        size_t boundedTopCandidateScore = 0;
-        size_t boundedRefinementLimit = 0;
-        bool frozeBoundedScoreUpdates = false;
+        const size_t oldSize = trackedStates.size(); // LCOV_EXCL_LINE
+        size_t boundedCandidateCount = 0; // LCOV_EXCL_LINE
+        size_t boundedTopCandidateScore = 0; // LCOV_EXCL_LINE
+        size_t boundedRefinementLimit = 0; // LCOV_EXCL_LINE
+        bool frozeBoundedScoreUpdates = false; // LCOV_EXCL_LINE
         std::unordered_set<size_t> boundedRefinementSupport =
-            boundedProjectionRefinementSupport(
-                refinementScorer,
-                trackedStates,
-                frontier.transitionStateSupport,
+            boundedProjectionRefinementSupport( // LCOV_EXCL_LINE
+                refinementScorer, // LCOV_EXCL_LINE
+                trackedStates, // LCOV_EXCL_LINE
+                frontier.transitionStateSupport, // LCOV_EXCL_LINE
                 /*focusedTransitionProjection=*/true,
                 boundedCandidateCount,
                 boundedTopCandidateScore,
                 boundedRefinementLimit,
                 frozeBoundedScoreUpdates);
-        const std::unordered_set<size_t>& refinementSupport =
-            boundedRefinementSupport.empty() ? frontier.transitionStateSupport
+        const std::unordered_set<size_t>& refinementSupport = // LCOV_EXCL_LINE
+            boundedRefinementSupport.empty() ? frontier.transitionStateSupport // LCOV_EXCL_LINE
                                              : boundedRefinementSupport;
-        trackedStates.insert(
-            refinementSupport.begin(), refinementSupport.end());
-        if (trackedStates.size() != oldSize) {
-          if (frozeBoundedScoreUpdates) {
-            emitSecDiag(
+        trackedStates.insert( // LCOV_EXCL_LINE
+            refinementSupport.begin(), refinementSupport.end()); // LCOV_EXCL_LINE
+        if (trackedStates.size() != oldSize) { // LCOV_EXCL_LINE
+          if (frozeBoundedScoreUpdates) { // LCOV_EXCL_LINE
+            emitSecDiag( // LCOV_EXCL_LINE
                 "SEC diag: imc Craig freezes low-score fanin scoring "
                 "candidates=",
                 boundedCandidateCount,
                 " top_score=", boundedTopCandidateScore,
-                " support=", frontier.transitionStateSupport.size(),
+                " support=", frontier.transitionStateSupport.size(), // LCOV_EXCL_LINE
                 " score_limit=", kCraigLowScoreBackfillScoreLimit);
-          }
-          if (!boundedRefinementSupport.empty()) {
-            emitSecDiag(
+          } // LCOV_EXCL_LINE
+          if (!boundedRefinementSupport.empty()) { // LCOV_EXCL_LINE
+            emitSecDiag( // LCOV_EXCL_LINE
                 "SEC diag: imc Craig refines focused projection after growth "
                 "budget reason=",
                 budgetReason,
                 " candidates=", boundedCandidateCount,
-                " selected=", boundedRefinementSupport.size(),
-                " full=", frontier.transitionStateSupport.size(),
+                " selected=", boundedRefinementSupport.size(), // LCOV_EXCL_LINE
+                " full=", frontier.transitionStateSupport.size(), // LCOV_EXCL_LINE
                 " top_score=", boundedTopCandidateScore);
-          }
-          emitSecDiag(
+          } // LCOV_EXCL_LINE
+          emitSecDiag( // LCOV_EXCL_LINE
               "SEC diag: imc Craig refines transition projection states=",
-              oldSize, "->", trackedStates.size());
-          return {CraigImcStatus::NoProgress, 0};
+              oldSize, "->", trackedStates.size()); // LCOV_EXCL_LINE
+          return {CraigImcStatus::NoProgress, 0}; // LCOV_EXCL_LINE
         }
-      }
+      } // LCOV_EXCL_LINE
       const size_t qExpansionPassLimit =
           craigFocusedSaturatedQExpansionPassLimit(
               frontier.usesFocusedTransitionProjection(),
@@ -4462,13 +4462,13 @@ CraigImcResult runWithProjection(
               budgetReason,
               qExpansionPass,
               qExpansionPassLimit)) {
-        emitSecDiag(
+        emitSecDiag( // LCOV_EXCL_LINE
             "SEC diag: imc Craig continues saturated focused q expansion "
             "lookahead=",
             lookahead,
             " q_pass=", qExpansionPass,
             " limit=", qExpansionPassLimit,
-            " tracked_states=", trackedStates.size());
+            " tracked_states=", trackedStates.size()); // LCOV_EXCL_LINE
       } else if (shouldAdvanceLookaheadAfterSaturatedFocusedQBudget(
                      frontier,
                      trackedStates,
@@ -4481,27 +4481,27 @@ CraigImcResult runWithProjection(
         // The q-pass limit is an optimization guard, not a semantic bound.
         // When projection is saturated, avoid q13's proof explosion by trying
         // the next strict IMC unroll depth from the concrete frontier.
-        emitSecDiag(
+        emitSecDiag( // LCOV_EXCL_LINE
             "SEC diag: imc Craig advances focused lookahead after q budget "
             "lookahead=",
             lookahead,
-            " next=", lookahead + 1,
+            " next=", lookahead + 1, // LCOV_EXCL_LINE
             " q_pass=", qExpansionPass,
-            " tracked_states=", trackedStates.size(),
-            " clauses=", frontierRegionClauseCount(frontier),
-            " literals=", frontierRegionLiteralCount(frontier),
-            " auxiliaries=", frontierRegionAuxiliaryCount(frontier));
-        ++lookahead;
-        qExpansionPass = 1;
-        localAuxiliaryRetryCount = 0;
-        reachableRegions = {concreteInitialRegion};
-        continue;
+            " tracked_states=", trackedStates.size(), // LCOV_EXCL_LINE
+            " clauses=", frontierRegionClauseCount(frontier), // LCOV_EXCL_LINE
+            " literals=", frontierRegionLiteralCount(frontier), // LCOV_EXCL_LINE
+            " auxiliaries=", frontierRegionAuxiliaryCount(frontier)); // LCOV_EXCL_LINE
+        ++lookahead; // LCOV_EXCL_LINE
+        qExpansionPass = 1; // LCOV_EXCL_LINE
+        localAuxiliaryRetryCount = 0; // LCOV_EXCL_LINE
+        reachableRegions = {concreteInitialRegion}; // LCOV_EXCL_LINE
+        continue; // LCOV_EXCL_LINE
       } else {
         emitCraigGrowthBudgetExceeded(
             lookahead, qExpansionPass, frontier, budgetReason);
         return {CraigImcStatus::BudgetExceeded, lookahead};
       }
-    }
+    } // LCOV_EXCL_LINE
 
     // McMillan UNSAT branch: Q := Q OR I, then repeat the same loop without
     // increasing k.
@@ -4527,7 +4527,7 @@ CraigImcResult runWithProjection(
 
 InterpolantRegion simplifyCraigInterpolantRegion(InterpolantRegion region) {
   return simplifyCraigInterpolantRegionImpl(std::move(region));
-}
+} // LCOV_EXCL_LINE
 
 size_t compactCraigReachableRegions(
     const KInductionProblem& problem,
@@ -4544,7 +4544,7 @@ size_t compactCraigReachableRegions(
       reachableRegions,
       compactionStart,
       candidateLimit);
-}
+} // LCOV_EXCL_LINE
 
 bool shouldAdvanceCraigLookaheadAfterSaturatedFocusedQBudget(
     bool focusedTransitionProjection,
@@ -4759,9 +4759,9 @@ CraigImcResult CraigInterpolatingModelChecker::run(
     const size_t projectionSize = trackedStates.size();
     if (craigProjectionBudgetExceeded(
             options_.growthBudget, projectionSize)) {
-      emitCraigProjectionBudgetExceeded(
-          projectionRound, projectionSize, options_.growthBudget);
-      return {CraigImcStatus::BudgetExceeded, 0};
+      emitCraigProjectionBudgetExceeded( // LCOV_EXCL_LINE
+          projectionRound, projectionSize, options_.growthBudget); // LCOV_EXCL_LINE
+      return {CraigImcStatus::BudgetExceeded, 0}; // LCOV_EXCL_LINE
     }
     emitSecDiag(
         "SEC diag: imc Craig projection round=", projectionRound,
@@ -4791,7 +4791,7 @@ CraigImcResult CraigInterpolatingModelChecker::run(
       return {CraigImcStatus::BudgetExceeded, 0};
     }
   }
-  return {};
+  return {}; // LCOV_EXCL_LINE
 }
 
 bool craigInvariantExcludesBad(

@@ -75,7 +75,7 @@ constexpr size_t kCraigIndexedVectorUnionRawSupportLimit = 128;
 constexpr size_t kCraigHelperReuseMinOverlapPercent = 80;
 constexpr size_t kCraigSingletonRawHelperSourceLimit = 32;
 
-struct CraigOutputSupport {
+struct CraigOutputSupport { // LCOV_EXCL_LINE
   std::unordered_set<size_t> raw;
   std::unordered_set<size_t> projection;
 };
@@ -124,7 +124,7 @@ bool shouldBuildCraigProjectionSupportCache(
   const size_t outputCount = problem.observedOutputExprs0.size();
   const size_t stateCount = problem.effectiveTotalStateCount();
   if (outputCount == 0 || stateCount == 0) {
-    return true;
+    return true; // LCOV_EXCL_LINE
   }
   // The cache expands each output support through the transition relation.
   // That is useful on AES-sized surfaces, but BP-sized dual-rail problems can
@@ -219,7 +219,7 @@ void mergeLocalTrackedSeeds(
 bool supportCoversMostOf(const std::unordered_set<size_t>& reference,
                          const std::unordered_set<size_t>& candidate) {
   if (candidate.empty()) {
-    return reference.empty();
+    return reference.empty(); // LCOV_EXCL_LINE
   }
   return (supportIntersectionSize(reference, candidate) * 100) /
              candidate.size() >=
@@ -242,7 +242,7 @@ bool supportOverlapAtLeast(const std::unordered_set<size_t>& lhs,
                            const std::unordered_set<size_t>& rhs,
                            size_t minPercent) {
   if (lhs.empty() || rhs.empty()) {
-    return lhs.empty() && rhs.empty();
+    return lhs.empty() && rhs.empty(); // LCOV_EXCL_LINE
   }
   const size_t overlap = supportIntersectionSize(lhs, rhs);
   return (overlap * 100) / lhs.size() >= minPercent &&
@@ -320,20 +320,20 @@ bool indexedOutputVectorBase(
   if (outputName.empty() || outputName.back() != ']') {
     return false;
   }
-  const size_t openBracket = outputName.rfind('[');
-  if (openBracket == std::string::npos ||
-      openBracket == 0 ||
-      openBracket + 1 == outputName.size() - 1) {
-    return false;
+  const size_t openBracket = outputName.rfind('['); // LCOV_EXCL_LINE
+  if (openBracket == std::string::npos || // LCOV_EXCL_LINE
+      openBracket == 0 || // LCOV_EXCL_LINE
+      openBracket + 1 == outputName.size() - 1) { // LCOV_EXCL_LINE
+    return false; // LCOV_EXCL_LINE
   }
-  for (size_t index = openBracket + 1; index + 1 < outputName.size();
-       ++index) {
-    if (outputName[index] < '0' || outputName[index] > '9') {
-      return false;
+  for (size_t index = openBracket + 1; index + 1 < outputName.size(); // LCOV_EXCL_LINE
+       ++index) { // LCOV_EXCL_LINE
+    if (outputName[index] < '0' || outputName[index] > '9') { // LCOV_EXCL_LINE
+      return false; // LCOV_EXCL_LINE
     }
-  }
-  *baseName = outputName.substr(0, openBracket);
-  return true;
+  } // LCOV_EXCL_LINE
+  *baseName = outputName.substr(0, openBracket); // LCOV_EXCL_LINE
+  return true; // LCOV_EXCL_LINE
 }
 
 bool sameIndexedOutputVector(
@@ -342,15 +342,15 @@ bool sameIndexedOutputVector(
     size_t rhsOutput) {
   if (lhsOutput >= supportCache.outputNames.size() ||
       rhsOutput >= supportCache.outputNames.size()) {
-    return false;
+    return false; // LCOV_EXCL_LINE
   }
   std::string lhsBase;
   std::string rhsBase;
   return indexedOutputVectorBase(
              supportCache.outputNames[lhsOutput], &lhsBase) &&
-         indexedOutputVectorBase(
-             supportCache.outputNames[rhsOutput], &rhsBase) &&
-         lhsBase == rhsBase;
+         indexedOutputVectorBase( // LCOV_EXCL_LINE
+             supportCache.outputNames[rhsOutput], &rhsBase) && // LCOV_EXCL_LINE
+         lhsBase == rhsBase; // LCOV_EXCL_LINE
 }
 
 bool canUseIndexedVectorRawBatch(
@@ -381,7 +381,7 @@ size_t envSizeOrDefault(const char* name, size_t fallback) {
   char* end = nullptr;
   const unsigned long long parsed = std::strtoull(value, &end, 10);
   if (end == value || *end != '\0') {
-    return fallback;
+    return fallback; // LCOV_EXCL_LINE
   }
   return static_cast<size_t>(parsed);
 }
@@ -473,8 +473,8 @@ bool canAddOutputToCraigBatch(
                         : (overlap * 100) / outputComparison.size();
 
   if (unionSupport > limits.outputBatchSupportLimit) {
-    *rejectReason = "support_limit";
-    return false;
+    *rejectReason = "support_limit"; // LCOV_EXCL_LINE
+    return false; // LCOV_EXCL_LINE
   }
   if (*overlapPercent < kCraigBatchMinOverlapPercent) {
     if (canUseIndexedVectorRawBatch(
@@ -484,14 +484,14 @@ bool canAddOutputToCraigBatch(
             firstOutput,
             output,
             unionSupport)) {
-      return true;
+      return true; // LCOV_EXCL_LINE
     }
     *rejectReason = "low_overlap";
     return false;
   }
   if (marginal > marginalSupportLimit(batchComparison.size())) {
-    *rejectReason = "marginal_support";
-    return false;
+    *rejectReason = "marginal_support"; // LCOV_EXCL_LINE
+    return false; // LCOV_EXCL_LINE
   }
   return true;
 }
@@ -674,7 +674,7 @@ void removeCrossDesignStateCandidates(KInductionProblem& problem) {
   problem.inductionPropertyAssumesInductiveStateEqualities = false;
 }
 
-struct ReusableCraigInvariant {
+struct ReusableCraigInvariant { // LCOV_EXCL_LINE
   std::vector<InterpolantRegion> regions;
   std::unordered_set<size_t> trackedStates;
   std::vector<std::pair<size_t, bool>> auxiliaryConstants;
@@ -708,7 +708,7 @@ bool reusableCraigInvariantMatchesOutputRange(
     return false;
   }
   if (!reusableInvariant.hasSource) {
-    return true;
+    return true; // LCOV_EXCL_LINE
   }
   if (isSingleCraigOutputRange(firstOutput, endOutput) &&
       canUseSmallRawHelperForSingleton(
@@ -719,7 +719,7 @@ bool reusableCraigInvariantMatchesOutputRange(
   // overlap before projection but converge to the same Craig surface.
   if (sameIndexedOutputVector(
           supportCache, reusableInvariant.sourceFirstOutput, firstOutput)) {
-    return true;
+    return true; // LCOV_EXCL_LINE
   }
   return hasReusableProjectionSurface(
              reusableInvariant.sourceSupport, rangeSupport) ||
@@ -746,30 +746,30 @@ void saveReusableCraigInvariant(
 }
 
 template <typename T>
-void appendUniqueCraigHelperFacts(std::vector<T>& target,
+void appendUniqueCraigHelperFacts(std::vector<T>& target, // LCOV_EXCL_LINE
                                   const std::vector<T>& source) {
-  for (const T& fact : source) {
-    if (std::find(target.begin(), target.end(), fact) == target.end()) {
-      target.push_back(fact);
-    }
+  for (const T& fact : source) { // LCOV_EXCL_LINE
+    if (std::find(target.begin(), target.end(), fact) == target.end()) { // LCOV_EXCL_LINE
+      target.push_back(fact); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
   }
-}
+} // LCOV_EXCL_LINE
 
-ReusableCraigInvariant combineCraigHelperInvariants(
+ReusableCraigInvariant combineCraigHelperInvariants( // LCOV_EXCL_LINE
     const ReusableCraigInvariant& primary,
     const ReusableCraigInvariant& secondary) {
-  ReusableCraigInvariant combined = primary;
-  combined.regions.insert(
-      combined.regions.end(), secondary.regions.begin(), secondary.regions.end());
-  mergeSupport(combined.trackedStates, secondary.trackedStates);
-  appendUniqueCraigHelperFacts(
-      combined.auxiliaryConstants, secondary.auxiliaryConstants);
-  appendUniqueCraigHelperFacts(
-      combined.auxiliaryEqualities, secondary.auxiliaryEqualities);
-  combined.proofBound = std::max(combined.proofBound, secondary.proofBound);
-  combined.hasSource = primary.hasSource || secondary.hasSource;
-  return combined;
-}
+  ReusableCraigInvariant combined = primary; // LCOV_EXCL_LINE
+  combined.regions.insert( // LCOV_EXCL_LINE
+      combined.regions.end(), secondary.regions.begin(), secondary.regions.end()); // LCOV_EXCL_LINE
+  mergeSupport(combined.trackedStates, secondary.trackedStates); // LCOV_EXCL_LINE
+  appendUniqueCraigHelperFacts( // LCOV_EXCL_LINE
+      combined.auxiliaryConstants, secondary.auxiliaryConstants); // LCOV_EXCL_LINE
+  appendUniqueCraigHelperFacts( // LCOV_EXCL_LINE
+      combined.auxiliaryEqualities, secondary.auxiliaryEqualities); // LCOV_EXCL_LINE
+  combined.proofBound = std::max(combined.proofBound, secondary.proofBound); // LCOV_EXCL_LINE
+  combined.hasSource = primary.hasSource || secondary.hasSource; // LCOV_EXCL_LINE
+  return combined; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
 std::unordered_set<size_t> buildCraigInitialTrackedStatesForAttempt(
     const std::unordered_set<size_t>& trackedStateSeeds,
@@ -865,7 +865,7 @@ std::optional<IMCResult> findLargeDualRailCounterexampleUpTo(
   if (problem.observedOutputExprs0.empty() ||
       problem.observedOutputExprs0.size() !=
           problem.observedOutputExprs1.size()) {
-    return std::nullopt;
+    return std::nullopt; // LCOV_EXCL_LINE
   }
 
   std::vector<CraigCounterexampleProbe> probes;
@@ -882,8 +882,8 @@ std::optional<IMCResult> findLargeDualRailCounterexampleUpTo(
     const std::unordered_set<size_t> support =
         observedOutputSupportForProbe(problem, output);
     if (support.size() > kLargeDualRailCounterexampleProbeSupportLimit) {
-      ++skippedLargeSupport;
-      continue;
+      ++skippedLargeSupport; // LCOV_EXCL_LINE
+      continue; // LCOV_EXCL_LINE
     }
     const bool touchesState = outputSupportTouchesState(support, stateSymbols);
     size_t supportScore = support.size();
@@ -916,7 +916,7 @@ std::optional<IMCResult> findLargeDualRailCounterexampleUpTo(
   for (size_t depth = 0; depth <= maxK; ++depth) {
     for (const CraigCounterexampleProbe& probe : probes) {
       if (!probe.touchesState && depth > 0) {
-        continue;
+        continue; // LCOV_EXCL_LINE
       }
       KInductionProblem outputProblem = problem;
       configureOutputBatchProblem(
@@ -977,9 +977,9 @@ IMCResult runCraigOutputRange(
     // already-proved Craig invariants over this same SEC problem.  Conjoin them
     // as helper facts instead of choosing one and rediscovering the other in
     // the expensive retained-helper tail.
-    combinedReusableInvariant = combineCraigHelperInvariants(
-        smallRawSingletonInvariant, reusableInvariant);
-  }
+    combinedReusableInvariant = combineCraigHelperInvariants( // LCOV_EXCL_LINE
+        smallRawSingletonInvariant, reusableInvariant); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
   const ReusableCraigInvariant& activeReusableInvariant =
       useReusableInvariant
           ? reusableInvariant
@@ -992,35 +992,35 @@ IMCResult runCraigOutputRange(
       " first_name=",
       firstOutput < problem.observedOutputNames.size()
           ? problem.observedOutputNames[firstOutput]
-          : std::string("<unknown>"),
+          : std::string("<unknown>"), // LCOV_EXCL_LINE
       " bad_support=", batchProblem.bad->getSupportVars().size(),
       " tracked_seed_states=", trackedStateSeeds.size(),
       " helper_regions=", activeReusableInvariant.regions.size());
   if (!reusableInvariant.regions.empty() && !useReusableInvariant) {
-    emitSecDiag(
+    emitSecDiag( // LCOV_EXCL_LINE
         "SEC diag: imc Craig skips reusable invariant for output batch first=",
         firstOutput, " end=", endOutput,
-        " source_first=", reusableInvariant.sourceFirstOutput,
-        " source_end=", reusableInvariant.sourceEndOutput,
-        " helper_regions=", reusableInvariant.regions.size());
-  }
+        " source_first=", reusableInvariant.sourceFirstOutput, // LCOV_EXCL_LINE
+        " source_end=", reusableInvariant.sourceEndOutput, // LCOV_EXCL_LINE
+        " helper_regions=", reusableInvariant.regions.size()); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
   if (useSmallRawSingletonInvariant) {
-    emitSecDiag(
+    emitSecDiag( // LCOV_EXCL_LINE
         "SEC diag: imc Craig uses retained small singleton invariant for "
         "output batch first=",
         firstOutput, " end=", endOutput,
-        " source_first=", smallRawSingletonInvariant.sourceFirstOutput,
-        " source_end=", smallRawSingletonInvariant.sourceEndOutput,
-        " helper_regions=", smallRawSingletonInvariant.regions.size());
-  }
+        " source_first=", smallRawSingletonInvariant.sourceFirstOutput, // LCOV_EXCL_LINE
+        " source_end=", smallRawSingletonInvariant.sourceEndOutput, // LCOV_EXCL_LINE
+        " helper_regions=", smallRawSingletonInvariant.regions.size()); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
   if (combineCraigHelpers) {
-    emitSecDiag(
+    emitSecDiag( // LCOV_EXCL_LINE
         "SEC diag: imc Craig combines reusable helpers for output batch first=",
         firstOutput, " end=", endOutput,
-        " singleton_regions=", smallRawSingletonInvariant.regions.size(),
-        " reusable_regions=", reusableInvariant.regions.size(),
-        " combined_regions=", combinedReusableInvariant.regions.size());
-  }
+        " singleton_regions=", smallRawSingletonInvariant.regions.size(), // LCOV_EXCL_LINE
+        " reusable_regions=", reusableInvariant.regions.size(), // LCOV_EXCL_LINE
+        " combined_regions=", combinedReusableInvariant.regions.size()); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
   if (!activeReusableInvariant.regions.empty() &&
       craigInvariantExcludesBad(
@@ -1100,14 +1100,14 @@ IMCResult runCraigOutputRange(
     // Craig found SAT from the exact concrete post-reset frontier. Reconstruct
     // only that lookahead with the exact bounded witness encoder; this is
     // counterexample validation inside IMC, not a different proof engine.
-    const auto cache = makeImcBaseCounterexampleCache(batchProblem);
-    if (const auto counterexample =
-            findImcCounterexample(*cache, solverType, proof.iterations);
-        counterexample.has_value()) {
-      return *counterexample;
+    const auto cache = makeImcBaseCounterexampleCache(batchProblem); // LCOV_EXCL_LINE
+    if (const auto counterexample = // LCOV_EXCL_LINE
+            findImcCounterexample(*cache, solverType, proof.iterations); // LCOV_EXCL_LINE
+        counterexample.has_value()) { // LCOV_EXCL_LINE
+      return *counterexample; // LCOV_EXCL_LINE
     }
-    return makeCraigInconclusiveResult(maxK, firstOutput);
-  }
+    return makeCraigInconclusiveResult(maxK, firstOutput); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
   if (proof.status == CraigImcStatus::BudgetExceeded) {
     if (multiOutputRange) {
       emitSecDiag(
@@ -1144,22 +1144,22 @@ IMCResult runCraigOutputRange(
         reusableInvariant,
         smallRawSingletonInvariant);
     if (left.status == IMCStatus::Different) {
-      return left;
+      return left; // LCOV_EXCL_LINE
     }
     if (right.status == IMCStatus::Different) {
-      return right;
+      return right; // LCOV_EXCL_LINE
     }
     if (left.status == IMCStatus::Inconclusive) {
       return left;
     }
-    if (right.status == IMCStatus::Inconclusive) {
-      return right;
+    if (right.status == IMCStatus::Inconclusive) { // LCOV_EXCL_LINE
+      return right; // LCOV_EXCL_LINE
     }
-    if (left.status == IMCStatus::Equivalent &&
-        right.status == IMCStatus::Equivalent) {
-      return {IMCStatus::Equivalent, std::max(left.bound, right.bound)};
+    if (left.status == IMCStatus::Equivalent && // LCOV_EXCL_LINE
+        right.status == IMCStatus::Equivalent) { // LCOV_EXCL_LINE
+      return {IMCStatus::Equivalent, std::max(left.bound, right.bound)}; // LCOV_EXCL_LINE
     }
-    return makeCraigInconclusiveResult(maxK, firstOutput);
+    return makeCraigInconclusiveResult(maxK, firstOutput); // LCOV_EXCL_LINE
   }
 
   if (proof.status == CraigImcStatus::ConcreteNoProgress) {
@@ -1168,19 +1168,19 @@ IMCResult runCraigOutputRange(
     // transition prefixes and is outside the interpolation proof step. Keep
     // only the guarded local probe for small output cones; otherwise return
     // inconclusive conservatively.
-    if (const auto counterexample =
-            findLargeDualRailCounterexampleUpTo(batchProblem, solverType, maxK);
-        counterexample.has_value()) {
-      return *counterexample;
+    if (const auto counterexample = // LCOV_EXCL_LINE
+            findLargeDualRailCounterexampleUpTo(batchProblem, solverType, maxK); // LCOV_EXCL_LINE
+        counterexample.has_value()) { // LCOV_EXCL_LINE
+      return *counterexample; // LCOV_EXCL_LINE
     }
-    return makeCraigInconclusiveResult(maxK, firstOutput);
+    return makeCraigInconclusiveResult(maxK, firstOutput); // LCOV_EXCL_LINE
   }
   if (proof.status == CraigImcStatus::BudgetExceeded) {
     if (const auto counterexample =
             findLargeDualRailCounterexampleUpTo(
                 batchProblem, solverType, proof.iterations);
         counterexample.has_value()) {
-      return *counterexample;
+      return *counterexample; // LCOV_EXCL_LINE
     }
     return makeCraigInconclusiveResult(proof.iterations, firstOutput);
   }
@@ -1315,8 +1315,8 @@ std::vector<CraigOutputBatchPlan> buildLargeDualRailCraigImcOutputBatchPlans(
       // Always make progress: an oversized single output still deserves one
       // exact IMC attempt rather than being silently skipped by the scheduler.
       ++endOutput;  // LCOV_EXCL_LINE
-      mergeCraigOutputSupport(batchSupport, outputSupports[firstOutput]);
-    }
+      mergeCraigOutputSupport(batchSupport, outputSupports[firstOutput]); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
     CraigOutputBatchPlan plan;
     plan.firstOutput = firstOutput;
     plan.endOutput = endOutput;

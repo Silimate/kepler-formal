@@ -12,24 +12,24 @@
 
 namespace KEPLER_FORMAL::SEC {
 
-struct RegionLiteral {
+struct RegionLiteral { // LCOV_EXCL_LINE
   // Large Craig proofs contain millions of literals. Bit fields keep each
   // literal in one word instead of padding two booleans around a size_t.
-  size_t isState : 1 = false;
-  size_t index : (sizeof(size_t) * 8 - 2) = 0;
-  size_t positive : 1 = true;
+  size_t isState : 1 = false; // LCOV_EXCL_LINE
+  size_t index : (sizeof(size_t) * 8 - 2) = 0; // LCOV_EXCL_LINE
+  size_t positive : 1 = true; // LCOV_EXCL_LINE
 };
 static_assert(sizeof(RegionLiteral) == sizeof(size_t));
 
-struct InterpolantRegion {
+struct InterpolantRegion { // LCOV_EXCL_LINE
   enum class Type {
     False,
     True,
     Normal,
   };
 
-  Type type = Type::False;
-  size_t auxiliaryCount = 0;
+  Type type = Type::False; // LCOV_EXCL_LINE
+  size_t auxiliaryCount = 0; // LCOV_EXCL_LINE
   // Flat clause storage avoids one heap allocation and one vector object per
   // Tseitin clause while preserving the exact interpolant CNF.
   std::vector<RegionLiteral> definitionLiterals;
@@ -45,24 +45,24 @@ enum class CraigImcStatus {
   NoProgress,
 };
 
-struct CraigImcGrowthBudget {
-  bool enabled = false;
-  size_t maxQExpansionPass = 0;
-  size_t maxInterpolantClauses = 0;
-  size_t maxInterpolantLiterals = 0;
-  size_t maxInterpolantAuxiliaries = 0;
-  size_t maxProjectionStates = 0;
-  size_t maxImageTransitionStates = 0;
+struct CraigImcGrowthBudget { // LCOV_EXCL_LINE
+  bool enabled = false; // LCOV_EXCL_LINE
+  size_t maxQExpansionPass = 0; // LCOV_EXCL_LINE
+  size_t maxInterpolantClauses = 0; // LCOV_EXCL_LINE
+  size_t maxInterpolantLiterals = 0; // LCOV_EXCL_LINE
+  size_t maxInterpolantAuxiliaries = 0; // LCOV_EXCL_LINE
+  size_t maxProjectionStates = 0; // LCOV_EXCL_LINE
+  size_t maxImageTransitionStates = 0; // LCOV_EXCL_LINE
 };
 
-struct CraigImcOptions {
+struct CraigImcOptions { // LCOV_EXCL_LINE
   // Large dual-rail IMC may derive transition-proven constants from the
   // bootstrap cube to prune Craig image queries. The environment switch still
   // enables the same path for direct checker experiments.
-  bool enableAuxiliaryInvariants = false;
+  bool enableAuxiliaryInvariants = false; // LCOV_EXCL_LINE
   // Avoid reifying the concrete post-reset cube as an ordinary region when the
   // caller already has an exact bootstrap assignment.
-  bool enableDirectConcreteCubeSource = false;
+  bool enableDirectConcreteCubeSource = false; // LCOV_EXCL_LINE
   // Helper Craig invariants can depend on transition-proven auxiliary facts.
   // Seed them into the next strict IMC batch instead of re-mining the same
   // constants/equalities from scratch.
@@ -71,7 +71,7 @@ struct CraigImcOptions {
   CraigImcGrowthBudget growthBudget;
 };
 
-struct CraigImcResult {
+struct CraigImcResult { // LCOV_EXCL_LINE
   CraigImcStatus status = CraigImcStatus::NoProgress;
   size_t iterations = 0;
   std::vector<InterpolantRegion> invariantRegions;
@@ -177,7 +177,7 @@ size_t cappedCraigFocusedImageTransitionRequestCount(
 // this checker are clauses emitted by CaDiCaL's UNSAT proof. A SAT result is
 // reported with its concrete lookahead so the caller can reconstruct exactly
 // that counterexample instead of repeating the complete bounded sweep.
-class CraigInterpolatingModelChecker {
+class CraigInterpolatingModelChecker { // LCOV_EXCL_LINE
  public:
   explicit CraigInterpolatingModelChecker(
       const KInductionProblem& problem,

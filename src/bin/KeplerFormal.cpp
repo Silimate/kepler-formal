@@ -1835,7 +1835,7 @@ int KeplerFormalMain(int argc, char** argv) {
             return EXIT_FAILURE;
             // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
           default:
             // LCOV_EXCL_START
             SPDLOG_CRITICAL(

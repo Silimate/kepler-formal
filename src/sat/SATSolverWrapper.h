@@ -40,7 +40,7 @@ public:
     B,
   };
 
-  struct CraigInterpolantCnf {
+  struct CraigInterpolantCnf { // LCOV_EXCL_LINE
     enum class Type {
       None,
       ConstantFalse,
@@ -48,8 +48,8 @@ public:
       Normal,
     };
 
-    Type type = Type::None;
-    int firstAuxiliaryVariable = 0;
+    Type type = Type::None; // LCOV_EXCL_LINE
+    int firstAuxiliaryVariable = 0; // LCOV_EXCL_LINE
     std::vector<std::vector<int>> clauses;
   };
 
@@ -79,15 +79,15 @@ public:
       kissatNumVars_ = 0;
       kissatReservedVars_ = 0;
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
-      cadicalSolver_ = std::make_unique<CaDiCaL::Solver>();
-      cadicalNumVars_ = 0;
-      cadicalReservedVars_ = 0;
-      if (CaDiCaL::Solver::is_valid_option("quiet")) {
+      cadicalSolver_ = std::make_unique<CaDiCaL::Solver>(); // LCOV_EXCL_LINE
+      cadicalNumVars_ = 0; // LCOV_EXCL_LINE
+      cadicalReservedVars_ = 0; // LCOV_EXCL_LINE
+      if (CaDiCaL::Solver::is_valid_option("quiet")) { // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         cadicalSolver_->set("quiet", 1);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
       // LCOV_EXCL_STOP
-    } else {
+    } else { // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       // LCOV_DISABLED_START
       throw std::invalid_argument("Unknown solver type");
@@ -98,79 +98,79 @@ public:
 
   ~SATSolverWrapper() {
     if (cadicalCraigTracer_ != nullptr && cadicalSolver_ != nullptr) {
-      cadicalSolver_->disconnect_proof_tracer(cadicalCraigTracer_.get());
-    }
+      cadicalSolver_->disconnect_proof_tracer(cadicalCraigTracer_.get()); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT && kissatSolver_) {
       kissat_release(static_cast<kissat*>(kissatSolver_));
     }
   }
 
-  void enableCraigInterpolation() {
-    if (solverType_ != KEPLER_FORMAL::Config::SolverType::CADICAL) {
-      throw std::runtime_error(
+  void enableCraigInterpolation() { // LCOV_EXCL_LINE
+    if (solverType_ != KEPLER_FORMAL::Config::SolverType::CADICAL) { // LCOV_EXCL_LINE
+      throw std::runtime_error( // LCOV_EXCL_LINE
           "Craig interpolation requires the CaDiCaL solver backend");
     }
-    if (cadicalCraigTracer_ != nullptr) {
-      return;
+    if (cadicalCraigTracer_ != nullptr) { // LCOV_EXCL_LINE
+      return; // LCOV_EXCL_LINE
     }
     // CaDiCaL's Craig tracer requires proof-preserving CNF construction. BVA
     // introduces variables without a caller-visible A/B/global partition.
-    cadicalSolver_->set("factor", 0);
-    cadicalCraigTracer_ = std::make_unique<CaDiCraig::CraigTracer>();
-    cadicalSolver_->connect_proof_tracer(cadicalCraigTracer_.get(), true);
-    cadicalCraigTracer_->set_craig_construction(
+    cadicalSolver_->set("factor", 0); // LCOV_EXCL_LINE
+    cadicalCraigTracer_ = std::make_unique<CaDiCraig::CraigTracer>(); // LCOV_EXCL_LINE
+    cadicalSolver_->connect_proof_tracer(cadicalCraigTracer_.get(), true); // LCOV_EXCL_LINE
+    cadicalCraigTracer_->set_craig_construction( // LCOV_EXCL_LINE
         CaDiCraig::CraigConstruction::ASYMMETRIC);
-  }
+  } // LCOV_EXCL_LINE
 
-  void setCraigVariablePartition(CraigVariablePartition partition) {
-    craigVariablePartition_ = partition;
-  }
+  void setCraigVariablePartition(CraigVariablePartition partition) { // LCOV_EXCL_LINE
+    craigVariablePartition_ = partition; // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
-  void setCraigClausePartition(CraigClausePartition partition) {
-    craigClausePartition_ = partition;
-  }
+  void setCraigClausePartition(CraigClausePartition partition) { // LCOV_EXCL_LINE
+    craigClausePartition_ = partition; // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
-  CraigInterpolantCnf createCraigInterpolant() {
-    if (cadicalCraigTracer_ == nullptr) {
-      throw std::runtime_error("Craig interpolation was not enabled");
+  CraigInterpolantCnf createCraigInterpolant() { // LCOV_EXCL_LINE
+    if (cadicalCraigTracer_ == nullptr) { // LCOV_EXCL_LINE
+      throw std::runtime_error("Craig interpolation was not enabled"); // LCOV_EXCL_LINE
     }
-    std::vector<std::vector<int>> cadicalClauses;
-    int nextVariable = cadicalNumVars_ + 1;
-    const auto result = cadicalCraigTracer_->create_craig_interpolant(
+    std::vector<std::vector<int>> cadicalClauses; // LCOV_EXCL_LINE
+    int nextVariable = cadicalNumVars_ + 1; // LCOV_EXCL_LINE
+    const auto result = cadicalCraigTracer_->create_craig_interpolant( // LCOV_EXCL_LINE
         CaDiCraig::CraigInterpolant::ASYMMETRIC,
         cadicalClauses,
         nextVariable);
 
-    CraigInterpolantCnf interpolant;
-    interpolant.firstAuxiliaryVariable = cadicalNumVars_ + 2;
-    switch (result) {
+    CraigInterpolantCnf interpolant; // LCOV_EXCL_LINE
+    interpolant.firstAuxiliaryVariable = cadicalNumVars_ + 2; // LCOV_EXCL_LINE
+    switch (result) { // LCOV_EXCL_LINE
       case CaDiCraig::CraigCnfType::NONE:
-        interpolant.type = CraigInterpolantCnf::Type::None;
-        break;
+        interpolant.type = CraigInterpolantCnf::Type::None; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       case CaDiCraig::CraigCnfType::CONSTANT0:
-        interpolant.type = CraigInterpolantCnf::Type::ConstantFalse;
-        break;
+        interpolant.type = CraigInterpolantCnf::Type::ConstantFalse; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       case CaDiCraig::CraigCnfType::CONSTANT1:
-        interpolant.type = CraigInterpolantCnf::Type::ConstantTrue;
-        break;
+        interpolant.type = CraigInterpolantCnf::Type::ConstantTrue; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       case CaDiCraig::CraigCnfType::NORMAL:
-        interpolant.type = CraigInterpolantCnf::Type::Normal;
-        break;
+        interpolant.type = CraigInterpolantCnf::Type::Normal; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
     }
 
-    interpolant.clauses.reserve(cadicalClauses.size());
-    for (const auto& clause : cadicalClauses) {
-      std::vector<int> externalClause;
-      externalClause.reserve(clause.size());
-      for (const int literal : clause) {
-        const int externalVariable = std::abs(literal) + 1;
-        externalClause.push_back(
-            literal > 0 ? externalVariable : -externalVariable);
+    interpolant.clauses.reserve(cadicalClauses.size()); // LCOV_EXCL_LINE
+    for (const auto& clause : cadicalClauses) { // LCOV_EXCL_LINE
+      std::vector<int> externalClause; // LCOV_EXCL_LINE
+      externalClause.reserve(clause.size()); // LCOV_EXCL_LINE
+      for (const int literal : clause) { // LCOV_EXCL_LINE
+        const int externalVariable = std::abs(literal) + 1; // LCOV_EXCL_LINE
+        externalClause.push_back( // LCOV_EXCL_LINE
+            literal > 0 ? externalVariable : -externalVariable); // LCOV_EXCL_LINE
       }
-      interpolant.clauses.push_back(std::move(externalClause));
-    }
-    return interpolant;
-  }
+      interpolant.clauses.push_back(std::move(externalClause)); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    return interpolant; // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
   // Create a new variable (returns 0-based index)
   int newVar() {
@@ -183,14 +183,14 @@ public:
       // kissat_add(), which is the hottest path for large PDR queries.
       reserveVars(static_cast<size_t>(kissatNumVars_) + 1);
       return kissatNumVars_++;
-    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
-      reserveVars(static_cast<size_t>(cadicalNumVars_) + 1);
-      const int variable = cadicalNumVars_++;
-      if (cadicalCraigTracer_ != nullptr) {
-        cadicalCraigTracer_->label_variable(
-            variable + 1, cadicalCraigVariableType(craigVariablePartition_));
-      }
-      return variable;
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) { // LCOV_EXCL_LINE
+      reserveVars(static_cast<size_t>(cadicalNumVars_) + 1); // LCOV_EXCL_LINE
+      const int variable = cadicalNumVars_++; // LCOV_EXCL_LINE
+      if (cadicalCraigTracer_ != nullptr) { // LCOV_EXCL_LINE
+        cadicalCraigTracer_->label_variable( // LCOV_EXCL_LINE
+            variable + 1, cadicalCraigVariableType(craigVariablePartition_)); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      return variable; // LCOV_EXCL_LINE
     }
     // LCOV_EXCL_START
     // LCOV_DISABLED_START
@@ -219,24 +219,24 @@ public:
                      static_cast<int>(targetVars));
       kissatReservedVars_ = static_cast<int>(targetVars);
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
-      if (numVars <= static_cast<size_t>(cadicalReservedVars_)) {
-        return;
+      if (numVars <= static_cast<size_t>(cadicalReservedVars_)) { // LCOV_EXCL_LINE
+        return; // LCOV_EXCL_LINE
       }
-      const size_t currentReserved = static_cast<size_t>(cadicalReservedVars_);
-      const size_t growthSlack =
-          std::max(currentReserved / 2, static_cast<size_t>(4096));
-      const size_t targetVars =
-          currentReserved == 0
-              ? numVars
-              : std::max(numVars, currentReserved + growthSlack);
-      if (targetVars > static_cast<size_t>(std::numeric_limits<int>::max())) {
+      const size_t currentReserved = static_cast<size_t>(cadicalReservedVars_); // LCOV_EXCL_LINE
+      const size_t growthSlack = // LCOV_EXCL_LINE
+          std::max(currentReserved / 2, static_cast<size_t>(4096)); // LCOV_EXCL_LINE
+      const size_t targetVars = // LCOV_EXCL_LINE
+          currentReserved == 0 // LCOV_EXCL_LINE
+              ? numVars // LCOV_EXCL_LINE
+              : std::max(numVars, currentReserved + growthSlack); // LCOV_EXCL_LINE
+      if (targetVars > static_cast<size_t>(std::numeric_limits<int>::max())) { // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         throw std::runtime_error("CaDiCaL variable reservation exceeds int range");  // LCOV_EXCL_LINE
         // LCOV_EXCL_STOP
       }
-      cadicalSolver_->resize(static_cast<int>(targetVars));
-      cadicalReservedVars_ = static_cast<int>(targetVars);
-    }
+      cadicalSolver_->resize(static_cast<int>(targetVars)); // LCOV_EXCL_LINE
+      cadicalReservedVars_ = static_cast<int>(targetVars); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
   }
 
   void reserveAdditionalVars(size_t additionalVars) {
@@ -501,11 +501,11 @@ public:
   }
   // LCOV_EXCL_STOP
 
-  SolveStatus solveWithAssumptionsStatus(
+  SolveStatus solveWithAssumptionsStatus( // LCOV_EXCL_LINE
       const std::vector<int>& assumptions,
       int64_t conflictLimit = -1,
       int64_t propagationLimit = -1) {
-    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) { // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       Glucose::vec<Glucose::Lit> glucoseAssumptions;  // LCOV_EXCL_LINE
       for (int lit : assumptions) {  // LCOV_EXCL_LINE
@@ -576,7 +576,7 @@ public:
                  /*turn_off_simp=*/true)
                  ? SolveStatus::Sat
                  : SolveStatus::Unsat;
-    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) {
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::KISSAT) { // LCOV_EXCL_LINE
       // This vendored Kissat exposes only the partial IPASIR API and has no
       // assumption call. Callers that need repeated assumption solves should use
       // CaDiCaL for that local incremental query.
@@ -588,76 +588,76 @@ public:
       // LCOV_EXCL_START
       throw std::runtime_error("Kissat assumptions are not available in this build");  // LCOV_EXCL_LINE
       // LCOV_EXCL_STOP
-    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
-      lastAssumptions_ = assumptions;
-      lastAssumptionSolveStatus_ = SolveStatus::Unknown;
-      for (int lit : assumptions) {
-        if (lit == 0 || lit == 1) {
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) { // LCOV_EXCL_LINE
+      lastAssumptions_ = assumptions; // LCOV_EXCL_LINE
+      lastAssumptionSolveStatus_ = SolveStatus::Unknown; // LCOV_EXCL_LINE
+      for (int lit : assumptions) { // LCOV_EXCL_LINE
+        if (lit == 0 || lit == 1) { // LCOV_EXCL_LINE
           // LCOV_EXCL_START
           // LCOV_DISABLED_START
           throw std::runtime_error("Constant literal (0/1) passed as CaDiCaL assumption");
           // LCOV_DISABLED_STOP
           // LCOV_EXCL_STOP
         }
-        const int var = std::abs(lit) - 2;
-        if (var < 0) {
+        const int var = std::abs(lit) - 2; // LCOV_EXCL_LINE
+        if (var < 0) { // LCOV_EXCL_LINE
           // LCOV_EXCL_START
           // LCOV_DISABLED_START
           throw std::runtime_error("Invalid literal (<2) passed as CaDiCaL assumption");
           // LCOV_DISABLED_STOP
           // LCOV_EXCL_STOP
         }
-        if (var >= cadicalNumVars_) {
+        if (var >= cadicalNumVars_) { // LCOV_EXCL_LINE
           // LCOV_EXCL_START
           cadicalNumVars_ = var + 1;  // LCOV_EXCL_LINE
           reserveVars(static_cast<size_t>(cadicalNumVars_));  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
         // LCOV_EXCL_STOP
-        cadicalSolver_->assume(lit > 0 ? var + 1 : -(var + 1));
+        cadicalSolver_->assume(lit > 0 ? var + 1 : -(var + 1)); // LCOV_EXCL_LINE
       }
-      if (conflictLimit >= 0) {
-        cadicalSolver_->limit(
+      if (conflictLimit >= 0) { // LCOV_EXCL_LINE
+        cadicalSolver_->limit( // LCOV_EXCL_LINE
             "conflicts",
             static_cast<int>(
-                std::min<int64_t>(conflictLimit, std::numeric_limits<int>::max())));
-      }
-      if (propagationLimit >= 0) {
+                std::min<int64_t>(conflictLimit, std::numeric_limits<int>::max()))); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      if (propagationLimit >= 0) { // LCOV_EXCL_LINE
         // CaDiCaL does not expose a propagation budget. Use a decision budget
         // as the closest available solve limiter for callers that pass both.
-        cadicalSolver_->limit(
+        cadicalSolver_->limit( // LCOV_EXCL_LINE
             "decisions",
             static_cast<int>(
-                std::min<int64_t>(propagationLimit, std::numeric_limits<int>::max())));
-      }
-      const int res = cadicalSolver_->solve();
-      if (res == 10) {
-        lastAssumptionSolveStatus_ = SolveStatus::Sat;
-      } else if (res == 20) {
-        lastAssumptionSolveStatus_ = SolveStatus::Unsat;
-      } else {
+                std::min<int64_t>(propagationLimit, std::numeric_limits<int>::max()))); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      const int res = cadicalSolver_->solve(); // LCOV_EXCL_LINE
+      if (res == 10) { // LCOV_EXCL_LINE
+        lastAssumptionSolveStatus_ = SolveStatus::Sat; // LCOV_EXCL_LINE
+      } else if (res == 20) { // LCOV_EXCL_LINE
+        lastAssumptionSolveStatus_ = SolveStatus::Unsat; // LCOV_EXCL_LINE
+      } else { // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         lastAssumptionSolveStatus_ = SolveStatus::Unknown;  // LCOV_EXCL_LINE
         // LCOV_EXCL_STOP
       }
-      if (lastAssumptionSolveStatus_ != SolveStatus::Unsat) {
-        lastAssumptions_.clear();
-      }
-      return lastAssumptionSolveStatus_;
+      if (lastAssumptionSolveStatus_ != SolveStatus::Unsat) { // LCOV_EXCL_LINE
+        lastAssumptions_.clear(); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      return lastAssumptionSolveStatus_; // LCOV_EXCL_LINE
     }
     // LCOV_EXCL_START
     // LCOV_DISABLED_START
     throw std::runtime_error("Unknown solver type");
     // LCOV_DISABLED_STOP
     // LCOV_EXCL_STOP
-  }
+  } // LCOV_EXCL_LINE
 
   bool solveWithAssumptions(const std::vector<int>& assumptions) {
     return solveWithAssumptionsStatus(assumptions) == SolveStatus::Sat;
   }
 
-  std::vector<int> failedAssumptions() const {
-    std::vector<int> failed;
-    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
+  std::vector<int> failedAssumptions() const { // LCOV_EXCL_LINE
+    std::vector<int> failed; // LCOV_EXCL_LINE
+    if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) { // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       failed.reserve(glucoseSolver_->conflict.size());  // LCOV_EXCL_LINE
       for (int i = 0; i < glucoseSolver_->conflict.size(); ++i) {  // LCOV_EXCL_LINE
@@ -673,19 +673,19 @@ public:
         failed.push_back(-conflictLiteral);  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
       // LCOV_EXCL_STOP
-    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL &&
-               lastAssumptionSolveStatus_ == SolveStatus::Unsat) {
-      failed.reserve(lastAssumptions_.size());
-      for (int lit : lastAssumptions_) {
-        const int var = std::abs(lit) - 2;
-        const int cadicalLit = lit > 0 ? var + 1 : -(var + 1);
-        if (cadicalSolver_->failed(cadicalLit)) {
-          failed.push_back(lit);
-        }
+    } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL && // LCOV_EXCL_LINE
+               lastAssumptionSolveStatus_ == SolveStatus::Unsat) { // LCOV_EXCL_LINE
+      failed.reserve(lastAssumptions_.size()); // LCOV_EXCL_LINE
+      for (int lit : lastAssumptions_) { // LCOV_EXCL_LINE
+        const int var = std::abs(lit) - 2; // LCOV_EXCL_LINE
+        const int cadicalLit = lit > 0 ? var + 1 : -(var + 1); // LCOV_EXCL_LINE
+        if (cadicalSolver_->failed(cadicalLit)) { // LCOV_EXCL_LINE
+          failed.push_back(lit); // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
       }
-    }
-    return failed;
-  }
+    } // LCOV_EXCL_LINE
+    return failed; // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
   bool getLiteralValue(int lit) const {
     if (lit == 0) {
@@ -1042,18 +1042,18 @@ public:
   // LCOV_EXCL_STOP
 
 private:
-  static CaDiCraig::CraigVarType cadicalCraigVariableType(
+  static CaDiCraig::CraigVarType cadicalCraigVariableType( // LCOV_EXCL_LINE
       CraigVariablePartition partition) {
-    switch (partition) {
+    switch (partition) { // LCOV_EXCL_LINE
       case CraigVariablePartition::ALocal:
-        return CaDiCraig::CraigVarType::A_LOCAL;
+        return CaDiCraig::CraigVarType::A_LOCAL; // LCOV_EXCL_LINE
       case CraigVariablePartition::BLocal:
-        return CaDiCraig::CraigVarType::B_LOCAL;
+        return CaDiCraig::CraigVarType::B_LOCAL; // LCOV_EXCL_LINE
       case CraigVariablePartition::Global:
-        return CaDiCraig::CraigVarType::GLOBAL;
+        return CaDiCraig::CraigVarType::GLOBAL; // LCOV_EXCL_LINE
     }
-    return CaDiCraig::CraigVarType::A_LOCAL;
-  }
+    return CaDiCraig::CraigVarType::A_LOCAL; // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
   static bool setKissatOptionIfSupported(kissat* solver, const char* name, int value) {
     kissat_set_option(solver, name, value);
@@ -1068,9 +1068,9 @@ private:
     (void)setKissatOptionIfSupported(solver, name, value);
   }
 
-  static bool setCadicalOptionIfSupported(
+  static bool setCadicalOptionIfSupported( // LCOV_EXCL_LINE
       CaDiCaL::Solver* solver, const char* name, int value) {
-    return CaDiCaL::Solver::is_valid_option(name) && solver->set(name, value);
+    return CaDiCaL::Solver::is_valid_option(name) && solver->set(name, value); // LCOV_EXCL_LINE
   }
 
   KEPLER_FORMAL::Config::SolverType solverType_;

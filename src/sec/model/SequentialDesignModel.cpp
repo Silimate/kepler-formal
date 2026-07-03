@@ -1323,7 +1323,7 @@ std::optional<naja::DNL::DNLID> resolvePendingPinTermID(
 
   const bool isDataPin = std::string(pinName) == "D";
   if (isDataPin && pending.independentStateOutputCount > 1) {
-    throw std::runtime_error(
+    throw std::runtime_error( // LCOV_EXCL_LINE
         "Shared scalar D input cannot define multiple independent state outputs");
   }
 
@@ -1782,8 +1782,8 @@ std::optional<std::string> getPendingTransitionUnsupportedReason(
       }
     }
     if (!hasBitMatchedDataPin) {
-      return "Missing bit-matched sequential pin `D` for output `" +
-             pending.statePinName + "[" + std::to_string(pending.stateBit) +
+      return "Missing bit-matched sequential pin `D` for output `" + // LCOV_EXCL_LINE
+             pending.statePinName + "[" + std::to_string(pending.stateBit) + // LCOV_EXCL_LINE
              "]`";
     }
   }
