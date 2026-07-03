@@ -12013,6 +12013,38 @@ std::optional<StateCube> findPredecessorCube(
       return std::nullopt;
     }
   }
+  std::optional<StateCube> cachedResetPredecessorCore;
+  if (resetFrontierCache != nullptr && problem.resetBootstrapCycles != 0) {
+    cachedResetPredecessorCore =
+        findPdrResetUnreachableCoreForCube(
+            *resetFrontierCache,
+            targetCube,
+            /*postBootstrapSteps=*/1);
+  }
+  if (detail::shouldUseCachedResetPredecessorCore(
+          problem.resetBootstrapCycles != 0,
+          level,
+          cachedResetPredecessorCore.has_value())) {
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor cached reset-frontier core ",
+          "level=", level,
+          " target_cube=", targetCube.size(),
+          " core_cube=", cachedResetPredecessorCore->size(),
+          " target_hash=", cubeFingerprint(targetCube),
+          " core_hash=", cubeFingerprint(*cachedResetPredecessorCore));
+    }
+    if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() &&
+        predecessorAssumptionCache != nullptr) {
+      rememberPredecessorQueryResult(
+          *predecessorAssumptionCache,
+          *exactCacheKey,
+          *stableUnsatCacheKey,
+          std::nullopt,
+          &*cachedResetPredecessorCore);
+    }
+    return std::nullopt;
+  }
   if (!consumePdrPredecessorQueryBudget(predecessorQueryBudget)) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
@@ -12039,6 +12071,14 @@ std::optional<StateCube> findPredecessorCube(
   // LCOV_EXCL_STOP
   const size_t exactResetPrecheckSupportLimit =
       maxExactResetPrecheckTransitionSupport(solverType);
+  const size_t localExactResetPrecheckSupportLimit =
+      detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+          hasLocalDualRailFinalLeafRepairSurface(problem),
+          problem.observedOutputExprs0.size(),
+          level,
+          targetCube.size(),
+          exactResetPrecheckSupportLimit,
+          kMinLocalDualRailFinalLeafPredecessorSupport);
   if (problem.usesDualRailStateEncoding) {
     const size_t encodingNodeLimit = dualRailPredecessorEncodingNodeLimit();
     const size_t configuredEncodingSupportLimit =
@@ -12090,7 +12130,7 @@ std::optional<StateCube> findPredecessorCube(
           level,
           targetCube.size(),
           transitionSupportSymbols.size(),
-          exactResetPrecheckSupportLimit)) {
+          localExactResetPrecheckSupportLimit)) {
     if (const auto resetPrecheck =
             proveLargeDualRailPredecessorWithResetFrontier(
                 problem,
@@ -12101,7 +12141,7 @@ std::optional<StateCube> findPredecessorCube(
                 targetCube,
                 transitionSupportSymbols,
                 useExactResetFrontierChecks,
-                exactResetPrecheckSupportLimit,
+                localExactResetPrecheckSupportLimit,
                 resetFrontierCache,
                 "precheck");
         resetPrecheck.has_value()) {
@@ -12128,7 +12168,7 @@ std::optional<StateCube> findPredecessorCube(
       !predecessorQueryIsAlreadyExact &&
       level == 0 && problem.resetBootstrapCycles != 0 &&
       resetFrontierCache != nullptr &&
-      transitionSupportSymbols.size() <= exactResetPrecheckSupportLimit) {
+      transitionSupportSymbols.size() <= localExactResetPrecheckSupportLimit) {
     // F[0] is a compact summary of the concrete post-reset image. Asking only
     // the abstract F[0] predecessor query can enumerate thousands of fake
     // reset states one refinement clause at a time. The exact reset-frontier
@@ -12159,7 +12199,7 @@ std::optional<StateCube> findPredecessorCube(
           " encoded_targets=", encodedTargets.size(),
           " transition_support=", transitionSupportSymbols.size(),
           " projection_limit=", predecessorProjectionLimit,
-          " support_limit=", exactResetPrecheckSupportLimit,
+          " support_limit=", localExactResetPrecheckSupportLimit,
           " exact_reset_frontier=1 result=",
           hasConcreteResetPredecessor ? "sat" : "unsat");
     }
@@ -12177,7 +12217,7 @@ std::optional<StateCube> findPredecessorCube(
         " encoded_targets=", encodedTargets.size(),
         " transition_support=", transitionSupportSymbols.size(),
         " projection_limit=", predecessorProjectionLimit,
-        " support_limit=", exactResetPrecheckSupportLimit,
+        " support_limit=", localExactResetPrecheckSupportLimit,
         " exact_reset_frontier=",
         useExactResetFrontierChecks ? "skipped" : "disabled");
   }
@@ -12300,7 +12340,7 @@ std::optional<StateCube> findPredecessorCube(
                     targetCube,
                     transitionSupportSymbols,
                     useExactResetFrontierChecks,
-                    exactResetPrecheckSupportLimit,
+                    localExactResetPrecheckSupportLimit,
                     resetFrontierCache,
                     "retry after budget");
             resetRetry.has_value() && *resetRetry) {
@@ -12444,7 +12484,7 @@ std::optional<StateCube> findPredecessorCube(
                 targetCube,
                 transitionSupportSymbols,
                 useExactResetFrontierChecks,
-                exactResetPrecheckSupportLimit,
+                localExactResetPrecheckSupportLimit,
                 resetFrontierCache,
                 "retry after budget");
         resetRetry.has_value() && *resetRetry) {

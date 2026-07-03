@@ -8672,6 +8672,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PdrLargeDualRailPredecessorResetFrontierRepairUsesLocalF0Only) {
+  constexpr size_t kDefaultSupportLimit = 8192;
+  constexpr size_t kLocalSupportLimit = 16 * 1024;
   EXPECT_TRUE(detail::shouldRetryLargeDualRailPredecessorWithResetFrontier(
       /*usesDualRailStateEncoding=*/true,
       /*exactResetFrontierChecksEnabled=*/false,
@@ -8747,6 +8749,80 @@ TEST_F(SequentialEquivalenceStrategyTests,
       /*targetCubeSize=*/32,
       /*transitionSupportSize=*/8193,
       /*exactResetPrecheckSupportLimit=*/8192));
+  // Single-output local leaves can run the exact reset precheck before the
+  // ordinary predecessor SAT query for slightly wider 8k-16k support cones.
+  EXPECT_EQ(detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+                /*hasLocalDualRailLeafRepairSurface=*/true,
+                /*observedOutputCount=*/1,
+                /*level=*/0,
+                /*targetCubeSize=*/32,
+                kDefaultSupportLimit,
+                kLocalSupportLimit),
+            kLocalSupportLimit);
+  EXPECT_EQ(detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+                /*hasLocalDualRailLeafRepairSurface=*/true,
+                /*observedOutputCount=*/1,
+                /*level=*/0,
+                /*targetCubeSize=*/27,
+                kDefaultSupportLimit,
+                kLocalSupportLimit),
+            kDefaultSupportLimit);
+  EXPECT_EQ(detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+                /*hasLocalDualRailLeafRepairSurface=*/true,
+                /*observedOutputCount=*/1,
+                /*level=*/0,
+                /*targetCubeSize=*/33,
+                kDefaultSupportLimit,
+                kLocalSupportLimit),
+            kDefaultSupportLimit);
+  EXPECT_EQ(detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+                /*hasLocalDualRailLeafRepairSurface=*/true,
+                /*observedOutputCount=*/2,
+                /*level=*/0,
+                /*targetCubeSize=*/32,
+                kDefaultSupportLimit,
+                kLocalSupportLimit),
+            kDefaultSupportLimit);
+  EXPECT_EQ(detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+                /*hasLocalDualRailLeafRepairSurface=*/true,
+                /*observedOutputCount=*/1,
+                /*level=*/1,
+                /*targetCubeSize=*/32,
+                kDefaultSupportLimit,
+                kLocalSupportLimit),
+            kDefaultSupportLimit);
+  EXPECT_EQ(detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+                /*hasLocalDualRailLeafRepairSurface=*/false,
+                /*observedOutputCount=*/1,
+                /*level=*/0,
+                /*targetCubeSize=*/32,
+                kDefaultSupportLimit,
+                kLocalSupportLimit),
+            kDefaultSupportLimit);
+  EXPECT_EQ(detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+                /*hasLocalDualRailLeafRepairSurface=*/true,
+                /*observedOutputCount=*/1,
+                /*level=*/0,
+                /*targetCubeSize=*/32,
+                /*configuredSupportLimit=*/0,
+                kLocalSupportLimit),
+            0);
+  EXPECT_TRUE(detail::shouldUseCachedResetPredecessorCore(
+      /*hasResetBootstrap=*/true,
+      /*level=*/0,
+      /*hasCachedCore=*/true));
+  EXPECT_FALSE(detail::shouldUseCachedResetPredecessorCore(
+      /*hasResetBootstrap=*/false,
+      /*level=*/0,
+      /*hasCachedCore=*/true));
+  EXPECT_FALSE(detail::shouldUseCachedResetPredecessorCore(
+      /*hasResetBootstrap=*/true,
+      /*level=*/1,
+      /*hasCachedCore=*/true));
+  EXPECT_FALSE(detail::shouldUseCachedResetPredecessorCore(
+      /*hasResetBootstrap=*/true,
+      /*level=*/0,
+      /*hasCachedCore=*/false));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

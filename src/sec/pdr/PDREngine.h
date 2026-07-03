@@ -211,6 +211,42 @@ inline bool shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
              exactResetPrecheckSupportLimit);
 }
 
+inline size_t effectiveLocalDualRailExactResetPrecheckSupportLimit(
+    bool hasLocalDualRailLeafRepairSurface,
+    size_t observedOutputCount,
+    size_t level,
+    size_t targetCubeSize,
+    size_t configuredSupportLimit,
+    size_t localSupportLimit) {
+  constexpr size_t kMinLocalPrecheckTargetCubeLiterals = 28;
+  constexpr size_t kMaxLocalPrecheckTargetCubeLiterals = 32;
+  if (configuredSupportLimit == 0) {
+    return 0;
+  }
+  // Local final dual-rail leaves may exceed the broad reset-precheck support
+  // cap by a small amount.  Let the exact reset proof run before building the
+  // ordinary wide predecessor SAT instance, but keep batches and non-F0 queries
+  // on the global cap.
+  if (!hasLocalDualRailLeafRepairSurface ||
+      observedOutputCount != 1 ||
+      level != 0 ||
+      targetCubeSize < kMinLocalPrecheckTargetCubeLiterals ||
+      targetCubeSize > kMaxLocalPrecheckTargetCubeLiterals) {
+    return configuredSupportLimit;
+  }
+  return std::max(configuredSupportLimit, localSupportLimit);
+}
+
+inline bool shouldUseCachedResetPredecessorCore(
+    bool hasResetBootstrap,
+    size_t level,
+    bool hasCachedCore) {
+  // Cached reset-predecessor cores come from exact concrete reset-frontier
+  // proofs.  Reusing them is only a level-0 predecessor shortcut; higher PDR
+  // frames still need ordinary frame-relative predecessor checks.
+  return hasResetBootstrap && level == 0 && hasCachedCore;
+}
+
 inline bool shouldSeedExactResetPredecessorSiblingCores(
     size_t cubeSize,
     size_t knownCoreSize) {
