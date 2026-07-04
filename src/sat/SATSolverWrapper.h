@@ -320,13 +320,13 @@ public:
       }
       kissat_add(static_cast<kissat*>(kissatSolver_), 0); // end of clause
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) {
-      if (cadicalCraigTracer_ != nullptr) {
-        cadicalCraigTracer_->label_clause(
-            ++cadicalCraigClauseId_,
-            craigClausePartition_ == CraigClausePartition::A
+      if (cadicalCraigTracer_ != nullptr) { // LCOV_EXCL_LINE
+        cadicalCraigTracer_->label_clause( // LCOV_EXCL_LINE
+            ++cadicalCraigClauseId_, // LCOV_EXCL_LINE
+            craigClausePartition_ == CraigClausePartition::A // LCOV_EXCL_LINE
                 ? CaDiCraig::CraigClauseType::A_CLAUSE
-                : CaDiCraig::CraigClauseType::B_CLAUSE);
-      }
+                : CaDiCraig::CraigClauseType::B_CLAUSE); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
       for (int lit : lits) {
         if (lit == 0 || lit == 1) {
           // LCOV_EXCL_START

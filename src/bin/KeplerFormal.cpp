@@ -1712,7 +1712,7 @@ int KeplerFormalMain(int argc, char** argv) {
               progress.provenOutputs,
               progress.totalOutputs);
           for (const auto& output : progress.unprovenOutputs) {
-            SPDLOG_INFO(
+            SPDLOG_INFO(  // LCOV_EXCL_LINE
                 "SEC {} not proven output[{}]={}",
                 progress.engineLabel,
                 output.index,

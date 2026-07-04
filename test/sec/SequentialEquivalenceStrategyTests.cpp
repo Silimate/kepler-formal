@@ -6382,6 +6382,42 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       BaseCaseSolverConcreteDualRailBootstrapForbidsUnknownRailValues) {
+  KInductionProblem problem;
+  constexpr size_t mayBeOne = 2;
+  constexpr size_t mayBeZero = 3;
+  constexpr size_t reset = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.inputSymbols = {reset};
+  problem.state0Symbols = {mayBeOne, mayBeZero};
+  problem.allSymbols = {mayBeOne, mayBeZero, reset};
+  problem.totalStateCount = 2;
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateAssignments = {{mayBeOne, false}, {mayBeZero, true}};
+  problem.dualRailStatePairs = {DualRailSymbolPair{mayBeOne, mayBeZero}};
+  problem.property = BoolExpr::Not(
+      BoolExpr::And(BoolExpr::Var(mayBeOne), BoolExpr::Var(mayBeZero)));
+  problem.bad = BoolExpr::Not(problem.property);
+
+  EXPECT_FALSE(findBaseCounterexample(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0).has_value());
+
+  KInductionProblem initialProblem = problem;
+  initialProblem.inputSymbols.clear();
+  initialProblem.allSymbols = {mayBeOne, mayBeZero};
+  initialProblem.resetBootstrapCycles = 0;
+  initialProblem.resetBootstrapInputs.clear();
+  initialProblem.bootstrapStateAssignments.clear();
+  initialProblem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(mayBeOne)), BoolExpr::Var(mayBeZero));
+  initialProblem.initializedStateCount = 2;
+
+  EXPECT_FALSE(findBaseCounterexample(
+      initialProblem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0).has_value());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SequentialSteadyFrontierMismatchRequiresEngineValidation) {
   KInductionProblem combinationalProblem;
   EXPECT_TRUE(
