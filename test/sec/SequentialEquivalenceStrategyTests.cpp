@@ -5644,6 +5644,80 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantRecognizesDomainPrefixedActiveLowResetNames) {
+  const SignalKey readReset0 = makeSignalKey("readReset0");
+  const SignalKey writeReset1 = makeSignalKey("writeReset1");
+  const SignalKey state0 = makeSignalKey("state0");
+  const SignalKey state1 = makeSignalKey("state1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {readReset0};
+  model0.stateBits = {state0};
+  model0.inputVarByKey.emplace(readReset0, 2);
+  model0.inputVarByKey.emplace(state0, 4);
+  model0.displayNameByKey.emplace(readReset0, "rrst_n");
+  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {writeReset1};
+  model1.stateBits = {state1};
+  model1.inputVarByKey.emplace(writeReset1, 3);
+  model1.inputVarByKey.emplace(state1, 5);
+  model1.displayNameByKey.emplace(writeReset1, "wrst_n");
+  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(3));
+
+  const auto invariant = buildReachableStateInvariant(model0, model1);
+
+  // These resets are design-local active-low controls, not cross-design state
+  // relations.
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
+  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
+  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
+  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ReachableStateInvariantHandlesInputInSuffixAndMissingNextState) {
+  const SignalKey reset0 = makeSignalKey("reset0");
+  const SignalKey reset1 = makeSignalKey("reset1");
+  const SignalKey driven0 = makeSignalKey("driven0");
+  const SignalKey driven1 = makeSignalKey("driven1");
+  const SignalKey missingNext0 = makeSignalKey("missingNext0");
+  const SignalKey missingNext1 = makeSignalKey("missingNext1");
+
+  SequentialDesignModel model0;
+  model0.environmentInputs = {reset0};
+  model0.stateBits = {driven0, missingNext0};
+  model0.inputVarByKey.emplace(reset0, 2);
+  model0.inputVarByKey.emplace(driven0, 4);
+  model0.inputVarByKey.emplace(missingNext0, 6);
+  model0.displayNameByKey.emplace(reset0, "reset_in");
+  model0.nextStateExprByStateKey.emplace(driven0, BoolExpr::Var(2));
+
+  SequentialDesignModel model1;
+  model1.environmentInputs = {reset1};
+  model1.stateBits = {driven1, missingNext1};
+  model1.inputVarByKey.emplace(reset1, 3);
+  model1.inputVarByKey.emplace(driven1, 5);
+  model1.inputVarByKey.emplace(missingNext1, 7);
+  model1.displayNameByKey.emplace(reset1, "reset_in");
+  model1.nextStateExprByStateKey.emplace(driven1, BoolExpr::Var(3));
+
+  const auto invariant = buildReachableStateInvariant(model0, model1);
+
+  // States without a local next-state expression cannot receive a reset-derived
+  // bootstrap value.
+  EXPECT_EQ(invariant.bootstrapCycles, 3u);
+  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
+  EXPECT_TRUE(invariant.bootstrapValues0.at(driven0));
+  EXPECT_EQ(invariant.bootstrapValues0.count(missingNext0), 0u);
+  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
+  EXPECT_TRUE(invariant.bootstrapValues1.at(driven1));
+  EXPECT_EQ(invariant.bootstrapValues1.count(missingNext1), 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantEvaluatesBootstrapValueOperatorsAndInvalidNodes) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
@@ -7720,6 +7794,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
@@ -7728,6 +7803,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find("frame invariant shared_strengthening"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("PDR using validated SEC strengthening frame invariant"),
       std::string::npos);
 }
 
