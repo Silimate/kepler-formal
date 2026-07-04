@@ -222,7 +222,7 @@ jobs:
             "${{github.workspace}}/kepler-formal-examples/nangate45_black_parrot_sec_final" \
             "${{github.workspace}}/build-sec-regress/src/bin/kepler-formal" \
             6_final_sec_test.yml \
-            ${{ env.SEC_FULL_COVERAGE_EXPECTATION }} \
+            ${{ env.SEC_POSITIVE_EXPECTATION }} \
             compact \
             engine=${{ env.SEC_ENGINE }} \
             sec-encoding=${{ env.SEC_ENCODING }}
