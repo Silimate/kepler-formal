@@ -1590,7 +1590,7 @@ uint64_t fingerprintExpr(
         fingerprint = combineHashes({opTag, lhs, rhs}); // LCOV_EXCL_LINE
         break; // LCOV_EXCL_LINE
       }
-      case Op::VAR:
+      case Op::VAR:  // LCOV_EXCL_LINE
       case Op::NONE:  // LCOV_EXCL_LINE
       default:
         throw std::runtime_error("Unsupported BoolExpr operator in fingerprint");  // LCOV_EXCL_LINE
