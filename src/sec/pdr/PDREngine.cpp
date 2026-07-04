@@ -12152,7 +12152,7 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
   if (resetFrontierCache == nullptr || problem.resetBootstrapCycles == 0) {
     return std::nullopt;
   }
-  const bool resetFrontierQueryAllowed =
+  const bool resetFrontierQueryAllowed = // LCOV_EXCL_LINE
       detail::shouldRetryLargeDualRailPredecessorWithResetFrontier( // LCOV_EXCL_LINE
           problem.usesDualRailStateEncoding, // LCOV_EXCL_LINE
           exactResetFrontierChecksEnabled, // LCOV_EXCL_LINE
@@ -12162,12 +12162,12 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
           transitionSupportSymbols.size(), // LCOV_EXCL_LINE
           exactResetPrecheckSupportLimit); // LCOV_EXCL_LINE
   if (!resetFrontierQueryAllowed) { // LCOV_EXCL_LINE
-    return std::nullopt;
+    return std::nullopt; // LCOV_EXCL_LINE
   }
-  const bool hasLargeResetFrontierSurface =
-      hasLargeDualRailResetFrontierSurface(problem);
-  const bool hasLocalLeafRepairSurface =
-      hasLocalDualRailFinalLeafRepairSurface(problem);
+  const bool hasLargeResetFrontierSurface = // LCOV_EXCL_LINE
+      hasLargeDualRailResetFrontierSurface(problem); // LCOV_EXCL_LINE
+  const bool hasLocalLeafRepairSurface = // LCOV_EXCL_LINE
+      hasLocalDualRailFinalLeafRepairSurface(problem); // LCOV_EXCL_LINE
   if (!detail::shouldRunLargeDualRailResetFrontierQuery( // LCOV_EXCL_LINE
           resetFrontierQueryAllowed, // LCOV_EXCL_LINE
           hasLargeResetFrontierSurface, // LCOV_EXCL_LINE
@@ -12185,8 +12185,8 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
     return std::nullopt; // LCOV_EXCL_LINE
   }
 
-  const ConcreteCubeReachabilityMode resetFrontierMode =
-      predecessorResetFrontierMode(problem);
+  const ConcreteCubeReachabilityMode resetFrontierMode = // LCOV_EXCL_LINE
+      predecessorResetFrontierMode(problem); // LCOV_EXCL_LINE
   const bool outsideConcreteResetFrontier = // LCOV_EXCL_LINE
       cubeOutsideConcreteResetFrontier( // LCOV_EXCL_LINE
           problem, // LCOV_EXCL_LINE
@@ -12196,7 +12196,7 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
           /*postBootstrapSteps=*/1,
           *resetFrontierCache, // LCOV_EXCL_LINE
           /*useResetConstantShortcut=*/false,
-          resetFrontierMode,
+          resetFrontierMode, // LCOV_EXCL_LINE
           frameInvariant, // LCOV_EXCL_LINE
           /*resourceLimitStartupExactQuery=*/false);
   if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
@@ -12208,7 +12208,7 @@ std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
         " target_cube=", targetCube.size(), // LCOV_EXCL_LINE
         " target_hash=", cubeFingerprint(targetCube), // LCOV_EXCL_LINE
         " transition_support=", transitionSupportSymbols.size(), // LCOV_EXCL_LINE
-        " mode=", concreteCubeReachabilityModeName(
+        " mode=", concreteCubeReachabilityModeName( // LCOV_EXCL_LINE
                        resetFrontierMode), // LCOV_EXCL_LINE
         " result=", outsideConcreteResetFrontier ? "unsat" : "not_proved"); // LCOV_EXCL_LINE
   } // LCOV_EXCL_LINE

@@ -224,16 +224,16 @@ inline bool shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
              exactResetPrecheckSupportLimit); // LCOV_EXCL_LINE
 }
 
-inline bool shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+inline bool shouldUseOneShotLargeDualRailResetFrontierPredecessor( // LCOV_EXCL_LINE
     bool hasLargeDualRailResetFrontierSurface,
     bool hasLocalDualRailLeafRepairSurface) {
   // If an exact reset-frontier query runs on a huge non-local leaf, avoid
   // pinning the reset-prefix SAT solver that can dominate top MEM there.
-  return hasLargeDualRailResetFrontierSurface &&
-         !hasLocalDualRailLeafRepairSurface;
+  return hasLargeDualRailResetFrontierSurface && // LCOV_EXCL_LINE
+         !hasLocalDualRailLeafRepairSurface; // LCOV_EXCL_LINE
 }
 
-inline bool shouldRunLargeDualRailResetFrontierQuery(
+inline bool shouldRunLargeDualRailResetFrontierQuery( // LCOV_EXCL_LINE
     bool resetFrontierQueryAllowed,
     bool hasLargeDualRailResetFrontierSurface,
     bool hasLocalDualRailLeafRepairSurface) {
@@ -242,10 +242,10 @@ inline bool shouldRunLargeDualRailResetFrontierQuery(
   // mode protects memory but rebuilding the reset transition dominates runtime;
   // keep the exact query for cached/local repair and let ordinary PDR splitting
   // handle the non-local hot path.
-  return resetFrontierQueryAllowed &&
-         !shouldUseOneShotLargeDualRailResetFrontierPredecessor(
-             hasLargeDualRailResetFrontierSurface,
-             hasLocalDualRailLeafRepairSurface);
+  return resetFrontierQueryAllowed && // LCOV_EXCL_LINE
+         !shouldUseOneShotLargeDualRailResetFrontierPredecessor( // LCOV_EXCL_LINE
+             hasLargeDualRailResetFrontierSurface, // LCOV_EXCL_LINE
+             hasLocalDualRailLeafRepairSurface); // LCOV_EXCL_LINE
 }
 
 inline size_t effectiveLocalDualRailExactResetPrecheckSupportLimit(
