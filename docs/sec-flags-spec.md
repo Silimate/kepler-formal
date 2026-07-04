@@ -1,9 +1,9 @@
 # SEC Flag Specification
 
-Status: under construction. SEC is an active development area, so this document
-describes the current user-facing surface rather than a frozen compatibility
-contract. Names and defaults should be treated as provisional until the SEC flow
-is declared stable.
+This document describes the user-facing surface for Sequential Equivalence
+Checking (SEC). SEC supports both gate-level sequential netlists and RTL-level
+Verilog/SystemVerilog designs through the same extracted transition-system
+model.
 
 ## Scope
 
@@ -14,9 +14,17 @@ library, logging, solver, CNF export, and LEC flags remain documented in
 SEC clock extraction and multi-clock-domain coverage handling are documented in
 [sec-clock-handling.md](sec-clock-handling.md).
 
+Supported SEC flows:
+
+| Flow | Typical inputs |
+| --- | --- |
+| Gate-level SEC | Sequential gate-level Verilog/SystemVerilog netlists with Liberty/Python primitive libraries as needed. |
+| RTL-level SEC | RTL Verilog/SystemVerilog sources, including SystemVerilog flists with explicit tops. |
+
 ## CLI Shape
 
-SEC is selected with `-v sec` or `--verification sec`.
+SEC is selected with `-v sec` or `--verification sec`. LEC remains the default
+verification mode when no SEC selector is provided.
 
 ```sh
 kepler-formal -verilog \

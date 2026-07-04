@@ -5,15 +5,29 @@ surface accepted by `kepler-formal`.
 
 The stable top-level overview remains in [README.md](../README.md).
 The SEC-specific flag surface is documented separately in
-[sec-flags-spec.md](sec-flags-spec.md). SEC is still under construction, so
-that page describes the current implementation rather than a frozen contract.
+[sec-flags-spec.md](sec-flags-spec.md).
+
+## Verification modes
+
+`kepler-formal` supports full equivalence checking flows:
+
+| Mode | Typical use | Inputs |
+| --- | --- | --- |
+| `lec` | Gate-level combinational equivalence checking | Verilog or Naja IF netlists plus Liberty/Python primitive libraries as needed. |
+| `sec` | Gate-level sequential equivalence checking | Sequential Verilog/SystemVerilog netlists plus Liberty/Python primitive libraries as needed. |
+| `sec` | RTL-level sequential equivalence checking | RTL Verilog/SystemVerilog sources, including SystemVerilog flists with explicit tops. |
+
+LEC is the default. Select SEC with `-v sec`, `--verification sec`, or
+`verification: sec` in YAML.
 
 ## Binary flags
 
 | Flag | Meaning |
 | --- | --- |
 | `-verilog` | Use Verilog Format. |
+| `-systemverilog`, `-sv` | Use SystemVerilog format. |
 | `-naja_if` | Use naja-if format. |
+| `-v <mode>`, `--verification <mode>` | Select verification mode. Supported values: `lec`, `sec`. If omitted, the implementation defaults to `lec`. |
 | `--help`, `-h` | Print usage and exit. |
 | `--config <file>`, `-c <file>` | Load a YAML config file. If present anywhere on the CLI, YAML parsing takes precedence over the rest of the arguments. |
 | `--design1 <file...>` | Explicit source list for design 1 in multi-file Verilog mode. |
@@ -27,7 +41,8 @@ that page describes the current implementation rather than a frozen contract.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `format` | string | Input format[verilog, naja_if]. If omitted, the implementation defaults to `verilog`. |
+| `format` | string | Input format. Supported values: `verilog`, `v`, `systemverilog`, `sv`, and `naja_if`. If omitted, the implementation defaults to `verilog`. |
+| `verification` | string | Verification mode. Supported values: `lec`, `sec`. If omitted, the implementation defaults to `lec`. |
 | `input_paths` | list | Required for normal runs. Accepts either `[design0, design1]` or `[[design0_file...], [design1_file...]]`. The nested form is for multi-file Verilog. |
 | `liberty_files` | list[string] | Liberty libraries loaded through `SNLLibertyConstructor`. |
 | `py_tech_files` | list[string] | Python primitive loaders loaded through `SNLPyLoader`. |

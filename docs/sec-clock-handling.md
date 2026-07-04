@@ -1,7 +1,7 @@
 # SEC Clock Handling
 
-Status: under construction. This document describes the current SEC clock
-modeling behavior, not a frozen compatibility contract.
+This document describes the SEC clock modeling behavior used during
+gate-level and RTL-level sequential equivalence checking.
 
 ## Scope
 
@@ -165,7 +165,7 @@ When SEC skips observed outputs due to clock-domain mixing, the main log reports
 partial coverage:
 
 ```text
-SEC output coverage: <covered>/<existing>
+SEC checked-output coverage: <percent> (<covered>/<existing> covered/existing outputs)
 ```
 
 The skipped reason is summarized as `multi-clock-domain`.
@@ -194,4 +194,3 @@ Use this interpretation when reviewing SEC output:
 | Full coverage on a multi-clock design | Covered observed outputs did not require an unsupported cross-domain timing assumption under the extracted model. |
 | Partial coverage with `multi-clock-domain` skips | Some observed outputs crossed extracted clock domains and were intentionally skipped. |
 | Partial coverage with reset/unconnected/loop skips | Those issues blocked coverage first; the run does not prove whether skipped outputs are also CDC-sensitive. |
-
