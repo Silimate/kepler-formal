@@ -18696,7 +18696,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(stderrOutput.find("post_bootstrap_steps=1"), std::string::npos)
       << stderrOutput;
-  EXPECT_NE(stderrOutput.find("exact_reset_frontier=1 result=unsat"), std::string::npos)
+  EXPECT_NE(
+      stderrOutput.find(
+          "exact_reset_frontier=1 mode=cached_assumptions result=unsat"),
+      std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("reset-frontier core"), std::string::npos)
       << stderrOutput;
@@ -19963,7 +19966,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Different);
   EXPECT_NE(
-      stderrOutput.find("exact_reset_frontier=1 result=sat"),
+      stderrOutput.find(
+          "exact_reset_frontier=1 mode=cached_assumptions result=sat"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find("predecessor_cube=1"), std::string::npos)
