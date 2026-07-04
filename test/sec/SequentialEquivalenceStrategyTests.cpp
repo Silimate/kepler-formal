@@ -38,6 +38,7 @@
 #include "SNLInstance.h"
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
+#include "common/AlignedSignals.h"
 #include "common/BoolExprUtils.h"
 #include "common/PrivateProofSymbol.h"
 #include "common/ProofProblemDebug.h"
@@ -58,7 +59,6 @@
 #include "clocks/SecClockModel.h"
 #include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
-#include "strategy/StructuralStateInvariant.h"
 
 using namespace naja::NL;
 using namespace KEPLER_FORMAL::SEC;
@@ -1593,22 +1593,6 @@ class ScopedEnvVar {
   std::optional<std::string> previousValue_;
 };
 
-class ScopedSecInternalStateCorrespondence {
- public:
-  explicit ScopedSecInternalStateCorrespondence(bool enabled)
-      : previousValue_(
-            KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-    KEPLER_FORMAL::Config::setSecInternalStateCorrespondence(enabled);
-  }
-
-  ~ScopedSecInternalStateCorrespondence() {
-    KEPLER_FORMAL::Config::setSecInternalStateCorrespondence(previousValue_);
-  }
-
- private:
-  bool previousValue_;
-};
-
 class ScopedUnsetEnvVar {
  public:
   explicit ScopedUnsetEnvVar(const char* name)
@@ -1684,53 +1668,6 @@ BoolExpr* makeRepeatedSmallSupportCone(size_t varA, size_t varB, size_t depth) {
   return expr;
 }
 
-struct DeepResetBootstrapCase {
-  SequentialDesignModel model0;
-  SequentialDesignModel model1;
-  AlignedSignals alignedInputs;
-  AlignedSignals candidateStates;
-};
-
-DeepResetBootstrapCase makeDeepResetBootstrapCase(
-    const std::string& prefix,
-    size_t coneDepth) {
-  const SignalKey rst0 = makeSignalKey(prefix + "Rst0");
-  const SignalKey rst1 = makeSignalKey(prefix + "Rst1");
-  const SignalKey dataA0 = makeSignalKey(prefix + "DataA0");
-  const SignalKey dataA1 = makeSignalKey(prefix + "DataA1");
-  const SignalKey dataB0 = makeSignalKey(prefix + "DataB0");
-  const SignalKey dataB1 = makeSignalKey(prefix + "DataB1");
-  const SignalKey state0 = makeSignalKey(prefix + "State0");
-  const SignalKey state1 = makeSignalKey(prefix + "State1");
-
-  DeepResetBootstrapCase testCase;
-  testCase.model0.environmentInputs = {rst0, dataA0, dataB0};
-  testCase.model1.environmentInputs = {rst1, dataA1, dataB1};
-  testCase.model0.stateBits = {state0};
-  testCase.model1.stateBits = {state1};
-  testCase.model0.inputVarByKey.emplace(rst0, 2);
-  testCase.model1.inputVarByKey.emplace(rst1, 3);
-  testCase.model0.inputVarByKey.emplace(state0, 4);
-  testCase.model1.inputVarByKey.emplace(state1, 5);
-  testCase.model0.inputVarByKey.emplace(dataA0, 6);
-  testCase.model1.inputVarByKey.emplace(dataA1, 7);
-  testCase.model0.inputVarByKey.emplace(dataB0, 8);
-  testCase.model1.inputVarByKey.emplace(dataB1, 9);
-  testCase.model0.displayNameByKey.emplace(rst0, "rst");
-  testCase.model1.displayNameByKey.emplace(rst1, "rst");
-  testCase.model0.nextStateExprByStateKey.emplace(
-      state0, makeRepeatedSmallSupportCone(6, 8, coneDepth));
-  testCase.model1.nextStateExprByStateKey.emplace(
-      state1, BoolExpr::Not(makeRepeatedSmallSupportCone(7, 9, coneDepth)));
-  testCase.alignedInputs.names = {"rst", "data_a", "data_b"};
-  testCase.alignedInputs.keys0 = {rst0, dataA0, dataB0};
-  testCase.alignedInputs.keys1 = {rst1, dataA1, dataB1};
-  testCase.candidateStates.names = {"deep_state"};
-  testCase.candidateStates.keys0 = {state0};
-  testCase.candidateStates.keys1 = {state1};
-  return testCase;
-}
-
 SequentialDesignModel makeCombinationalExtractedModel(BoolExpr* outputExpr) {
   SequentialDesignModel model;
   const SignalKey inputKey = makeSignalKey("in");
@@ -1765,8 +1702,6 @@ KInductionProblem makeDualRailComplementedOutputProblemForTest() {
       p0One, p0Zero, c0One, c0Zero, p1One, p1Zero, c1One, c1Zero};
   problem.dualRailStatePairs = {
       {p0One, p0Zero}, {c0One, c0Zero}, {p1One, p1Zero}, {c1One, c1Zero}};
-  problem.initialStateEqualityPairs = {{p0One, p1One}, {p0Zero, p1Zero}};
-  problem.inductiveStateEqualityPairs = problem.initialStateEqualityPairs;
   problem.sameFrameStateEqualityPairs0 = {{c0One, p0Zero}, {c0Zero, p0One}};
   problem.sameFrameStateEqualityPairs1 = {{c1One, p1Zero}, {c1Zero, p1One}};
 
@@ -1777,53 +1712,49 @@ KInductionProblem makeDualRailComplementedOutputProblemForTest() {
     problem.transitions1.emplace_back(symbol, BoolExpr::Var(symbol));
   }
 
-  BoolExpr* primaryEquality = BoolExpr::And(
-      makeEqualityExpr(BoolExpr::Var(p0One), BoolExpr::Var(p1One)),
-      makeEqualityExpr(BoolExpr::Var(p0Zero), BoolExpr::Var(p1Zero)));
+  // This fixture checks the allowed same-design rail relation only. It must
+  // not assume any by-name relation between design0 and design1 internals.
   BoolExpr* complementedOutputEquality = BoolExpr::And(
-      makeEqualityExpr(BoolExpr::Var(c0One), BoolExpr::Var(c1One)),
-      makeEqualityExpr(BoolExpr::Var(c0Zero), BoolExpr::Var(c1Zero)));
+      makeEqualityExpr(BoolExpr::Var(c0One), BoolExpr::Var(p0Zero)),
+      makeEqualityExpr(BoolExpr::Var(c0Zero), BoolExpr::Var(p0One)));
   problem.observedOutputNames = {"complemented_rail_output"};
   problem.observedOutputExprs0 = {complementedOutputEquality};
   problem.observedOutputExprs1 = {BoolExpr::createTrue()};
   problem.property = complementedOutputEquality;
   problem.bad = BoolExpr::Not(problem.property);
-  problem.inductionProperty =
-      BoolExpr::And(primaryEquality, complementedOutputEquality);
+  problem.inductionProperty = complementedOutputEquality;
   problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
-  problem.inductionPropertyAssumesInductiveStateEqualities = true;
   problem.totalStateCount = problem.state0Symbols.size() + problem.state1Symbols.size();
   return problem;
 }
 
-KInductionProblem makePartiallyInductiveEqualitySubsetProblemForTest() {
-  constexpr size_t stable0 = 2;
-  constexpr size_t unstable0 = 3;
-  constexpr size_t stable1 = 4;
-  constexpr size_t unstable1 = 5;
-
+KInductionProblem makeDualRailLocalFalseInvariantProblemForTest(
+    size_t outputCount = 1) {
+  constexpr size_t state = 2;
   KInductionProblem problem;
-  problem.state0Symbols = {stable0, unstable0};
-  problem.state1Symbols = {stable1, unstable1};
-  problem.allSymbols = {stable0, unstable0, stable1, unstable1};
-  problem.initialStateEqualityPairs = {
-      {stable0, stable1}, {unstable0, unstable1}};
-  problem.inductiveStateEqualityPairs = problem.initialStateEqualityPairs;
-  problem.transitions0.emplace_back(stable0, BoolExpr::Var(stable0));
-  problem.transitions1.emplace_back(stable1, BoolExpr::Var(stable1));
-  problem.transitions0.emplace_back(unstable0, BoolExpr::Not(BoolExpr::Var(unstable0)));
-  problem.transitions1.emplace_back(unstable1, BoolExpr::Var(unstable1));
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {state};
+  problem.allSymbols = {state};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(state));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.transitions0 = {{state, BoolExpr::createFalse()}};
 
-  problem.observedOutputNames = {"stable_out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(stable0)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(stable1)};
-  problem.property =
-      makeEqualityExpr(BoolExpr::Var(stable0), BoolExpr::Var(stable1));
+  problem.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < outputCount; ++output) {
+    problem.observedOutputNames.push_back("out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(state));
+    problem.observedOutputExprs1.push_back(BoolExpr::createFalse());
+    problem.property = BoolExpr::And(
+        problem.property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0.back(),
+            problem.observedOutputExprs1.back()));
+  }
+  problem.property = BoolExpr::simplify(problem.property);
   problem.bad = BoolExpr::Not(problem.property);
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
-  problem.totalStateCount = problem.state0Symbols.size() + problem.state1Symbols.size();
-  problem.lazyTransitions = std::make_shared<LazyTransitionStore>();
   return problem;
 }
 
@@ -5502,8 +5433,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.run(1);
 
   // A one-step proof cannot justify equality of a hidden 20-stage shift chain
-  // unless SEC assumes cross-design internal state correspondence.  Keep the
-  // result inconclusive until the caller supplies a sufficient KI horizon.
+  // because SEC does not assume cross-design internal state correspondence.
+  // Keep the result inconclusive until the caller supplies a sufficient KI
+  // horizon.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.bound, 1u);
 }
@@ -5553,81 +5485,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantUsesExplicitInitialCompatibilityWithoutReset) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey state0A = makeSignalKey("state0A");
-  const SignalKey state0B = makeSignalKey("state0B");
-  const SignalKey state1A = makeSignalKey("state1A");
-  const SignalKey state1B = makeSignalKey("state1B");
-
-  SequentialDesignModel model0;
-  model0.stateBits = {state0A, state0B};
-  model0.initialStateValueByKey.emplace(state0A, false);
-  model0.initialStateValueByKey.emplace(state0B, true);
-
-  SequentialDesignModel model1;
-  model1.stateBits = {state1A, state1B};
-  model1.initialStateValueByKey.emplace(state1A, false);
-  model1.initialStateValueByKey.emplace(state1B, false);
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state_a", "state_b"};
-  candidateStates.keys0 = {state0A, state0B};
-  candidateStates.keys1 = {state1A, state1B};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, AlignedSignals{}, candidateStates);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 0u);
-  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
-  EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state_a");
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state_a");
-  EXPECT_TRUE(invariant.bootstrapValues0.empty());
-  EXPECT_TRUE(invariant.bootstrapValues1.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantIgnoresInternalCorrespondenceByDefault) {
-  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
-
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.stateBits = {state0};
-  model0.initialStateValueByKey.emplace(state0, false);
-
-  SequentialDesignModel model1;
-  model1.stateBits = {state1};
-  model1.initialStateValueByKey.emplace(state1, false);
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"internal_state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  const auto disabledInvariant =
-      buildReachableStateInvariant(model0, model1, AlignedSignals{}, candidateStates);
-
-  EXPECT_TRUE(disabledInvariant.initialStateCorrespondence.names.empty());
-  EXPECT_TRUE(disabledInvariant.anchoredStateEqualities.names.empty());
-
-  {
-    ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-    const auto enabledInvariant =
-        buildReachableStateInvariant(model0, model1, AlignedSignals{}, candidateStates);
-    ASSERT_EQ(enabledInvariant.initialStateCorrespondence.names.size(), 1u);
-    EXPECT_EQ(enabledInvariant.initialStateCorrespondence.names[0], "internal_state");
-    ASSERT_EQ(enabledInvariant.anchoredStateEqualities.names.size(), 1u);
-    EXPECT_EQ(enabledInvariant.anchoredStateEqualities.names[0], "internal_state");
-  }
-
-  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantDoesNotInferStartupPairsFromInternalNames) {
+       ReachableStateInvariantDoesNotRelateInternalStateWithoutReset) {
   const SignalKey state0 = makeSignalKey("state0");
   const SignalKey state1 = makeSignalKey("state1");
 
@@ -5639,19 +5497,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   SequentialDesignModel model1;
   model1.stateBits = {state1};
   model1.displayNameByKey.emplace(state1, "same_name_state[0]");
-  model1.initialStateValueByKey.emplace(state1, true);
+  model1.initialStateValueByKey.emplace(state1, false);
 
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, AlignedSignals{}, AlignedSignals{});
+  const auto invariant = buildReachableStateInvariant(model0, model1);
 
   EXPECT_EQ(invariant.bootstrapCycles, 0u);
-  EXPECT_TRUE(invariant.initialStateCorrespondence.names.empty());
-  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
+  EXPECT_TRUE(invariant.bootstrapValues0.empty());
+  EXPECT_TRUE(invariant.bootstrapValues1.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
        ReachableStateInvariantSkipsBootstrapWhenResetAndInitialStateAreComplete) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -5669,33 +5525,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.stateBits = {state1};
   model1.inputVarByKey.emplace(rst1, 3);
   model1.displayNameByKey.emplace(rst1, "rst");
-  model1.initialStateValueByKey.emplace(state1, false);
+  model1.initialStateValueByKey.emplace(state1, true);
 
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
+  const auto invariant = buildReachableStateInvariant(model0, model1);
 
   EXPECT_EQ(invariant.bootstrapCycles, 0u);
-  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
-  EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state");
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state");
   EXPECT_TRUE(invariant.bootstrapValues0.empty());
   EXPECT_TRUE(invariant.bootstrapValues1.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantDerivesBootstrapValuesAndAnchorsFromReset) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       ReachableStateInvariantDerivesDesignLocalBootstrapValuesFromReset) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -5705,6 +5545,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model0.environmentInputs = {rst0};
   model0.stateBits = {state0};
   model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(state0, 4);
   model0.displayNameByKey.emplace(rst0, "rst");
   model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
 
@@ -5712,27 +5553,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.environmentInputs = {rst1};
   model1.stateBits = {state1};
   model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(state1, 5);
   model1.displayNameByKey.emplace(rst1, "rst");
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
 
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
+  const auto invariant = buildReachableStateInvariant(model0, model1);
 
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
-  EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state");
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state");
   ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
   EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
   ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
@@ -5740,8 +5567,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantCanSkipBootstrapValueSweepForPdr) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       ReachableStateInvariantCanSkipDesignLocalBootstrapValueSweep) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey state0 = makeSignalKey("state0");
@@ -5751,6 +5577,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model0.environmentInputs = {rst0};
   model0.stateBits = {state0};
   model0.inputVarByKey.emplace(rst0, 2);
+  model0.inputVarByKey.emplace(state0, 4);
   model0.displayNameByKey.emplace(rst0, "rst");
   model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
 
@@ -5758,34 +5585,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.environmentInputs = {rst1};
   model1.stateBits = {state1};
   model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(state1, 5);
   model1.displayNameByKey.emplace(rst1, "rst");
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
 
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
   const auto invariant = buildReachableStateInvariant(
-      model0,
-      model1,
-      alignedInputs,
-      candidateStates,
-      /*deriveResetBootstrapStrengthening=*/false,
-      /*secDiagEnabled=*/false,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*deriveResetBootstrapEqualities=*/false);
+      model0, model1, /*deriveResetBootstrapStrengthening=*/false);
 
-  // PDR keeps the concrete reset window but lets BMC/reset-frontier checks
-  // validate startup candidates instead of precomputing every state value.
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state");
   EXPECT_TRUE(invariant.bootstrapValues0.empty());
   EXPECT_TRUE(invariant.bootstrapValues1.empty());
 }
@@ -5825,18 +5632,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
   model1.nextStateExprByStateKey.emplace(lowState1, BoolExpr::Var(5));
 
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"reset_i", "rst_ni"};
-  alignedInputs.keys0 = {reset0, activeLowReset0};
-  alignedInputs.keys1 = {reset1, activeLowReset1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state", "low_state"};
-  candidateStates.keys0 = {state0, lowState0};
-  candidateStates.keys1 = {state1, lowState1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
+  const auto invariant = buildReachableStateInvariant(model0, model1);
 
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
   ASSERT_EQ(invariant.bootstrapValues0.size(), 2u);
@@ -5848,1100 +5644,59 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantEvaluatesXorBootstrapValuesInSourcePath) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("xorRst0");
-  const SignalKey rst1 = makeSignalKey("xorRst1");
-  const SignalKey lhs0 = makeSignalKey("xorLhs0");
-  const SignalKey lhs1 = makeSignalKey("xorLhs1");
-  const SignalKey rhs0 = makeSignalKey("xorRhs0");
-  const SignalKey rhs1 = makeSignalKey("xorRhs1");
-  const SignalKey xor0 = makeSignalKey("xorState0");
-  const SignalKey xor1 = makeSignalKey("xorState1");
-  const SignalKey unknownXor0 = makeSignalKey("unknownXorState0");
-  const SignalKey unknownXor1 = makeSignalKey("unknownXorState1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {xor0, lhs0, rhs0, unknownXor0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(lhs0, 4);
-  model0.inputVarByKey.emplace(rhs0, 6);
-  model0.inputVarByKey.emplace(xor0, 8);
-  model0.inputVarByKey.emplace(unknownXor0, 10);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.initialStateValueByKey.emplace(lhs0, true);
-  model0.initialStateValueByKey.emplace(rhs0, false);
-  model0.nextStateExprByStateKey.emplace(lhs0, BoolExpr::Var(4));
-  model0.nextStateExprByStateKey.emplace(rhs0, BoolExpr::Var(6));
-  model0.nextStateExprByStateKey.emplace(
-      xor0, BoolExpr::Xor(BoolExpr::Var(4), BoolExpr::Var(6)));
-  model0.nextStateExprByStateKey.emplace(
-      unknownXor0, BoolExpr::Xor(BoolExpr::Var(4), BoolExpr::Var(1000)));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {xor1, lhs1, rhs1, unknownXor1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(lhs1, 5);
-  model1.inputVarByKey.emplace(rhs1, 7);
-  model1.inputVarByKey.emplace(xor1, 9);
-  model1.inputVarByKey.emplace(unknownXor1, 11);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.initialStateValueByKey.emplace(lhs1, true);
-  model1.initialStateValueByKey.emplace(rhs1, false);
-  model1.nextStateExprByStateKey.emplace(lhs1, BoolExpr::Var(5));
-  model1.nextStateExprByStateKey.emplace(rhs1, BoolExpr::Var(7));
-  model1.nextStateExprByStateKey.emplace(
-      xor1, BoolExpr::Xor(BoolExpr::Var(5), BoolExpr::Var(7)));
-  model1.nextStateExprByStateKey.emplace(
-      unknownXor1, BoolExpr::Xor(BoolExpr::Var(5), BoolExpr::Var(1001)));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"xor_state"};
-  candidateStates.keys0 = {xor0};
-  candidateStates.keys1 = {xor1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.bootstrapValues0.size(), 3u);
-  EXPECT_TRUE(invariant.bootstrapValues0.at(xor0));
-  ASSERT_EQ(invariant.bootstrapValues1.size(), 3u);
-  EXPECT_TRUE(invariant.bootstrapValues1.at(xor1));
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "xor_state");
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantEvaluatesAndOrBootstrapShortCircuitsInSourcePath) {
-  const SignalKey rst0 = makeSignalKey("andOrRst0");
-  const SignalKey rst1 = makeSignalKey("andOrRst1");
-
-  auto buildModel = [](const SignalKey& rst, size_t firstVar) {
-    SequentialDesignModel model;
-    const SignalKey falseState = makeSignalKey("andOrFalse" + std::to_string(firstVar));
-    const SignalKey trueState = makeSignalKey("andOrTrue" + std::to_string(firstVar));
-    const SignalKey falseHighState =
-        makeSignalKey("andOrFalseHigh" + std::to_string(firstVar));
-    const SignalKey trueHighState =
-        makeSignalKey("andOrTrueHigh" + std::to_string(firstVar));
-    const SignalKey andLhsFalse =
-        makeSignalKey("andOrAndLhsFalse" + std::to_string(firstVar));
-    const SignalKey andRhsFalse =
-        makeSignalKey("andOrAndRhsFalse" + std::to_string(firstVar));
-    const SignalKey andBothKnown =
-        makeSignalKey("andOrAndBothKnown" + std::to_string(firstVar));
-    const SignalKey orLhsTrue =
-        makeSignalKey("andOrOrLhsTrue" + std::to_string(firstVar));
-    const SignalKey orRhsTrue =
-        makeSignalKey("andOrOrRhsTrue" + std::to_string(firstVar));
-    const SignalKey orBothKnown =
-        makeSignalKey("andOrOrBothKnown" + std::to_string(firstVar));
-
-    const size_t falseVar = firstVar;
-    const size_t trueVar = firstVar + 2;
-    const size_t falseHighVar = firstVar + 4;
-    const size_t trueHighVar = firstVar + 6;
-    const size_t andLhsFalseVar = firstVar + 8;
-    const size_t andRhsFalseVar = firstVar + 10;
-    const size_t andBothKnownVar = firstVar + 12;
-    const size_t orLhsTrueVar = firstVar + 14;
-    const size_t orRhsTrueVar = firstVar + 16;
-    const size_t orBothKnownVar = firstVar + 18;
-    const size_t unknownVar = firstVar + 1000;
-
-    model.environmentInputs = {rst};
-    model.stateBits = {
-        falseState,
-        trueState,
-        falseHighState,
-        trueHighState,
-        andLhsFalse,
-        andRhsFalse,
-        andBothKnown,
-        orLhsTrue,
-        orRhsTrue,
-        orBothKnown};
-    model.inputVarByKey.emplace(rst, firstVar - 2);
-    model.inputVarByKey.emplace(falseState, falseVar);
-    model.inputVarByKey.emplace(trueState, trueVar);
-    model.inputVarByKey.emplace(falseHighState, falseHighVar);
-    model.inputVarByKey.emplace(trueHighState, trueHighVar);
-    model.inputVarByKey.emplace(andLhsFalse, andLhsFalseVar);
-    model.inputVarByKey.emplace(andRhsFalse, andRhsFalseVar);
-    model.inputVarByKey.emplace(andBothKnown, andBothKnownVar);
-    model.inputVarByKey.emplace(orLhsTrue, orLhsTrueVar);
-    model.inputVarByKey.emplace(orRhsTrue, orRhsTrueVar);
-    model.inputVarByKey.emplace(orBothKnown, orBothKnownVar);
-    model.displayNameByKey.emplace(rst, "rst");
-    model.initialStateValueByKey.emplace(falseState, false);
-    model.initialStateValueByKey.emplace(trueState, true);
-    model.initialStateValueByKey.emplace(falseHighState, false);
-    model.initialStateValueByKey.emplace(trueHighState, true);
-
-    model.nextStateExprByStateKey.emplace(falseState, BoolExpr::Var(falseVar));
-    model.nextStateExprByStateKey.emplace(trueState, BoolExpr::Var(trueVar));
-    model.nextStateExprByStateKey.emplace(falseHighState, BoolExpr::Var(falseHighVar));
-    model.nextStateExprByStateKey.emplace(trueHighState, BoolExpr::Var(trueHighVar));
-    model.nextStateExprByStateKey.emplace(
-        andLhsFalse,
-        BoolExpr::And(BoolExpr::Var(falseVar), BoolExpr::Var(unknownVar)));
-    model.nextStateExprByStateKey.emplace(
-        andRhsFalse,
-        BoolExpr::And(BoolExpr::Var(trueVar), BoolExpr::Var(falseHighVar)));
-    model.nextStateExprByStateKey.emplace(
-        andBothKnown,
-        BoolExpr::And(BoolExpr::Var(trueVar), BoolExpr::Var(trueHighVar)));
-    model.nextStateExprByStateKey.emplace(
-        orLhsTrue,
-        BoolExpr::Or(BoolExpr::Var(trueVar), BoolExpr::Var(unknownVar)));
-    model.nextStateExprByStateKey.emplace(
-        orRhsTrue,
-        BoolExpr::Or(BoolExpr::Var(falseVar), BoolExpr::Var(trueVar)));
-    model.nextStateExprByStateKey.emplace(
-        orBothKnown,
-        BoolExpr::Or(BoolExpr::Var(falseVar), BoolExpr::Var(falseHighVar)));
-
-    return std::make_pair(std::move(model), std::vector<SignalKey>{
-        andLhsFalse,
-        andRhsFalse,
-        andBothKnown,
-        orLhsTrue,
-        orRhsTrue,
-        orBothKnown});
-  };
-
-  auto [model0, states0] = buildModel(rst0, 4);
-  auto [model1, states1] = buildModel(rst1, 5);
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, {});
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(states0.size(), states1.size());
-  for (size_t i = 0; i < states0.size(); ++i) {
-    ASSERT_NE(invariant.bootstrapValues0.find(states0[i]),
-              invariant.bootstrapValues0.end());
-    ASSERT_NE(invariant.bootstrapValues1.find(states1[i]),
-              invariant.bootstrapValues1.end());
-  }
-  EXPECT_FALSE(invariant.bootstrapValues0.at(states0[0]));
-  EXPECT_FALSE(invariant.bootstrapValues0.at(states0[1]));
-  EXPECT_TRUE(invariant.bootstrapValues0.at(states0[2]));
-  EXPECT_TRUE(invariant.bootstrapValues0.at(states0[3]));
-  EXPECT_TRUE(invariant.bootstrapValues0.at(states0[4]));
-  EXPECT_FALSE(invariant.bootstrapValues0.at(states0[5]));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantCoversSatRemapFailureForUnalignedBootstrapInput) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey privateInput0 = makeSignalKey("privateInput0");
-  const SignalKey privateInput1 = makeSignalKey("privateInput1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0, privateInput0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(privateInput0, 4);
-  model0.inputVarByKey.emplace(state0, 6);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.displayNameByKey.emplace(privateInput0, "private");
-  model0.displayNameByKey.emplace(state0, "state_q[0]");
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(4));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1, privateInput1};
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(privateInput1, 5);
-  model1.inputVarByKey.emplace(state1, 7);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.displayNameByKey.emplace(privateInput1, "private");
-  model1.displayNameByKey.emplace(state1, "state_q[0]");
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(5));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state_q[0]"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
-  EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state_q[0]");
-  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantUsesCheapSatRecoveryPastCandidateBudget) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("satBudgetRst0");
-  const SignalKey rst1 = makeSignalKey("satBudgetRst1");
-  SequentialDesignModel model0;
-  SequentialDesignModel model1;
-  model0.environmentInputs = {rst0};
-  model1.environmentInputs = {rst1};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model1.inputVarByKey.emplace(rst1, 3);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model1.displayNameByKey.emplace(rst1, "rst");
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  constexpr size_t kCandidateCount = 4097;
-  for (size_t i = 0; i < kCandidateCount; ++i) {
-    const SignalKey dataA0 = makeSignalKey("satBudgetDataA0_" + std::to_string(i));
-    const SignalKey dataA1 = makeSignalKey("satBudgetDataA1_" + std::to_string(i));
-    const SignalKey dataB0 = makeSignalKey("satBudgetDataB0_" + std::to_string(i));
-    const SignalKey dataB1 = makeSignalKey("satBudgetDataB1_" + std::to_string(i));
-    const SignalKey state0 = makeSignalKey("satBudgetState0_" + std::to_string(i));
-    const SignalKey state1 = makeSignalKey("satBudgetState1_" + std::to_string(i));
-    const size_t dataAVar0 = 10 + i * 6;
-    const size_t dataAVar1 = 11 + i * 6;
-    const size_t dataBVar0 = 12 + i * 6;
-    const size_t dataBVar1 = 13 + i * 6;
-    const size_t stateVar0 = 14 + i * 6;
-    const size_t stateVar1 = 15 + i * 6;
-
-    model0.environmentInputs.push_back(dataA0);
-    model1.environmentInputs.push_back(dataA1);
-    model0.environmentInputs.push_back(dataB0);
-    model1.environmentInputs.push_back(dataB1);
-    model0.stateBits.push_back(state0);
-    model1.stateBits.push_back(state1);
-    model0.inputVarByKey.emplace(dataA0, dataAVar0);
-    model1.inputVarByKey.emplace(dataA1, dataAVar1);
-    model0.inputVarByKey.emplace(dataB0, dataBVar0);
-    model1.inputVarByKey.emplace(dataB1, dataBVar1);
-    model0.inputVarByKey.emplace(state0, stateVar0);
-    model1.inputVarByKey.emplace(state1, stateVar1);
-    if (i == 0) {
-      // This pair is Boolean-equivalent but not structurally identical; it
-      // needs one cheap SAT recovery even though the total state frontier is
-      // larger than the per-step recovery budget.
-      model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(dataAVar0));
-      model1.nextStateExprByStateKey.emplace(
-          state1,
-          BoolExpr::Or(
-              BoolExpr::And(BoolExpr::Var(dataAVar1), BoolExpr::Var(dataBVar1)),
-              BoolExpr::And(
-                  BoolExpr::Var(dataAVar1),
-                  BoolExpr::Not(BoolExpr::Var(dataBVar1)))));
-    } else {
-      model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(dataAVar0));
-      model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(dataAVar1));
-    }
-
-    alignedInputs.names.push_back("data_a_" + std::to_string(i));
-    alignedInputs.keys0.push_back(dataA0);
-    alignedInputs.keys1.push_back(dataA1);
-    alignedInputs.names.push_back("data_b_" + std::to_string(i));
-    alignedInputs.keys0.push_back(dataB0);
-    alignedInputs.keys1.push_back(dataB1);
-    candidateStates.names.push_back("state_" + std::to_string(i));
-    candidateStates.keys0.push_back(state0);
-    candidateStates.keys1.push_back(state1);
-  }
-
-  testing::internal::CaptureStderr();
-  const auto invariant = buildReachableStateInvariant(
-      model0,
-      model1,
-      alignedInputs,
-      candidateStates,
-      /*deriveResetBootstrapStrengthening=*/false,
-      /*secDiagEnabled=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names.size(), kCandidateCount);
-  EXPECT_NE(stderrOutput.find("sat_recovered_equalities="), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantSkipsHugeBootstrapSatRecoveryConeBeforeSatCall) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("wideSatRst0");
-  const SignalKey rst1 = makeSignalKey("wideSatRst1");
-  const SignalKey state0 = makeSignalKey("wideSatState0");
-  const SignalKey state1 = makeSignalKey("wideSatState1");
-  SequentialDesignModel model0;
-  SequentialDesignModel model1;
-  model0.environmentInputs = {rst0};
-  model1.environmentInputs = {rst1};
-  model0.stateBits = {state0};
-  model1.stateBits = {state1};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model1.inputVarByKey.emplace(rst1, 3);
-  model0.inputVarByKey.emplace(state0, 4);
-  model1.inputVarByKey.emplace(state1, 5);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model1.displayNameByKey.emplace(rst1, "rst");
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  std::vector<size_t> vars0;
-  std::vector<size_t> vars1;
-  constexpr size_t kWideSupportSize = 4097;
-  vars0.reserve(kWideSupportSize);
-  vars1.reserve(kWideSupportSize);
-  for (size_t i = 0; i < kWideSupportSize; ++i) {
-    const SignalKey data0 = makeSignalKey("wideSatData0_" + std::to_string(i));
-    const SignalKey data1 = makeSignalKey("wideSatData1_" + std::to_string(i));
-    const size_t dataVar0 = 100 + i * 2;
-    const size_t dataVar1 = 101 + i * 2;
-    model0.environmentInputs.push_back(data0);
-    model1.environmentInputs.push_back(data1);
-    model0.inputVarByKey.emplace(data0, dataVar0);
-    model1.inputVarByKey.emplace(data1, dataVar1);
-    alignedInputs.names.push_back("wide_data_" + std::to_string(i));
-    alignedInputs.keys0.push_back(data0);
-    alignedInputs.keys1.push_back(data1);
-    vars0.push_back(dataVar0);
-    vars1.push_back(dataVar1);
-  }
-  model0.nextStateExprByStateKey.emplace(state0, makeOrChain(vars0));
-  model1.nextStateExprByStateKey.emplace(
-      state1, BoolExpr::Not(makeOrChain(vars1)));
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"wide_state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  testing::internal::CaptureStderr();
-  const auto invariant = buildReachableStateInvariant(
-      model0,
-      model1,
-      alignedInputs,
-      candidateStates,
-      /*deriveResetBootstrapStrengthening=*/false,
-      /*secDiagEnabled=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=1"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantSkipsDeepBootstrapSatRecoveryCone) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  constexpr size_t kDeepConeDepth = 3000;
-  const auto testCase =
-      makeDeepResetBootstrapCase("deepSat", kDeepConeDepth);
-
-  testing::internal::CaptureStderr();
-  const auto invariant = buildReachableStateInvariant(
-      testCase.model0,
-      testCase.model1,
-      testCase.alignedInputs,
-      testCase.candidateStates,
-      /*deriveResetBootstrapStrengthening=*/false,
-      /*secDiagEnabled=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-  EXPECT_NE(stderrOutput.find("sat_recovery_skipped=1"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantPreservesWideStructuralResetSpecializationCone) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("wideStructuralRst0");
-  const SignalKey rst1 = makeSignalKey("wideStructuralRst1");
-  const SignalKey state0 = makeSignalKey("wideStructuralState0");
-  const SignalKey state1 = makeSignalKey("wideStructuralState1");
-  SequentialDesignModel model0;
-  SequentialDesignModel model1;
-  model0.environmentInputs = {rst0};
-  model1.environmentInputs = {rst1};
-  model0.stateBits = {state0};
-  model1.stateBits = {state1};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model1.inputVarByKey.emplace(rst1, 3);
-  model0.inputVarByKey.emplace(state0, 4);
-  model1.inputVarByKey.emplace(state1, 5);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model1.displayNameByKey.emplace(rst1, "rst");
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  std::vector<size_t> vars0;
-  std::vector<size_t> vars1;
-  constexpr size_t kWideSupportSize = 4097;
-  vars0.reserve(kWideSupportSize);
-  vars1.reserve(kWideSupportSize);
-  for (size_t i = 0; i < kWideSupportSize; ++i) {
-    const SignalKey data0 =
-        makeSignalKey("wideStructuralData0_" + std::to_string(i));
-    const SignalKey data1 =
-        makeSignalKey("wideStructuralData1_" + std::to_string(i));
-    const size_t dataVar0 = 100 + i * 2;
-    const size_t dataVar1 = 101 + i * 2;
-    model0.environmentInputs.push_back(data0);
-    model1.environmentInputs.push_back(data1);
-    model0.inputVarByKey.emplace(data0, dataVar0);
-    model1.inputVarByKey.emplace(data1, dataVar1);
-    alignedInputs.names.push_back("wide_structural_data_" + std::to_string(i));
-    alignedInputs.keys0.push_back(data0);
-    alignedInputs.keys1.push_back(data1);
-    vars0.push_back(dataVar0);
-    vars1.push_back(dataVar1);
-  }
-  model0.nextStateExprByStateKey.emplace(state0, makeOrChain(vars0));
-  model1.nextStateExprByStateKey.emplace(state1, makeOrChain(vars1));
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"wide_structural_state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  testing::internal::CaptureStderr();
-  const auto invariant = buildReachableStateInvariant(
-      model0,
-      model1,
-      alignedInputs,
-      candidateStates,
-      /*deriveResetBootstrapStrengthening=*/false,
-      /*secDiagEnabled=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "wide_structural_state");
-  EXPECT_EQ(
-      stderrOutput.find("bootstrap reset specialization skipped"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantCoversMissingMapBootstrapFallback) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey missingInput0 = makeSignalKey("missingInput0");
-  const SignalKey missingInput1 = makeSignalKey("missingInput1");
-  const SignalKey mappedState0 = makeSignalKey("mappedState0");
-  const SignalKey mappedState1 = makeSignalKey("mappedState1");
-  const SignalKey missingState0 = makeSignalKey("missingState0");
-  const SignalKey missingState1 = makeSignalKey("missingState1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {mappedState0, missingState0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(mappedState0, 4);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.initialStateValueByKey.emplace(missingState0, false);
-  model0.nextStateExprByStateKey.emplace(mappedState0, BoolExpr::Var(4));
-  model0.nextStateExprByStateKey.emplace(missingState0, BoolExpr::createFalse());
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {mappedState1, missingState1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(mappedState1, 5);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.initialStateValueByKey.emplace(missingState1, false);
-  model1.nextStateExprByStateKey.emplace(mappedState1, BoolExpr::Var(5));
-  model1.nextStateExprByStateKey.emplace(missingState1, BoolExpr::createFalse());
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst", "missing"};
-  alignedInputs.keys0 = {rst0, missingInput0};
-  alignedInputs.keys1 = {rst1, missingInput1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"mapped", "missing"};
-  candidateStates.keys0 = {mappedState0, missingState0};
-  candidateStates.keys1 = {mappedState1, missingState1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "missing");
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantThrowsAfterMissingBootstrapNextStateExpr) {
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(state0, 4);
-  model0.displayNameByKey.emplace(rst0, "rst");
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(state1, 5);
-  model1.displayNameByKey.emplace(rst1, "rst");
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  EXPECT_THROW(
-      static_cast<void>(
-          buildReachableStateInvariant(model0, model1, alignedInputs, candidateStates)),
-      std::out_of_range);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantReportsSatRecoveredBootstrapEquality) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey data0 = makeSignalKey("data0");
-  const SignalKey data1 = makeSignalKey("data1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0, data0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(data0, 4);
-  model0.inputVarByKey.emplace(state0, 6);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.displayNameByKey.emplace(data0, "data");
-  model0.displayNameByKey.emplace(state0, "state_q[0]");
-  model0.nextStateExprByStateKey.emplace(
-      state0,
-      BoolExpr::And(BoolExpr::Var(6), BoolExpr::Var(4)));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1, data1};
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(data1, 5);
-  model1.inputVarByKey.emplace(state1, 7);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.displayNameByKey.emplace(data1, "data");
-  model1.displayNameByKey.emplace(state1, "state_q[0]");
-  model1.nextStateExprByStateKey.emplace(
-      state1,
-      BoolExpr::Not(BoolExpr::Or(
-          BoolExpr::Not(BoolExpr::Var(7)),
-          BoolExpr::Not(BoolExpr::Var(5)))));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst", "data"};
-  alignedInputs.keys0 = {rst0, data0};
-  alignedInputs.keys1 = {rst1, data1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state_q[0]"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  testing::internal::CaptureStderr();
-  const auto invariant = buildReachableStateInvariant(
-      model0,
-      model1,
-      alignedInputs,
-      candidateStates,
-      /*deriveResetBootstrapStrengthening=*/true,
-      /*secDiagEnabled=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state_q[0]");
-  EXPECT_NE(
-      stderrOutput.find("sat_recovered_equalities=1"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantDoesNotUseInternalNamesForResetlessBootstrapState) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey structural0 = makeSignalKey("structural0");
-  const SignalKey structural1 = makeSignalKey("structural1");
-  const SignalKey resetless0 = makeSignalKey("resetless0");
-  const SignalKey resetless1 = makeSignalKey("resetless1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {structural0, resetless0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(structural0, 4);
-  model0.inputVarByKey.emplace(resetless0, 6);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.displayNameByKey.emplace(structural0, "u_guard.q[0]");
-  model0.displayNameByKey.emplace(resetless0, "text_out[0]$_DFF_P_.QN[0]");
-  model0.nextStateExprByStateKey.emplace(structural0, BoolExpr::Not(BoolExpr::Var(2)));
-  model0.nextStateExprByStateKey.emplace(resetless0, BoolExpr::Var(6));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {structural1, resetless1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(structural1, 5);
-  model1.inputVarByKey.emplace(resetless1, 7);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.displayNameByKey.emplace(structural1, "u_guard.q[0]");
-  model1.displayNameByKey.emplace(resetless1, "text_out[0]$_DFF_P_.QN[0]");
-  model1.nextStateExprByStateKey.emplace(structural1, BoolExpr::Not(BoolExpr::Var(3)));
-  model1.nextStateExprByStateKey.emplace(resetless1, BoolExpr::Var(7));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  // Internal state names are diagnostic only.  Even when a resetless flop has
-  // the same display name on both sides, SEC may not add that pair unless the
-  // structural/semantic matcher already supplied it.
-  AlignedSignals inductiveStates;
-  inductiveStates.names = {"u_guard.q[0]"};
-  inductiveStates.keys0 = {structural0};
-  inductiveStates.keys1 = {structural1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, inductiveStates);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
-  EXPECT_NE(
-      std::find(
-          invariant.initialStateCorrespondence.names.begin(),
-          invariant.initialStateCorrespondence.names.end(),
-          "u_guard.q[0]"),
-      invariant.initialStateCorrespondence.names.end());
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_NE(
-      std::find(
-          invariant.anchoredStateEqualities.names.begin(),
-          invariant.anchoredStateEqualities.names.end(),
-          "u_guard.q[0]"),
-      invariant.anchoredStateEqualities.names.end());
-  EXPECT_EQ(
-      std::find(
-          invariant.anchoredStateEqualities.names.begin(),
-          invariant.anchoredStateEqualities.names.end(),
-          "text_out[0]$_DFF_P_.QN[0]"),
-      invariant.anchoredStateEqualities.names.end());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantUsesSatToAnchorCommutedBootstrapLogic) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey in0 = makeSignalKey("in0");
-  const SignalKey in1 = makeSignalKey("in1");
-  const SignalKey structural0 = makeSignalKey("structural0");
-  const SignalKey structural1 = makeSignalKey("structural1");
-  const SignalKey resetless0 = makeSignalKey("resetless0");
-  const SignalKey resetless1 = makeSignalKey("resetless1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0, in0};
-  model0.stateBits = {structural0, resetless0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(in0, 8);
-  model0.inputVarByKey.emplace(structural0, 4);
-  model0.inputVarByKey.emplace(resetless0, 6);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.displayNameByKey.emplace(in0, "in");
-  model0.displayNameByKey.emplace(structural0, "u_guard.q[0]");
-  model0.displayNameByKey.emplace(resetless0, "state_q[0]");
-  model0.nextStateExprByStateKey.emplace(structural0, BoolExpr::Not(BoolExpr::Var(2)));
-  model0.nextStateExprByStateKey.emplace(
-      resetless0,
-      BoolExpr::And(BoolExpr::Var(6), BoolExpr::Var(8)));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1, in1};
-  model1.stateBits = {structural1, resetless1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(in1, 9);
-  model1.inputVarByKey.emplace(structural1, 5);
-  model1.inputVarByKey.emplace(resetless1, 7);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.displayNameByKey.emplace(in1, "in");
-  model1.displayNameByKey.emplace(structural1, "u_guard.q[0]");
-  model1.displayNameByKey.emplace(resetless1, "state_q[0]");
-  model1.nextStateExprByStateKey.emplace(structural1, BoolExpr::Not(BoolExpr::Var(3)));
-  model1.nextStateExprByStateKey.emplace(
-      resetless1,
-      BoolExpr::And(BoolExpr::Var(9), BoolExpr::Var(7)));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst", "in"};
-  alignedInputs.keys0 = {rst0, in0};
-  alignedInputs.keys1 = {rst1, in1};
-
-  AlignedSignals inductiveStates;
-  inductiveStates.names = {"u_guard.q[0]", "state_q[0]"};
-  inductiveStates.keys0 = {structural0, resetless0};
-  inductiveStates.keys1 = {structural1, resetless1};
-
-  const auto invariant =
-      buildReachableStateInvariant(model0, model1, alignedInputs, inductiveStates);
-
-  EXPECT_NE(
-      std::find(
-          invariant.anchoredStateEqualities.names.begin(),
-          invariant.anchoredStateEqualities.names.end(),
-          "state_q[0]"),
-      invariant.anchoredStateEqualities.names.end());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantBootstrapRecoversEqualitiesAfterMismatchedInitialValues) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-  const SignalKey shadow0 = makeSignalKey("shadow0");
-  const SignalKey shadow1 = makeSignalKey("shadow1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {state0, shadow0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(state0, 3);
-  model0.inputVarByKey.emplace(shadow0, 6);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.initialStateValueByKey.emplace(state0, false);
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
-  model0.nextStateExprByStateKey.emplace(shadow0, BoolExpr::Var(6));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {state1, shadow1};
-  model1.inputVarByKey.emplace(rst1, 4);
-  model1.inputVarByKey.emplace(state1, 5);
-  model1.inputVarByKey.emplace(shadow1, 7);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.initialStateValueByKey.emplace(state1, true);
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(4)));
-  model1.nextStateExprByStateKey.emplace(shadow1, BoolExpr::Var(7));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStderr();
-  const auto invariant = buildReachableStateInvariant(
-      model0,
-      model1,
-      alignedInputs,
-      candidateStates,
-      /*deriveResetBootstrapStrengthening=*/true,
-      /*secDiagEnabled=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  EXPECT_TRUE(invariant.initialStateCorrespondence.names.empty());
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state");
-  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
-  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
-  EXPECT_NE(stderrOutput.find("SEC diag: bootstrap step 1"), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantFallsBackWhenBootstrapHasNoCandidates) {
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(state0, 4);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(state1, 5);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
-
-  const auto invariant = buildReachableStateInvariant(
-      model0, model1, AlignedSignals{}, AlignedSignals{});
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  EXPECT_TRUE(invariant.anchoredStateEqualities.names.empty());
-  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
-  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantFallsBackWhenOnlyOneSideHasResetAssignments) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(state0, 3);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.initialStateValueByKey.emplace(state0, false);
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(state1, 4);
-  model1.initialStateValueByKey.emplace(state1, false);
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state"};
-  candidateStates.keys0 = {state0};
-  candidateStates.keys1 = {state1};
-
-  const auto invariant = buildReachableStateInvariant(
-      model0, model1, AlignedSignals{}, candidateStates);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 0u);
-  ASSERT_EQ(invariant.initialStateCorrespondence.names.size(), 1u);
-  EXPECT_EQ(invariant.initialStateCorrespondence.names[0], "state");
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 1u);
-  EXPECT_EQ(invariant.anchoredStateEqualities.names[0], "state");
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantCoversBootstrapValuePropagationEdgeCases) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey truth0 = makeSignalKey("truth0");
-  const SignalKey truth1 = makeSignalKey("truth1");
-  const SignalKey invalid0 = makeSignalKey("invalid0");
-  const SignalKey invalid1 = makeSignalKey("invalid1");
-  const SignalKey null0 = makeSignalKey("null0");
-  const SignalKey null1 = makeSignalKey("null1");
-  const SignalKey diff0 = makeSignalKey("diff0");
-  const SignalKey diff1 = makeSignalKey("diff1");
-  const SignalKey hidden0 = makeSignalKey("hidden0");
-  const SignalKey hidden1 = makeSignalKey("hidden1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {truth0, invalid0, null0, diff0, hidden0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(truth0, 3);
-  model0.inputVarByKey.emplace(invalid0, 4);
-  model0.inputVarByKey.emplace(null0, 5);
-  model0.inputVarByKey.emplace(diff0, 6);
-  model0.inputVarByKey.emplace(hidden0, 7);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.nextStateExprByStateKey.emplace(
-      truth0,
-      BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::createFalse()));
-  model0.nextStateExprByStateKey.emplace(invalid0, BoolExpr::Var(7));
-  model0.nextStateExprByStateKey.emplace(null0, nullptr);
-  model0.nextStateExprByStateKey.emplace(diff0, BoolExpr::Var(2));
-  model0.nextStateExprByStateKey.emplace(hidden0, BoolExpr::Var(7));
-  model0.initialStateValueByKey.emplace(truth0, false);
-  model0.initialStateValueByKey.emplace(invalid0, false);
-  model0.initialStateValueByKey.emplace(null0, false);
-  model0.initialStateValueByKey.emplace(diff0, false);
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {truth1, invalid1, null1, diff1, hidden1};
-  model1.inputVarByKey.emplace(rst1, 10);
-  model1.inputVarByKey.emplace(truth1, 11);
-  model1.inputVarByKey.emplace(invalid1, 12);
-  model1.inputVarByKey.emplace(null1, 13);
-  model1.inputVarByKey.emplace(diff1, 14);
-  model1.inputVarByKey.emplace(hidden1, 15);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.nextStateExprByStateKey.emplace(
-      truth1,
-      BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::createFalse()));
-  model1.nextStateExprByStateKey.emplace(invalid1, BoolExpr::Var(15));
-  model1.nextStateExprByStateKey.emplace(null1, nullptr);
-  model1.nextStateExprByStateKey.emplace(diff1, BoolExpr::Not(BoolExpr::Var(10)));
-  model1.nextStateExprByStateKey.emplace(hidden1, BoolExpr::Var(15));
-  model1.initialStateValueByKey.emplace(truth1, true);
-  model1.initialStateValueByKey.emplace(invalid1, true);
-  model1.initialStateValueByKey.emplace(null1, true);
-  model1.initialStateValueByKey.emplace(diff1, true);
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"rst"};
-  alignedInputs.keys0 = {rst0};
-  alignedInputs.keys1 = {rst1};
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"truth", "invalid", "null", "diff"};
-  candidateStates.keys0 = {truth0, invalid0, null0, diff0};
-  candidateStates.keys1 = {truth1, invalid1, null1, diff1};
-
-  const auto invariant = buildReachableStateInvariant(
-      model0, model1, alignedInputs, candidateStates);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  EXPECT_TRUE(invariant.initialStateCorrespondence.names.empty());
-  EXPECT_TRUE(invariant.bootstrapValues0.at(truth0));
-  EXPECT_TRUE(invariant.bootstrapValues1.at(truth1));
-  EXPECT_TRUE(invariant.bootstrapValues0.at(diff0));
-  EXPECT_FALSE(invariant.bootstrapValues1.at(diff1));
-  EXPECT_TRUE(
-      std::find(
-          invariant.anchoredStateEqualities.names.begin(),
-          invariant.anchoredStateEqualities.names.end(),
-          "truth") != invariant.anchoredStateEqualities.names.end());
-  EXPECT_TRUE(
-      std::find(
-          invariant.anchoredStateEqualities.names.begin(),
-          invariant.anchoredStateEqualities.names.end(),
-          "diff") == invariant.anchoredStateEqualities.names.end());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantBootstrapValuesEvaluateConstTrueXorAndInvalidExprStates) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
+       ReachableStateInvariantEvaluatesBootstrapValueOperatorsAndInvalidNodes) {
   const SignalKey rst0 = makeSignalKey("rst0");
   const SignalKey rst1 = makeSignalKey("rst1");
   const SignalKey const0 = makeSignalKey("const0");
   const SignalKey const1 = makeSignalKey("const1");
   const SignalKey xor0 = makeSignalKey("xor0");
   const SignalKey xor1 = makeSignalKey("xor1");
+  const SignalKey diff0 = makeSignalKey("diff0");
+  const SignalKey diff1 = makeSignalKey("diff1");
   const SignalKey invalid0 = makeSignalKey("invalid0");
   const SignalKey invalid1 = makeSignalKey("invalid1");
-  const SignalKey hidden0 = makeSignalKey("hidden0");
-  const SignalKey hidden1 = makeSignalKey("hidden1");
   BoolExpr invalidExpr0;
   BoolExpr invalidExpr1;
 
   SequentialDesignModel model0;
   model0.environmentInputs = {rst0};
-  model0.stateBits = {const0, xor0, invalid0, hidden0};
+  model0.stateBits = {const0, xor0, diff0, invalid0};
   model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(const0, 3);
-  model0.inputVarByKey.emplace(xor0, 4);
-  model0.inputVarByKey.emplace(invalid0, 5);
-  model0.inputVarByKey.emplace(hidden0, 6);
+  model0.inputVarByKey.emplace(const0, 4);
+  model0.inputVarByKey.emplace(xor0, 6);
+  model0.inputVarByKey.emplace(diff0, 8);
+  model0.inputVarByKey.emplace(invalid0, 10);
   model0.displayNameByKey.emplace(rst0, "rst");
-  model0.initialStateValueByKey.emplace(const0, false);
-  model0.initialStateValueByKey.emplace(xor0, false);
-  model0.initialStateValueByKey.emplace(invalid0, false);
   model0.nextStateExprByStateKey.emplace(const0, BoolExpr::createTrue());
   model0.nextStateExprByStateKey.emplace(
       xor0, BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::createFalse()));
+  model0.nextStateExprByStateKey.emplace(diff0, BoolExpr::Var(2));
   model0.nextStateExprByStateKey.emplace(invalid0, &invalidExpr0);
-  model0.nextStateExprByStateKey.emplace(hidden0, BoolExpr::Var(6));
 
   SequentialDesignModel model1;
   model1.environmentInputs = {rst1};
-  model1.stateBits = {const1, xor1, invalid1, hidden1};
-  model1.inputVarByKey.emplace(rst1, 10);
-  model1.inputVarByKey.emplace(const1, 11);
-  model1.inputVarByKey.emplace(xor1, 12);
-  model1.inputVarByKey.emplace(invalid1, 13);
-  model1.inputVarByKey.emplace(hidden1, 14);
+  model1.stateBits = {const1, xor1, diff1, invalid1};
+  model1.inputVarByKey.emplace(rst1, 3);
+  model1.inputVarByKey.emplace(const1, 5);
+  model1.inputVarByKey.emplace(xor1, 7);
+  model1.inputVarByKey.emplace(diff1, 9);
+  model1.inputVarByKey.emplace(invalid1, 11);
   model1.displayNameByKey.emplace(rst1, "rst");
-  model1.initialStateValueByKey.emplace(const1, false);
-  model1.initialStateValueByKey.emplace(xor1, false);
-  model1.initialStateValueByKey.emplace(invalid1, false);
   model1.nextStateExprByStateKey.emplace(const1, BoolExpr::createTrue());
   model1.nextStateExprByStateKey.emplace(
-      xor1, BoolExpr::Xor(BoolExpr::Var(10), BoolExpr::createFalse()));
+      xor1, BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::createFalse()));
+  model1.nextStateExprByStateKey.emplace(diff1, BoolExpr::Not(BoolExpr::Var(3)));
   model1.nextStateExprByStateKey.emplace(invalid1, &invalidExpr1);
-  model1.nextStateExprByStateKey.emplace(hidden1, BoolExpr::Var(14));
 
-  AlignedSignals candidateStates;
-  candidateStates.names = {"const", "xor", "invalid"};
-  candidateStates.keys0 = {const0, xor0, invalid0};
-  candidateStates.keys1 = {const1, xor1, invalid1};
-
-  const auto invariant = buildReachableStateInvariant(
-      model0, model1, AlignedSignals{}, candidateStates);
+  const auto invariant = buildReachableStateInvariant(model0, model1);
 
   EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.anchoredStateEqualities.names.size(), 2u);
-  EXPECT_TRUE(
-      std::find(
-          invariant.anchoredStateEqualities.names.begin(),
-          invariant.anchoredStateEqualities.names.end(),
-          "invalid") == invariant.anchoredStateEqualities.names.end());
   EXPECT_TRUE(invariant.bootstrapValues0.at(const0));
   EXPECT_TRUE(invariant.bootstrapValues1.at(const1));
   EXPECT_TRUE(invariant.bootstrapValues0.at(xor0));
   EXPECT_TRUE(invariant.bootstrapValues1.at(xor1));
+  EXPECT_TRUE(invariant.bootstrapValues0.at(diff0));
+  EXPECT_FALSE(invariant.bootstrapValues1.at(diff1));
   EXPECT_EQ(invariant.bootstrapValues0.count(invalid0), 0u);
   EXPECT_EQ(invariant.bootstrapValues1.count(invalid1), 0u);
 }
@@ -7487,44 +6242,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       BaseCaseSolverPdrProofOnlyDoesNotChaseUnrelatedStartupEqualityChain) {
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  problem.state0Symbols = {x, y};
-  problem.allSymbols = {x, y};
-  problem.initialStateAssignments = {{y, false}};
-  problem.initializedStateCount = 1;
-  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(y));
-  problem.transitions0.emplace_back(x, BoolExpr::Var(y));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionBad = problem.bad;
-  problem.inductionProperty = problem.property;
-
-  size_t previous = y;
-  for (size_t i = 0; i < 128; ++i) {
-    const size_t symbol = 4 + i;
-    problem.state0Symbols.push_back(symbol);
-    problem.allSymbols.push_back(symbol);
-    problem.initialStateEqualityPairs.emplace_back(previous, symbol);
-    previous = symbol;
-  }
-  problem.totalStateCount = problem.state0Symbols.size();
-
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  EXPECT_TRUE(provesNoBaseCounterexampleAtFrontier(
-      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1));
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_NE(stderrOutput.find("solver_symbols=2"), std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(stderrOutput.find("transition_targets=1"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        BaseCaseSolverPdrProofOnlyRejectsReachableFrontierBad) {
   KInductionProblem problem;
   constexpr size_t badState = 2;
@@ -7581,7 +6298,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.resetBootstrapCycles = 2;
   problem.resetBootstrapInputs = {{2, true}};
   problem.bootstrapStateAssignments = {{3, false}, {4, false}};
-  problem.bootstrapStateEqualityPairs = {{3, 4}};
   problem.state0Symbols = {3};
   problem.state1Symbols = {4};
   problem.allSymbols = {2, 3, 4, 5};
@@ -7753,34 +6469,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       BaseCaseSolverPartialInitWithStateRelationKeepsFrameZeroAligned) {
-  KInductionProblem problem;
-  problem.environmentInputNames = {"in"};
-  problem.observedOutputNames = {"out"};
-  problem.inputSymbols = {2};
-  problem.state0Symbols = {3};
-  problem.state1Symbols = {4};
-  problem.allSymbols = {2, 3, 4};
-  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
-  problem.transitions0 = {{3, BoolExpr::Var(2)}};
-  problem.transitions1 = {{4, BoolExpr::createFalse()}};
-  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(3));
-  problem.initializedStateCount = 1;
-  problem.totalStateCount = 2;
-  problem.initialStateEqualityPairs = {{3, 4}};
-  problem.property = makeEqualityExpr(
-      problem.observedOutputExprs0[0], problem.observedOutputExprs1[0]);
-  problem.bad = BoolExpr::Not(problem.property);
-
-  const auto witness = findBaseCounterexample(
-      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1);
-
-  ASSERT_TRUE(witness.has_value());
-  EXPECT_EQ(witness->badFrame, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        ExactInterpolantSynthesizerDerivesOneStepReachableStateInvariant) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -7878,7 +6566,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.allSymbols = {2, 3};
   problem.resetBootstrapCycles = 1;
   problem.bootstrapStateAssignments = {{2, false}, {3, true}};
-  problem.bootstrapStateEqualityPairs = {{2, 2}};
   problem.complementedStatePairs0 = {{2, 3}};
   problem.transitions0.emplace_back(2, BoolExpr::createFalse());
   problem.transitions0.emplace_back(3, BoolExpr::createTrue());
@@ -8428,7 +7115,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.allSymbols = {2, 3};
   problem.resetBootstrapCycles = 1;
   problem.bootstrapStateAssignments = {{2, false}, {3, true}};
-  problem.bootstrapStateEqualityPairs = {{2, 2}};
   problem.complementedStatePairs0 = {{2, 3}};
   problem.transitions0.emplace_back(2, BoolExpr::createFalse());
   problem.transitions0.emplace_back(3, BoolExpr::createTrue());
@@ -8451,64 +7137,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(1);
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDualRailStateEqualitySubsetUsesCadical) {
-  EXPECT_TRUE(detail::pdrStateEqualitySubsetPrefersCadical(
-      /*usesDualRailStateEncoding=*/true,
-      /*equalityPairCount=*/64,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*solverSymbols=*/4,
-      /*pairLimit=*/64,
-      /*symbolLimit=*/256));
-  EXPECT_TRUE(detail::pdrStateEqualitySubsetPrefersCadical(
-      /*usesDualRailStateEncoding=*/true,
-      /*equalityPairCount=*/1,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*solverSymbols=*/256,
-      /*pairLimit=*/64,
-      /*symbolLimit=*/256));
-  EXPECT_FALSE(detail::pdrStateEqualitySubsetPrefersCadical(
-      /*usesDualRailStateEncoding=*/true,
-      /*equalityPairCount=*/63,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*solverSymbols=*/255,
-      /*pairLimit=*/64,
-      /*symbolLimit=*/256));
-  EXPECT_FALSE(detail::pdrStateEqualitySubsetPrefersCadical(
-      /*usesDualRailStateEncoding=*/true,
-      /*equalityPairCount=*/64,
-      KEPLER_FORMAL::Config::SolverType::CADICAL,
-      /*solverSymbols=*/4,
-      /*pairLimit=*/64,
-      /*symbolLimit=*/256));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineReusesCachedStateEqualitySubsetAcrossSlices) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem =
-      makePartiallyInductiveEqualitySubsetProblemForTest();
-  ASSERT_NE(problem.lazyTransitions, nullptr);
-
-  PDREngine firstEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto firstResult = firstEngine.run(2);
-
-  EXPECT_EQ(firstResult.status, PDRStatus::Equivalent);
-  ASSERT_EQ(problem.lazyTransitions->pdrStateEqualitySubsetCache.size(), 1u);
-  const std::vector<std::pair<size_t, size_t>> expectedSubset = {{2, 4}};
-  EXPECT_EQ(
-      problem.lazyTransitions->pdrStateEqualitySubsetCache.front().selectedPairs,
-      expectedSubset);
-
-  KInductionProblem copiedSlice = problem;
-  PDREngine secondEngine(
-      copiedSlice, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto secondResult = secondEngine.run(2);
-
-  EXPECT_EQ(secondResult.status, PDRStatus::Equivalent);
-  EXPECT_EQ(problem.lazyTransitions->pdrStateEqualitySubsetCache.size(), 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -9004,41 +7632,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       DualRailKiAndImcSkipOnlyWideGlobalBootstrapEqualityMining) {
-  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
-      SecEngine::KInduction,
-      SecEncoding::DualRailSteady,
-      /*observedOutputSurface=*/384));
-
-  // BlackParrot-shaped dual-rail KI/IMC surfaces should not spend minutes
-  // mining global reset-bootstrap state equalities before the selected proof
-  // engine starts.
-  EXPECT_TRUE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
-      SecEngine::KInduction,
-      SecEncoding::DualRailSteady,
-      /*observedOutputSurface=*/598));
-  EXPECT_TRUE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
-      SecEngine::Imc,
-      SecEncoding::DualRailSteady,
-      /*observedOutputSurface=*/598));
-
-  // Keep binary KI/IMC and PDR on the existing paths. This guard is only for
-  // the sampled dual-rail KI/IMC startup-mining wall.
-  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
-      SecEngine::KInduction,
-      SecEncoding::Binary,
-      /*observedOutputSurface=*/598));
-  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
-      SecEngine::Imc,
-      SecEncoding::Binary,
-      /*observedOutputSurface=*/598));
-  EXPECT_FALSE(detail::shouldSkipDualRailGlobalBootstrapEqualityMining(
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      /*observedOutputSurface=*/598));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDoesNotReuseNonInductiveStrengtheningAsFrameInvariant) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
@@ -9065,7 +7658,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineTriesSharedStrengtheningBeforeWeakStateSubsetFallback) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
   KInductionProblem problem;
   problem.state0Symbols = {2, 3, 4, 5, 6, 7};
   problem.allSymbols = problem.state0Symbols;
@@ -9082,10 +7674,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.transitions0.emplace_back(5, BoolExpr::createFalse());
   problem.transitions0.emplace_back(6, BoolExpr::createTrue());
   problem.transitions0.emplace_back(7, BoolExpr::createFalse());
-  // The full equality set fails because 6==7 is not inductive, but pruning can
-  // still find the weaker 2==3 subset. PDR should not stop there: the shared
-  // strengthening below is also valid and can be strictly stronger for SEC.
-  problem.inductiveStateEqualityPairs = {{2, 3}, {6, 7}};
+  // PDR should prefer the validated shared strengthening below before falling
+  // back to its regular frame-clause loop.
   problem.observedOutputExprs0 = {BoolExpr::Var(6)};
   problem.observedOutputExprs1 = {BoolExpr::Var(7)};
   problem.bad = BoolExpr::Var(5);
@@ -9295,15 +7885,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ProofProblemDebugFormatsConstantsInvalidExpressionsAndMultiplePairs) {
+       ProofProblemDebugFormatsConstantsAndInvalidExpressions) {
   BoolExpr invalid;
   KInductionProblem problem;
   problem.description = "debug edge cases";
   problem.allSymbols = {0, 1, 2};
   problem.state0Symbols = {0, 1};
-  problem.initialStateEqualityPairs = {{0, 1}, {1, 2}};
-  problem.bootstrapStateEqualityPairs = {{0, 1}, {1, 2}};
-  problem.inductiveStateEqualityPairs = {{0, 1}, {1, 2}};
   problem.transitions0.emplace_back(0, &invalid);
   problem.property = BoolExpr::Not(BoolExpr::Var(0));
   problem.bad = BoolExpr::Var(1);
@@ -9311,8 +7898,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string formattedProblem = formatKInductionProblemForDebug(problem);
 
   EXPECT_NE(formattedProblem.find("state0_symbols: [FALSE, TRUE]"),
-            std::string::npos);
-  EXPECT_NE(formattedProblem.find("initial_state_equalities: [FALSE=TRUE, TRUE=x2]"),
             std::string::npos);
   EXPECT_NE(formattedProblem.find("FALSE' = <invalid>"), std::string::npos);
 }
@@ -9381,22 +7966,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        KInductionBatchDecisionLimitSettingKeepsProofSound) {
-  KInductionProblem problem;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  for (size_t i = 0; i < 2; ++i) {
-    problem.observedOutputs.push_back(makeSignalKey("resource_limited_batch_" + std::to_string(i)));
-    problem.observedOutputNames.push_back("out_" + std::to_string(i));
-    problem.observedOutputExprs0.push_back(BoolExpr::Var(2));
-    problem.observedOutputExprs1.push_back(BoolExpr::Var(3));
-  }
-  problem.property = BoolExpr::createTrue();
-  problem.bad = BoolExpr::createFalse();
+  KInductionProblem problem =
+      makeDualRailLocalFalseInvariantProblemForTest(/*outputCount=*/2);
 
   const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
   const ScopedEnvVar decisionLimit("KEPLER_SEC_KI_BATCH_DECISION_LIMIT", "0");
@@ -9405,8 +7976,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   // The batch decision limit is a performance guard for broad output slices.
   // Even an aggressively tiny limit must not change the proof result: the
-  // engine can still split or prove smaller slices without assuming internal
-  // state equality by name.
+  // engine can still split or prove smaller slices using only the encoded
+  // transition relation.
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
 }
 
@@ -9438,53 +8009,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       KInductionProvesStateOutputEqualityThroughInductionStep) {
-  KInductionProblem problem;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
-
-  // State equalities may strengthen the KI obligation, but they are not a
-  // pre-engine proof. The selected KI engine must still close the step.
-  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(1);
-
-  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
-  EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        DualRailLeafResourceLimitContinuesToNextFrontier) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
 
   const ScopedEnvVar leafLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
   KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
 
-  // The leaf limit bounds decisions, not propagation.  This tiny equality
+  // The leaf limit bounds decisions, not propagation.  This tiny invariant
   // proof closes without decisions, so it must still be accepted instead of
   // being treated as a resource-limited UNKNOWN.
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
@@ -9632,21 +8165,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailSmallLeafUsesNormalProofProfileByDefault) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
   problem.originalObservedOutputCount = 18;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
 
   const ScopedEnvVar batchLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "");
@@ -9723,22 +8243,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailSmallDeferredLeafUsesDirectProofProfileWithoutCdcl) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
   problem.deferBaseCaseChecks = true;
   problem.originalObservedOutputCount = 18;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
 
   const ScopedEnvVar leafLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "100");
@@ -9765,21 +8272,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailDeferredLeafUsesDirectProofProfileAfterSplitting) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
   problem.deferBaseCaseChecks = true;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
   for (size_t index = 0; index < 300; ++index) {
     problem.dualRailStatePairs.push_back(
         DualRailSymbolPair{1000 + index * 2, 1001 + index * 2});
@@ -9810,20 +8304,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DirectDualRailInductionAllowsKissatPropagationUnderLeafLimit) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
 
   const ScopedEnvVar leafLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
@@ -9839,51 +8320,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
           1,
           std::nullopt),
       InductionProofStatus::Proved);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       KInductionStepCoiPrunesUnrelatedStateEqualityPairs) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {2, 4, 6};
-  problem.state1Symbols = {3, 5, 7};
-  problem.allSymbols = {2, 3, 4, 5, 6, 7};
-  problem.transitions0 = {
-      {2, BoolExpr::Var(2)},
-      {4, BoolExpr::Var(4)},
-      {6, BoolExpr::Var(6)}};
-  problem.transitions1 = {
-      {3, BoolExpr::Var(3)},
-      {5, BoolExpr::Var(5)},
-      {7, BoolExpr::Var(7)}};
-  problem.inductiveStateEqualityPairs = {{2, 3}, {4, 5}, {6, 7}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
-
-  const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  const auto proofStatus = proveByInductionStatus(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      2,
-      std::nullopt);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // A selected output proof may use the state relation connected to its own cone,
-  // but unrelated equality pairs must not be dragged into every KI/IMC residual.
-  EXPECT_EQ(proofStatus, InductionProofStatus::Proved);
-  EXPECT_NE(
-      stderrOutput.find("SEC diag: k-induction step coi k=2"),
-      std::string::npos);
-  EXPECT_NE(
-      stderrOutput.find("inductive_equalities_in_coi=1"),
-      std::string::npos);
-  EXPECT_EQ(
-      stderrOutput.find("inductive_equalities_in_coi=3"),
-      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -10442,25 +8878,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailSmallOutputBatchKeepsSimplePathBeforeDirectCdclProfile) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem =
+      makeDualRailLocalFalseInvariantProblemForTest(/*outputCount=*/2);
   problem.originalObservedOutputCount = 33;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.observedOutputNames = {"out0", "out1"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3), BoolExpr::Var(3)};
-  problem.property = BoolExpr::And(
-      makeEqualityExpr(problem.observedOutputExprs0[0],
-                       problem.observedOutputExprs1[0]),
-      makeEqualityExpr(problem.observedOutputExprs0[1],
-                       problem.observedOutputExprs1[1]));
-  problem.bad = BoolExpr::Not(problem.property);
 
   const ScopedEnvVar coiDiag("KEPLER_SEC_KI_COI_DIAG", "1");
   testing::internal::CaptureStderr();
@@ -10488,24 +8908,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailSmallDeferredLeafUsesSimplePathWithoutLimit) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
   problem.deferBaseCaseChecks = true;
   problem.originalObservedOutputCount = 33;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.property = makeEqualityExpr(
-      problem.observedOutputExprs0[0],
-      problem.observedOutputExprs1[0]);
-  problem.bad = BoolExpr::Not(problem.property);
 
   const ScopedEnvVar leafLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
@@ -10536,24 +8941,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailWideOriginalSmallDeferredLeafUsesDefaultCap) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
   problem.deferBaseCaseChecks = true;
   problem.originalObservedOutputCount = 129;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.property = makeEqualityExpr(
-      problem.observedOutputExprs0[0],
-      problem.observedOutputExprs1[0]);
-  problem.bad = BoolExpr::Not(problem.property);
 
   const ScopedEnvVar leafLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "");
@@ -10578,22 +8968,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailCompactOriginalLargeDeferredLeafKeepsDefaultCapForLargeRailSurface) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
   problem.deferBaseCaseChecks = true;
   problem.originalObservedOutputCount = 34;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.observedOutputNames = {"out"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3)};
-  problem.property = makeEqualityExpr(
-      problem.observedOutputExprs0[0],
-      problem.observedOutputExprs1[0]);
-  problem.bad = BoolExpr::Not(problem.property);
   for (size_t index = 0; index < 300; ++index) {
     problem.dualRailStatePairs.push_back(
         DualRailSymbolPair{1000 + index * 2, 1001 + index * 2});
@@ -10621,31 +8998,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailWideDeferredEightOutputBatchUsesDefaultCap) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
+  KInductionProblem problem =
+      makeDualRailLocalFalseInvariantProblemForTest(/*outputCount=*/8);
   problem.deferBaseCaseChecks = true;
   problem.originalObservedOutputCount = 129;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  for (size_t output = 0; output < 8; ++output) {
-    problem.observedOutputNames.push_back("out" + std::to_string(output));
-    problem.observedOutputExprs0.push_back(BoolExpr::Var(2));
-    problem.observedOutputExprs1.push_back(BoolExpr::Var(3));
-  }
-  problem.property = BoolExpr::createTrue();
-  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
-    problem.property = BoolExpr::And(
-        problem.property,
-        makeEqualityExpr(
-            problem.observedOutputExprs0[output],
-            problem.observedOutputExprs1[output]));
-  }
-  problem.bad = BoolExpr::Not(problem.property);
 
   const ScopedEnvVar batchLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "");
@@ -10907,22 +9263,38 @@ TEST_F(SequentialEquivalenceStrategyTests,
        DualRailCompactSplitUsesPublicConjunctionHypothesis) {
   KInductionProblem problem;
   problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.observedOutputNames = {"out0", "out1"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3), BoolExpr::Var(3)};
-  problem.property = BoolExpr::And(
-      makeEqualityExpr(problem.observedOutputExprs0[0],
-                       problem.observedOutputExprs1[0]),
-      makeEqualityExpr(problem.observedOutputExprs0[1],
-                       problem.observedOutputExprs1[1]));
-  problem.bad = BoolExpr::Not(problem.property);
+  constexpr size_t kOutputs = 2;
+  BoolExpr* initial = BoolExpr::createTrue();
+  for (size_t output = 0; output < kOutputs; ++output) {
+    const size_t state0 = 10 + output;
+    const size_t state1 = 100 + output;
+    const size_t next0 = 10 + ((output + 1) % kOutputs);
+    const size_t next1 = 100 + ((output + 1) % kOutputs);
+    problem.state0Symbols.push_back(state0);
+    problem.state1Symbols.push_back(state1);
+    problem.allSymbols.push_back(state0);
+    problem.allSymbols.push_back(state1);
+    problem.transitions0.emplace_back(state0, BoolExpr::Var(next0));
+    problem.transitions1.emplace_back(state1, BoolExpr::Var(next1));
+    problem.observedOutputNames.push_back("out" + std::to_string(output));
+    problem.observedOutputExprs0.push_back(BoolExpr::Var(state0));
+    problem.observedOutputExprs1.push_back(BoolExpr::Var(state1));
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state0)));
+    initial = BoolExpr::And(initial, BoolExpr::Not(BoolExpr::Var(state1)));
+  }
+  problem.initialCondition = BoolExpr::simplify(initial);
+  problem.initializedStateCount = kOutputs * 2;
+  problem.totalStateCount = kOutputs * 2;
+  problem.property = BoolExpr::createTrue();
+  for (size_t output = 0; output < problem.observedOutputExprs0.size(); ++output) {
+    problem.property = BoolExpr::And(
+        problem.property,
+        makeEqualityExpr(
+            problem.observedOutputExprs0[output],
+            problem.observedOutputExprs1[output]));
+  }
+  problem.property = BoolExpr::simplify(problem.property);
+  problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
 
   const ScopedEnvVar batchLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
@@ -10935,8 +9307,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // Decomposed KI for a compact public conjunction is still strict KI: each
-  // split proves the output under the full public-output induction hypothesis,
-  // and the engine accepts only after all splits plus the shared base check.
+  // output depends on the other output's previous equality, so each split must
+  // prove under the full public-output induction hypothesis and the engine
+  // accepts only after all splits plus the shared base check.
   EXPECT_EQ(result.status, KInductionStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find("dual-rail public conjunction hypothesis"),
@@ -10945,24 +9318,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailCompactBatchUsesBoundedStrictKInductionByDefault) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.observedOutputNames = {"out0", "out1"};
-  problem.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(2)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(3), BoolExpr::Var(3)};
-  problem.property = BoolExpr::And(
-      makeEqualityExpr(problem.observedOutputExprs0[0],
-                       problem.observedOutputExprs1[0]),
-      makeEqualityExpr(problem.observedOutputExprs0[1],
-                       problem.observedOutputExprs1[1]));
-  problem.bad = BoolExpr::Not(problem.property);
+  KInductionProblem problem =
+      makeDualRailLocalFalseInvariantProblemForTest(/*outputCount=*/2);
 
   const ScopedEnvVar batchLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "");
@@ -11095,28 +9452,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        DualRailBatchedKInductionAllowsKissatPropagationUnderBatchLimit) {
-  KInductionProblem problem;
-  constexpr size_t state0 = 2;
-  constexpr size_t state1 = 3;
-  problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {state0};
-  problem.state1Symbols = {state1};
-  problem.allSymbols = {state0, state1};
-  problem.initialStateEqualityPairs = {{state0, state1}};
-  problem.inductiveStateEqualityPairs = {{state0, state1}};
-  problem.transitions0 = {{state0, BoolExpr::Var(state0)}};
-  problem.transitions1 = {{state1, BoolExpr::Var(state1)}};
-  problem.observedOutputNames = {"out0", "out1"};
-  problem.observedOutputExprs0 = {
-      BoolExpr::Var(state0), BoolExpr::Not(BoolExpr::Var(state0))};
-  problem.observedOutputExprs1 = {
-      BoolExpr::Var(state1), BoolExpr::Not(BoolExpr::Var(state1))};
-  problem.property = BoolExpr::And(
-      makeEqualityExpr(problem.observedOutputExprs0[0],
-                       problem.observedOutputExprs1[0]),
-      makeEqualityExpr(problem.observedOutputExprs0[1],
-                       problem.observedOutputExprs1[1]));
-  problem.bad = BoolExpr::Not(problem.property);
+  KInductionProblem problem =
+      makeDualRailLocalFalseInvariantProblemForTest(/*outputCount=*/2);
 
   const ScopedEnvVar batchLimit(
       "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "100");
@@ -11203,17 +9540,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        KInductionReusesTransitionSupportCacheAcrossDepths) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {2};
-  problem.state1Symbols = {3};
-  problem.allSymbols = {2, 3};
-  problem.initialStateEqualityPairs = {{2, 3}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0 = {{2, BoolExpr::Var(2)}};
-  problem.transitions1 = {{3, BoolExpr::Var(3)}};
-  problem.property = makeEqualityExpr(BoolExpr::Var(2), BoolExpr::Var(3));
-  problem.bad = BoolExpr::Not(problem.property);
+  KInductionProblem problem = makeDualRailLocalFalseInvariantProblemForTest();
 
   EXPECT_EQ(
       proveByInductionStatus(
@@ -11387,35 +9714,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // same huge strict-KI obligation at larger k values.
   EXPECT_EQ(result.status, KInductionStatus::Inconclusive);
   EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       OutputBatchingKeepsSharedStateEqualitiesAsHypotheses) {
-  KInductionProblem source;
-  source.inductiveStateEqualityPairs = {{2, 3}};
-  source.observedOutputNames = {"out0", "out1"};
-  source.observedOutputExprs0 = {BoolExpr::Var(4), BoolExpr::Var(6)};
-  source.observedOutputExprs1 = {BoolExpr::Var(5), BoolExpr::Var(7)};
-  source.property = BoolExpr::And(
-      makeEqualityExpr(source.observedOutputExprs0[0],
-                       source.observedOutputExprs1[0]),
-      makeEqualityExpr(source.observedOutputExprs0[1],
-                       source.observedOutputExprs1[1]));
-  source.bad = BoolExpr::Not(source.property);
-
-  KInductionProblem batch = source;
-  configureOutputBatchProblem(batch, source, 0, 1);
-
-  // KI batches prove one output cone at a time.  Keeping the induction
-  // hypothesis slice-local prevents a wide public-output surface from being
-  // rebuilt in every k-frame retry.
-  EXPECT_EQ(batch.inductionProperty, batch.property);
-  EXPECT_EQ(batch.inductionBad, batch.bad);
-  EXPECT_FALSE(batch.inductionPropertyAssumesInductiveStateEqualities);
-  EXPECT_EQ(batch.inductiveStateEqualityPairs.size(), 1u);
-  ASSERT_EQ(batch.observedOutputExprs0.size(), 1u);
-  EXPECT_EQ(batch.observedOutputExprs0[0], BoolExpr::Var(4));
-  EXPECT_EQ(batch.observedOutputExprs1[0], BoolExpr::Var(5));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -11720,20 +10018,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("imc Craig growth budget exceeded reason=q_pass"),
       std::string::npos)
       << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       CraigImcIgnoresSuppliedCrossDesignStateCandidates) {
-  KInductionProblem problem = buildCraigResetSecProblem(false);
-  problem.bootstrapStateEqualityPairs = {{4, 5}};
-  problem.inductiveStateEqualityPairs = {{4, 5}};
-
-  CraigInterpolatingModelChecker checker(problem);
-  const CraigImcResult result = checker.run(4);
-
-  // These candidate vectors are intentionally false for the transition
-  // system. Craig IMC must ignore them and refuse to prove equivalence.
-  EXPECT_EQ(result.status, CraigImcStatus::NoProgress);
 }
 
 KInductionProblem buildCraigAuxiliaryConstantProblemForTest() {
@@ -14346,22 +12630,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       LargeDualRailImcFindsDifferenceWithoutTrustingStateCandidates) {
-  KInductionProblem problem = buildCraigResetSecProblem(false);
-  problem.initialStateEqualityPairs = {{4, 5}};
-  problem.bootstrapStateEqualityPairs = {{4, 5}};
-  problem.inductiveStateEqualityPairs = {{4, 5}};
-
-  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const IMCResult result = engine.run(4);
-
-  EXPECT_EQ(result.status, IMCStatus::Different);
-  ASSERT_TRUE(result.witness.has_value());
-  ASSERT_EQ(result.witness->outputMismatches.size(), 1u);
-  EXPECT_EQ(result.witness->outputMismatches.front().signal, "out");
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        IMCEngineFindsReachableBadState) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -14382,28 +12650,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ASSERT_TRUE(result.witness.has_value());
   EXPECT_EQ(result.bound, 1u);
   EXPECT_EQ(result.witness->badFrame, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       LargeDualRailImcIgnoresFalseBootstrapStateCandidate) {
-  KInductionProblem problem = buildCraigResetSecProblem(false);
-  problem.initialStateAssignments = {{4, true}, {5, false}};
-  problem.bootstrapStateAssignments = {{4, false}, {5, true}};
-  problem.bootstrapStateEqualityPairs = {{4, 5}};
-  problem.transitions0 = {{4, BoolExpr::createFalse()}};
-  problem.transitions1 = {{5, BoolExpr::createTrue()}};
-
-  IMCEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(4);
-
-  // The false candidate equality contradicts the concrete bootstrap values and
-  // would make every bounded query vacuously UNSAT if IMC asserted it. The
-  // opposite pre-reset assignments also ensure the optimized post-reset
-  // frontier is not accidentally conjoined with obsolete initial-state facts.
-  EXPECT_EQ(result.status, IMCStatus::Different);
-  ASSERT_TRUE(result.witness.has_value());
-  // The witness frame is reported relative to the post-bootstrap SEC horizon.
-  EXPECT_EQ(result.witness->badFrame, 0u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -15796,7 +14042,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   }
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -15805,7 +14050,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::Pdr,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
-  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // SEC engines must not assume that internal state from different designs is
@@ -15814,15 +14058,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      stderrOutput.find("cross-design internal state equality mining disabled"),
+  EXPECT_EQ(
+      stderrOutput.find("cross-design internal state equality mining"),
       std::string::npos);
   EXPECT_EQ(
       stderrOutput.find("SEC diag: inferring inductive state equalities"),
-      std::string::npos);
-  EXPECT_NE(
-      stdoutOutput.find(
-          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
       std::string::npos);
 }
 
@@ -15856,7 +14096,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       BoolExpr::Var(3));
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -15865,21 +14104,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::Imc,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 0);
-  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // Classic IMC should start from interpolation/reachability, never from
   // assumed cross-design internal-state relations before the engine runs.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("cross-design internal state equality mining disabled"),
+  EXPECT_EQ(
+      stderrOutput.find("cross-design internal state equality mining"),
       std::string::npos);
   EXPECT_EQ(
       stderrOutput.find("SEC diag: inferring inductive state equalities"),
-      std::string::npos);
-  EXPECT_NE(
-      stdoutOutput.find(
-          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
       std::string::npos);
 }
 
@@ -15905,7 +14139,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       model1, state1, /*symbol=*/3, "ki_no_cross_state_q1[0]", BoolExpr::Var(3));
 
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -15914,19 +14147,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEngine::KInduction,
       SecEncoding::DualRailSteady);
   const auto result = strategy.runExtractedModels(model0, model1, 1);
-  const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("cross-design internal state equality mining disabled"),
+  EXPECT_EQ(
+      stderrOutput.find("cross-design internal state equality mining"),
       std::string::npos);
   EXPECT_EQ(
       stderrOutput.find("SEC diag: inferring inductive state equalities"),
-      std::string::npos);
-  EXPECT_NE(
-      stdoutOutput.find(
-          "inductive_state_equalities=0 reset_bootstrap_candidate_equalities=0"),
       std::string::npos);
 }
 
@@ -16808,217 +15036,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineCanonicalizesInitialEqualitiesBeforeResetExpressionSatCap) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t reset = 5;
-  constexpr size_t firstA = 6;
-  constexpr size_t parityWidth = 257;
-  constexpr size_t firstB = firstA + parityWidth;
-
-  problem.state0Symbols = {x, y, w};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, y, w, reset};
-  std::vector<size_t> aSymbols;
-  std::vector<size_t> bSymbols;
-  aSymbols.reserve(parityWidth);
-  bSymbols.reserve(parityWidth);
-  for (size_t index = 0; index < parityWidth; ++index) {
-    const size_t a = firstA + index;
-    const size_t b = firstB + index;
-    aSymbols.push_back(a);
-    bSymbols.push_back(b);
-    problem.state0Symbols.push_back(a);
-    problem.state0Symbols.push_back(b);
-    problem.allSymbols.push_back(a);
-    problem.allSymbols.push_back(b);
-    problem.initialStateEqualityPairs.emplace_back(a, b);
-    problem.transitions0.emplace_back(a, BoolExpr::Var(a));
-    problem.transitions0.emplace_back(b, BoolExpr::Var(b));
-  }
-
-  auto leftAssociatedXor = [](const std::vector<size_t>& symbols) {
-    BoolExpr* expr = BoolExpr::Var(symbols.front());
-    for (size_t index = 1; index < symbols.size(); ++index) {
-      expr = BoolExpr::Xor(expr, BoolExpr::Var(symbols[index]));
-    }
-    return expr;
-  };
-  auto rightAssociatedXor = [](const std::vector<size_t>& symbols) {
-    BoolExpr* expr = BoolExpr::Var(symbols.back());
-    for (size_t index = symbols.size() - 1; index-- > 0;) {
-      expr = BoolExpr::Xor(BoolExpr::Var(symbols[index]), expr);
-    }
-    return expr;
-  };
-
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
-  // The two parity cones are equivalent only after substituting the initial
-  // SEC equality pairs a[i] == b[i]. Raw support closure contains both sides
-  // and crosses the reset-expression SAT cap; the shortcut must canonicalize
-  // those equalities before applying the cap so it can prove the contradiction
-  // locally instead of falling into the sampled wide reset-frontier query.
-  problem.transitions0.emplace_back(y, leftAssociatedXor(aSymbols));
-  problem.transitions0.emplace_back(w, rightAssociatedXor(bSymbols));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  // Keep this test focused on the PDR-local reset-expression proof. A full BMC
-  // precheck over this intentionally wide parity cone can exercise solver
-  // internals before the shortcut under test has a chance to run.
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("reset-specialized expression conflict"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("via=affine_xor"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset-specialized expression solve cube=2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset-specialized expression solver_profile=pdr"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("miss reason=full_sat_support_cap cube=2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineStructurallyBlocksAffineXorResetExpressionConflict) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t reset = 5;
-  constexpr size_t firstA = 6;
-  constexpr size_t parityWidth = 96;
-  constexpr size_t firstB = firstA + parityWidth;
-
-  problem.state0Symbols = {x, y, w};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, y, w, reset};
-  std::vector<size_t> aSymbols;
-  std::vector<size_t> bSymbols;
-  aSymbols.reserve(parityWidth);
-  bSymbols.reserve(parityWidth);
-  for (size_t index = 0; index < parityWidth; ++index) {
-    const size_t a = firstA + index;
-    const size_t b = firstB + index;
-    aSymbols.push_back(a);
-    bSymbols.push_back(b);
-    problem.state0Symbols.push_back(a);
-    problem.state0Symbols.push_back(b);
-    problem.allSymbols.push_back(a);
-    problem.allSymbols.push_back(b);
-    problem.initialStateEqualityPairs.emplace_back(a, b);
-    problem.transitions0.emplace_back(a, BoolExpr::Var(a));
-    problem.transitions0.emplace_back(b, BoolExpr::Var(b));
-  }
-
-  auto leftAssociatedXor = [](const std::vector<size_t>& symbols) {
-    BoolExpr* expr = BoolExpr::Var(symbols.front());
-    for (size_t index = 1; index < symbols.size(); ++index) {
-      expr = BoolExpr::Xor(expr, BoolExpr::Var(symbols[index]));
-    }
-    return expr;
-  };
-  auto rightAssociatedXor = [](const std::vector<size_t>& symbols) {
-    BoolExpr* expr = BoolExpr::Var(symbols.back());
-    for (size_t index = symbols.size() - 1; index-- > 0;) {
-      expr = BoolExpr::Xor(BoolExpr::Var(symbols[index]), expr);
-    }
-    return expr;
-  };
-
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
-  problem.transitions0.emplace_back(y, leftAssociatedXor(aSymbols));
-  problem.transitions0.emplace_back(w, rightAssociatedXor(bSymbols));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
-  const ScopedEnvVar proofConflictLimit(
-      "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT", "0");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // This guards the AES-sized parity shape sampled in PDR: equivalent XOR
-  // reset cones can be only associatively different after SEC init equality
-  // substitution.  The structural affine-XOR pass should learn the conflict
-  // without relying on the optional reset-expression SAT shortcut.
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("via=affine_xor"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset-specialized expression solve cube=2"),
-      std::string::npos)
       << stderrOutput;
 }
 
@@ -17975,540 +15992,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineFiltersUnrelatedStartupEqualitiesFromResetExpressionSat) {
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t a = 5;
-  constexpr size_t b = 6;
-  constexpr size_t reset = 7;
-  constexpr size_t firstUnrelated = 8;
-  constexpr size_t unrelatedPairs = 16;
-  problem.state0Symbols = {x, y, w, a, b};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, y, w, a, b, reset};
-  for (size_t index = 0; index < unrelatedPairs; ++index) {
-    const size_t lhs = firstUnrelated + index * 2;
-    const size_t rhs = lhs + 1;
-    problem.state0Symbols.push_back(lhs);
-    problem.state1Symbols.push_back(rhs);
-    problem.allSymbols.push_back(lhs);
-    problem.allSymbols.push_back(rhs);
-    problem.initialStateEqualityPairs.emplace_back(lhs, rhs);
-  }
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
-  problem.transitions0.emplace_back(
-      y,
-      BoolExpr::And(
-          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Var(b)),
-          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Not(BoolExpr::Var(b)))));
-  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
-  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
-  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  // The reset cube depends only on a and b.  Unrelated startup equalities must
-  // not be streamed into the per-cube SAT fallback.  The pair probe may prove
-  // the conflict before the full cube is queried, but the local proof should
-  // still stay restricted to the actual reset-expression support.
-  EXPECT_NE(
-      stderrOutput.find(
-          "reset-specialized expression solve cube=2 target_step=1 support=2 "
-          "initial_equalities=0 bootstrap_equalities=0"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineFiltersUnrelatedBootstrapEqualitiesFromResetExpressionSat) {
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t a = 5;
-  constexpr size_t b = 6;
-  constexpr size_t reset = 7;
-  constexpr size_t unrelated0 = 8;
-  constexpr size_t unrelated1 = 9;
-  constexpr size_t unrelatedLeaf0 = 10;
-  constexpr size_t unrelatedLeaf1 = 11;
-  problem.state0Symbols = {x, y, w, a, b, unrelated0, unrelatedLeaf0};
-  problem.state1Symbols = {unrelated1, unrelatedLeaf1};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {
-      x, y, w, a, b, reset, unrelated0, unrelated1, unrelatedLeaf0,
-      unrelatedLeaf1};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateEqualityPairs = {{unrelated0, unrelated1}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
-  problem.transitions0.emplace_back(
-      y,
-      BoolExpr::And(
-          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Var(b)),
-          BoolExpr::Or(BoolExpr::Var(a), BoolExpr::Not(BoolExpr::Var(b)))));
-  problem.transitions0.emplace_back(w, BoolExpr::Var(a));
-  problem.transitions0.emplace_back(a, BoolExpr::Var(a));
-  problem.transitions0.emplace_back(b, BoolExpr::Var(b));
-  problem.transitions0.emplace_back(unrelated0, BoolExpr::Var(unrelatedLeaf0));
-  problem.transitions1.emplace_back(unrelated1, BoolExpr::Var(unrelatedLeaf1));
-  problem.transitions0.emplace_back(unrelatedLeaf0, BoolExpr::Var(unrelatedLeaf0));
-  problem.transitions1.emplace_back(unrelatedLeaf1, BoolExpr::Var(unrelatedLeaf1));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  // Bootstrap equality expressions are valid reset-frontier constraints, but
-  // unrelated ones must not pull extra reset cones into a local cube proof.
-  EXPECT_NE(
-      stderrOutput.find(
-          "reset-specialized expression solve cube=2 target_step=1 support=2 "
-          "initial_equalities=0 bootstrap_equalities=0"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesResetSpecializedInitialEqualitiesBeforeExactRootResetFrontier) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t a0 = 5;
-  constexpr size_t a1 = 6;
-  constexpr size_t reset = 7;
-  problem.state0Symbols = {x, y, a0};
-  problem.state1Symbols = {w, a1};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, y, w, a0, a1, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.initialStateEqualityPairs = {{a0, a1}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
-  // The post-reset relation y == w is not visible in the reset expressions
-  // alone: y depends on a0 and w depends on a1. It becomes provable only after
-  // applying the SEC frame-0 equality a0 == a1. AES samples hit this shape as a
-  // tiny root cube that otherwise fell into the expensive concrete reset-frontier
-  // SAT unroll.
-  problem.transitions0.emplace_back(y, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(w, BoolExpr::Var(a1));
-  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("reset-specialized expression conflict"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesResetSpecializedBootstrapEqualitiesBeforeExpressionSat) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t a0 = 5;
-  constexpr size_t a1 = 6;
-  constexpr size_t reset = 7;
-  problem.state0Symbols = {x, y, a0};
-  problem.state1Symbols = {w, a1};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, y, w, a0, a1, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateEqualityPairs = {{a0, a1}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
-  // The reset cube y=1,w=0 is excluded by the post-bootstrap equality
-  // a0 == a1 after substituting y'=a0 and w'=a1. This should be detected as a
-  // relation conflict before invoking the broader reset-expression SAT query.
-  problem.transitions0.emplace_back(y, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(w, BoolExpr::Var(a1));
-  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("via=bootstrap_relation"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset-specialized expression solver_profile=pdr"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineRewritesBootstrapEqualitiesInsideResetExpressions) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t a0 = 5;
-  constexpr size_t a1 = 6;
-  constexpr size_t shared = 7;
-  constexpr size_t reset = 8;
-  problem.state0Symbols = {x, y, a0, shared};
-  problem.state1Symbols = {w, a1};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, y, w, a0, a1, shared, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateEqualityPairs = {{a0, a1}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)))));
-  // y and w are not directly equal expressions. They become equal only after
-  // rewriting the children a0/a1 through the bootstrap equality, matching the
-  // AES reset-image shape that sampled inside the exact reset-frontier SAT
-  // unroll.
-  problem.transitions0.emplace_back(
-      y, BoolExpr::And(BoolExpr::Var(a0), BoolExpr::Var(shared)));
-  problem.transitions1.emplace_back(
-      w, BoolExpr::And(BoolExpr::Var(a1), BoolExpr::Var(shared)));
-  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
-  problem.transitions0.emplace_back(shared, BoolExpr::Var(shared));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
-  const ScopedEnvVar proofConflictLimit(
-      "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT", "0");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("via=bootstrap_rewrite"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset-specialized expression solve cube=2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesResetExpressionImplicationBeforeExactFrontier) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t guard = 3;
-  constexpr size_t payload = 4;
-  constexpr size_t a0 = 5;
-  constexpr size_t a1 = 6;
-  constexpr size_t reset = 7;
-  problem.state0Symbols = {x, guard, payload, a0};
-  problem.state1Symbols = {a1};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, guard, payload, a0, a1, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateEqualityPairs = {{a0, a1}};
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(
-          BoolExpr::Not(BoolExpr::Var(reset)),
-          BoolExpr::And(
-              BoolExpr::Not(BoolExpr::Var(guard)),
-              BoolExpr::Var(payload))));
-  // payload' implies guard' after rewriting a0/a1 through the bootstrap
-  // equality. The cube guard=0,payload=1 is therefore impossible, but the
-  // expressions are not equivalent, so the reset-specialized proof must learn
-  // the implication structurally instead of falling into the exact SAT unroll.
-  problem.transitions0.emplace_back(guard, BoolExpr::Var(a0));
-  problem.transitions0.emplace_back(
-      payload, BoolExpr::And(BoolExpr::Var(a1), BoolExpr::Var(payload)));
-  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar resetDiag("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG", "1");
-  const ScopedEnvVar proofConflictLimit(
-      "KEPLER_SEC_PDR_RESET_EXPRESSION_CONFLICT_LIMIT", "0");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("via=bootstrap_rewrite_implication"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset-specialized expression solve cube=2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesResetSpecializedExpressionSatForWideRootCubes) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t x = 2;
-  constexpr size_t y = 3;
-  constexpr size_t w = 4;
-  constexpr size_t a0 = 5;
-  constexpr size_t a1 = 6;
-  constexpr size_t reset = 7;
-  constexpr size_t firstExtra = 8;
-  constexpr size_t extraCount = 9;
-
-  problem.state0Symbols = {x, y, a0};
-  problem.state1Symbols = {w, a1};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {x, y, w, a0, a1, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.initialStateEqualityPairs = {{a0, a1}};
-
-  BoolExpr* rootCubeDriver =
-      BoolExpr::And(BoolExpr::Var(y), BoolExpr::Not(BoolExpr::Var(w)));
-  for (size_t index = 0; index < extraCount; ++index) {
-    const size_t symbol = firstExtra + index;
-    problem.state0Symbols.push_back(symbol);
-    problem.allSymbols.push_back(symbol);
-    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
-    rootCubeDriver = BoolExpr::And(rootCubeDriver, BoolExpr::Var(symbol));
-  }
-
-  problem.transitions0.emplace_back(
-      x,
-      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(reset)), rootCubeDriver));
-  // This wide root cube is reset-unreachable only after substituting the reset
-  // expressions y'=a0 and w'=a1 and applying the SEC frame-0 equality a0 == a1.
-  // AES produced the same shape with 108 literals; falling back to exact
-  // reset-frontier SAT there was the sampled runtime wall.
-  problem.transitions0.emplace_back(y, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(w, BoolExpr::Var(a1));
-  problem.transitions0.emplace_back(a0, BoolExpr::Var(a0));
-  problem.transitions1.emplace_back(a1, BoolExpr::Var(a1));
-  problem.bad = BoolExpr::Var(x);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/32,
-      /*preciseBadCubeStateLimit=*/32,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(
-      stderrOutput.find("reset-specialized expression conflict"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineCanonicalizesResetSpecializedExpressionsBeforeSat) {
   KInductionProblem problem;
   constexpr size_t x0 = 2;
@@ -18832,7 +16315,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineMinimizesExactResetPredecessorCoreAfterRelaxedPrecheck) {
-  ScopedSecInternalStateCorrespondence disableInternalStateCorrespondence(false);
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t q = 3;
@@ -19057,160 +16539,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       ResetFrontierReachabilitySkipsDanglingInitialEqualityTails) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t y = 2;
-  constexpr size_t x = 3;
-  constexpr size_t equalityTailBase = 100;
-  constexpr size_t equalityTailLength = 20;
-  problem.state0Symbols = {y, x};
-  problem.allSymbols = {y, x};
-  for (size_t offset = 0; offset < equalityTailLength; ++offset) {
-    const size_t symbol = equalityTailBase + offset;
-    problem.state0Symbols.push_back(symbol);
-    problem.allSymbols.push_back(symbol);
-  }
-  problem.transitions0.emplace_back(y, BoolExpr::Var(x));
-  problem.transitions0.emplace_back(x, BoolExpr::Var(x));
-  problem.initialStateEqualityPairs.emplace_back(x, equalityTailBase);
-  for (size_t offset = 1; offset < equalityTailLength; ++offset) {
-    problem.initialStateEqualityPairs.emplace_back(
-        equalityTailBase + offset - 1, equalityTailBase + offset);
-  }
-
-  const TransitionExprResolver transitionByState(problem);
-  const auto context =
-      makeResetFrontierReachabilityContext(problem, transitionByState);
-
-  // The equality tail is existential-only: no cube literal, transition, or
-  // initial assignment observes the far end.  Closing the whole tail is exact
-  // but wasteful; AES PDR samples showed these dangling relational tails
-  // inflating final reset-frontier SAT queries.
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  EXPECT_TRUE(isStateCubeReachableAtResetFrontierOneShot(
-      *context,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      std::vector<std::pair<size_t, bool>>{{y, true}},
-      1));
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_NE(stderrOutput.find("solver_symbols=2"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetFrontierReachabilityRelaxedPostBootstrapOneShotCanAvoidExactCoi) {
-  KInductionProblem problem;
-  constexpr size_t observed = 2;
-  constexpr size_t bootstrapGuard = 3;
-  constexpr size_t reset = 4;
-  constexpr size_t equalityTailBase = 100;
-  constexpr size_t equalityTailLength = 32;
-  problem.state0Symbols = {observed, bootstrapGuard};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {observed, bootstrapGuard, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateAssignments = {{bootstrapGuard, false}};
-  problem.transitions0.emplace_back(observed, BoolExpr::Var(bootstrapGuard));
-  problem.transitions0.emplace_back(bootstrapGuard, BoolExpr::Var(bootstrapGuard));
-  for (size_t offset = 0; offset < equalityTailLength; ++offset) {
-    const size_t symbol = equalityTailBase + offset;
-    problem.state0Symbols.push_back(symbol);
-    problem.allSymbols.push_back(symbol);
-    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
-  }
-  problem.bootstrapStateEqualityPairs.emplace_back(
-      bootstrapGuard, equalityTailBase);
-  for (size_t offset = 1; offset < equalityTailLength; ++offset) {
-    problem.bootstrapStateEqualityPairs.emplace_back(
-        equalityTailBase + offset - 1, equalityTailBase + offset);
-  }
-
-  const TransitionExprResolver transitionByState(problem);
-  const auto context =
-      makeResetFrontierReachabilityContext(problem, transitionByState);
-
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  EXPECT_FALSE(isStateCubeReachableAtResetFrontierOneShot(
-      *context,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      std::vector<std::pair<size_t, bool>>{{observed, true}},
-      1));
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // The relaxed precheck drops only startup equality closure, so UNSAT remains
-  // a sound reset-frontier proof. It should avoid opening the exact COI that
-  // would pull the whole bootstrap equality tail into this local contradiction.
-  EXPECT_NE(
-      stderrOutput.find("reset frontier relaxed one-shot cube coi"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset frontier one-shot cube coi"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetFrontierReachabilityRelaxedPostBootstrapCachedCanAvoidExactCoi) {
-  KInductionProblem problem;
-  constexpr size_t observed = 2;
-  constexpr size_t bootstrapGuard = 3;
-  constexpr size_t reset = 4;
-  constexpr size_t equalityTailBase = 100;
-  constexpr size_t equalityTailLength = 32;
-  problem.state0Symbols = {observed, bootstrapGuard};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {observed, bootstrapGuard, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateAssignments = {{bootstrapGuard, false}};
-  problem.transitions0.emplace_back(observed, BoolExpr::Var(bootstrapGuard));
-  problem.transitions0.emplace_back(bootstrapGuard, BoolExpr::Var(bootstrapGuard));
-  for (size_t offset = 0; offset < equalityTailLength; ++offset) {
-    const size_t symbol = equalityTailBase + offset;
-    problem.state0Symbols.push_back(symbol);
-    problem.allSymbols.push_back(symbol);
-    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
-  }
-  problem.bootstrapStateEqualityPairs.emplace_back(
-      bootstrapGuard, equalityTailBase);
-  for (size_t offset = 1; offset < equalityTailLength; ++offset) {
-    problem.bootstrapStateEqualityPairs.emplace_back(
-        equalityTailBase + offset - 1, equalityTailBase + offset);
-  }
-
-  const TransitionExprResolver transitionByState(problem);
-  const auto context =
-      makeResetFrontierReachabilityContext(problem, transitionByState);
-
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  EXPECT_FALSE(isStateCubeReachableAtResetFrontier(
-      *context,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      std::vector<std::pair<size_t, bool>>{{observed, true}},
-      1));
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // Cached-assumption validation is the PDR hot path. It should use the same
-  // sound relaxed UNSAT precheck as one-shot validation before opening the
-  // wider exact Glucose assumption solver sampled in AES.
-  EXPECT_NE(
-      stderrOutput.find("reset frontier relaxed cached cube coi"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset frontier cube coi"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        ResetFrontierReachabilitySkipsBroadRelaxedCachedPrecheck) {
   KInductionProblem problem;
   constexpr size_t observed = 2;
@@ -19363,46 +16691,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_NE(
       stderrOutput.find("frame_invariant_symbols=2"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetFrontierReachabilityRejectsTransitiveKnownFactConflictBeforeSat) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t stateA = 2;
-  constexpr size_t stateB = 3;
-  constexpr size_t stateC = 4;
-  constexpr size_t reset = 5;
-  problem.state0Symbols = {stateA, stateB, stateC};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {stateA, stateB, stateC, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  // The reset frontier contains a == b and b == c, so a != c is impossible
-  // even though no direct equality pair mentions both cube literals.
-  problem.bootstrapStateEqualityPairs = {{stateA, stateB}, {stateB, stateC}};
-
-  const TransitionExprResolver transitionByState(problem);
-  const auto context =
-      makeResetFrontierReachabilityContext(problem, transitionByState);
-
-  const ScopedEnvVar kiDiag("KEPLER_SEC_KI_DIAG", "1");
-  testing::internal::CaptureStderr();
-  EXPECT_FALSE(isStateCubeReachableAtResetFrontier(
-      *context,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      std::vector<std::pair<size_t, bool>>{{stateA, true}, {stateC, false}},
-      0));
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_NE(
-      stderrOutput.find("reset frontier known facts exclude cube"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("reset frontier cube coi"),
       std::string::npos)
       << stderrOutput;
 }
@@ -20823,275 +18111,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesCheckedResetFramePropertyWithStructuredInitFacts) {
-  KInductionProblem problem;
-  constexpr size_t badState = 2;
-  constexpr size_t eqLhs = 3;
-  constexpr size_t eqRhs = 4;
-  constexpr size_t reset = 5;
-
-  problem.state0Symbols = {badState, eqLhs, eqRhs};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {badState, eqLhs, eqRhs, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  // This unrelated structured fact makes PDR use the sparse structured-init
-  // path. The regression was that this path skipped the checked F[0] property.
-  problem.bootstrapStateEqualityPairs = {{eqLhs, eqRhs}};
-  problem.transitions0.emplace_back(
-      badState,
-      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(reset)), BoolExpr::Var(badState)));
-  problem.transitions0.emplace_back(eqLhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(eqRhs, BoolExpr::createFalse());
-  problem.bad = BoolExpr::Var(badState);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 2)
-          .has_value());
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/0,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/false,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(stderrOutput.find(" result=unsat"), std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("counterexample candidate reached init"),
-            std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineValidatesStateInvariantFromStructuredBootstrapFacts) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t lhs = 2;
-  constexpr size_t rhs = 3;
-  constexpr size_t badState = 4;
-  constexpr size_t reset = 5;
-
-  problem.state0Symbols = {lhs, rhs, badState};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {lhs, rhs, badState, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateAssignments = {{badState, false}};
-  problem.bootstrapStateEqualityPairs = {{lhs, rhs}};
-  problem.inductiveStateEqualityPairs = {{lhs, rhs}};
-  problem.transitions0.emplace_back(lhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(rhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(badState, BoolExpr::createFalse());
-  problem.bad = BoolExpr::Var(badState);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty =
-      BoolExpr::And(problem.property, makeEqualityExpr(BoolExpr::Var(lhs),
-                                                       BoolExpr::Var(rhs)));
-  problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "frame invariant state_equalities support=2 init=pass inductive=pass"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineRejectsStateInvariantWhenNoStructuredInitFactsExist) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t lhs = 2;
-  constexpr size_t rhs = 3;
-
-  problem.state0Symbols = {lhs, rhs};
-  problem.allSymbols = {lhs, rhs};
-  problem.inductiveStateEqualityPairs = {{lhs, rhs}};
-  problem.transitions0.emplace_back(lhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(rhs, BoolExpr::createFalse());
-  problem.property = BoolExpr::createTrue();
-  problem.bad = BoolExpr::createFalse();
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(1);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // A frame invariant may not be accepted just because it is syntactically
-  // available; without init/bootstrap facts, the startup frontier does not prove
-  // the candidate equality.
-  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "frame invariant state_equalities support=2 init=fail"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineRejectsStateInvariantWhenStructuredFactsMissPair) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t lhs = 2;
-  constexpr size_t rhs = 3;
-  constexpr size_t unrelated = 4;
-
-  problem.state0Symbols = {lhs, rhs, unrelated};
-  problem.allSymbols = {lhs, rhs, unrelated};
-  problem.initialStateEqualityPairs = {{lhs, unrelated}};
-  problem.inductiveStateEqualityPairs = {{lhs, rhs}};
-  problem.transitions0.emplace_back(lhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(rhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(unrelated, BoolExpr::createFalse());
-  problem.property = BoolExpr::createTrue();
-  problem.bad = BoolExpr::createFalse();
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(1);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // Structured facts must prove each requested equality pair.  An unrelated
-  // equality is not enough to make the PDR frame-invariant shortcut sound.
-  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "frame invariant state_equalities support=2 init=fail"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineValidatesStateOutputInvariantFromStructuredBootstrapFacts) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t lhs = 2;
-  constexpr size_t rhs = 3;
-  constexpr size_t droppedLhs = 4;
-  constexpr size_t droppedRhs = 5;
-  constexpr size_t outputState = 6;
-  constexpr size_t reset = 7;
-
-  problem.state0Symbols = {lhs, rhs, droppedLhs, droppedRhs, outputState};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {lhs, rhs, droppedLhs, droppedRhs, outputState, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateAssignments = {{outputState, false}};
-  problem.bootstrapStateEqualityPairs = {{lhs, rhs}, {droppedLhs, droppedRhs}};
-  problem.inductiveStateEqualityPairs = {{lhs, rhs}, {droppedLhs, droppedRhs}};
-  problem.transitions0.emplace_back(lhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(rhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(droppedLhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(droppedRhs, BoolExpr::createTrue());
-  problem.transitions0.emplace_back(outputState, BoolExpr::createFalse());
-  problem.observedOutputExprs0 = {BoolExpr::Var(outputState)};
-  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
-  problem.property = BoolExpr::Not(BoolExpr::Var(outputState));
-  problem.bad = BoolExpr::Var(outputState);
-  problem.inductionProperty = BoolExpr::And(
-      problem.property,
-      makeEqualityExpr(BoolExpr::Var(lhs), BoolExpr::Var(rhs)));
-  problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "frame invariant state_equalities support=4 init=pass inductive=fail"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "frame invariant state_equality_subset_outputs support=3 init=pass "
-          "inductive=pass"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesOutputPropertyToValidateFullStateInvariant) {
-  ScopedSecInternalStateCorrespondence enableInternalStateCorrespondence(true);
-  KInductionProblem problem;
-  constexpr size_t lhs = 2;
-  constexpr size_t rhs = 3;
-  constexpr size_t outputState = 4;
-  constexpr size_t reset = 5;
-
-  problem.state0Symbols = {lhs, rhs, outputState};
-  problem.inputSymbols = {reset};
-  problem.allSymbols = {lhs, rhs, outputState, reset};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{reset, true}};
-  problem.bootstrapStateAssignments = {{outputState, false}};
-  problem.bootstrapStateEqualityPairs = {{lhs, rhs}};
-  problem.inductiveStateEqualityPairs = {{lhs, rhs}};
-  problem.transitions0.emplace_back(lhs, BoolExpr::Var(outputState));
-  problem.transitions0.emplace_back(rhs, BoolExpr::createFalse());
-  problem.transitions0.emplace_back(outputState, BoolExpr::createFalse());
-  problem.observedOutputExprs0 = {BoolExpr::Var(outputState)};
-  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
-  problem.property = BoolExpr::Not(BoolExpr::Var(outputState));
-  problem.bad = BoolExpr::Var(outputState);
-  problem.inductionProperty = BoolExpr::And(
-      problem.property,
-      makeEqualityExpr(BoolExpr::Var(lhs), BoolExpr::Var(rhs)));
-  problem.inductionBad = BoolExpr::Not(problem.inductionProperty);
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "frame invariant state_equalities support=2 init=pass inductive=fail"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "frame invariant state_equalities_outputs support=3 init=pass "
-          "inductive=pass"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineCanLearnValidatedBadFormulaClausesAfterRejectedTrace) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3, 4, 5};
@@ -22465,37 +19484,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineSeedsInductiveStateEqualitiesAndComplementedDesign1Pairs) {
-  KInductionProblem problem;
-  problem.state0Symbols = {2, 3};
-  problem.state1Symbols = {4, 5};
-  problem.allSymbols = {2, 3, 4, 5};
-  problem.complementedStatePairs1 = {{4, 5}};
-  problem.inductiveStateEqualityPairs = {{2, 3}};
-  problem.transitions0.emplace_back(2, BoolExpr::Var(3));
-  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
-  problem.transitions1.emplace_back(4, BoolExpr::createFalse());
-  problem.initialCondition = BoolExpr::And(
-      BoolExpr::And(BoolExpr::Not(BoolExpr::Var(2)), BoolExpr::Not(BoolExpr::Var(3))),
-      BoolExpr::Not(BoolExpr::Var(4)));
-  problem.initializedStateCount = 3;
-  problem.totalStateCount = 4;
-  problem.bad = BoolExpr::Var(2);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  const ScopedEnvVar secPdrTrace("KEPLER_SEC_PDR_TRACE", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_NE(stderrOutput.find("F[1]"), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        SynthesizedResetInferencePropagatesThroughLongBootstrapPipeline) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -22531,240 +19519,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_FALSE(model.hasUnsupportedFeatures());
   EXPECT_EQ(model.initialStateValueByKey.size(), model.stateBits.size());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralStateInvariantRefinesConstantsUnknownVarsAndInvalidNodes) {
-  const SignalKey a0 = makeSignalKey("a0");
-  const SignalKey b0 = makeSignalKey("b0");
-  const SignalKey c0 = makeSignalKey("c0");
-  const SignalKey a1 = makeSignalKey("a1");
-  const SignalKey b1 = makeSignalKey("b1");
-  const SignalKey c1 = makeSignalKey("c1");
-  BoolExpr invalid0;
-  BoolExpr invalid1;
-
-  SequentialDesignModel model0;
-  model0.stateBits = {a0, b0, c0};
-  model0.inputVarByKey.emplace(a0, 2);
-  model0.inputVarByKey.emplace(b0, 3);
-  model0.inputVarByKey.emplace(c0, 4);
-  model0.initialStateValueByKey.emplace(a0, false);
-  model0.initialStateValueByKey.emplace(b0, true);
-  model0.initialStateValueByKey.emplace(c0, false);
-  model0.nextStateExprByStateKey.emplace(a0, BoolExpr::createFalse());
-  model0.nextStateExprByStateKey.emplace(b0, BoolExpr::Var(99));
-  model0.nextStateExprByStateKey.emplace(c0, &invalid0);
-  model0.complementedStateRelations.push_back({a0, b0});
-
-  SequentialDesignModel model1;
-  model1.stateBits = {b1, c1, a1};
-  model1.inputVarByKey.emplace(a1, 5);
-  model1.inputVarByKey.emplace(b1, 6);
-  model1.inputVarByKey.emplace(c1, 7);
-  model1.initialStateValueByKey.emplace(a1, false);
-  model1.initialStateValueByKey.emplace(b1, true);
-  model1.initialStateValueByKey.emplace(c1, false);
-  model1.nextStateExprByStateKey.emplace(a1, BoolExpr::createFalse());
-  model1.nextStateExprByStateKey.emplace(b1, BoolExpr::Var(123));
-  model1.nextStateExprByStateKey.emplace(c1, &invalid1);
-  model1.complementedStateRelations.push_back({a1, b1});
-
-  const auto aligned = inferStructurallyEquivalentStatePairs(
-      model0, model1, AlignedSignals{});
-
-  EXPECT_EQ(aligned.names.size(), 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralOutputConeCandidatesRejectMixedRoots) {
-  const SignalKey data0 = makeSignalKey("partialCoiData0");
-  const SignalKey data1 = makeSignalKey("partialCoiData1");
-  const SignalKey bad0 = makeSignalKey("partialCoiBad0");
-  const SignalKey bad1 = makeSignalKey("partialCoiBad1");
-  const SignalKey good0 = makeSignalKey("partialCoiGood0");
-  const SignalKey good1 = makeSignalKey("partialCoiGood1");
-  const SignalKey state0 = makeSignalKey("partialCoiState0");
-  const SignalKey state1 = makeSignalKey("partialCoiState1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {data0};
-  model0.inputVarByKey.emplace(data0, 2);
-  model0.inputVarByKey.emplace(bad0, 6);
-  model0.inputVarByKey.emplace(good0, 8);
-  model0.displayNameByKey.emplace(data0, "data[0]");
-  model0.observedOutputExprByKey.emplace(bad0, BoolExpr::Var(2));
-  model0.observedOutputExprByKey.emplace(good0, BoolExpr::Var(4));
-  addStateBitForTest(model0, state0, 4, "left_state_q[0]", BoolExpr::Var(2));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {data1};
-  model1.inputVarByKey.emplace(data1, 3);
-  model1.inputVarByKey.emplace(bad1, 7);
-  model1.inputVarByKey.emplace(good1, 9);
-  model1.displayNameByKey.emplace(data1, "data[0]");
-  model1.observedOutputExprByKey.emplace(bad1, BoolExpr::Not(BoolExpr::Var(3)));
-  model1.observedOutputExprByKey.emplace(good1, BoolExpr::Var(5));
-  addStateBitForTest(model1, state1, 5, "right_state_q[0]", BoolExpr::Var(3));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"data[0]"};
-  alignedInputs.keys0 = {data0};
-  alignedInputs.keys1 = {data1};
-  AlignedSignals alignedOutputs;
-  alignedOutputs.names = {"bad[0]", "good[0]"};
-  alignedOutputs.keys0 = {bad0, good0};
-  alignedOutputs.keys1 = {bad1, good1};
-
-  const auto aligned = inferStructurallyEquivalentOutputConeStatePairs(
-      model0,
-      model1,
-      alignedInputs,
-      alignedOutputs,
-      KEPLER_FORMAL::Config::SolverType::KISSAT);
-
-  // A partial structural startup relation can over-strengthen unrelated
-  // engines. Keep this all-or-nothing across top outputs instead.
-  EXPECT_TRUE(aligned.names.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralOutputConeCandidatesKeepCheckedTransitionPrefix) {
-  const SignalKey data0 = makeSignalKey("checkedPrefixData0");
-  const SignalKey data1 = makeSignalKey("checkedPrefixData1");
-  const SignalKey out0 = makeSignalKey("checkedPrefixOut0");
-  const SignalKey out1 = makeSignalKey("checkedPrefixOut1");
-  const SignalKey root0 = makeSignalKey("checkedPrefixRoot0");
-  const SignalKey root1 = makeSignalKey("checkedPrefixRoot1");
-  const SignalKey child0 = makeSignalKey("checkedPrefixChild0");
-  const SignalKey child1 = makeSignalKey("checkedPrefixChild1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {data0};
-  model0.inputVarByKey.emplace(data0, 2);
-  model0.inputVarByKey.emplace(out0, 8);
-  model0.displayNameByKey.emplace(data0, "data[0]");
-  model0.observedOutputExprByKey.emplace(out0, BoolExpr::Var(4));
-  addStateBitForTest(model0, root0, 4, "root_q[0]", BoolExpr::Var(6));
-  addStateBitForTest(model0, child0, 6, "child_q[0]", BoolExpr::Var(2));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {data1};
-  model1.inputVarByKey.emplace(data1, 3);
-  model1.inputVarByKey.emplace(out1, 9);
-  model1.displayNameByKey.emplace(data1, "data[0]");
-  model1.observedOutputExprByKey.emplace(out1, BoolExpr::Var(5));
-  addStateBitForTest(model1, root1, 5, "root_q[0]", BoolExpr::Var(7));
-  addStateBitForTest(
-      model1, child1, 7, "child_q[0]", BoolExpr::Not(BoolExpr::Var(3)));
-
-  AlignedSignals alignedInputs;
-  alignedInputs.names = {"data[0]"};
-  alignedInputs.keys0 = {data0};
-  alignedInputs.keys1 = {data1};
-  AlignedSignals alignedOutputs;
-  alignedOutputs.names = {"out[0]"};
-  alignedOutputs.keys0 = {out0};
-  alignedOutputs.keys1 = {out1};
-
-  const auto aligned = inferStructurallyEquivalentOutputConeStatePairs(
-      model0,
-      model1,
-      alignedInputs,
-      alignedOutputs,
-      KEPLER_FORMAL::Config::SolverType::KISSAT);
-
-  // The child transition intentionally fails structural closure.  The
-  // top-output-rooted root pair was already checked, so keep it as a candidate
-  // while dropping the unchecked child relation.
-  EXPECT_EQ(aligned.names.size(), 1u);
-  EXPECT_EQ(aligned.keys0.front(), root0);
-  EXPECT_EQ(aligned.keys1.front(), root1);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralStateInvariantSkipsGlobalRefinementAboveStateLimit) {
-  const ScopedEnvVar stateLimit(
-      "KEPLER_SEC_GLOBAL_STRUCTURAL_REFINEMENT_STATE_LIMIT", "1");
-  const SignalKey false0 = makeSignalKey("false0");
-  const SignalKey true0 = makeSignalKey("true0");
-  const SignalKey false1 = makeSignalKey("false1");
-  const SignalKey true1 = makeSignalKey("true1");
-
-  SequentialDesignModel model0;
-  model0.stateBits = {false0, true0};
-  model0.inputVarByKey.emplace(false0, 2);
-  model0.inputVarByKey.emplace(true0, 3);
-  model0.initialStateValueByKey.emplace(false0, false);
-  model0.initialStateValueByKey.emplace(true0, true);
-  model0.nextStateExprByStateKey.emplace(false0, BoolExpr::createFalse());
-  model0.nextStateExprByStateKey.emplace(true0, BoolExpr::createTrue());
-
-  SequentialDesignModel model1;
-  model1.stateBits = {true1, false1};
-  model1.inputVarByKey.emplace(true1, 4);
-  model1.inputVarByKey.emplace(false1, 5);
-  model1.initialStateValueByKey.emplace(true1, true);
-  model1.initialStateValueByKey.emplace(false1, false);
-  model1.nextStateExprByStateKey.emplace(true1, BoolExpr::createTrue());
-  model1.nextStateExprByStateKey.emplace(false1, BoolExpr::createFalse());
-
-  const auto aligned = inferStructurallyEquivalentStatePairs(
-      model0, model1, AlignedSignals{});
-
-  EXPECT_TRUE(aligned.names.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralStateInvariantReturnsEmptyWhenOneSideHasNoState) {
-  SequentialDesignModel model0;
-  SequentialDesignModel model1;
-  model1.stateBits = {makeSignalKey("s1")};
-  model1.inputVarByKey.emplace(model1.stateBits.front(), 2);
-  model1.nextStateExprByStateKey.emplace(model1.stateBits.front(), BoolExpr::createFalse());
-
-  const auto aligned = inferStructurallyEquivalentStatePairs(
-      model0, model1, AlignedSignals{});
-
-  EXPECT_TRUE(aligned.names.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralStateInvariantReturnsEmptyWhenBothSidesHaveNoState) {
-  SequentialDesignModel model0;
-  SequentialDesignModel model1;
-
-  const auto aligned = inferStructurallyEquivalentStatePairs(
-      model0, model1, AlignedSignals{});
-
-  EXPECT_TRUE(aligned.names.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralStateInvariantHandlesNullNextStateExpressions) {
-  const SignalKey null0 = makeSignalKey("null0");
-  const SignalKey false0 = makeSignalKey("false0");
-  const SignalKey null1 = makeSignalKey("null1");
-  const SignalKey false1 = makeSignalKey("false1");
-
-  SequentialDesignModel model0;
-  model0.stateBits = {null0, false0};
-  model0.inputVarByKey.emplace(null0, 2);
-  model0.inputVarByKey.emplace(false0, 3);
-  model0.nextStateExprByStateKey.emplace(null0, nullptr);
-  model0.nextStateExprByStateKey.emplace(false0, BoolExpr::createFalse());
-
-  SequentialDesignModel model1;
-  model1.stateBits = {false1, null1};
-  model1.inputVarByKey.emplace(false1, 4);
-  model1.inputVarByKey.emplace(null1, 5);
-  model1.nextStateExprByStateKey.emplace(false1, BoolExpr::createFalse());
-  model1.nextStateExprByStateKey.emplace(null1, nullptr);
-
-  const auto aligned = inferStructurallyEquivalentStatePairs(
-      model0, model1, AlignedSignals{});
-
-  EXPECT_EQ(aligned.names.size(), 2u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -24818,34 +21572,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos);
   EXPECT_NE(stdoutOutput.find("SEC diag: aligned_inputs="), std::string::npos);
   EXPECT_NE(stdoutOutput.find("SEC summary: property_is_true="), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapInductionProvesPostResetInvariant) {
-  KInductionProblem problem;
-  problem.environmentInputNames = {"rst"};
-  problem.observedOutputNames = {"out"};
-  problem.inputSymbols = {2};
-  problem.resetBootstrapInputs = {{2, true}};
-  problem.bootstrapStateEqualityPairs = {{3, 4}};
-  problem.inductiveStateEqualityPairs = {{3, 4}};
-  problem.state0Symbols = {3};
-  problem.state1Symbols = {4};
-  problem.allSymbols = {2, 3, 4};
-  problem.observedOutputExprs0 = {BoolExpr::Var(3)};
-  problem.observedOutputExprs1 = {BoolExpr::Var(4)};
-  problem.transitions0 = {{3, BoolExpr::Var(3)}};
-  problem.transitions1 = {{4, BoolExpr::Var(4)}};
-  problem.property =
-      BoolExpr::Not(BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::Var(4)));
-  problem.bad = BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::Var(4));
-  problem.description = "bootstrap induction regression";
-
-  KInductionEngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(3);
-
-  EXPECT_EQ(result.status, KInductionStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

@@ -1149,6 +1149,16 @@ TEST_F(KeplerFormalCliTests, ConfigUnknownKeyFails) {
   std::filesystem::remove(cfgPath);
 }
 
+TEST_F(KeplerFormalCliTests, ConfigRemovedInternalStateCorrespondenceKeyFails) {
+  const auto cfgPath = writeTempConfig(
+      "format: verilog\n"
+      "input_paths: [a.v, b.v]\n"
+      "sec_internal_state_correspondence: true\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+  std::filesystem::remove(cfgPath);
+}
+
 TEST_F(KeplerFormalCliTests, ConfigNonScalarKeyFails) {
   const auto cfgPath = writeTempConfig(
       "? [a, b]\n"
@@ -1661,6 +1671,19 @@ TEST_F(KeplerFormalCliTests, CliUnknownOptionFails) {
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
                   argv4.data(), argv5.data(), argv6.data()};
   int argc = 7;
+  int rc = KeplerFormalMain(argc, argv);
+  EXPECT_EQ(rc, EXIT_FAILURE);
+}
+
+TEST_F(KeplerFormalCliTests, CliRemovedInternalStateCorrespondenceFlagFails) {
+  std::string argv0 = "kepler-formal";
+  std::string argv1 = "-verilog";
+  std::string argv2 = "--sec-internal-state-correspondence";
+  std::string argv3 = "a.v";
+  std::string argv4 = "b.v";
+  char* argv[] = {
+      argv0.data(), argv1.data(), argv2.data(), argv3.data(), argv4.data()};
+  int argc = 5;
   int rc = KeplerFormalMain(argc, argv);
   EXPECT_EQ(rc, EXIT_FAILURE);
 }

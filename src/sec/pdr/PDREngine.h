@@ -28,14 +28,6 @@ struct PDRResult {
 
 namespace detail {
 
-bool pdrStateEqualitySubsetPrefersCadical(
-    bool usesDualRailStateEncoding,
-    size_t equalityPairCount,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t solverSymbols,
-    size_t pairLimit = 64,
-    size_t symbolLimit = 256);
-
 bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
                                        size_t observedOutputCount,
                                        size_t originalObservedOutputCount,

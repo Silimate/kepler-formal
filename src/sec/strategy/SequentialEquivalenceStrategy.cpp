@@ -38,7 +38,6 @@
 #include "proof/DualRailEncoding.h"
 #include "proof/TransitionExprResolver.h"
 #include "strategy/ReachableStateInvariant.h"
-#include "strategy/StructuralStateInvariant.h"
 #include "../../sat/SATSolverWrapper.h"
 
 namespace KEPLER_FORMAL::SEC {
@@ -46,7 +45,8 @@ namespace KEPLER_FORMAL::SEC {
 // Overall SEC strategy pipeline:
 // 1. Extract both designs into the normalized sequential model used by SEC.
 // 2. Align environment inputs and observed outputs by stable external names.
-// 3. Optionally infer internal state correspondences when explicitly enabled.
+// 3. Keep cross-design internal state uncorrelated; only public/reset facts can
+//    constrain the two designs before the selected SEC engine proves outputs.
 // 4. Build reset/init reachable-state strengthening for startup anchoring.
 // 5. Remap both designs into one shared SAT symbol space.
 // 6. Build the checked SEC property and the stronger proof invariant.
@@ -54,6 +54,21 @@ namespace KEPLER_FORMAL::SEC {
 //    translate its result back into user-facing SEC diagnostics.
 
 namespace {
+
+using PublicInputAbstractMap = std::unordered_map<size_t, size_t>;
+
+struct PublicInputExprPairHash {
+  size_t operator()(const std::pair<BoolExpr*, BoolExpr*>& pair) const noexcept {
+    size_t seed = std::hash<const void*>()(pair.first);
+    seed ^= std::hash<const void*>()(pair.second) + 0x9e3779b9 +
+            (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
+using PublicInputExprPairMemo =
+    std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool,
+                       PublicInputExprPairHash>;
 
 std::string joinReasons(const std::vector<std::string>& reasons) {
   std::ostringstream oss;
@@ -64,6 +79,149 @@ std::string joinReasons(const std::vector<std::string>& reasons) {
     oss << reasons[i];
   }
   return oss.str();
+}
+
+bool isCommutativeOutputCompareOp(Op op) {
+  return op == Op::AND || op == Op::OR || op == Op::XOR;
+}
+
+void cachePublicInputOutputEquivalence(
+    PublicInputExprPairMemo& memo,
+    const std::pair<BoolExpr*, BoolExpr*>& key,
+    bool equivalent) {
+  memo[key] = equivalent;
+}
+
+std::pair<PublicInputAbstractMap, PublicInputAbstractMap>
+buildPublicInputAbstractMaps(const SequentialDesignModel& model0,
+                             const SequentialDesignModel& model1,
+                             const AlignedSignals& alignedInputs) {
+  PublicInputAbstractMap abstractMap0;
+  PublicInputAbstractMap abstractMap1;
+  abstractMap0.reserve(alignedInputs.names.size());
+  abstractMap1.reserve(alignedInputs.names.size());
+
+  // Only aligned SEC inputs are shared between designs here.  Internal state is
+  // deliberately left unmapped so this comparison cannot create a hidden
+  // cross-design state relation.
+  size_t nextAbstractSymbol = 2;
+  for (size_t i = 0; i < alignedInputs.names.size(); ++i) {
+    const size_t symbol = nextAbstractSymbol++;
+    abstractMap0.emplace(model0.inputVarByKey.at(alignedInputs.keys0[i]), symbol);
+    abstractMap1.emplace(model1.inputVarByKey.at(alignedInputs.keys1[i]), symbol);
+  }
+  return {std::move(abstractMap0), std::move(abstractMap1)};
+}
+
+bool publicInputVarsMatch(size_t var0,
+                          size_t var1,
+                          const PublicInputAbstractMap& abstractMap0,
+                          const PublicInputAbstractMap& abstractMap1) {
+  if (var0 < 2 || var1 < 2) {
+    return var0 == var1;
+  }
+  const auto it0 = abstractMap0.find(var0);
+  const auto it1 = abstractMap1.find(var1);
+  return it0 != abstractMap0.end() && it1 != abstractMap1.end() &&
+         it0->second == it1->second;
+}
+
+bool areOutputExprsEquivalentUnderPublicInputs(
+    BoolExpr* expr0,
+    BoolExpr* expr1,
+    const PublicInputAbstractMap& abstractMap0,
+    const PublicInputAbstractMap& abstractMap1) {
+  struct StackFrame {
+    BoolExpr* lhs = nullptr;
+    BoolExpr* rhs = nullptr;
+    bool visited = false;
+  };
+
+  PublicInputExprPairMemo memo;
+  std::vector<StackFrame> stack{{expr0, expr1, false}};
+  while (!stack.empty()) {
+    const StackFrame current = stack.back();
+    stack.pop_back();
+    const auto key = std::make_pair(current.lhs, current.rhs);
+    if (memo.find(key) != memo.end()) {
+      continue;
+    }
+
+    if (current.lhs == nullptr || current.rhs == nullptr) {
+      cachePublicInputOutputEquivalence(
+          memo, key, current.lhs == current.rhs);
+      continue;
+    }
+
+    const Op lhsOp = current.lhs->getOp();
+    const Op rhsOp = current.rhs->getOp();
+    if (lhsOp == Op::VAR && rhsOp == Op::VAR) {
+      cachePublicInputOutputEquivalence(
+          memo,
+          key,
+          publicInputVarsMatch(
+              current.lhs->getId(),
+              current.rhs->getId(),
+              abstractMap0,
+              abstractMap1));
+      continue;
+    }
+    if (lhsOp != rhsOp) {
+      cachePublicInputOutputEquivalence(memo, key, false);
+      continue;
+    }
+
+    if (!current.visited) {
+      stack.push_back({current.lhs, current.rhs, true});
+      const auto rightKey =
+          std::make_pair(current.lhs->getRight(), current.rhs->getRight());
+      if (memo.find(rightKey) == memo.end()) {
+        stack.push_back(
+            {current.lhs->getRight(), current.rhs->getRight(), false});
+      }
+      const auto leftKey =
+          std::make_pair(current.lhs->getLeft(), current.rhs->getLeft());
+      if (memo.find(leftKey) == memo.end()) {
+        stack.push_back(
+            {current.lhs->getLeft(), current.rhs->getLeft(), false});
+      }
+      continue;
+    }
+
+    const bool leftEquivalent =
+        memo.at(std::make_pair(current.lhs->getLeft(), current.rhs->getLeft()));
+    const bool rightEquivalent =
+        memo.at(std::make_pair(current.lhs->getRight(), current.rhs->getRight()));
+    bool equivalent = leftEquivalent && rightEquivalent;
+    if (!equivalent && isCommutativeOutputCompareOp(lhsOp)) {
+      const auto crossLeftKey =
+          std::make_pair(current.lhs->getLeft(), current.rhs->getRight());
+      const auto crossRightKey =
+          std::make_pair(current.lhs->getRight(), current.rhs->getLeft());
+      bool deferred = false;
+      if (memo.find(crossRightKey) == memo.end()) {
+        stack.push_back({current.lhs, current.rhs, true});
+        stack.push_back(
+            {current.lhs->getRight(), current.rhs->getLeft(), false});
+        deferred = true;
+      }
+      if (memo.find(crossLeftKey) == memo.end()) {
+        if (!deferred) {
+          stack.push_back({current.lhs, current.rhs, true});
+        }
+        stack.push_back(
+            {current.lhs->getLeft(), current.rhs->getRight(), false});
+        deferred = true;
+      }
+      if (deferred) {
+        continue;
+      }
+      equivalent = memo.at(crossLeftKey) && memo.at(crossRightKey);
+    }
+    cachePublicInputOutputEquivalence(memo, key, equivalent);
+  }
+
+  return memo.at(std::make_pair(expr0, expr1));
 }
 
 std::string describeMismatchedNames(const std::vector<std::string>& lhs,
@@ -294,8 +452,6 @@ struct OutputCoverageSelection {
 struct AlignedSecInterface {
   AlignedSignals inputs;
   AlignedSignals outputs;
-  AlignedSignals inductiveStateEqualities;
-  AlignedSignals resetBootstrapCandidateStateEqualities;
   OutputCoverageSelection outputCoverage;
 };
 
@@ -1097,7 +1253,6 @@ void rebuildSelectedOutputProperty(KInductionProblem& problem) {
   problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
   problem.inductionProperty = nullptr;
   problem.inductionBad = nullptr;
-  problem.inductionPropertyAssumesInductiveStateEqualities = false;
 }
 
 KInductionProblem makeOutputSubsetProblem(
@@ -1175,33 +1330,6 @@ std::unordered_map<size_t, SignalKey> buildStateKeyByLocalVar(
   return stateKeyByVar;
 }
 
-// LCOV_DISABLED_START
-void addAnchoredStateKeysFromAlignedSignals( // LCOV_EXCL_LINE
-// LCOV_DISABLED_STOP
-    const std::vector<SignalKey>& keys,
-    std::unordered_set<SignalKey, SignalKeyHash>& anchoredKeys) {
-  for (const auto& key : keys) { // LCOV_EXCL_LINE
-    anchoredKeys.insert(key);  // LCOV_EXCL_LINE
-  }
-} // LCOV_EXCL_LINE
-
-std::unordered_set<SignalKey, SignalKeyHash> buildInductivelyAnchoredStateSet(
-    size_t designIndex,
-    const ReachableStateInvariant& reachableInvariant) {
-  std::unordered_set<SignalKey, SignalKeyHash> anchoredKeys;
-  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-    return anchoredKeys;
-  }
-  anchoredKeys.reserve(reachableInvariant.anchoredStateEqualities.names.size()); // LCOV_EXCL_LINE
-  addAnchoredStateKeysFromAlignedSignals( // LCOV_EXCL_LINE
-      designIndex == 0 ? reachableInvariant.anchoredStateEqualities.keys0 // LCOV_EXCL_LINE
-                       : reachableInvariant.anchoredStateEqualities.keys1, // LCOV_EXCL_LINE
-      anchoredKeys);
-  return anchoredKeys; // LCOV_EXCL_LINE
-// LCOV_DISABLED_START
-}
-// LCOV_DISABLED_STOP
-
 std::optional<SignalKey> findFirstUnanchoredStateSupportKey(
     BoolExpr* expr,
     const std::unordered_map<size_t, SignalKey>& stateKeyByVar,
@@ -1247,20 +1375,10 @@ void filterOutputsRequiringUnanchoredResetState(
     return;  // LCOV_EXCL_LINE
   }
 
-  const auto anchoredStateKeys0 =
-      buildInductivelyAnchoredStateSet(0, reachableInvariant);
-  const auto anchoredStateKeys1 =
-      buildInductivelyAnchoredStateSet(1, reachableInvariant);
-  const AlignedSignals emptyStateEqualities;
-  const AlignedSignals& anchoredStateEqualities =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
-          ? reachableInvariant.anchoredStateEqualities // LCOV_EXCL_LINE
-          : emptyStateEqualities;
-  const auto [abstractOutputMap0, abstractOutputMap1] = buildAbstractTransitionMaps(
-      model0,
-      model1,
-      aligned.inputs,
-      anchoredStateEqualities);
+  const std::unordered_set<SignalKey, SignalKeyHash> anchoredStateKeys0;
+  const std::unordered_set<SignalKey, SignalKeyHash> anchoredStateKeys1;
+  const auto [abstractOutputMap0, abstractOutputMap1] =
+      buildPublicInputAbstractMaps(model0, model1, aligned.inputs);
 
   AlignedSignals filteredOutputs;
   filteredOutputs.names.reserve(aligned.outputs.names.size());
@@ -1277,7 +1395,7 @@ void filterOutputsRequiringUnanchoredResetState(
 
 
 // LCOV_DISABLED_STOP
-    if (areEquivalentUnderAbstractMaps(
+    if (areOutputExprsEquivalentUnderPublicInputs(
             model0.observedOutputExprByKey.at(key0),
             model1.observedOutputExprByKey.at(key1),
             abstractOutputMap0,
@@ -1414,9 +1532,6 @@ bool secSummaryStatsEnabled() {
          pdrStrategyStatsEnabled();
 }
 
-constexpr size_t kMaxPdrGlobalResetBootstrapEqualityStates = 100000;
-constexpr size_t kMaxPdrResetBootstrapCandidateStates = 8192;
-constexpr size_t kWidePdrObservedOutputSurface = 129;
 constexpr size_t kMaxDualRailResidualOutputs = 128;
 constexpr size_t kMaxDualRailResidualProofStateSymbols = 4096;
 constexpr size_t kMaxDualRailResidualConcretePrecheckOutputs = 16;
@@ -2245,9 +2360,6 @@ void emitPdrStrategyStageStats(
       " transitions=", batch.transitions0.size() + batch.transitions1.size(),  // LCOV_EXCL_LINE
       " init_assignments=", batch.initialStateAssignments.size(),  // LCOV_EXCL_LINE
       " bootstrap_assignments=", batch.bootstrapStateAssignments.size(),  // LCOV_EXCL_LINE
-      " init_equalities=", batch.initialStateEqualityPairs.size(),  // LCOV_EXCL_LINE
-      " bootstrap_equalities=", batch.bootstrapStateEqualityPairs.size(),  // LCOV_EXCL_LINE
-      " inductive_equalities=", batch.inductiveStateEqualityPairs.size(),  // LCOV_EXCL_LINE
       " observed_outputs=", batch.observedOutputExprs0.size(),
       " direct_support=", directObservedOutputSupportSize(batch),
       " output_names=[",
@@ -2335,9 +2447,6 @@ SequentialDesignModel extractSecDesign(naja::NL::SNLDesign* top,
 
 AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
                                       const SequentialDesignModel& model1,
-                                      KEPLER_FORMAL::Config::SolverType solverType,
-                                      bool inferInductiveStateEqualities,
-                                      bool inferResetBootstrapCandidateEqualities,
                                       bool secDiagEnabled) {
   AlignedSecInterface aligned;
   logSecDiagLine(secDiagEnabled, "SEC diag: aligning inputs/outputs");
@@ -2377,31 +2486,6 @@ AlignedSecInterface alignSecInterface(const SequentialDesignModel& model0,
   // the raw extractor-visible list would reintroduce stale or one-sided skipped
   // outputs after selectCoveredObservedOutputs already removed them.
 
-  const auto localValidationSolverType =
-      SATSolverWrapper::assumptionSolverTypeFor(solverType);
-  if (!inferInductiveStateEqualities) {
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: cross-design internal state equality mining disabled");
-  } else {
-    logSecDiagLine(secDiagEnabled, "SEC diag: inferring inductive state equalities"); // LCOV_EXCL_LINE
-    aligned.inductiveStateEqualities = inferStructurallyEquivalentStatePairs( // LCOV_EXCL_LINE
-        model0, model1, aligned.inputs, aligned.outputs, localValidationSolverType); // LCOV_EXCL_LINE
-    logSecDiagLine(secDiagEnabled, "SEC diag: inferred inductive state equalities"); // LCOV_EXCL_LINE
-  }
-  if (!inferResetBootstrapCandidateEqualities) {
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: skipping reset-bootstrap candidate equality mining");
-  } else {
-    aligned.resetBootstrapCandidateStateEqualities = // LCOV_EXCL_LINE
-        inferStructurallyEquivalentOutputConeStatePairs( // LCOV_EXCL_LINE
-            model0, // LCOV_EXCL_LINE
-            model1, // LCOV_EXCL_LINE
-            aligned.inputs, // LCOV_EXCL_LINE
-            aligned.outputs, // LCOV_EXCL_LINE
-            localValidationSolverType); // LCOV_EXCL_LINE
-  }
   return aligned;
 }
 
@@ -2890,16 +2974,10 @@ void applyInitialStateAssignments(
 ReachableStateInvariant integrateReachableStateInvariant(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
-    const AlignedSignals& alignedInputs,
-    const AlignedSignals& inductiveStateEqualities,
-    const AlignedSignals& resetBootstrapCandidateStateEqualities,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
     KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    bool deriveResetBootstrapStrengthening,
-    bool deriveResetBootstrapEqualities,
-    bool secDiagEnabled) {
+    bool deriveResetBootstrapStrengthening) {
   BoolExpr* initialCondition = BoolExpr::createTrue();
   applyInitialStateAssignments(
       model0.initialStateValueByKey, state0Symbols, initialCondition, problem);
@@ -2910,37 +2988,10 @@ ReachableStateInvariant integrateReachableStateInvariant(
   if (problem.hasExplicitInitialState()) {
     problem.initialCondition = BoolExpr::simplify(initialCondition);
   }
-  const bool allowInternalStateCorrespondence =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
-
-  const AlignedSignals noCrossDesignStateEqualities;
-  const AlignedSignals& allowedInductiveStateEqualities =
-      allowInternalStateCorrespondence
-          ? inductiveStateEqualities // LCOV_EXCL_LINE
-          : noCrossDesignStateEqualities;
-  const AlignedSignals& allowedResetBootstrapCandidateStateEqualities =
-      allowInternalStateCorrespondence
-          ? resetBootstrapCandidateStateEqualities // LCOV_EXCL_LINE
-          : noCrossDesignStateEqualities;
   const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
       model0,
       model1,
-      alignedInputs,
-      allowedInductiveStateEqualities,
-      deriveResetBootstrapStrengthening,
-      secDiagEnabled,
-      SATSolverWrapper::assumptionSolverTypeFor(solverType),
-      allowInternalStateCorrespondence && deriveResetBootstrapEqualities,
-      allowedResetBootstrapCandidateStateEqualities);
-  if (allowInternalStateCorrespondence) {
-    for (size_t i = 0; // LCOV_EXCL_LINE
-         i < reachableInvariant.initialStateCorrespondence.names.size(); // LCOV_EXCL_LINE
-         ++i) { // LCOV_EXCL_LINE
-      problem.initialStateEqualityPairs.emplace_back( // LCOV_EXCL_LINE
-          state0Symbols.at(reachableInvariant.initialStateCorrespondence.keys0[i]), // LCOV_EXCL_LINE
-          state1Symbols.at(reachableInvariant.initialStateCorrespondence.keys1[i])); // LCOV_EXCL_LINE
-    } // LCOV_EXCL_LINE
-  } // LCOV_EXCL_LINE
+      deriveResetBootstrapStrengthening);
 
   for (const auto& [key, value] : reachableInvariant.bootstrapValues0) {
     if (state0Symbols.find(key) != state0Symbols.end()) {
@@ -2967,41 +3018,10 @@ ReachableStateInvariant integrateReachableStateInvariant(
     // assembled. PDR/KI/IMC can only run a reset-bootstrap proof when that
     // reset also exists as an aligned environment input with one shared symbol.
     // If no such symbol was created, keep the proof in normal initial-frontier
-    // mode so the initial state/equality facts remain active instead of being
+    // mode so design-local initial facts remain active instead of being
     // replaced by an unconstrained "bootstrap" frontier.
     problem.resetBootstrapCycles = 0;
     problem.bootstrapStateAssignments.clear();
-    problem.bootstrapStateEqualityPairs.clear();
-  }
-  if (allowInternalStateCorrespondence) {
-    for (size_t i = 0; // LCOV_EXCL_LINE
-         i < reachableInvariant.anchoredStateEqualities.names.size(); // LCOV_EXCL_LINE
-         ++i) { // LCOV_EXCL_LINE
-      problem.inductiveStateEqualityPairs.emplace_back( // LCOV_EXCL_LINE
-          state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]), // LCOV_EXCL_LINE
-          state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i])); // LCOV_EXCL_LINE
-      if (!problem.resetBootstrapInputs.empty()) { // LCOV_EXCL_LINE
-        problem.bootstrapStateEqualityPairs.emplace_back( // LCOV_EXCL_LINE
-            state0Symbols.at(reachableInvariant.anchoredStateEqualities.keys0[i]), // LCOV_EXCL_LINE
-            state1Symbols.at(reachableInvariant.anchoredStateEqualities.keys1[i])); // LCOV_EXCL_LINE
-      } // LCOV_EXCL_LINE
-    } // LCOV_EXCL_LINE
-    for (size_t i = 0; // LCOV_EXCL_LINE
-         // LCOV_DISABLED_START
-         i < reachableInvariant.bootstrapOnlyStateEqualities.names.size(); // LCOV_EXCL_LINE
-         ++i) { // LCOV_EXCL_LINE
-      if (!problem.resetBootstrapInputs.empty()) { // LCOV_EXCL_LINE
-      // LCOV_DISABLED_STOP
-        problem.bootstrapStateEqualityPairs.emplace_back( // LCOV_EXCL_LINE
-            // LCOV_DISABLED_START
-            state0Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys0[i]), // LCOV_EXCL_LINE
-            state1Symbols.at(reachableInvariant.bootstrapOnlyStateEqualities.keys1[i])); // LCOV_EXCL_LINE
-      } // LCOV_EXCL_LINE
-    } // LCOV_EXCL_LINE
-  } else { // LCOV_EXCL_LINE
-    problem.initialStateEqualityPairs.clear();
-    problem.bootstrapStateEqualityPairs.clear();
-    problem.inductiveStateEqualityPairs.clear();
   }
   return reachableInvariant;
 }
@@ -3011,19 +3031,11 @@ void buildSecPropertiesAndTransitions(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
     const AlignedSignals& alignedOutputs,
-    const ReachableStateInvariant& reachableInvariant,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state1Symbols,
     const RemappedSecExpressions& remapped,
     KInductionProblem& problem,
     bool secDiagEnabled) {
-  const bool allowInternalStateCorrespondence =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
-  const AlignedSignals emptyStateEqualities;
-  const AlignedSignals& anchoredStateEqualities =
-      allowInternalStateCorrespondence ? reachableInvariant.anchoredStateEqualities
-                                       : emptyStateEqualities;
-
   if (problem.lazyTransitions == nullptr) {
     for (const auto& key : model0.stateBits) {
       problem.transitions0.emplace_back(state0Symbols.at(key), remapped.next0.at(key));
@@ -3035,15 +3047,6 @@ void buildSecPropertiesAndTransitions(
 
   BoolExpr* property = BoolExpr::createTrue();
   BoolExpr* inductionCore = BoolExpr::createTrue();
-  for (size_t i = 0; i < anchoredStateEqualities.names.size(); ++i) {
-    inductionCore = BoolExpr::And( // LCOV_EXCL_LINE
-        inductionCore, // LCOV_EXCL_LINE
-        makeEqualityExpr( // LCOV_EXCL_LINE
-            BoolExpr::Var( // LCOV_EXCL_LINE
-                state0Symbols.at(anchoredStateEqualities.keys0[i])), // LCOV_EXCL_LINE
-            BoolExpr::Var( // LCOV_EXCL_LINE
-                state1Symbols.at(anchoredStateEqualities.keys1[i])))); // LCOV_EXCL_LINE
-  } // LCOV_EXCL_LINE
 
   BoolExpr* inductionProperty = inductionCore;
   problem.dualRailOutputSkipReasons.clear();
@@ -3071,10 +3074,6 @@ void buildSecPropertiesAndTransitions(
   problem.inductionProperty = BoolExpr::simplify(inductionProperty);
   problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
   // LCOV_DISABLED_STOP
-  problem.inductionPropertyAssumesInductiveStateEqualities =
-      // LCOV_DISABLED_START
-      allowInternalStateCorrespondence &&
-      !problem.inductiveStateEqualityPairs.empty(); // LCOV_EXCL_LINE
   problem.description = "SEC property with aligned observed outputs";
   // LCOV_DISABLED_STOP
   logSecDiagLine(secDiagEnabled, "SEC diag: built SEC and induction properties");
@@ -3086,18 +3085,14 @@ void buildSecPropertiesAndTransitions(
     // LCOV_DISABLED_STOP
         "SEC summary: property_is_true=%d induction_property_is_true=%d "
         "bad_is_false=%d induction_bad_is_false=%d reset_bootstrap_inputs=%zu "
-        "bootstrap_cycles=%zu bootstrap_assignments=%zu initial_equalities=%zu "
-        "bootstrap_equalities=%zu inductive_equalities=%zu\n",
+        "bootstrap_cycles=%zu bootstrap_assignments=%zu\n",
         problem.property == BoolExpr::createTrue(),
         problem.inductionProperty == BoolExpr::createTrue(),
         problem.bad == BoolExpr::createFalse(),
         problem.inductionBad == BoolExpr::createFalse(),
         problem.resetBootstrapInputs.size(),
         problem.resetBootstrapCycles,
-        problem.bootstrapStateAssignments.size(),
-        problem.initialStateEqualityPairs.size(),
-        problem.bootstrapStateEqualityPairs.size(),
-        problem.inductiveStateEqualityPairs.size());
+        problem.bootstrapStateAssignments.size());
     fflush(stdout);
   }
 }
@@ -3114,21 +3109,6 @@ KInductionProblem buildDualRailSecProblem(
     bool useLazyTransitionRemapping,
     bool secDiagEnabled) {
   KInductionProblem problem;
-  const bool allowInternalStateCorrespondence =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
-  const AlignedSignals emptyStateEqualities;
-  const AlignedSignals& initialStateCorrespondence =
-      allowInternalStateCorrespondence
-          ? reachableInvariant.initialStateCorrespondence // LCOV_EXCL_LINE
-          : emptyStateEqualities;
-  const AlignedSignals& anchoredStateEqualities =
-      allowInternalStateCorrespondence
-          ? reachableInvariant.anchoredStateEqualities // LCOV_EXCL_LINE
-          : emptyStateEqualities;
-  const AlignedSignals& bootstrapOnlyStateEqualities =
-      allowInternalStateCorrespondence
-          ? reachableInvariant.bootstrapOnlyStateEqualities // LCOV_EXCL_LINE
-          : emptyStateEqualities;
   problem.environmentInputs = alignedInputs.keys0;
   problem.environmentInputNames = symbolSpace.problem.environmentInputNames;
   problem.inputSymbols = symbolSpace.problem.inputSymbols;
@@ -3162,30 +3142,6 @@ KInductionProblem buildDualRailSecProblem(
       model0, reachableInvariant.bootstrapValues0, railMaps.state0ByKey, problem);
   addDualRailBootstrapAssignments(
       model1, reachableInvariant.bootstrapValues1, railMaps.state1ByKey, problem);
-  addDualRailEqualityPairs(
-      initialStateCorrespondence,
-      railMaps.state0ByKey,
-      railMaps.state1ByKey,
-      problem.initialStateEqualityPairs);
-  addDualRailEqualityPairs(
-      anchoredStateEqualities,
-      railMaps.state0ByKey,
-      railMaps.state1ByKey,
-      problem.inductiveStateEqualityPairs);
-  if (!problem.resetBootstrapInputs.empty()) {
-    addDualRailEqualityPairs(
-        anchoredStateEqualities,
-        // LCOV_DISABLED_START
-        railMaps.state0ByKey,
-        // LCOV_DISABLED_STOP
-        railMaps.state1ByKey,
-        problem.bootstrapStateEqualityPairs);
-    addDualRailEqualityPairs(
-        bootstrapOnlyStateEqualities,
-        railMaps.state0ByKey,
-        railMaps.state1ByKey,
-        problem.bootstrapStateEqualityPairs);
-  }
 
 // LCOV_DISABLED_START
 
@@ -3208,11 +3164,6 @@ KInductionProblem buildDualRailSecProblem(
   std::unordered_map<BoolExpr*, DualRailBoolExpr> memo1;
 
   BoolExpr* inductionCore = BoolExpr::createTrue();
-  for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-    inductionCore = BoolExpr::And( // LCOV_EXCL_LINE
-        inductionCore, // LCOV_EXCL_LINE
-        makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol))); // LCOV_EXCL_LINE
-  }
 
 // LCOV_DISABLED_START
 
@@ -3293,9 +3244,6 @@ KInductionProblem buildDualRailSecProblem(
   problem.bad = BoolExpr::simplify(BoolExpr::Not(problem.property));
   problem.inductionProperty = BoolExpr::simplify(inductionProperty);
   problem.inductionBad = BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
-  problem.inductionPropertyAssumesInductiveStateEqualities =
-      allowInternalStateCorrespondence &&
-      !problem.inductiveStateEqualityPairs.empty(); // LCOV_EXCL_LINE
   problem.description =
       "SEC dual-rail steady-state property with aligned observed outputs";
 
@@ -3303,17 +3251,13 @@ KInductionProblem buildDualRailSecProblem(
     printf(
         "SEC summary: encoding=dual_rail_steady rail_state_bits=%zu "
         "rail_outputs=%zu reset_bootstrap_inputs=%zu bootstrap_cycles=%zu "
-        "bootstrap_assignments=%zu initial_equalities=%zu "
-        "bootstrap_equalities=%zu inductive_equalities=%zu "
+        "bootstrap_assignments=%zu "
         "dual_rail_state_relation_pairs=%zu\n",
         problem.totalStateCount,
         problem.observedOutputExprs0.size(),
         problem.resetBootstrapInputs.size(),
         problem.resetBootstrapCycles,
         problem.bootstrapStateAssignments.size(),
-        problem.initialStateEqualityPairs.size(),
-        problem.bootstrapStateEqualityPairs.size(),
-        problem.inductiveStateEqualityPairs.size(),
         problem.sameFrameStateEqualityPairs0.size() +
             problem.sameFrameStateEqualityPairs1.size());
     fflush(stdout);
@@ -3519,16 +3463,6 @@ SequentialEquivalenceResult runPdrSecEngine(
 
   auto rebuildPdrBatchStrengthening = [](KInductionProblem& batch) {
     BoolExpr* inductionProperty = BoolExpr::createTrue();
-    const bool allowInternalStateCorrespondence =
-        KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
-    if (allowInternalStateCorrespondence) {
-      for (const auto& [lhsSymbol, rhsSymbol] : batch.inductiveStateEqualityPairs) { // LCOV_EXCL_LINE
-        inductionProperty = BoolExpr::And(  // LCOV_EXCL_LINE
-        // LCOV_DISABLED_STOP
-            inductionProperty,  // LCOV_EXCL_LINE
-            makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));  // LCOV_EXCL_LINE
-      }
-    } // LCOV_EXCL_LINE
     for (size_t i = 0; i < batch.observedOutputExprs0.size(); ++i) {
       inductionProperty = BoolExpr::And(
           inductionProperty,
@@ -3542,11 +3476,6 @@ SequentialEquivalenceResult runPdrSecEngine(
     batch.inductionProperty = BoolExpr::simplify(inductionProperty);
     // LCOV_DISABLED_STOP
     batch.inductionBad = BoolExpr::simplify(BoolExpr::Not(batch.inductionProperty));
-    // LCOV_DISABLED_START
-    batch.inductionPropertyAssumesInductiveStateEqualities =
-    // LCOV_DISABLED_STOP
-        allowInternalStateCorrespondence &&
-        !batch.inductiveStateEqualityPairs.empty(); // LCOV_EXCL_LINE
   };
 
   // LCOV_DISABLED_START
@@ -3619,32 +3548,8 @@ SequentialEquivalenceResult runPdrSecEngine(
     auto support =
         computePdrBatchSupportClosure(batch, transitionClosureLimit);
 
-    // A PDR output slice should not inherit every state-equality/reset fact in
-    // an ASIC-size SEC problem. Keep only the relational startup and inductive
-    // facts connected to the current property through a bounded transition
-    // LCOV_DISABLED_STOP
-    // cone. One-step pruning is too weak for PDR because predecessor blocking
-    // LCOV_DISABLED_START
-    // walks backwards through multiple transition layers; the bounded closure
-    // LCOV_DISABLED_STOP
-    // keeps those real dependencies without reintroducing the full-design
-    // million-symbol relational init surface.
-    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-      filterPairsToSupport( // LCOV_EXCL_LINE
-          // LCOV_DISABLED_START
-          problem.initialStateEqualityPairs, batch.initialStateEqualityPairs, support); // LCOV_EXCL_LINE
-          // LCOV_DISABLED_STOP
-      filterPairsToSupport( // LCOV_EXCL_LINE
-          // LCOV_DISABLED_START
-          problem.bootstrapStateEqualityPairs, batch.bootstrapStateEqualityPairs, support); // LCOV_EXCL_LINE
-          // LCOV_DISABLED_STOP
-      filterPairsToSupport( // LCOV_EXCL_LINE
-          problem.inductiveStateEqualityPairs, batch.inductiveStateEqualityPairs, support); // LCOV_EXCL_LINE
-    } else { // LCOV_EXCL_LINE
-      batch.initialStateEqualityPairs.clear();
-      batch.bootstrapStateEqualityPairs.clear();
-      batch.inductiveStateEqualityPairs.clear();
-    }
+    // A PDR output slice may only inherit same-design rail relations and reset
+    // value facts; cross-design internal equalities have no representation.
     filterPairsToSupport(
         problem.sameFrameStateEqualityPairs0,
         batch.sameFrameStateEqualityPairs0,
@@ -3659,24 +3564,6 @@ SequentialEquivalenceResult runPdrSecEngine(
         // LCOV_DISABLED_STOP
     filterAssignmentsToSupport(
         problem.bootstrapStateAssignments, batch.bootstrapStateAssignments, support);
-    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-      for (const auto& pair : batch.initialStateEqualityPairs) { // LCOV_EXCL_LINE
-        // LCOV_DISABLED_START
-        support.insert(pair.first);  // LCOV_EXCL_LINE
-        support.insert(pair.second);  // LCOV_EXCL_LINE
-      }
-      for (const auto& pair : batch.bootstrapStateEqualityPairs) { // LCOV_EXCL_LINE
-        support.insert(pair.first);  // LCOV_EXCL_LINE
-        // LCOV_DISABLED_STOP
-        support.insert(pair.second);  // LCOV_EXCL_LINE
-      }
-      // LCOV_DISABLED_START
-      for (const auto& pair : batch.inductiveStateEqualityPairs) { // LCOV_EXCL_LINE
-        support.insert(pair.first);  // LCOV_EXCL_LINE
-        support.insert(pair.second);  // LCOV_EXCL_LINE
-        // LCOV_DISABLED_STOP
-      }
-    } // LCOV_EXCL_LINE
     for (const auto& pair : batch.sameFrameStateEqualityPairs0) {
       support.insert(pair.first);  // LCOV_EXCL_LINE
       support.insert(pair.second);  // LCOV_EXCL_LINE
@@ -4876,17 +4763,6 @@ std::unordered_map<size_t, size_t> buildLocalToCombinedMap(
 
 namespace detail {
 
-bool shouldInferPdrInductiveStateEqualities(SecEngine secEngine, // LCOV_EXCL_LINE
-                                            size_t observedOutputSurface) {
-  if (secEngine == SecEngine::Imc) { // LCOV_EXCL_LINE
-    return false; // LCOV_EXCL_LINE
-  }
-  if (secEngine != SecEngine::Pdr) { // LCOV_EXCL_LINE
-    return true; // LCOV_EXCL_LINE
-  }
-  return observedOutputSurface < kWidePdrObservedOutputSurface; // LCOV_EXCL_LINE
-} // LCOV_EXCL_LINE
-
 SequentialEquivalenceProofProgress buildSecEngineProofProgress(
     const std::string& engineLabel,
     const std::vector<std::string>& observedOutputNames,
@@ -5019,42 +4895,11 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
 
   // Phase 2: align the externally visible SEC interface, then drop any outputs
   // whose cones were already classified as skipped by extraction.
-  const size_t totalStateBits = model0.stateBits.size() + model1.stateBits.size();
-  // PDR validates these correspondences before using them as frame invariants.
-  // Gate the mining by output surface, not raw flop count: FIFO/CPU blocks can
-  // have many state bits but only a small top-output property that needs these
-  // facts to avoid relearning identical state relations one cube at a time.
-  const size_t observedOutputSurface =
-      std::max(model0.observedOutputs.size(), model1.observedOutputs.size());
-  const bool allowInternalStateCorrespondence =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
-  if (secDiagEnabled && !allowInternalStateCorrespondence) {
-    logSecDiagLine(
-        secDiagEnabled,
-        "SEC diag: internal state correspondence disabled");
-  }
-  // PDR validates mined state equalities before using them, but medium
-  // reset-bootstrap CPU surfaces can spend proof effort on state relations
-  // that are not needed for the top-output property and may expose abstract
-  // startup counterexamples. Keep this accelerator for focused properties.
-  const bool inferInductiveStateEqualities =
-      allowInternalStateCorrespondence &&
-      detail::shouldInferPdrInductiveStateEqualities( // LCOV_EXCL_LINE
-          secEngine_, observedOutputSurface); // LCOV_EXCL_LINE
-  // IMC owns reachability through interpolation.  Do not spend pre-engine SAT
-  // effort mining cross-design internal state candidates for that engine.
-  const bool inferResetBootstrapCandidateEqualities =
-      allowInternalStateCorrespondence &&
-      secEngine_ != SecEngine::Imc && // LCOV_EXCL_LINE
-      (secEngine_ != SecEngine::Pdr || // LCOV_EXCL_LINE
-       observedOutputSurface >= kWidePdrObservedOutputSurface || // LCOV_EXCL_LINE
-       totalStateBits <= kMaxPdrResetBootstrapCandidateStates); // LCOV_EXCL_LINE
+  // SEC proves only the public interface relation.  Do not mine or assume
+  // same-named internal state across the two independently extracted designs.
   AlignedSecInterface aligned = alignSecInterface(
       model0,
       model1,
-      solverType_,
-      inferInductiveStateEqualities,
-      inferResetBootstrapCandidateEqualities,
       secDiagEnabled);
   if (aligned.outputs.names.empty()) {
     return makeSecResult(
@@ -5069,12 +4914,10 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
 
   if (secDiagEnabled) {
     printf(
-        "SEC diag: aligned_inputs=%zu aligned_outputs=%zu inductive_state_equalities=%zu "
-        "reset_bootstrap_candidate_equalities=%zu state_bits0=%zu state_bits1=%zu\n",
+        "SEC diag: aligned_inputs=%zu aligned_outputs=%zu "
+        "state_bits0=%zu state_bits1=%zu\n",
         aligned.inputs.names.size(),
         aligned.outputs.names.size(),
-        aligned.inductiveStateEqualities.names.size(),
-        aligned.resetBootstrapCandidateStateEqualities.names.size(),
         model0.stateBits.size(),
         model1.stateBits.size());
     fflush(stdout);
@@ -5090,53 +4933,15 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
   // BMC / reset-frontier checks, so it can avoid the sampled full-design sweep
   // that tries to constant-evaluate every state bit before the first PDR query.
   const bool deriveResetBootstrapStrengthening = secEngine_ != SecEngine::Pdr;
-  const bool deriveResetBootstrapEqualities =
-      allowInternalStateCorrespondence &&
-      (secEngine_ != SecEngine::Pdr || // LCOV_EXCL_LINE
-       totalStateBits <= kMaxPdrGlobalResetBootstrapEqualityStates) && // LCOV_EXCL_LINE
-      !detail::shouldSkipDualRailGlobalBootstrapEqualityMining( // LCOV_EXCL_LINE
-          secEngine_, encoding_, observedOutputSurface); // LCOV_EXCL_LINE
-  if (secDiagEnabled && allowInternalStateCorrespondence &&
-      !deriveResetBootstrapEqualities) { // LCOV_EXCL_LINE
-    if (secEngine_ == SecEngine::Pdr) { // LCOV_EXCL_LINE
-      fprintf(  // LCOV_EXCL_LINE
-          stderr,  // LCOV_EXCL_LINE
-          "SEC diag: skipping global PDR reset-bootstrap equality mining for "
-          "%zu state bits (limit=%zu)\n",
-          totalStateBits,  // LCOV_EXCL_LINE
-          kMaxPdrGlobalResetBootstrapEqualityStates);
-    } else if (secEngine_ == SecEngine::KInduction || // LCOV_EXCL_LINE
-               secEngine_ == SecEngine::Imc) { // LCOV_EXCL_LINE
-      // KI/IMC still receive reset/bootstrap values and output-rooted startup
-      // candidates.  This only avoids the all-state pre-proof sweep sampled on
-      // wide dual-rail BlackParrot surfaces before the selected engine starts.
-      fprintf(  // LCOV_EXCL_LINE
-          stderr,  // LCOV_EXCL_LINE
-          "SEC diag: skipping global %s reset-bootstrap equality mining for "
-          "%zu outputs (limit=%zu)\n",
-          secEngine_ == SecEngine::KInduction ? "k-induction" : "imc", // LCOV_EXCL_LINE
-          observedOutputSurface,  // LCOV_EXCL_LINE
-          detail::kMaxDualRailGlobalBootstrapEqualityOutputs);
-    } // LCOV_EXCL_LINE
-    fflush(stderr);  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  // Reset-bootstrap candidates are rooted at aligned top-output cones and then
-  // validated before becoming proof facts.  Keep that path available for
-  // dual-rail PDR too; otherwise reset-heavy designs enter PDR with no startup
-  // relation and every non-trivial top output becomes an isolated unknown rail.
+  // Reset bootstrap is allowed to add concrete values inside each design, but
+  // it must not add any cross-design internal state relation.
   const auto reachableInvariant = integrateReachableStateInvariant(
       model0,
       model1,
-      aligned.inputs,
-      aligned.inductiveStateEqualities,
-      aligned.resetBootstrapCandidateStateEqualities,
       symbolSpace.state0Symbols,
       symbolSpace.state1Symbols,
       symbolSpace.problem,
-      solverType_,
-      deriveResetBootstrapStrengthening,
-      deriveResetBootstrapEqualities,
-      secDiagEnabled);
+      deriveResetBootstrapStrengthening);
   if (encoding_ == SecEncoding::Binary) {
     filterOutputsRequiringUnanchoredResetState(
         model0,
@@ -5205,7 +5010,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         model0,
         model1,
         aligned.outputs,
-        reachableInvariant,
         symbolSpace.state0Symbols,
         symbolSpace.state1Symbols,
         remapped,

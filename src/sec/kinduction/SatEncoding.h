@@ -15,14 +15,6 @@
 
 namespace KEPLER_FORMAL::SEC {
 
-// Frame-local equality assumptions can be encoded more efficiently by making
-// both symbolic names point at the same SAT literal in that frame. This is a
-// quotienting of an assumption already present in the proof obligation, not a
-// structural shortcut: if the equality is not assumed for a frame, no alias is
-// installed for that frame.
-using FrameSymbolAliases =
-    std::vector<std::vector<std::pair<size_t, size_t>>>;
-
 // Owns the SAT literals that represent each symbolic SEC variable in each time
 // frame of the unrolled problem.
 class FrameVariableStore {
@@ -30,10 +22,6 @@ class FrameVariableStore {
   FrameVariableStore(SATSolverWrapper& solver,
                      const std::vector<size_t>& symbols,
                      size_t numFrames);
-  FrameVariableStore(SATSolverWrapper& solver,
-                     const std::vector<size_t>& symbols,
-                     size_t numFrames,
-                     const FrameSymbolAliases& aliasesByFrame);
 
   bool hasSymbol(size_t symbol) const;
   int getLiteral(size_t symbol, size_t frame) const;

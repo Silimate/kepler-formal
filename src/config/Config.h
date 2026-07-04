@@ -47,14 +47,6 @@ public:
     return secTreatUncomputableSeqAsBoundary_;  // LCOV_EXCL_LINE
   }
 
-  static void setSecInternalStateCorrespondence(bool enabled) {
-    secInternalStateCorrespondence_ = enabled;
-  }
-
-  static bool getSecInternalStateCorrespondence() {
-    return secInternalStateCorrespondence_;
-  }
-
 private:
   Config() = default;
   ~Config() = default;
@@ -62,7 +54,6 @@ private:
   inline static SolverType solverType_ = KISSAT;
   inline static bool reportSkippedPOs_ = false;
   inline static bool secTreatUncomputableSeqAsBoundary_ = true;
-  inline static bool secInternalStateCorrespondence_ = false;
 };
 
 } // namespace kepler

@@ -35,17 +35,6 @@ struct LazyTransitionSource {
   LazyTransitionRail rail = LazyTransitionRail::Binary;
 };
 
-struct PdrStateEqualitySubsetCacheEntry { // LCOV_EXCL_LINE
-  std::vector<std::pair<size_t, size_t>> inputPairs;
-  std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
-  size_t resetBootstrapCycles = 0;
-  std::vector<std::pair<size_t, bool>> initialStateAssignments;
-  std::vector<std::pair<size_t, size_t>> initialStateEqualityPairs;
-  std::vector<std::pair<size_t, bool>> bootstrapStateAssignments;
-  std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
-  std::vector<std::pair<size_t, size_t>> selectedPairs;
-};
-
 struct InductionTransitionSupportCache;
 
 struct DualRailResidualPublicKiAttempt {
@@ -89,11 +78,6 @@ struct LazyTransitionStore {
   mutable std::array<std::unordered_map<BoolExpr*, DualRailBoolExpr>, 2>
       dualRailRemapMemoByDesign;
   mutable std::unordered_map<size_t, BoolExpr*> remappedByStateSymbol;
-  // Output-batched PDR slices share the same transition store. Cache validated
-  // state-equality subsets here so split leaves do not re-prove the same
-  // transition-preserved relation for every output batch.
-  mutable std::vector<PdrStateEqualitySubsetCacheEntry>
-      pdrStateEqualitySubsetCache;
   // Output-batched SEC creates a fresh transition resolver for each PDR slice.
   // Keep lazy support and size metadata with the shared transition store so
   // reset-frontier COI rebuilding does not repeatedly walk the same large
@@ -209,10 +193,7 @@ struct KInductionProblem {
   size_t resetBootstrapCycles = 0;
   std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
   std::vector<std::pair<size_t, bool>> initialStateAssignments;
-  std::vector<std::pair<size_t, size_t>> initialStateEqualityPairs;
   std::vector<std::pair<size_t, bool>> bootstrapStateAssignments;
-  std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
-  std::vector<std::pair<size_t, size_t>> inductiveStateEqualityPairs;
   std::vector<size_t> state0Symbols;
   std::vector<size_t> state1Symbols;
   std::vector<size_t> allSymbols;
@@ -237,7 +218,6 @@ struct KInductionProblem {
   BoolExpr* bad = nullptr;
   BoolExpr* inductionProperty = nullptr;
   BoolExpr* inductionBad = nullptr;
-  bool inductionPropertyAssumesInductiveStateEqualities = false;
   // Dual-rail SEC has a complete rail-valued boot state, but it still needs
   // the normal reset-bootstrap prefix so reset controls are driven exactly as
   // they are in the binary SEC flow.
