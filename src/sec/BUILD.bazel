@@ -22,6 +22,7 @@ cc_library(
     srcs = [
         "common/BoolExprUtils.cpp",
         "common/ProofProblemDebug.cpp",
+        "imc/CraigInterpolatingModelChecker.cpp",
         "imc/ExactInterpolantSynthesizer.cpp",
         "imc/IMCEngine.cpp",
         "kinduction/BaseCaseSolver.cpp",
@@ -45,6 +46,7 @@ cc_library(
         "common/ProofProblemDebug.h",
         "common/SecDiag.h",
         "common/SignalKey.h",
+        "imc/CraigInterpolatingModelChecker.h",
         "imc/ExactInterpolantSynthesizer.h",
         "imc/IMCEngine.h",
         "kinduction/BaseCaseSolver.h",

@@ -971,16 +971,40 @@ class ConstantAwareFrameFormulaEncoder {
     return trueLit_ != 0 && lit == (value ? trueLit_ : -trueLit_);
   }
 
+  struct BoolExprStackFrame {
+    BoolExpr* expr = nullptr;
+    bool visited = false;
+  };
+
+  std::optional<bool> cachedConstantValue(BoolExpr* expr) const {
+    const auto cached = constantValueByNode_.find(expr);
+    if (cached == constantValueByNode_.end()) {
+      return std::nullopt;
+    }
+    return cached->second;
+  }
+
   std::optional<bool> assignedConstantValue(BoolExpr* expr) {
     if (const auto cached = constantValueByNode_.find(expr);
         cached != constantValueByNode_.end()) {
       return cached->second;
     }
 
-    std::optional<bool> value;
-    switch (expr->getOp()) {
-      case Op::VAR: {
-        const size_t symbol = expr->getId();
+    std::vector<BoolExprStackFrame> stack;
+    stack.reserve(512);
+    stack.push_back({expr, false});
+
+    while (!stack.empty()) {
+      const BoolExprStackFrame current = stack.back();
+      stack.pop_back();
+      BoolExpr* node = current.expr;
+      if (constantValueByNode_.find(node) != constantValueByNode_.end()) {
+        continue;
+      }
+
+      if (node->getOp() == Op::VAR) {
+        std::optional<bool> value;
+        const size_t symbol = node->getId();
         if (symbol == 0) {
           value = false;
         } else if (symbol == 1) {
@@ -989,188 +1013,213 @@ class ConstantAwareFrameFormulaEncoder {
                    constant != constantAssignments_.end()) {
           value = constant->second;
         }
-        break;
+        constantValueByNode_.emplace(node, value);
+        continue;
       }
-      case Op::NOT: {
-        const auto child = assignedConstantValue(expr->getLeft());
-        if (child.has_value()) {
-          value = !*child;
+
+      if (!current.visited) {
+        stack.push_back({node, true});
+        if (node->getRight() != nullptr &&
+            constantValueByNode_.find(node->getRight()) ==
+                constantValueByNode_.end()) {
+          stack.push_back({node->getRight(), false});
         }
-        break;
+        if (node->getLeft() != nullptr &&
+            constantValueByNode_.find(node->getLeft()) ==
+                constantValueByNode_.end()) {
+          stack.push_back({node->getLeft(), false});
+        }
+        continue;
       }
-      case Op::AND: {
-        const auto left = assignedConstantValue(expr->getLeft());
-        if (left.has_value() && !*left) {
-          value = false;
+
+      const auto left =
+          node->getLeft() == nullptr ? std::optional<bool>{}
+                                     : cachedConstantValue(node->getLeft());
+      const auto right =
+          node->getRight() == nullptr ? std::optional<bool>{}
+                                      : cachedConstantValue(node->getRight());
+      std::optional<bool> value;
+      switch (node->getOp()) {
+        case Op::NOT:
+          if (left.has_value()) {
+            value = !*left;
+          }
           break;
-        }
-        const auto right = assignedConstantValue(expr->getRight());
-        if (right.has_value() && !*right) {
-          value = false;
-        } else if (left.has_value() && right.has_value()) {
-          value = *left && *right; // LCOV_EXCL_LINE
-        } else if (left.has_value() && *left) {
-          value = right;
-        } else if (right.has_value() && *right) {
-          value = left; // LCOV_EXCL_LINE
-        } // LCOV_EXCL_LINE
-        break;
-      }
-      case Op::OR: {
-        const auto left = assignedConstantValue(expr->getLeft());
-        if (left.has_value() && *left) {
-          value = true; // LCOV_EXCL_LINE
+        case Op::AND:
+          if ((left.has_value() && !*left) ||
+              (right.has_value() && !*right)) {
+            value = false;
+          } else if (left.has_value() && right.has_value()) {
+            value = *left && *right; // LCOV_EXCL_LINE
+          } else if (left.has_value() && *left) {
+            value = right;
+          } else if (right.has_value() && *right) {
+            value = left; // LCOV_EXCL_LINE
+          } // LCOV_EXCL_LINE
+          break;
+        case Op::OR:
+          if ((left.has_value() && *left) ||
+              (right.has_value() && *right)) {
+            value = true; // LCOV_EXCL_LINE
+          } else if (left.has_value() && right.has_value()) {
+            value = *left || *right;
+          } else if (left.has_value() && !*left) {
+            value = right;
+          } else if (right.has_value() && !*right) {
+            value = left;
+          }
+          break;
+        case Op::XOR:
+          if (left.has_value() && right.has_value()) { // LCOV_EXCL_LINE
+            value = *left != *right; // LCOV_EXCL_LINE
+          } // LCOV_EXCL_LINE
           break; // LCOV_EXCL_LINE
-        }
-        const auto right = assignedConstantValue(expr->getRight());
-        if (right.has_value() && *right) {
-          value = true; // LCOV_EXCL_LINE
-        } else if (left.has_value() && right.has_value()) {
-          value = *left || *right;
-        } else if (left.has_value() && !*left) {
-          value = right;
-        } else if (right.has_value() && !*right) {
-          value = left;
-        }
-        break;
+        case Op::VAR: // LCOV_EXCL_LINE
+        case Op::NONE: // LCOV_EXCL_LINE
+        default:
+          throw std::runtime_error( // LCOV_EXCL_LINE
+              "Unsupported BoolExpr operator in constant-aware evaluation");
       }
-      case Op::XOR: {
-        const auto left = assignedConstantValue(expr->getLeft()); // LCOV_EXCL_LINE
-        const auto right = assignedConstantValue(expr->getRight()); // LCOV_EXCL_LINE
-        if (left.has_value() && right.has_value()) { // LCOV_EXCL_LINE
-          value = *left != *right; // LCOV_EXCL_LINE
-        } // LCOV_EXCL_LINE
-        break; // LCOV_EXCL_LINE
-      }
-      case Op::NONE: // LCOV_EXCL_LINE
-      default:
-        throw std::runtime_error( // LCOV_EXCL_LINE
-            "Unsupported BoolExpr operator in constant-aware evaluation");
+
+      constantValueByNode_.emplace(node, value);
     }
 
-    constantValueByNode_.emplace(expr, value);
-    return value;
+    return cachedConstantValue(expr);
   }
 
   int encodeImpl(BoolExpr* expr) {
-    if (const auto cached = nodeToLit_.find(expr); cached != nodeToLit_.end()) {
-      return cached->second;
-    }
-    if (const auto value = assignedConstantValue(expr); value.has_value()) {
-      const int lit = constLit(*value);
-      nodeToLit_.emplace(expr, lit);
-      return lit;
-    }
+    std::vector<BoolExprStackFrame> stack;
+    stack.reserve(512);
+    stack.push_back({expr, false});
 
-    int lit = 0;
-    switch (expr->getOp()) {
-      case Op::VAR: {
-        const size_t symbol = expr->getId();
+    while (!stack.empty()) {
+      const BoolExprStackFrame current = stack.back();
+      stack.pop_back();
+      BoolExpr* node = current.expr;
+      if (nodeToLit_.find(node) != nodeToLit_.end()) {
+        continue;
+      }
+
+      if (const auto value = assignedConstantValue(node); value.has_value()) {
+        nodeToLit_.emplace(node, constLit(*value));
+        continue;
+      }
+
+      if (node->getOp() == Op::VAR) {
+        const size_t symbol = node->getId();
         if (symbol == 0) {
-          lit = constLit(false); // LCOV_EXCL_LINE
-          break; // LCOV_EXCL_LINE
+          nodeToLit_.emplace(node, constLit(false)); // LCOV_EXCL_LINE
+          continue; // LCOV_EXCL_LINE
         }
         if (symbol == 1) {
-          lit = constLit(true); // LCOV_EXCL_LINE
-          break; // LCOV_EXCL_LINE
+          nodeToLit_.emplace(node, constLit(true)); // LCOV_EXCL_LINE
+          continue; // LCOV_EXCL_LINE
         }
         if (const auto constant = constantAssignments_.find(symbol);
             constant != constantAssignments_.end()) {
-          lit = constLit(constant->second); // LCOV_EXCL_LINE
-          break; // LCOV_EXCL_LINE
+          nodeToLit_.emplace(node, constLit(constant->second)); // LCOV_EXCL_LINE
+          continue; // LCOV_EXCL_LINE
         }
         auto leaf = leafLits_.find(symbol);
         if (leaf == leafLits_.end()) {
           leaf = leafLits_.emplace(symbol, newLiteral()).first;
         }
-        lit = leaf->second;
-        break;
+        nodeToLit_.emplace(node, leaf->second);
+        continue;
       }
-      case Op::NOT:
-        lit = -encodeImpl(expr->getLeft());
-        break;
-      case Op::AND: {
-        const int leftLit = encodeImpl(expr->getLeft());
-        if (isConstLit(leftLit, false)) {
-          lit = constLit(false); // LCOV_EXCL_LINE
-          break; // LCOV_EXCL_LINE
+
+      if (!current.visited) {
+        stack.push_back({node, true});
+        if (node->getRight() != nullptr &&
+            nodeToLit_.find(node->getRight()) == nodeToLit_.end()) {
+          stack.push_back({node->getRight(), false});
         }
-        if (isConstLit(leftLit, true)) {
-          lit = encodeImpl(expr->getRight());
+        if (node->getLeft() != nullptr &&
+            nodeToLit_.find(node->getLeft()) == nodeToLit_.end()) {
+          stack.push_back({node->getLeft(), false});
+        }
+        continue;
+      }
+
+      const auto leftIt =
+          node->getLeft() == nullptr ? nodeToLit_.end()
+                                     : nodeToLit_.find(node->getLeft());
+      const auto rightIt =
+          node->getRight() == nullptr ? nodeToLit_.end()
+                                      : nodeToLit_.find(node->getRight());
+      const int leftLit =
+          leftIt == nodeToLit_.end() ? 0 : leftIt->second;
+      const int rightLit =
+          rightIt == nodeToLit_.end() ? 0 : rightIt->second;
+      int lit = 0;
+      switch (node->getOp()) {
+        case Op::NOT:
+          lit = -leftLit;
           break;
-        }
-        const int rightLit = encodeImpl(expr->getRight());
-        if (leftLit == rightLit || isConstLit(rightLit, true)) {
-          lit = leftLit; // LCOV_EXCL_LINE
-        } else if (leftLit == -rightLit || isConstLit(rightLit, false)) {
-          lit = constLit(false); // LCOV_EXCL_LINE
-        } else { // LCOV_EXCL_LINE
-          lit = newLiteral();
-          addClause({-lit, leftLit});
-          addClause({-lit, rightLit});
-          addClause({lit, -leftLit, -rightLit});
-        }
-        break;
-      }
-      case Op::OR: {
-        const int leftLit = encodeImpl(expr->getLeft());
-        if (isConstLit(leftLit, true)) {
-          lit = constLit(true); // LCOV_EXCL_LINE
-          break; // LCOV_EXCL_LINE
-        }
-        if (isConstLit(leftLit, false)) {
-          lit = encodeImpl(expr->getRight());
+        case Op::AND:
+          if (isConstLit(leftLit, false)) {
+            lit = constLit(false); // LCOV_EXCL_LINE
+          } else if (isConstLit(leftLit, true)) {
+            lit = rightLit;
+          } else if (leftLit == rightLit || isConstLit(rightLit, true)) {
+            lit = leftLit; // LCOV_EXCL_LINE
+          } else if (leftLit == -rightLit || isConstLit(rightLit, false)) {
+            lit = constLit(false); // LCOV_EXCL_LINE
+          } else { // LCOV_EXCL_LINE
+            lit = newLiteral();
+            addClause({-lit, leftLit});
+            addClause({-lit, rightLit});
+            addClause({lit, -leftLit, -rightLit});
+          }
           break;
-        }
-        const int rightLit = encodeImpl(expr->getRight());
-        if (leftLit == rightLit || isConstLit(rightLit, false)) {
-          lit = leftLit;
-        } else if (leftLit == -rightLit || isConstLit(rightLit, true)) {
-          lit = constLit(true); // LCOV_EXCL_LINE
-        } else { // LCOV_EXCL_LINE
-          lit = newLiteral(); // LCOV_EXCL_LINE
-          addClause({-leftLit, lit}); // LCOV_EXCL_LINE
-          addClause({-rightLit, lit}); // LCOV_EXCL_LINE
-          addClause({-lit, leftLit, rightLit}); // LCOV_EXCL_LINE
-        }
-        break;
-      }
-      case Op::XOR: {
-        const int leftLit = encodeImpl(expr->getLeft()); // LCOV_EXCL_LINE
-        if (isConstLit(leftLit, false)) { // LCOV_EXCL_LINE
-          lit = encodeImpl(expr->getRight()); // LCOV_EXCL_LINE
+        case Op::OR:
+          if (isConstLit(leftLit, true)) {
+            lit = constLit(true); // LCOV_EXCL_LINE
+          } else if (isConstLit(leftLit, false)) {
+            lit = rightLit;
+          } else if (leftLit == rightLit || isConstLit(rightLit, false)) {
+            lit = leftLit;
+          } else if (leftLit == -rightLit || isConstLit(rightLit, true)) {
+            lit = constLit(true); // LCOV_EXCL_LINE
+          } else { // LCOV_EXCL_LINE
+            lit = newLiteral(); // LCOV_EXCL_LINE
+            addClause({-leftLit, lit}); // LCOV_EXCL_LINE
+            addClause({-rightLit, lit}); // LCOV_EXCL_LINE
+            addClause({-lit, leftLit, rightLit}); // LCOV_EXCL_LINE
+          }
+          break;
+        case Op::XOR:
+          if (isConstLit(leftLit, false)) { // LCOV_EXCL_LINE
+            lit = rightLit; // LCOV_EXCL_LINE
+          } else if (isConstLit(leftLit, true)) { // LCOV_EXCL_LINE
+            lit = -rightLit; // LCOV_EXCL_LINE
+          } else if (leftLit == rightLit) { // LCOV_EXCL_LINE
+            lit = constLit(false); // LCOV_EXCL_LINE
+          } else if (leftLit == -rightLit) { // LCOV_EXCL_LINE
+            lit = constLit(true); // LCOV_EXCL_LINE
+          } else if (isConstLit(rightLit, false)) { // LCOV_EXCL_LINE
+            lit = leftLit; // LCOV_EXCL_LINE
+          } else if (isConstLit(rightLit, true)) { // LCOV_EXCL_LINE
+            lit = -leftLit; // LCOV_EXCL_LINE
+          } else { // LCOV_EXCL_LINE
+            lit = newLiteral(); // LCOV_EXCL_LINE
+            addClause({-lit, -leftLit, -rightLit}); // LCOV_EXCL_LINE
+            addClause({-lit, leftLit, rightLit}); // LCOV_EXCL_LINE
+            addClause({lit, -leftLit, rightLit}); // LCOV_EXCL_LINE
+            addClause({lit, leftLit, -rightLit}); // LCOV_EXCL_LINE
+          }
           break; // LCOV_EXCL_LINE
-        }
-        if (isConstLit(leftLit, true)) { // LCOV_EXCL_LINE
-          lit = -encodeImpl(expr->getRight()); // LCOV_EXCL_LINE
-          break; // LCOV_EXCL_LINE
-        }
-        const int rightLit = encodeImpl(expr->getRight()); // LCOV_EXCL_LINE
-        if (leftLit == rightLit) { // LCOV_EXCL_LINE
-          lit = constLit(false); // LCOV_EXCL_LINE
-        } else if (leftLit == -rightLit) { // LCOV_EXCL_LINE
-          lit = constLit(true); // LCOV_EXCL_LINE
-        } else if (isConstLit(rightLit, false)) { // LCOV_EXCL_LINE
-          lit = leftLit; // LCOV_EXCL_LINE
-        } else if (isConstLit(rightLit, true)) { // LCOV_EXCL_LINE
-          lit = -leftLit; // LCOV_EXCL_LINE
-        } else { // LCOV_EXCL_LINE
-          lit = newLiteral(); // LCOV_EXCL_LINE
-          addClause({-lit, -leftLit, -rightLit}); // LCOV_EXCL_LINE
-          addClause({-lit, leftLit, rightLit}); // LCOV_EXCL_LINE
-          addClause({lit, -leftLit, rightLit}); // LCOV_EXCL_LINE
-          addClause({lit, leftLit, -rightLit}); // LCOV_EXCL_LINE
-        }
-        break; // LCOV_EXCL_LINE
+        case Op::VAR: // LCOV_EXCL_LINE
+        case Op::NONE: // LCOV_EXCL_LINE
+        default:
+          throw std::runtime_error( // LCOV_EXCL_LINE
+              "Unsupported BoolExpr operator in constant-aware encoding");
       }
-      case Op::NONE: // LCOV_EXCL_LINE
-      default:
-        throw std::runtime_error( // LCOV_EXCL_LINE
-            "Unsupported BoolExpr operator in constant-aware encoding");
+
+      nodeToLit_.emplace(node, lit);
     }
 
-    nodeToLit_.emplace(expr, lit);
-    return lit;
+    return nodeToLit_.at(expr);
   }
 
   SATSolverWrapper& solver_;
