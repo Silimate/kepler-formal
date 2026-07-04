@@ -37,7 +37,6 @@ cc_library(
         "proof/TransitionExprResolver.cpp",
         "strategy/ReachableStateInvariant.cpp",
         "strategy/SequentialEquivalenceStrategy.cpp",
-        "strategy/StructuralStateInvariant.cpp",
     ],
     hdrs = [
         "common/AlignedSignals.h",
@@ -61,7 +60,6 @@ cc_library(
         "proof/ProofEngineShared.h",
         "proof/TransitionExprResolver.h",
         "strategy/ReachableStateInvariant.h",
-        "strategy/StructuralStateInvariant.h",
         "strategy/SequentialEquivalenceStrategy.h",
     ],
     includes = [

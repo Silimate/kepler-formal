@@ -71,74 +71,11 @@ class EncoderStack {
   size_t capacity_ = 0;
 };
 
-class FrameAliasUnionFind {
- public:
-  explicit FrameAliasUnionFind(const std::vector<size_t>& symbols) {
-    parent_.reserve(symbols.size());
-    for (const auto symbol : symbols) {
-      parent_.emplace(symbol, symbol);
-    }
-  }
-
-  bool contains(size_t symbol) const {
-    return parent_.find(symbol) != parent_.end();
-  }
-
-  void unite(size_t lhs, size_t rhs) {
-    if (!contains(lhs) || !contains(rhs)) {
-      // LCOV_EXCL_START
-      return;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-    const size_t lhsRoot = find(lhs);
-    const size_t rhsRoot = find(rhs);
-    if (lhsRoot == rhsRoot) {
-      // LCOV_EXCL_START
-      return;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-    const size_t representative = std::min(lhsRoot, rhsRoot);
-    const size_t merged = std::max(lhsRoot, rhsRoot);
-    parent_[merged] = representative;
-  }
-
-  size_t find(size_t symbol) {
-    auto it = parent_.find(symbol);
-    if (it == parent_.end()) {
-      // LCOV_EXCL_START
-      throw std::runtime_error("Missing frame alias symbol " +  // LCOV_EXCL_LINE
-                               std::to_string(symbol));  // LCOV_EXCL_LINE
-                               // LCOV_EXCL_STOP
-    }
-    if (it->second != symbol) {
-      it->second = find(it->second);
-    }
-    return it->second;
-  // LCOV_EXCL_START
-  }  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
-
- private:
-  std::unordered_map<size_t, size_t> parent_;
-};
-
-FrameSymbolAliases emptyAliases() {
-  return {};
-}
-
 }  // namespace
 
-// LCOV_EXCL_START
 FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
                                        const std::vector<size_t>& symbols,
-                                       size_t numFrames)
-    : FrameVariableStore(solver, symbols, numFrames, emptyAliases()) {}
-// LCOV_EXCL_STOP
-
-FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
-                                       const std::vector<size_t>& symbols,
-                                       size_t numFrames,
-                                       const FrameSymbolAliases& aliasesByFrame) {
+                                       size_t numFrames) {
   // The store knows the frame-variable count before any clause is emitted.
   // Reserving it up front is especially helpful for PDR, which creates many
   // small solvers and otherwise makes Kissat repeatedly grow its variable
@@ -151,23 +88,8 @@ FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
   }
 
   for (size_t frame = 0; frame < numFrames; ++frame) {
-    FrameAliasUnionFind aliases(symbols);
-    if (frame < aliasesByFrame.size()) {
-      for (const auto& [lhs, rhs] : aliasesByFrame[frame]) {
-        aliases.unite(lhs, rhs);
-      }
-    }
-
-    std::unordered_map<size_t, int> litByRepresentative;
-    litByRepresentative.reserve(symbols.size());
     for (const auto symbol : symbols) {
-      const size_t representative = aliases.find(symbol);
-      auto [litIt, inserted] =
-          litByRepresentative.emplace(representative, 0);
-      if (inserted) {
-        litIt->second = newSolverLiteral(solver);
-      }
-      symbolFrameLits_[symbol].push_back(litIt->second);
+      symbolFrameLits_[symbol].push_back(newSolverLiteral(solver));
     }
   }
 }
@@ -546,11 +468,9 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
     const int rightLit = node->getRight() ? cachedLiteral(node->getRight()) : 0;
     int lit = 0;
 
-    // Standard Tseitin clauses for the BoolExpr node at this frame.  Before we
-    // emit them, apply literal-level simplifications created by frame aliases
-    // and constants.  Large SEC proofs intentionally alias state pairs that are
-    // assumed equal in a frame; without these reductions, expressions such as
-    // (a XOR a) still become full Tseitin cones and dominate CNF construction.
+    // Standard Tseitin clauses for the BoolExpr node at this frame.  Keep the
+    // local literal simplifications for constants and repeated subexpressions
+    // so expressions such as (a XOR a) do not become needless CNF cones.
     switch (node->getOp()) {
       case Op::NOT:
         lit = -leftLit;

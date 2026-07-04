@@ -18,7 +18,6 @@ add_library(kepler_sec STATIC
     kinduction/InductionStepSolver.cpp
     kinduction/SatEncoding.cpp
     strategy/ReachableStateInvariant.cpp
-    strategy/StructuralStateInvariant.cpp
     strategy/SequentialEquivalenceStrategy.cpp
 )
 

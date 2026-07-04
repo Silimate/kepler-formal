@@ -4665,8 +4665,8 @@ constexpr size_t kMaxCompleteStateFrontierForStartupMatching = 5000;
 
 bool shouldRetainCompleteStateFrontierForStartupMatching(size_t stateCount) {
   // Moderate-size SEC cases benefit from the complete transition relation:
-  // structural startup matching can validate state correspondences without
-  // relying on internal flop names.  Large ASICs still use the COI frontier so
+  // reset/startup checks can inspect local sequential cones without relying on
+  // internal flop names.  Large ASICs still use the COI frontier so
   // LCOV_EXCL_START
   // BlackParrot-scale proofs do not materialize every sequential cone up front.
   // LCOV_EXCL_STOP

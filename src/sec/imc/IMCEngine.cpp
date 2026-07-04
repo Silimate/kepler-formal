@@ -664,16 +664,6 @@ std::optional<IMCResult> findImcCounterexample(const ImcBaseCounterexampleCache&
   return std::nullopt;
 }
 
-void removeCrossDesignStateCandidates(KInductionProblem& problem) {
-  // IMC must derive every relation between the two designs from the encoded
-  // reset and transition formulas. Candidate correspondences mined elsewhere
-  // are intentionally unavailable to both interpolation and witness search.
-  problem.initialStateEqualityPairs.clear();
-  problem.bootstrapStateEqualityPairs.clear();
-  problem.inductiveStateEqualityPairs.clear();
-  problem.inductionPropertyAssumesInductiveStateEqualities = false;
-}
-
 struct ReusableCraigInvariant { // LCOV_EXCL_LINE
   std::vector<InterpolantRegion> regions;
   std::unordered_set<size_t> trackedStates;
@@ -921,7 +911,6 @@ std::optional<IMCResult> findLargeDualRailCounterexampleUpTo(
       KInductionProblem outputProblem = problem;
       configureOutputBatchProblem(
           outputProblem, problem, probe.output, probe.output + 1);
-      removeCrossDesignStateCandidates(outputProblem);
       if (auto witness = findFastBaseCounterexampleAtFrontier(
               outputProblem, solverType, depth);
           witness.has_value()) {
@@ -950,7 +939,6 @@ IMCResult runCraigOutputRange(
   KInductionProblem batchProblem = problem;
   configureOutputBatchProblem(
       batchProblem, problem, firstOutput, endOutput);
-  removeCrossDesignStateCandidates(batchProblem);
   const std::unordered_set<size_t> trackedStateSeeds =
       buildCraigTrackedStateSeedsForRange(
           supportCache, firstOutput, endOutput, seedScope);

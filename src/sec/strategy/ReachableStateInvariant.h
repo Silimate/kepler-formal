@@ -6,21 +6,15 @@
 #include <cstddef>
 #include <unordered_map>
 
-#include "../../config/Config.h"
-#include "common/AlignedSignals.h"
 #include "model/SequentialDesignModel.h"
 
 namespace KEPLER_FORMAL::SEC {
 
-// The reachable-state strengthening that SEC derives before proving anything:
-// which state pairs are compatible at startup, which ones stay anchored after
-// reset/bootstrap, and which concrete state values become known after reset
-// propagation.
+// Startup strengthening is design-local only.  It may derive concrete
+// per-design reset/bootstrap state values, but it must never relate internal
+// state bits from the two SEC designs.
 struct ReachableStateInvariant {
   size_t bootstrapCycles = 0;
-  AlignedSignals initialStateCorrespondence;
-  AlignedSignals anchoredStateEqualities;
-  AlignedSignals bootstrapOnlyStateEqualities;
   std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues0;
   std::unordered_map<SignalKey, bool, SignalKeyHash> bootstrapValues1;
 };
@@ -28,13 +22,6 @@ struct ReachableStateInvariant {
 ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
-    const AlignedSignals& alignedInputs,
-    const AlignedSignals& inductiveStateEqualities,
-    bool deriveResetBootstrapStrengthening = true,
-    bool secDiagEnabled = false,
-    KEPLER_FORMAL::Config::SolverType solverType =
-        KEPLER_FORMAL::Config::getSolverType(),
-    bool deriveResetBootstrapEqualities = true,
-    const AlignedSignals& resetBootstrapCandidateEqualities = {});
+    bool deriveResetBootstrapStrengthening = true);
 
 }  // namespace KEPLER_FORMAL::SEC

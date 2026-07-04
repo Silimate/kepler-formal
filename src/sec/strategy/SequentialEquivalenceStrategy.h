@@ -113,7 +113,6 @@ namespace detail {
 constexpr size_t kMinPdrDualRailFrameZeroValidationOutputs = 256;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationOutputs = 384;
 constexpr size_t kMaxPdrDualRailFrameZeroValidationStateSymbols = 1000000;
-constexpr size_t kMaxDualRailGlobalBootstrapEqualityOutputs = 384;
 
 SequentialEquivalenceProofProgress buildSecEngineProofProgress(
     const std::string& engineLabel,
@@ -126,16 +125,6 @@ std::vector<std::string> buildSecEngineProofProgressDiagLines(
     const std::vector<std::string>& observedOutputNames,
     size_t totalOutputCount,
     size_t provenOutputCount);
-
-inline bool shouldSkipDualRailGlobalBootstrapEqualityMining( // LCOV_EXCL_LINE
-    SecEngine secEngine,
-    SecEncoding encoding,
-    size_t observedOutputSurface) {
-  return (secEngine == SecEngine::KInduction || // LCOV_EXCL_LINE
-          secEngine == SecEngine::Imc) && // LCOV_EXCL_LINE
-         encoding == SecEncoding::DualRailSteady && // LCOV_EXCL_LINE
-         observedOutputSurface > kMaxDualRailGlobalBootstrapEqualityOutputs; // LCOV_EXCL_LINE
-}
 
 inline bool shouldDeferPdrDualRailFrameZeroValidation( // LCOV_EXCL_LINE
     size_t observedOutputSurface,

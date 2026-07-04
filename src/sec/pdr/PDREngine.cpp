@@ -34,18 +34,6 @@ namespace KEPLER_FORMAL::SEC {
 
 namespace detail {
 
-bool pdrStateEqualitySubsetPrefersCadical(
-    bool usesDualRailStateEncoding,
-    size_t equalityPairCount,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t solverSymbols,
-    size_t pairLimit,
-    size_t symbolLimit) {
-  return usesDualRailStateEncoding &&
-         solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
-         (equalityPairCount >= pairLimit || solverSymbols >= symbolLimit);
-}
-
 bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
                                        size_t observedOutputCount,
                                        size_t originalObservedOutputCount,
@@ -646,16 +634,6 @@ constexpr size_t kMaxProcessResetUnreachableCoreCacheEntries = 4;
 // bounded chunk from PDR when we have the transition DAG estimate.
 constexpr size_t kMinPdrTransitionSolverReserveNodes = 64 * 1024;
 constexpr size_t kMaxPdrTransitionSolverReserveHint = 512 * 1024;
-// PDR can use inferred state correspondences as an ordinary frame invariant,
-// but ASIC retiming/optimization can make a few inferred pairs non-inductive
-// while many others are still valid and very useful.  Mine a validated subset
-// once per PDR run instead of forcing the blocking loop to rediscover thousands
-// LCOV_EXCL_START
-// of those equality clauses one cube at a time.
-constexpr size_t kMaxStateEqualitySubsetPairs = 2048;
-constexpr size_t kMaxStateEqualitySubsetIterations = 256;
-// LCOV_EXCL_STOP
-
 bool isLocalDualRailPredecessorCoreSurface(size_t level,
                                            size_t cubeSize,
                                            size_t transitionSupportSize) {
@@ -1686,29 +1664,6 @@ KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
 }
 
 size_t envSizeLimitOrDefault(const char* name, size_t defaultValue);
-
-KEPLER_FORMAL::Config::SolverType stateEqualitySubsetSolverType(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    size_t equalityPairCount,
-    size_t solverSymbols) {
-  constexpr size_t kMediumDualRailStateEqualityPairs = 64;
-  constexpr size_t kMediumDualRailStateEqualitySymbols = 256;
-  // This is still the selected PDR proof path. Only the local SAT backend for
-  // the inductiveness-pruning query changes: medium dual-rail equality
-  // surfaces are model-producing and much wider than normal predecessor
-  // blocking queries, where Kissat remains the default.
-  if (detail::pdrStateEqualitySubsetPrefersCadical(
-          problem.usesDualRailStateEncoding,
-          equalityPairCount,
-          solverType,
-          solverSymbols,
-          kMediumDualRailStateEqualityPairs,
-          kMediumDualRailStateEqualitySymbols)) {
-    return KEPLER_FORMAL::Config::SolverType::CADICAL; // LCOV_EXCL_LINE
-  }
-  return solverType;
-}
 
 bool pdrResetShortcutDiagEnabled() {
   return std::getenv("KEPLER_SEC_PDR_RESET_SHORTCUT_DIAG") != nullptr;
@@ -4314,16 +4269,9 @@ class ResetExpressionCanonicalizer {
  public:
   explicit ResetExpressionCanonicalizer(const KInductionProblem& problem) {
     parent_.reserve(
-        (problem.initialStateEqualityPairs.size() +
-         problem.sameFrameStateEqualityPairs0.size() +
+        (problem.sameFrameStateEqualityPairs0.size() +
          problem.sameFrameStateEqualityPairs1.size()) *
         2);
-    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-      for (const auto& [lhsSymbol, rhsSymbol] :
-           problem.initialStateEqualityPairs) {
-        unite(lhsSymbol, rhsSymbol);
-      }
-    }
     for (const auto& [lhsSymbol, rhsSymbol] :
          problem.sameFrameStateEqualityPairs0) {
       unite(lhsSymbol, rhsSymbol); // LCOV_EXCL_LINE
@@ -4633,27 +4581,6 @@ ResetBootstrapExpressionRelations* resetBootstrapExpressionRelationsFor(
   auto relations = std::make_shared<ResetBootstrapExpressionRelations>();
   // LCOV_EXCL_STOP
   std::vector<std::pair<BoolExpr*, BoolExpr*>> bootstrapExprPairs;
-  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-    bootstrapExprPairs.reserve(problem.bootstrapStateEqualityPairs.size());
-    for (const auto& [lhsSymbol, rhsSymbol] :
-         problem.bootstrapStateEqualityPairs) {
-      const auto lhsExpr =
-          evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
-      const auto rhsExpr =
-          evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
-      if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
-        if (evaluator.budgetExhausted()) {  // LCOV_EXCL_LINE
-          return nullptr;  // LCOV_EXCL_LINE
-        }
-        continue;  // LCOV_EXCL_LINE
-      }
-      BoolExpr* lhsCanonical = canonicalizer.canonicalize(*lhsExpr);
-      BoolExpr* rhsCanonical = canonicalizer.canonicalize(*rhsExpr);
-      relations->index.unite(lhsCanonical, rhsCanonical);
-      bootstrapExprPairs.emplace_back(lhsCanonical, rhsCanonical);
-      relations->hasRelation = true;
-    }
-  }
 
   if (relations->hasRelation &&
       bootstrapExpressionRewriteBudgetAllows(bootstrapExprPairs)) {
@@ -4921,42 +4848,6 @@ selectRelevantBootstrapEqualityExprs(
   };
 
   std::vector<Candidate> candidates;
-  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-    candidates.reserve(problem.bootstrapStateEqualityPairs.size());
-    for (const auto& [lhsSymbol, rhsSymbol] :
-         problem.bootstrapStateEqualityPairs) {
-      const auto lhsExpr =
-          evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles); // LCOV_EXCL_LINE
-      const auto rhsExpr =
-          // LCOV_EXCL_START
-          evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
-          // LCOV_EXCL_STOP
-      if (!lhsExpr.has_value() || !rhsExpr.has_value()) { // LCOV_EXCL_LINE
-        return std::nullopt;  // LCOV_EXCL_LINE
-      }
-      // LCOV_EXCL_START
-      BoolExpr* lhs = *lhsExpr;
-      // LCOV_EXCL_STOP
-      BoolExpr* rhs = *rhsExpr; // LCOV_EXCL_LINE
-      if (canonicalizer != nullptr) { // LCOV_EXCL_LINE
-        lhs = canonicalizer->canonicalize(lhs); // LCOV_EXCL_LINE
-        rhs = canonicalizer->canonicalize(rhs); // LCOV_EXCL_LINE
-      } // LCOV_EXCL_LINE
-
-      const auto* lhsSupport = evaluator.cachedSupportVars(lhs); // LCOV_EXCL_LINE
-      if (lhsSupport == nullptr) { // LCOV_EXCL_LINE
-        return std::nullopt;  // LCOV_EXCL_LINE
-      }
-      const auto* rhsSupport = evaluator.cachedSupportVars(rhs); // LCOV_EXCL_LINE
-      if (rhsSupport == nullptr) { // LCOV_EXCL_LINE
-        return std::nullopt;  // LCOV_EXCL_LINE
-      }
-      std::set<size_t> support = *lhsSupport; // LCOV_EXCL_LINE
-      support.insert(rhsSupport->begin(), rhsSupport->end()); // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
-      candidates.push_back({lhs, rhs, std::move(support)});
-    }
-  }
 
   std::vector<std::pair<BoolExpr*, BoolExpr*>> selected;
   selected.reserve(candidates.size());
@@ -5117,8 +5008,8 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
           cube.size(),  // LCOV_EXCL_LINE
           " target_step=",
           targetStep,
-          " support=0 initial_equalities=0 bootstrap_equalities=0 "
-          "frame_invariant_equalities=0 literals=",
+          " support=0 initial_relation_clauses=0 bootstrap_relation_clauses=0 "
+          "frame_invariant_relation_clauses=0 literals=",
           formatCubeForDiag(cube),  // LCOV_EXCL_LINE
           " hash=",
           cubeFingerprint(cube));  // LCOV_EXCL_LINE
@@ -5143,9 +5034,9 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
   const auto miss = [&](std::string_view reason,
   // LCOV_EXCL_STOP
                         size_t supportSize = 0,
-                        size_t initialEqualityClauses = 0,
-                        size_t bootstrapEqualityClauses = 0,
-                        size_t frameInvariantEqualityClauses = 0)
+                        size_t initialRelationClauses = 0,
+                        size_t bootstrapRelationClauses = 0,
+                        size_t frameInvariantRelationClauses = 0)
       -> std::optional<StateCube> {
     if (deepResetExpressionStep && budgetSkipFromStep != nullptr &&
         (reason == "canonicalize_budget" ||  // LCOV_EXCL_LINE
@@ -5167,14 +5058,14 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
           // LCOV_EXCL_START
           supportSize,
           // LCOV_EXCL_STOP
-          " initial_equalities=",
-          initialEqualityClauses,
-          " bootstrap_equalities=",
+          " initial_relation_clauses=",
+          initialRelationClauses,
+          " bootstrap_relation_clauses=",
           // LCOV_EXCL_START
-          bootstrapEqualityClauses,
+          bootstrapRelationClauses,
           // LCOV_EXCL_STOP
-          " frame_invariant_equalities=",
-          frameInvariantEqualityClauses,
+          " frame_invariant_relation_clauses=",
+          frameInvariantRelationClauses,
           " literals=",
           formatCubeForDiag(cube),
           " hash=",
@@ -5748,20 +5639,20 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
 
   // The expressions were already rewritten through initial assignments and
   // LCOV_EXCL_START
-  // equality classes, so do not add the original equality-pair endpoints back
+  // equality classes, so do not add the original relation endpoints back
   // LCOV_EXCL_STOP
   // into this local proof. Doing so recreates the sampled AES support blow-up.
   // LCOV_EXCL_START
-  size_t initialEqualityClauses = 0;
-  size_t bootstrapEqualityClauses = 0;
-  size_t frameInvariantEqualityClauses = 0;
+  size_t initialRelationClauses = 0;
+  size_t bootstrapRelationClauses = 0;
+  size_t frameInvariantRelationClauses = 0;
   // LCOV_EXCL_STOP
   for (const auto& [lhsExpr, rhsExpr] : *bootstrapEqualityExprs) {
     addLiteralEquivalence(  // LCOV_EXCL_LINE
         solver,
         encoder.encode(lhsExpr),  // LCOV_EXCL_LINE
         encoder.encode(rhsExpr));  // LCOV_EXCL_LINE
-    ++bootstrapEqualityClauses;  // LCOV_EXCL_LINE
+    ++bootstrapRelationClauses;  // LCOV_EXCL_LINE
   }
   for (const auto& [lhsExpr, rhsExpr] : *frameInvariantEqualityExprs) {
     addLiteralEquivalence(  // LCOV_EXCL_LINE
@@ -5769,7 +5660,7 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
         solver,
         encoder.encode(lhsExpr),  // LCOV_EXCL_LINE
         encoder.encode(rhsExpr));  // LCOV_EXCL_LINE
-    ++frameInvariantEqualityClauses;  // LCOV_EXCL_LINE
+    ++frameInvariantRelationClauses;  // LCOV_EXCL_LINE
   }
 
 
@@ -5784,9 +5675,9 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
     return miss(  // LCOV_EXCL_LINE
         "encoded_support_cap",  // LCOV_EXCL_LINE
         encodedSupportSize,  // LCOV_EXCL_LINE
-        initialEqualityClauses,  // LCOV_EXCL_LINE
-        bootstrapEqualityClauses,  // LCOV_EXCL_LINE
-        frameInvariantEqualityClauses);  // LCOV_EXCL_LINE
+        initialRelationClauses,  // LCOV_EXCL_LINE
+        bootstrapRelationClauses,  // LCOV_EXCL_LINE
+        frameInvariantRelationClauses);  // LCOV_EXCL_LINE
   }
 
   if (pdrResetShortcutDiagEnabled()) {
@@ -5797,12 +5688,12 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
         targetStep,
         " support=",
         encodedSupportSize,
-        " initial_equalities=",
-        initialEqualityClauses,
-        " bootstrap_equalities=",
-        bootstrapEqualityClauses,
-        " frame_invariant_equalities=",
-        frameInvariantEqualityClauses,
+        " initial_relation_clauses=",
+        initialRelationClauses,
+        " bootstrap_relation_clauses=",
+        bootstrapRelationClauses,
+        " frame_invariant_relation_clauses=",
+        frameInvariantRelationClauses,
         " literals=",
         formatCubeForDiag(cube),
         " hash=",
@@ -5814,16 +5705,16 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
   if (solveStatus == SATSolverWrapper::SolveStatus::Unknown) {
     return miss("solver_resource_limit",
                 encodedSupportSize,
-                initialEqualityClauses,
-                bootstrapEqualityClauses,
-                frameInvariantEqualityClauses);
+                initialRelationClauses,
+                bootstrapRelationClauses,
+                frameInvariantRelationClauses);
   }
   if (solveStatus == SATSolverWrapper::SolveStatus::Sat) {
     return miss("sat",
                 encodedSupportSize,
-                initialEqualityClauses,
-                bootstrapEqualityClauses,
-                frameInvariantEqualityClauses);
+                initialRelationClauses,
+                bootstrapRelationClauses,
+                frameInvariantRelationClauses);
   }
 
   StateCube conflict = cube;
@@ -5896,8 +5787,8 @@ std::optional<StateCube> resetSpecializedConflictCubeAtStep(
           queryCube.size(),  // LCOV_EXCL_LINE
           " target_step=",
           targetStep,
-          " support=0 initial_equalities=0 bootstrap_equalities=0 "
-          "frame_invariant_equalities=0 literals=",
+          " support=0 initial_relation_clauses=0 bootstrap_relation_clauses=0 "
+          "frame_invariant_relation_clauses=0 literals=",
           formatCubeForDiag(queryCube),  // LCOV_EXCL_LINE
           " hash=",
           cubeFingerprint(queryCube));  // LCOV_EXCL_LINE
@@ -6050,9 +5941,9 @@ std::optional<StateCube> resetSpecializedConflictCubeAtStep(
               queryCube.size(),  // LCOV_EXCL_LINE
               " target_step=",
               targetStep,
-              " support=0 initial_equalities=0 bootstrap_equalities=0 "
+              " support=0 initial_relation_clauses=0 bootstrap_relation_clauses=0 "
               // LCOV_EXCL_START
-              "frame_invariant_equalities=0 literals=",
+              "frame_invariant_relation_clauses=0 literals=",
               // LCOV_EXCL_STOP
               formatCubeForDiag(queryCube),  // LCOV_EXCL_LINE
               " hash=",
@@ -6394,13 +6285,9 @@ const std::vector<std::pair<size_t, size_t>>& emptySymbolPairs();
 
 bool hasStructuredInitFacts(const KInductionProblem& problem) {
   if (problem.resetBootstrapCycles != 0) {
-    return !problem.bootstrapStateAssignments.empty() ||
-           (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
-            !problem.bootstrapStateEqualityPairs.empty());
+    return !problem.bootstrapStateAssignments.empty();
   }
-  return !problem.initialStateAssignments.empty() ||
-         (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
-          !problem.initialStateEqualityPairs.empty());
+  return !problem.initialStateAssignments.empty();
 }
 
 void addRelevantInitConstraintSymbols(const KInductionProblem& problem,
@@ -6413,21 +6300,6 @@ void addRelevantInitConstraintSymbols(const KInductionProblem& problem,
   for (const auto& [symbol, /*value*/ _] : assignments) {
     if (symbols.find(symbol) != symbols.end()) {
       symbols.insert(symbol);
-    }
-  }
-  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-    const auto& equalities = usesBootstrapFrontier
-                                 ? problem.bootstrapStateEqualityPairs
-                                 : problem.initialStateEqualityPairs;
-    for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
-      const bool touchesQuery =
-          symbols.find(lhsSymbol) != symbols.end() ||
-          symbols.find(rhsSymbol) != symbols.end();
-      if (!touchesQuery) {
-        continue;
-      }
-      symbols.insert(lhsSymbol);
-      symbols.insert(rhsSymbol);
     }
   }
 }
@@ -7058,11 +6930,7 @@ std::optional<bool> cubeIntersectsKnownInitFacts(
                                 ? problem.bootstrapStateAssignments
                                 // LCOV_EXCL_STOP
                                 : problem.initialStateAssignments;
-  const auto& equalities =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
-          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
-                                   : problem.initialStateEqualityPairs) // LCOV_EXCL_LINE
-          : emptySymbolPairs();
+  const auto& equalities = emptySymbolPairs();
 
 // LCOV_EXCL_START
 
@@ -8206,11 +8074,7 @@ InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
-          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
-                                   : problem.initialStateEqualityPairs)
-          : emptySymbolPairs();
+  const auto& equalities = emptySymbolPairs();
 
   InitFactIndex index;
   index.assignments.reserve(assignments.size());
@@ -8524,7 +8388,6 @@ void releaseLargeDualRailResetFrontierContext(ResetFrontierCache& cache,
   size_t lazyDualRailRemapMemoEntries = 0;
   size_t lazySupportEntries = 0;
   size_t lazyNodeCountEntries = 0;
-  size_t lazyStateEqualitySubsetEntries = 0;
 
   cache.reachabilityContext.reset();
   cache.resetExpressionEvaluator.reset();
@@ -8553,7 +8416,6 @@ void releaseLargeDualRailResetFrontierContext(ResetFrontierCache& cache,
     }
     lazySupportEntries = store.supportByStateSymbol.size();
     lazyNodeCountEntries = store.nodeCountByStateSymbol.size();
-    lazyStateEqualitySubsetEntries = store.pdrStateEqualitySubsetCache.size();
 
     clearAndReleaseContainer(store.remappedByStateSymbol);
     for (auto& memo : store.remapMemoByDesign) {
@@ -8566,7 +8428,6 @@ void releaseLargeDualRailResetFrontierContext(ResetFrontierCache& cache,
     // slices.  These caches contain compact COI facts, not materialized
     // transition expressions, and Swerv rebuilds them for many sibling
     // dual-rail leaves when they are released with the heavy remap caches.
-    clearAndReleaseContainer(store.pdrStateEqualitySubsetCache);
   }
 
   releaseAllocatorFreePages();
@@ -8590,8 +8451,7 @@ void releaseLargeDualRailResetFrontierContext(ResetFrontierCache& cache,
         " lazy_remap_memos=", lazyRemapMemoEntries,
         " lazy_dual_rail_memos=", lazyDualRailRemapMemoEntries,
         " lazy_support=", lazySupportEntries,
-        " lazy_node_counts=", lazyNodeCountEntries,
-        " lazy_state_eq_subsets=", lazyStateEqualitySubsetEntries);
+        " lazy_node_counts=", lazyNodeCountEntries);
   }
 }
 
@@ -10611,11 +10471,7 @@ bool addRelevantStructuredInitConstraints(
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities =
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
-          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
-                                   : problem.initialStateEqualityPairs)
-          : emptySymbolPairs();
+  const auto& equalities = emptySymbolPairs();
 
   std::unordered_set<size_t> querySet(querySymbols.begin(), querySymbols.end());
   bool addedConstraint = false;
@@ -13063,13 +12919,7 @@ std::optional<StateCube> growCoreOutsideInit(  // LCOV_EXCL_LINE
                                 ? problem.bootstrapStateAssignments  // LCOV_EXCL_LINE
                                 : problem.initialStateAssignments;  // LCOV_EXCL_LINE
                                 // LCOV_EXCL_STOP
-  const auto& equalities =  // LCOV_EXCL_LINE
-      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() // LCOV_EXCL_LINE
-          ? (usesBootstrapFrontier  // LCOV_EXCL_LINE
-                 ? problem.bootstrapStateEqualityPairs  // LCOV_EXCL_LINE
-                 // LCOV_EXCL_START
-                 : problem.initialStateEqualityPairs)  // LCOV_EXCL_LINE
-          : emptySymbolPairs();  // LCOV_EXCL_LINE
+  const auto& equalities = emptySymbolPairs();  // LCOV_EXCL_LINE
 
   // UNSAT cores from transition assumptions can be too small to be legal PDR
   // frame clauses because a one-bit reason may still overlap Init. Add only
@@ -16209,420 +16059,19 @@ bool blockProofObligations(const KInductionProblem& problem,
 
 std::vector<StateClause> buildSeedClauses(const KInductionProblem& problem,
                                           const InitFactIndex& initFacts) {
+  (void)problem;
+  (void)initFacts;
   std::vector<StateClause> seedClauses;
-  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-    return seedClauses;
-  }
-  // Seed the first learned frame with state equalities that are already
-  // guaranteed by Init/bootstrap, so PDR starts from facts that are known
-  // reachable-state invariants instead of rediscovering them from scratch.
-  //
-  // This deliberately uses only structured init/bootstrap facts. Running an
-  // exact SAT init-intersection query for every possible equality seed is too
-  // expensive on ASIC regressions and is not needed for soundness: if a seed is
-  // not cheaply known to hold on the startup frontier, we simply do not seed it.
-  for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-    StateClause clause0 = {{lhsSymbol, false}, {rhsSymbol, true}};
-    StateClause clause1 = {{lhsSymbol, true}, {rhsSymbol, false}};
-    normalizeClause(clause0);
-    normalizeClause(clause1);
-
-    // Promote already-anchored state equalities into initial frame facts when
-    // they are guaranteed by Init/bootstrap instead of guessed from structure.
-    if (twoLiteralCubeIsKnownOutsideInit(
-            initFacts, lhsSymbol, true, rhsSymbol, false)) {
-      seedClauses.push_back(clause0);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    if (twoLiteralCubeIsKnownOutsideInit(
-            initFacts, lhsSymbol, false, rhsSymbol, true)) {
-      seedClauses.push_back(clause1);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-  }
+  // Cross-design internal state equality seeds are forbidden.
   return seedClauses;
 }
 
-BoolExpr* buildStateEqualityInvariant(
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
-  if (equalityPairs.empty()) {
-    return nullptr;
-  }
-
-  BoolExpr* invariant = BoolExpr::createTrue();
-  for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
-    invariant = BoolExpr::And(
-        invariant,
-        makeEqualityExpr(BoolExpr::Var(lhsSymbol), BoolExpr::Var(rhsSymbol)));
-  }
-  invariant = BoolExpr::simplify(invariant);
-  return invariant == BoolExpr::createTrue() ? nullptr : invariant;
-}
-
-BoolExpr* buildStateEqualityInvariant(const KInductionProblem& problem) {
-  return buildStateEqualityInvariant(problem.inductiveStateEqualityPairs);
-}
-
-bool structuredInitFactsProveEqualityPair(const InitFactIndex& initFacts,
-                                          const std::pair<size_t, size_t>& pair) {
-  // A structured Init/bootstrap equality proves `lhs == rhs` exactly when both
-  // violating two-literal cubes are excluded from the startup frontier.
-  return twoLiteralCubeIsKnownOutsideInit(
-             initFacts, pair.first, true, pair.second, false) &&
-         twoLiteralCubeIsKnownOutsideInit(
-             initFacts, pair.first, false, pair.second, true);
-}
-
-bool structuredInitFactsImplyStateEqualities(
-    const KInductionProblem& problem,
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
-  if (equalityPairs.empty() || !hasStructuredInitFacts(problem)) {
-    return false;
-  }
-
-  const InitFactIndex initFacts = buildInitFactIndex(problem);
-  for (const auto& pair : equalityPairs) {
-    if (!structuredInitFactsProveEqualityPair(initFacts, pair)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool structuredInitFactsImplyCandidate(
-    const KInductionProblem& problem,
-    BoolExpr* initFormula,
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
-    bool alsoRequireOutputProperty,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  if (!structuredInitFactsImplyStateEqualities(problem, equalityPairs)) {
-    return false;
-  }
-  if (!alsoRequireOutputProperty) {
-    return true;
-  }
-  // State/output candidates combine structured startup equalities with the
-  // ordinary top-output property.  The structured shortcut may prove only the
-  // LCOV_EXCL_START
-  // state half; the output half must still be present in the validated F[0]
-  // LCOV_EXCL_STOP
-  // formula before PDR can use the combined invariant.
-  return problem.property != nullptr &&
-         initialFrontierImplies(initFormula, problem.property, solverType);
-}
-
-bool pdrInitialFrontierImpliesStateEqualities(
-    const KInductionProblem& problem,
-    BoolExpr* initFormula,
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  // Structured startup equalities are exact F0 facts; consult them before
-  // building a broad monolithic Init SAT query for the same relation.
-  if (structuredInitFactsImplyStateEqualities(problem, equalityPairs)) {
-    return true;
-  }
-  BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
-  if (invariant == nullptr) {
-    return false;  // LCOV_EXCL_LINE
-  }
-  if (initialFrontierImplies(initFormula, invariant, solverType)) {
-    return true;
-  }
-  return false;
-}
-
-// LCOV_EXCL_START
-BoolExpr* buildStateAndOutputInvariant(
-    const KInductionProblem& problem,
-    // LCOV_EXCL_STOP
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
-  // This strengthening is meant to add top-output equality to real
-  // state-correspondence facts.  Without at least one state pair it degenerates
-  // into the property itself and bypasses PDR repair paths that still need to
-  // be exercised and validated independently.
-  if (equalityPairs.empty()) {
-    return nullptr;
-  }
-
-  BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
-  if (invariant == nullptr) {
-    invariant = BoolExpr::createTrue();  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  for (size_t output = 0;
-       output < problem.observedOutputExprs0.size() &&
-       output < problem.observedOutputExprs1.size();
-       ++output) {
-    invariant = BoolExpr::And(
-        invariant,
-        makeEqualityExpr(
-            problem.observedOutputExprs0[output],
-            problem.observedOutputExprs1[output]));
-  }
-  invariant = BoolExpr::simplify(invariant);
-  return invariant == BoolExpr::createTrue() ? nullptr : invariant;
-}
-
-std::vector<size_t> stateEqualitySymbols(
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
-  std::unordered_set<size_t> symbols;
-  // LCOV_EXCL_START
-  symbols.reserve(equalityPairs.size() * 2);
-  // LCOV_EXCL_STOP
-  for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
-    symbols.insert(lhsSymbol);
-    symbols.insert(rhsSymbol);
-  }
-  return sortUniqueSymbols(std::move(symbols));
-}
-
-bool pdrStateEqualitySubsetCacheEntryMatches(
-    const KInductionProblem& problem,
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
-    const PdrStateEqualitySubsetCacheEntry& entry) {
-  return entry.inputPairs == equalityPairs &&
-         entry.resetBootstrapInputs == problem.resetBootstrapInputs &&
-         entry.resetBootstrapCycles == problem.resetBootstrapCycles &&
-         entry.initialStateAssignments == problem.initialStateAssignments &&
-         entry.initialStateEqualityPairs == problem.initialStateEqualityPairs &&
-         entry.bootstrapStateAssignments == problem.bootstrapStateAssignments &&
-         entry.bootstrapStateEqualityPairs == problem.bootstrapStateEqualityPairs;
-}
-
-std::optional<std::vector<std::pair<size_t, size_t>>>
-lookupCachedPdrStateEqualitySubset(
-    const KInductionProblem& problem,
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
-  if (problem.lazyTransitions == nullptr) {
-    return std::nullopt;
-  }
-  for (const auto& entry :
-       problem.lazyTransitions->pdrStateEqualitySubsetCache) {
-    if (pdrStateEqualitySubsetCacheEntryMatches(
-            problem, equalityPairs, entry)) {
-      return entry.selectedPairs;
-    }
-  }
-  return std::nullopt;
-}
-
-void rememberCachedPdrStateEqualitySubset(
-    const KInductionProblem& problem,
-    const std::vector<std::pair<size_t, size_t>>& inputPairs,
-    const std::vector<std::pair<size_t, size_t>>& selectedPairs) {
-  if (problem.lazyTransitions == nullptr || selectedPairs.empty()) {
-    return;
-  }
-  auto& cache = problem.lazyTransitions->pdrStateEqualitySubsetCache;
-  for (auto& entry : cache) {
-    if (pdrStateEqualitySubsetCacheEntryMatches(problem, inputPairs, entry)) { // LCOV_EXCL_LINE
-      entry.selectedPairs = selectedPairs; // LCOV_EXCL_LINE
-      return; // LCOV_EXCL_LINE
-    }
-  }
-  PdrStateEqualitySubsetCacheEntry entry;
-  entry.inputPairs = inputPairs;
-  entry.resetBootstrapInputs = problem.resetBootstrapInputs;
-  entry.resetBootstrapCycles = problem.resetBootstrapCycles;
-  entry.initialStateAssignments = problem.initialStateAssignments;
-  entry.initialStateEqualityPairs = problem.initialStateEqualityPairs;
-  entry.bootstrapStateAssignments = problem.bootstrapStateAssignments;
-  entry.bootstrapStateEqualityPairs = problem.bootstrapStateEqualityPairs;
-  entry.selectedPairs = selectedPairs;
-  cache.push_back(std::move(entry));
-}
-
-bool equalityPairViolatedAtFrame(const SATSolverWrapper& solver,
-                                 const FrameVariableStore& variables,
-                                 const std::pair<size_t, size_t>& pair,
-                                 size_t frame) {
-  if (!variables.hasSymbol(pair.first) || !variables.hasSymbol(pair.second)) {
-    return false;  // LCOV_EXCL_LINE
-  }
-  return solver.getLiteralValue(variables.getLiteral(pair.first, frame)) !=
-         solver.getLiteralValue(variables.getLiteral(pair.second, frame));
-}
-
-std::optional<std::vector<std::pair<size_t, size_t>>>
-pruneStateEqualitySubsetByInductiveCounterexample(
-    const KInductionProblem& problem,
-    const TransitionExprResolver& transitionByState,
-    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
-    BoolExpr* invariant,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  const std::vector<size_t> invariantSymbols = stateEqualitySymbols(equalityPairs);
-  const std::vector<size_t> encodedTargets =
-      expandTransitionTargets(problem, invariantSymbols, transitionByState);
-  const std::vector<size_t> transitionSupportSymbols =
-      collectTransitionSupportSymbols(transitionByState, encodedTargets);
-
-  std::unordered_set<size_t> querySymbols(
-      invariantSymbols.begin(), invariantSymbols.end());
-  querySymbols.insert(encodedTargets.begin(), encodedTargets.end());
-  querySymbols.insert(
-      transitionSupportSymbols.begin(), transitionSupportSymbols.end());
-  addRelevantComplementedStatePartners(problem.complementedStatePairs0, querySymbols);
-  addRelevantComplementedStatePartners(problem.complementedStatePairs1, querySymbols);
-  addRelevantSameFrameStateEqualityPartners(problem, querySymbols);
-  addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
-
-  const auto solverSymbols = sortUniqueSymbols(std::move(querySymbols));
-  const auto querySolverType = stateEqualitySubsetSolverType(
-      problem, solverType, equalityPairs.size(), solverSymbols.size());
-  if (pdrStatsEnabled() && querySolverType != solverType) {
-    emitSecDiag(  // LCOV_EXCL_LINE
-        "SEC PDR stats: state equality subset solver=cadical symbols=",
-        solverSymbols.size(), // LCOV_EXCL_LINE
-        " pairs=",
-        equalityPairs.size()); // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  SATSolverWrapper solver(querySolverType);
-  // This local SAT query is part of PDR's invariant-pruning path, not a
-  // standalone preprocessing proof. Keep the selected backend on the same
-  // short-lived PDR query profile as predecessor and bad-state checks.
-  solver.configureForSecPdrQuery(solverSymbols.size());
-  FrameVariableStore variables(solver, solverSymbols, 2);
-  addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 2);
-  addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
-  addSameFrameStateEqualities(solver, variables, problem, 2);
-  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 2);
-  addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
-  addTransitionRelationForTargets(
-      solver,
-      variables,
-      transitionByState,
-      0,
-      encodedTargets,
-      transitionSupportSymbols);
-
-  FrameFormulaEncoder currentEncoder(
-      solver, variables.makeLeafLits(0, invariantSymbols));
-  FrameFormulaEncoder nextEncoder(
-      solver, variables.makeLeafLits(1, invariantSymbols));
-  solver.addClause({currentEncoder.encode(invariant)});
-  // LCOV_EXCL_START
-  solver.addClause({nextEncoder.encode(BoolExpr::Not(invariant))});
-  // LCOV_EXCL_STOP
-  if (!solver.solve()) {
-    return std::nullopt;
-  }
-
-  std::vector<std::pair<size_t, size_t>> keptPairs;
-  keptPairs.reserve(equalityPairs.size());
-  for (const auto& pair : equalityPairs) {
-    if (!equalityPairViolatedAtFrame(solver, variables, pair, 1)) {
-      keptPairs.push_back(pair);
-    }
-  }
-  if (keptPairs.size() == equalityPairs.size()) {
-    return std::vector<std::pair<size_t, size_t>>{};  // LCOV_EXCL_LINE
-  }
-  return keptPairs;
-}
-
-BoolExpr* selectInductiveStateEqualitySubsetInvariant(
-    const KInductionProblem& problem,
-    BoolExpr* initFormula,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    std::vector<std::pair<size_t, size_t>>* selectedPairs = nullptr) {
-  if (problem.inductiveStateEqualityPairs.empty() ||
-      problem.inductiveStateEqualityPairs.size() > kMaxStateEqualitySubsetPairs) {
-    return nullptr;
-  }
-
-  std::vector<std::pair<size_t, size_t>> equalityPairs =
-      problem.inductiveStateEqualityPairs;
-  BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
-  if (invariant == nullptr ||
-      !pdrInitialFrontierImpliesStateEqualities(
-          problem, initFormula, equalityPairs, solverType)) {
-    return nullptr;  // LCOV_EXCL_LINE
-  }
-  if (const auto cachedSubset =
-          lookupCachedPdrStateEqualitySubset(problem, equalityPairs);
-      cachedSubset.has_value()) {
-    if (pdrStatsEnabled()) {
-      emitSecDiag( // LCOV_EXCL_LINE
-          "SEC PDR stats: frame invariant state_equality_subset cache hit ",
-          "pairs=", cachedSubset->size()); // LCOV_EXCL_LINE
-    } // LCOV_EXCL_LINE
-    invariant = buildStateEqualityInvariant(*cachedSubset);
-    if (selectedPairs != nullptr) {
-      *selectedPairs = *cachedSubset;
-    }
-    return invariant;
-  }
-
-  TransitionExprResolver transitionByState(problem);
-  for (size_t iteration = 0;
-       iteration < kMaxStateEqualitySubsetIterations && !equalityPairs.empty();
-       ++iteration) {
-    invariant = buildStateEqualityInvariant(equalityPairs);
-    auto prunedPairs = pruneStateEqualitySubsetByInductiveCounterexample(
-        problem, transitionByState, equalityPairs, invariant, solverType);
-    if (!prunedPairs.has_value()) {
-      if (pdrStatsEnabled()) {
-        emitSecDiag(
-            "SEC PDR stats: frame invariant state_equality_subset support=",
-            invariant->getSupportVars().size(),
-            " pairs=", equalityPairs.size(),
-            " iterations=", iteration + 1,
-            " init=pass inductive=pass");
-      // LCOV_EXCL_START
-      }
-      // LCOV_EXCL_STOP
-      if (selectedPairs != nullptr) {
-        // LCOV_EXCL_START
-        *selectedPairs = equalityPairs;
-        // LCOV_EXCL_STOP
-      }
-      rememberCachedPdrStateEqualitySubset(
-          problem, problem.inductiveStateEqualityPairs, equalityPairs);
-      // LCOV_EXCL_START
-      return invariant;
-      // LCOV_EXCL_STOP
-    }
-    if (prunedPairs->empty()) {
-      break; // LCOV_EXCL_LINE
-    }
-    equalityPairs = std::move(*prunedPairs);
-  }
-
-  if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
-    emitSecDiag(  // LCOV_EXCL_LINE
-        "SEC PDR stats: frame invariant state_equality_subset unavailable ",
-        "remaining_pairs=", equalityPairs.size(),  // LCOV_EXCL_LINE
-        " iterations=", kMaxStateEqualitySubsetIterations);
-  }  // LCOV_EXCL_LINE
-  return nullptr; // LCOV_EXCL_LINE
-}
-
 BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
-                                  // LCOV_EXCL_START
                                   BoolExpr* initFormula,
-                                  // LCOV_EXCL_STOP
                                   KEPLER_FORMAL::Config::SolverType solverType) {
-  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
-    return nullptr;
-  }
-  // PDR can use already inferred SEC facts as a strengthening invariant, but
-  // only after validating the same two proof obligations that make any frame
-  // invariant sound:
-  //   1. the startup/reset frontier implies it, and
-  //   2. one transition step preserves it.
-  //
-  // This is not a separate "fast proof" path. The invariant is fed back into
-  // the ordinary bad-cube and predecessor queries below, so PDR still performs
-  // the frame/blocking/convergence algorithm. It simply avoids relearning the
-  // same state-equality facts one clause at a time on large SEC designs.
-  if (initFormula == nullptr) {
-    return nullptr;  // LCOV_EXCL_LINE
-  }
-
   FormulaSupportCache invariantSupportCache;
   auto validateCandidate =
-      [&](const char* label,
-          BoolExpr* candidate,
-          const std::vector<std::pair<size_t, size_t>>* stateEqualityPairs =
-              nullptr,
-          bool alsoRequireOutputProperty = false) -> BoolExpr* {
+      [&](const char* label, BoolExpr* candidate) -> BoolExpr* {
     if (candidate == nullptr) {
       if (pdrStatsEnabled()) {
         emitSecDiag("SEC PDR stats: frame invariant ", label, " unavailable");
@@ -16630,16 +16079,8 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
       return nullptr;
     }
 
-    bool initImpliesCandidate =
+    const bool initImpliesCandidate =
         initialFrontierImplies(initFormula, candidate, solverType);
-    if (!initImpliesCandidate && stateEqualityPairs != nullptr) {
-      initImpliesCandidate = structuredInitFactsImplyCandidate(
-          problem,
-          initFormula,
-          *stateEqualityPairs,
-          alsoRequireOutputProperty,
-          solverType);
-    }
     const bool inductive =
         initImpliesCandidate &&
         isInductiveInvariant(
@@ -16657,119 +16098,18 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
     return candidate;
   };
 
-  auto selectSharedStrengthening = [&]() -> BoolExpr* {
-    // The shared SEC strengthening can be stronger than a pruned equality
-    // LCOV_EXCL_START
-    // subset.  It still has to pass the same init and one-step inductiveness
-    // LCOV_EXCL_STOP
-    // checks before PDR may use it as a frame fact.
-    // LCOV_EXCL_START
-    BoolExpr* sharedStrengthening =
-    // LCOV_EXCL_STOP
-        selectValidatedStrengtheningInvariant(problem, initFormula, solverType);
-    // LCOV_EXCL_START
-    return validateCandidate("shared_strengthening", sharedStrengthening);
-    // LCOV_EXCL_STOP
-  };
-
-  if (BoolExpr* stateInvariant =
-          validateCandidate(
-              "state_equalities",
-              buildStateEqualityInvariant(problem),
-              &problem.inductiveStateEqualityPairs)) {
-    if (isSecDiagEnabled()) {  // LCOV_EXCL_LINE
-      emitSecDiag(  // LCOV_EXCL_LINE
-          "SEC diag: PDR using validated state-equality frame invariant with ",
-          problem.inductiveStateEqualityPairs.size(),  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
-          " equality pairs");
-          // LCOV_EXCL_STOP
-    }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
-    return stateInvariant;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
-  }
-
-  if (BoolExpr* stateOutputInvariant =
-          validateCandidate(
-              "state_equalities_outputs",
-              buildStateAndOutputInvariant(
-                  problem, problem.inductiveStateEqualityPairs),
-              &problem.inductiveStateEqualityPairs,
-              /*alsoRequireOutputProperty=*/true)) {
-    if (isSecDiagEnabled()) {  // LCOV_EXCL_LINE
-      emitSecDiag(  // LCOV_EXCL_LINE
-          "SEC diag: PDR using validated state/output frame invariant");
-    }  // LCOV_EXCL_LINE
-    return stateOutputInvariant;
-  }
-
-  std::vector<std::pair<size_t, size_t>> stateSubsetPairs;
-  if (BoolExpr* stateSubsetInvariant =
-          selectInductiveStateEqualitySubsetInvariant(
-              problem, initFormula, solverType, &stateSubsetPairs)) {
-    // LCOV_EXCL_START
-    // A state-only subset may be inductive but too weak to exclude the output
-    // LCOV_EXCL_STOP
-    // mismatch, causing PDR to rediscover the output equality as thousands of
-    // LCOV_EXCL_START
-    // tiny blocking clauses.  Strengthen that subset with the current output
-    // LCOV_EXCL_STOP
-    // equality only when the combined formula is itself proved valid on Init
-    // and inductive across one transition.  The result is still just a PDR
-    // frame fact; it is not an external fast proof path.
-    if (BoolExpr* outputStrengthenedInvariant =
-            validateCandidate(
-                // LCOV_EXCL_START
-                "state_equality_subset_outputs",
-                // LCOV_EXCL_STOP
-                buildStateAndOutputInvariant(problem, stateSubsetPairs),
-                // LCOV_EXCL_START
-                &stateSubsetPairs,
-                // LCOV_EXCL_STOP
-                /*alsoRequireOutputProperty=*/true)) {
-      if (isSecDiagEnabled()) {  // LCOV_EXCL_LINE
-        emitSecDiag(  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
-            "SEC diag: PDR using validated state/output subset frame invariant");
-      }  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-      return outputStrengthenedInvariant;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
-    }
-
-
-// LCOV_EXCL_STOP
-    if (BoolExpr* strengthenedInvariant = selectSharedStrengthening()) {
-      if (isSecDiagEnabled()) {
-        emitSecDiag(  // LCOV_EXCL_LINE
-            "SEC diag: PDR using validated SEC strengthening frame invariant");
-      }  // LCOV_EXCL_LINE
-      return strengthenedInvariant;
-    }
-
-// LCOV_EXCL_START
-
-
-// LCOV_EXCL_STOP
-    if (isSecDiagEnabled()) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
-      emitSecDiag(  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-          "SEC diag: PDR using validated state-equality subset frame invariant");
-    }  // LCOV_EXCL_LINE
-    return stateSubsetInvariant;  // LCOV_EXCL_LINE
-  }
-
-  // Some SEC proofs need the full extracted strengthening lemma, not just the
-  // raw state-equality core. This is still used as a PDR frame constraint only
-  // after the same inductiveness check succeeds.
-  if (BoolExpr* strengthenedInvariant = selectSharedStrengthening()) {
-    if (isSecDiagEnabled()) { // LCOV_EXCL_LINE
-      emitSecDiag(  // LCOV_EXCL_LINE
+  // PDR may reuse a validated public SEC strengthening lemma as a frame fact,
+  // but it must not build a frame invariant from cross-design internal state
+  // equalities.
+  BoolExpr* sharedStrengthening =
+      selectValidatedStrengtheningInvariant(problem, initFormula, solverType);
+  if (BoolExpr* strengthenedInvariant =
+          validateCandidate("shared_strengthening", sharedStrengthening)) {
+    if (isSecDiagEnabled()) {
+      emitSecDiag(
           "SEC diag: PDR using validated SEC strengthening frame invariant");
-    }  // LCOV_EXCL_LINE
-    return strengthenedInvariant; // LCOV_EXCL_LINE
+    }
+    return strengthenedInvariant;
   }
   return nullptr;
 }
@@ -17097,9 +16437,8 @@ PDRResult PDREngine::run(size_t maxFrames,
   }
 
   // PDR still establishes convergence through its own frame/blocking loop, but
-  // it may use validated state-correspondence equalities as a frame invariant.
-  // Those equalities come from the shared SEC extraction/reset analysis and are
-  // checked for init coverage and transition preservation before use.
+  // it may reuse a validated public SEC strengthening lemma as a frame
+  // invariant after checking init coverage and transition preservation.
   BoolExpr* frameInvariant =
       selectPdrFrameInvariant(problem_, initFormula, solverType_);
   const bool exactFrameClauses = useExactFrameClauses_;

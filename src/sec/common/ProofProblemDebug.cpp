@@ -172,14 +172,8 @@ std::string formatKInductionProblemForDebug(const KInductionProblem& problem) {
   oss << "reset_bootstrap_cycles: " << problem.resetBootstrapCycles << "\n";
   oss << "reset_bootstrap_inputs: "
       << formatAssignedSymbols(problem.resetBootstrapInputs) << "\n";
-  oss << "initial_state_equalities: "
-      << formatEqualityPairs(problem.initialStateEqualityPairs) << "\n";
   oss << "bootstrap_state_assignments: "
       << formatAssignedSymbols(problem.bootstrapStateAssignments) << "\n";
-  oss << "bootstrap_state_equalities: "
-      << formatEqualityPairs(problem.bootstrapStateEqualityPairs) << "\n";
-  oss << "inductive_state_equalities: "
-      << formatEqualityPairs(problem.inductiveStateEqualityPairs) << "\n";
   oss << "complemented_state_pairs0: "
       << formatEqualityPairs(problem.complementedStatePairs0) << "\n";
   oss << "complemented_state_pairs1: "

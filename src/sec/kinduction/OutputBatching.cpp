@@ -212,7 +212,6 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   // normal strict k-induction obligation over its own base and step cases.
   batch.inductionProperty = batch.property;
   batch.inductionBad = batch.bad;
-  batch.inductionPropertyAssumesInductiveStateEqualities = false;
   batch.description = source.description + " output batch";
 }
 

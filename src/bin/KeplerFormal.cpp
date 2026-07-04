@@ -61,12 +61,12 @@ static void print_usage(const char* prog) {
       "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
       "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
-      "[--sec-internal-state-correspondence] [--no-sec-uncomputable-seq-boundary] [--compact] "
+      "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
       "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
       "[--design1 <file...>] [--design2 <file...>] "
-      "[--sec-internal-state-correspondence] [--no-sec-uncomputable-seq-boundary] [--compact] "
+      "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
       prog);
 // LCOV_EXCL_START
@@ -338,7 +338,6 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "sec_engine",
       "sec_encoding",
       "sec_uncomputable_seq_as_boundary",
-      "sec_internal_state_correspondence",
       "input_paths",
       "liberty_files",
       "py_tech_files",
@@ -942,13 +941,11 @@ int KeplerFormalMain(int argc, char** argv) {
   bool compactMode = false;
   bool reportSkippedPOs = false;
   bool verilogPreprocessing = false;
-  bool secInternalStateCorrespondence = false;
   std::string dumpCnfPath;
   std::string dumpPoCnfPath;
 
   KEPLER_FORMAL::Config::setReportSkippedPOs(false);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(true);
-  KEPLER_FORMAL::Config::setSecInternalStateCorrespondence(false);
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -1074,15 +1071,6 @@ int KeplerFormalMain(int argc, char** argv) {
               cfg["sec_uncomputable_seq_as_boundary"].as<bool>();
         }
         // LCOV_EXCL_STOP
-
-        if (cfg["sec_internal_state_correspondence"]) {
-          if (!cfg["sec_internal_state_correspondence"].IsScalar()) {
-            SPDLOG_CRITICAL("sec_internal_state_correspondence must be a scalar");
-            return EXIT_FAILURE;
-          }
-          secInternalStateCorrespondence =
-              cfg["sec_internal_state_correspondence"].as<bool>();
-        }
 
         // input_paths
         if (cfg["input_paths"]) {
@@ -1316,16 +1304,6 @@ int KeplerFormalMain(int argc, char** argv) {
         continue;
         // LCOV_EXCL_STOP
       }
-      if (arg == "--sec-internal-state-correspondence") {
-        secInternalStateCorrespondence = true;
-        ++parseStart;
-        continue;
-      }
-      if (arg == "--no-sec-internal-state-correspondence") {
-        secInternalStateCorrespondence = false;
-        ++parseStart;
-        continue;
-      }
       // LCOV_EXCL_START
       if (arg == "-naja_if") {
         inputFormatType = FormatType::NAJA_IF;
@@ -1447,14 +1425,6 @@ int KeplerFormalMain(int argc, char** argv) {
         secTreatUncomputableSeqAsBoundary = false;
         continue;
         // LCOV_EXCL_STOP
-      }
-      if (arg == "--sec-internal-state-correspondence") {
-        secInternalStateCorrespondence = true;
-        continue;
-      }
-      if (arg == "--no-sec-internal-state-correspondence") {
-        secInternalStateCorrespondence = false;
-        continue;
       }
       // LCOV_EXCL_START
       if (arg == "--design1") {
@@ -1695,8 +1665,6 @@ int KeplerFormalMain(int argc, char** argv) {
   KEPLER_FORMAL::Config::setReportSkippedPOs(reportSkippedPOs);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(
       secTreatUncomputableSeqAsBoundary);
-  KEPLER_FORMAL::Config::setSecInternalStateCorrespondence(
-      secInternalStateCorrespondence);
   const char* solverName =
       solverType == KEPLER_FORMAL::Config::SolverType::KISSAT
           ? "KISSAT"
@@ -1715,9 +1683,6 @@ int KeplerFormalMain(int argc, char** argv) {
         "SEC uncomputable sequentials: {}",
         secTreatUncomputableSeqAsBoundary ? "boundary abstraction"
                                           : "strict failure");
-    SPDLOG_INFO(
-        "SEC internal state correspondence: {}",
-        secInternalStateCorrespondence ? "enabled" : "disabled");
   }
   SPDLOG_INFO("Compact mode: {}", compactMode ? "enabled" : "disabled");
   SPDLOG_INFO("Skipped PO reports: {}", reportSkippedPOs ? "enabled" : "disabled");
