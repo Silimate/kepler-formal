@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cassert>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -69,28 +70,62 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {  // LCOV_EXCL_L
   // void setIndex(size_t idx) { index_ = idx; }
   // size_t getIndex() const { assert(index_ != (size_t) -1); return index_; }
 
-  // comparator based on values
+  // Stable structural comparator.  PDR and SAT encoders rely on commutative
+  // BoolExpr factories producing the same DAG shape across processes, so raw
+  // child pointer addresses must not participate in ordering.
   bool operator==(const BoolExpr& other) const {
     return op_ == other.op_ && varID_ == other.varID_ && left_ == other.left_ &&
            right_ == other.right_;
   }
   bool operator!=(const BoolExpr& other) const { return !(*this == other); }
   bool operator<(const BoolExpr& other) const {
-    if (left_ != other.left_) {
-      return left_ < other.left_;
-    } else if (right_ != other.right_) {
-      return right_ < other.right_;
-    } else if (op_ != other.op_) {
-      return op_ < other.op_;
+    if (this == &other) {
+      return false;
     }
-    return varID_ < other.varID_;
+    if (structuralHash_ != other.structuralHash_) {
+      return structuralHash_ < other.structuralHash_;
+    }
+    if (op_ != other.op_) {
+      return op_ < other.op_;
+    } else if (varID_ != other.varID_) {
+      return varID_ < other.varID_;
+    } else if (left_ != other.left_) {
+      if (left_ == nullptr || other.left_ == nullptr) {
+        return left_ == nullptr;
+      }
+      if (*left_ < *other.left_) {
+        return true;
+      }
+      if (*other.left_ < *left_) {
+        return false;
+      }
+    }
+    if (right_ != other.right_) {
+      if (right_ == nullptr || other.right_ == nullptr) {
+        return right_ == nullptr;
+      }
+      if (*right_ < *other.right_) {
+        return true;
+      }
+      if (*other.right_ < *right_) {
+        return false;
+      }
+    }
+    return false;
   }
   bool operator<=(const BoolExpr& other) const {
-    return *this < other || *this == other;
+    return !(other < *this);
   }
   // Simplify/optimize an expression DAG (returns interned canonical node)
   // Memoized, safe on DAGs.
   static BoolExpr* simplify(BoolExpr* e);
+
+  // Rebuild arithmetic truth-table shapes into XOR/majority-style expressions.
+  // This keeps the expression equivalent while avoiding large DNF carry cones.
+  static BoolExpr* normalizeArithmetic(BoolExpr* e);
+  static BoolExpr* normalizeArithmetic(
+      BoolExpr* e,
+      std::unordered_map<BoolExpr*, BoolExpr*>& memo);
 
   std::set<size_t> getSupportVars() const;
 
@@ -111,6 +146,7 @@ class BoolExpr : public std::enable_shared_from_this<BoolExpr> {  // LCOV_EXCL_L
   size_t varID_ = (size_t)-1;  // only for VAR
   BoolExpr* left_ = nullptr;
   BoolExpr* right_ = nullptr;
+  uint64_t structuralHash_ = 0;
   // size_t index_ = (size_t) -1;
 
   static std::string OpToString(Op);

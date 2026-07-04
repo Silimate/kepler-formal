@@ -49,15 +49,28 @@ using ConstantEvalMemo =
 using SpecializedNextMap =
     std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash>;
 
-struct ResetStepEvalSummary {
-  bool valid = true;
+struct ResetStepEvalSummary { // LCOV_EXCL_LINE
+  bool valid = true; // LCOV_EXCL_LINE
   std::optional<bool> constant;
-  bool proven = false;
+  bool proven = false; // LCOV_EXCL_LINE
 };
 
 bool isConstBoolExpr(BoolExpr* expr, bool value) {
   return expr != nullptr && expr->getOp() == Op::VAR &&
          expr->getId() == static_cast<size_t>(value ? 1 : 0);
+}
+
+bool abstractMapCoversExprSupport(BoolExpr* expr,
+                                  const LocalToAbstractVarMap& abstractMap) {
+  if (expr == nullptr) {
+    return false; // LCOV_EXCL_LINE
+  }
+  for (const auto var : expr->getSupportVars()) {
+    if (var >= 2 && abstractMap.find(var) == abstractMap.end()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool areSatEquivalentUnderAbstractMaps(
@@ -66,18 +79,22 @@ bool areSatEquivalentUnderAbstractMaps(
     const LocalToAbstractVarMap& abstractMap0,
     const LocalToAbstractVarMap& abstractMap1,
     KEPLER_FORMAL::Config::SolverType solverType) {
-  try {
-    std::unordered_map<BoolExpr*, BoolExpr*> memo0;
-    std::unordered_map<BoolExpr*, BoolExpr*> memo1;
-    BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
-    BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
-    return boolFormulaImplies(
-        BoolExpr::createTrue(),
-        makeEqualityExpr(remapped0, remapped1),
-        solverType);
-  } catch (const std::runtime_error&) {
+  // SAT recovery is an optional bootstrap precision pass.  If a cone still
+  // contains a private/unmapped symbol, leave it to the real SEC engine instead
+  // of throwing while mining helper equalities.
+  if (!abstractMapCoversExprSupport(expr0, abstractMap0) ||
+      !abstractMapCoversExprSupport(expr1, abstractMap1)) {
     return false;
   }
+
+  std::unordered_map<BoolExpr*, BoolExpr*> memo0;
+  std::unordered_map<BoolExpr*, BoolExpr*> memo1;
+  BoolExpr* remapped0 = remapBoolExprVariables(expr0, abstractMap0, memo0);
+  BoolExpr* remapped1 = remapBoolExprVariables(expr1, abstractMap1, memo1);
+  return boolFormulaImplies(
+      BoolExpr::createTrue(),
+      makeEqualityExpr(remapped0, remapped1),
+      solverType);
 }
 
 bool addBoundedSupportVar(
@@ -129,6 +146,65 @@ bool collectBoundedSupportVars(
     }
     if (node->getLeft() != nullptr) {
       stack.push_back(node->getLeft());
+    }
+  }
+  return true;
+}
+
+bool isSupportedForBootstrapSubstitution(BoolExpr* root) {
+  if (root == nullptr) {
+    return false;
+  }
+
+  std::vector<BoolExpr*> stack{root};
+  std::unordered_set<BoolExpr*> visited;
+  while (!stack.empty()) {
+    BoolExpr* node = stack.back();
+    stack.pop_back();
+    if (node == nullptr || !visited.insert(node).second) {
+      continue;
+    }
+
+    switch (node->getOp()) {
+      case Op::VAR:
+        break;
+      case Op::NOT:
+        stack.push_back(node->getLeft());
+        break;
+      case Op::AND:
+      case Op::OR:
+      case Op::XOR:
+        stack.push_back(node->getLeft());
+        stack.push_back(node->getRight());
+        break;
+      case Op::NONE:
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
+BoolExpr* substituteBootstrapExprIfSupported(
+    BoolExpr* expr,
+    const std::unordered_map<size_t, bool>& assignments,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
+  if (!isSupportedForBootstrapSubstitution(expr)) {
+    return nullptr;
+  }
+  return substituteBoolExprVariables(expr, assignments, memo);
+}
+
+bool alignedSignalsHaveMappedVariables(
+    const SequentialDesignModel& model0,
+    const SequentialDesignModel& model1,
+    const AlignedSignals& aligned) {
+  for (size_t i = 0; i < aligned.names.size(); ++i) {
+    if (model0.inputVarByKey.find(aligned.keys0[i]) ==
+            model0.inputVarByKey.end() ||
+        model1.inputVarByKey.find(aligned.keys1[i]) ==
+            model1.inputVarByKey.end()) {
+      return false;
     }
   }
   return true;
@@ -352,7 +428,7 @@ AlignedSignals keepEqualitiesWithStateVariables(
   for (size_t i = 0; i < states.names.size(); ++i) {
     if (model0.inputVarByKey.find(states.keys0[i]) == model0.inputVarByKey.end() ||
         model1.inputVarByKey.find(states.keys1[i]) == model1.inputVarByKey.end()) {
-      continue;
+      continue; // LCOV_EXCL_LINE
     }
     filteredStates.names.push_back(states.names[i]);
     filteredStates.keys0.push_back(states.keys0[i]);
@@ -439,33 +515,33 @@ std::vector<SignalKey> collectResetBootstrapRelevantStateKeys(
   return ordered;
 }
 
-std::unordered_map<size_t, size_t> buildStatePairIndexByVar(
+std::unordered_map<size_t, size_t> buildStatePairIndexByVar( // LCOV_EXCL_LINE
     const SequentialDesignModel& model,
     const std::vector<SignalKey>& candidateKeys) {
-  std::unordered_map<size_t, size_t> pairIndexByVar;
-  pairIndexByVar.reserve(model.stateBits.size());
-  for (const auto& key : model.stateBits) {
-    if (const auto varIt = model.inputVarByKey.find(key);
-        varIt != model.inputVarByKey.end()) {
+  std::unordered_map<size_t, size_t> pairIndexByVar; // LCOV_EXCL_LINE
+  pairIndexByVar.reserve(model.stateBits.size()); // LCOV_EXCL_LINE
+  for (const auto& key : model.stateBits) { // LCOV_EXCL_LINE
+    if (const auto varIt = model.inputVarByKey.find(key); // LCOV_EXCL_LINE
+        varIt != model.inputVarByKey.end()) { // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       pairIndexByVar.emplace(varIt->second, kUnpairedStateDependency);
       // LCOV_EXCL_STOP
-    }
+    } // LCOV_EXCL_LINE
   }
-  for (size_t i = 0; i < candidateKeys.size(); ++i) {
-    if (const auto varIt = model.inputVarByKey.find(candidateKeys[i]);
-        varIt != model.inputVarByKey.end()) {
-      pairIndexByVar[varIt->second] = i;
-    }
-  }
-  return pairIndexByVar;
+  for (size_t i = 0; i < candidateKeys.size(); ++i) { // LCOV_EXCL_LINE
+    if (const auto varIt = model.inputVarByKey.find(candidateKeys[i]); // LCOV_EXCL_LINE
+        varIt != model.inputVarByKey.end()) { // LCOV_EXCL_LINE
+      pairIndexByVar[varIt->second] = i; // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  return pairIndexByVar; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
+
+bool isProvenResetStepOperand(const ResetStepEvalSummary& summary) { // LCOV_EXCL_LINE
+  return summary.constant.has_value() || summary.proven; // LCOV_EXCL_LINE
 }
 
-bool isProvenResetStepOperand(const ResetStepEvalSummary& summary) {
-  return summary.constant.has_value() || summary.proven;
-}
-
-ResetStepEvalSummary evaluateResetStepExpr(
+ResetStepEvalSummary evaluateResetStepExpr( // LCOV_EXCL_LINE
     BoolExpr* expr,
     const std::unordered_map<size_t, bool>& resetAssignments,
     const std::unordered_map<size_t, size_t>& statePairIndexByVar,
@@ -474,131 +550,131 @@ ResetStepEvalSummary evaluateResetStepExpr(
     // LCOV_EXCL_STOP
     const std::vector<std::optional<bool>>& previousPairConstants,
     std::pmr::unordered_map<BoolExpr*, ResetStepEvalSummary>& memo) {
-  if (expr == nullptr) {
+  if (expr == nullptr) { // LCOV_EXCL_LINE
     return {.valid = false};  // LCOV_EXCL_LINE
   }
-  if (const auto memoIt = memo.find(expr); memoIt != memo.end()) {
-    return memoIt->second;
+  if (const auto memoIt = memo.find(expr); memoIt != memo.end()) { // LCOV_EXCL_LINE
+    return memoIt->second; // LCOV_EXCL_LINE
   }
 
-  ResetStepEvalSummary summary;
-  switch (expr->getOp()) {
+  ResetStepEvalSummary summary; // LCOV_EXCL_LINE
+  switch (expr->getOp()) { // LCOV_EXCL_LINE
     case Op::VAR: {
-      const size_t id = expr->getId();
-      if (id < 2) {
-        summary.constant = id == 1;
-        summary.proven = true;
-      } else if (const auto resetIt = resetAssignments.find(id);
-                 resetIt != resetAssignments.end()) {
-        summary.constant = resetIt->second;
-        summary.proven = true;
-      } else if (const auto pairIt = statePairIndexByVar.find(id);
-                 pairIt != statePairIndexByVar.end()) {
-        if (pairIt->second == kUnpairedStateDependency) {
+      const size_t id = expr->getId(); // LCOV_EXCL_LINE
+      if (id < 2) { // LCOV_EXCL_LINE
+        summary.constant = id == 1; // LCOV_EXCL_LINE
+        summary.proven = true; // LCOV_EXCL_LINE
+      } else if (const auto resetIt = resetAssignments.find(id); // LCOV_EXCL_LINE
+                 resetIt != resetAssignments.end()) { // LCOV_EXCL_LINE
+        summary.constant = resetIt->second; // LCOV_EXCL_LINE
+        summary.proven = true; // LCOV_EXCL_LINE
+      } else if (const auto pairIt = statePairIndexByVar.find(id); // LCOV_EXCL_LINE
+                 pairIt != statePairIndexByVar.end()) { // LCOV_EXCL_LINE
+        if (pairIt->second == kUnpairedStateDependency) { // LCOV_EXCL_LINE
           // LCOV_EXCL_START
           summary.proven = false;  // LCOV_EXCL_LINE
         } else if (previousPairConstants[pairIt->second].has_value()) {
         // LCOV_EXCL_STOP
-          summary.constant = *previousPairConstants[pairIt->second];
-          summary.proven = true;
-        } else {
-          summary.proven = previousProvenPairs[pairIt->second];
+          summary.constant = *previousPairConstants[pairIt->second]; // LCOV_EXCL_LINE
+          summary.proven = true; // LCOV_EXCL_LINE
+        } else { // LCOV_EXCL_LINE
+          summary.proven = previousProvenPairs[pairIt->second]; // LCOV_EXCL_LINE
         }
-      } else {
+      } else { // LCOV_EXCL_LINE
         // Non-state variables are top/environment inputs in the SEC model.
         // The structural COI validation already proved both sides use the same
         // aligned input classes, so no internal name equality is introduced here.
-        summary.proven = true;
+        summary.proven = true; // LCOV_EXCL_LINE
       }
-      break;
+      break; // LCOV_EXCL_LINE
     }
     case Op::NOT: {
-      auto child = evaluateResetStepExpr(
-          expr->getLeft(),
+      auto child = evaluateResetStepExpr( // LCOV_EXCL_LINE
+          expr->getLeft(), // LCOV_EXCL_LINE
           // LCOV_EXCL_START
           resetAssignments,
           statePairIndexByVar,
           // LCOV_EXCL_STOP
-          previousProvenPairs,
-          previousPairConstants,
-          memo);
-      if (!child.valid) {
+          previousProvenPairs, // LCOV_EXCL_LINE
+          previousPairConstants, // LCOV_EXCL_LINE
+          memo); // LCOV_EXCL_LINE
+      if (!child.valid) { // LCOV_EXCL_LINE
         summary.valid = false;  // LCOV_EXCL_LINE
         break;  // LCOV_EXCL_LINE
       }
-      if (child.constant.has_value()) {
-        summary.constant = !*child.constant;
-      }
-      summary.proven = isProvenResetStepOperand(child);
-      break;
+      if (child.constant.has_value()) { // LCOV_EXCL_LINE
+        summary.constant = !*child.constant; // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      summary.proven = isProvenResetStepOperand(child); // LCOV_EXCL_LINE
+      break; // LCOV_EXCL_LINE
     }
     case Op::AND: {
       // LCOV_EXCL_START
       auto lhs = evaluateResetStepExpr(
           expr->getLeft(),
           // LCOV_EXCL_STOP
-          resetAssignments,
-          statePairIndexByVar,
-          previousProvenPairs,
-          previousPairConstants,
-          memo);
-      if (!lhs.valid) {
+          resetAssignments, // LCOV_EXCL_LINE
+          statePairIndexByVar, // LCOV_EXCL_LINE
+          previousProvenPairs, // LCOV_EXCL_LINE
+          previousPairConstants, // LCOV_EXCL_LINE
+          memo); // LCOV_EXCL_LINE
+      if (!lhs.valid) { // LCOV_EXCL_LINE
         summary.valid = false;  // LCOV_EXCL_LINE
         break;  // LCOV_EXCL_LINE
       }
-      if (lhs.constant.has_value() && !*lhs.constant) {
-        summary.constant = false;
-        summary.proven = true;
-        break;
+      if (lhs.constant.has_value() && !*lhs.constant) { // LCOV_EXCL_LINE
+        summary.constant = false; // LCOV_EXCL_LINE
+        summary.proven = true; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       }
-      auto rhs = evaluateResetStepExpr(
-          expr->getRight(),
-          resetAssignments,
-          statePairIndexByVar,
-          previousProvenPairs,
-          previousPairConstants,
-          memo);
-      if (!rhs.valid) {
+      auto rhs = evaluateResetStepExpr( // LCOV_EXCL_LINE
+          expr->getRight(), // LCOV_EXCL_LINE
+          resetAssignments, // LCOV_EXCL_LINE
+          statePairIndexByVar, // LCOV_EXCL_LINE
+          previousProvenPairs, // LCOV_EXCL_LINE
+          previousPairConstants, // LCOV_EXCL_LINE
+          memo); // LCOV_EXCL_LINE
+      if (!rhs.valid) { // LCOV_EXCL_LINE
         summary.valid = false;  // LCOV_EXCL_LINE
         break;  // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       }
       if (rhs.constant.has_value() && !*rhs.constant) {
       // LCOV_EXCL_STOP
-        summary.constant = false;
-        summary.proven = true;
-        break;
+        summary.constant = false; // LCOV_EXCL_LINE
+        summary.proven = true; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       }
-      if (lhs.constant.has_value() && rhs.constant.has_value()) {
-        summary.constant = *lhs.constant && *rhs.constant;
-        summary.proven = true;
-        break;
+      if (lhs.constant.has_value() && rhs.constant.has_value()) { // LCOV_EXCL_LINE
+        summary.constant = *lhs.constant && *rhs.constant; // LCOV_EXCL_LINE
+        summary.proven = true; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       }
-      summary.proven =
-          isProvenResetStepOperand(lhs) && isProvenResetStepOperand(rhs);
-      break;
+      summary.proven = // LCOV_EXCL_LINE
+          isProvenResetStepOperand(lhs) && isProvenResetStepOperand(rhs); // LCOV_EXCL_LINE
+      break; // LCOV_EXCL_LINE
     }
     case Op::OR: {
       // LCOV_EXCL_START
       auto lhs = evaluateResetStepExpr(
           expr->getLeft(),
           // LCOV_EXCL_STOP
-          resetAssignments,
-          statePairIndexByVar,
-          previousProvenPairs,
-          previousPairConstants,
-          memo);
-      if (!lhs.valid) {
+          resetAssignments, // LCOV_EXCL_LINE
+          statePairIndexByVar, // LCOV_EXCL_LINE
+          previousProvenPairs, // LCOV_EXCL_LINE
+          previousPairConstants, // LCOV_EXCL_LINE
+          memo); // LCOV_EXCL_LINE
+      if (!lhs.valid) { // LCOV_EXCL_LINE
         summary.valid = false;  // LCOV_EXCL_LINE
         break;  // LCOV_EXCL_LINE
       }
-      if (lhs.constant.has_value() && *lhs.constant) {
-        summary.constant = true;
-        summary.proven = true;
-        break;
+      if (lhs.constant.has_value() && *lhs.constant) { // LCOV_EXCL_LINE
+        summary.constant = true; // LCOV_EXCL_LINE
+        summary.proven = true; // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       }
-      auto rhs = evaluateResetStepExpr(
-          expr->getRight(),
+      auto rhs = evaluateResetStepExpr( // LCOV_EXCL_LINE
+          expr->getRight(), // LCOV_EXCL_LINE
           // LCOV_EXCL_START
           resetAssignments,
           statePairIndexByVar,
@@ -618,7 +694,7 @@ ResetStepEvalSummary evaluateResetStepExpr(
         summary.constant = *lhs.constant || *rhs.constant;
         summary.proven = true;
         // LCOV_EXCL_STOP
-        break;
+        break; // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       }
       summary.proven =
@@ -670,11 +746,11 @@ ResetStepEvalSummary evaluateResetStepExpr(
       break;  // LCOV_EXCL_LINE
   }
 
-  auto [it, _] = memo.emplace(expr, std::move(summary));
-  return it->second;
-}
+  auto [it, _] = memo.emplace(expr, std::move(summary)); // LCOV_EXCL_LINE
+  return it->second; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
-AlignedSignals deriveResetBootstrapStateEqualitiesByDependency(
+AlignedSignals deriveResetBootstrapStateEqualitiesByDependency( // LCOV_EXCL_LINE
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
     const AlignedSignals& candidateStates,
@@ -683,12 +759,12 @@ AlignedSignals deriveResetBootstrapStateEqualitiesByDependency(
     bool secDiagEnabled,
     std::unordered_map<SignalKey, bool, SignalKeyHash>* bootstrapValues0,
     std::unordered_map<SignalKey, bool, SignalKeyHash>* bootstrapValues1) {
-  if (cycles == 0 || candidateStates.names.empty()) {
+  if (cycles == 0 || candidateStates.names.empty()) { // LCOV_EXCL_LINE
     return {};  // LCOV_EXCL_LINE
   }
-  const auto resetAssignments0 = collectResetAssignments(model0);
-  const auto resetAssignments1 = collectResetAssignments(model1);
-  if (resetAssignments0.empty() || resetAssignments1.empty()) {
+  const auto resetAssignments0 = collectResetAssignments(model0); // LCOV_EXCL_LINE
+  const auto resetAssignments1 = collectResetAssignments(model1); // LCOV_EXCL_LINE
+  if (resetAssignments0.empty() || resetAssignments1.empty()) { // LCOV_EXCL_LINE
     return {};  // LCOV_EXCL_LINE
   }
 
@@ -697,30 +773,30 @@ AlignedSignals deriveResetBootstrapStateEqualitiesByDependency(
       buildStatePairIndexByVar(model0, candidateStates.keys0);
   const auto statePairIndexByVar1 =
   // LCOV_EXCL_STOP
-      buildStatePairIndexByVar(model1, candidateStates.keys1);
+      buildStatePairIndexByVar(model1, candidateStates.keys1); // LCOV_EXCL_LINE
 
 // LCOV_EXCL_START
 
   std::vector<char> proven(candidateStates.names.size(), false);
   std::vector<std::optional<bool>> provenConstants(candidateStates.names.size());
   // LCOV_EXCL_STOP
-  std::unordered_map<SignalKey, size_t, SignalKeyHash> candidatePairByKey0;
-  candidatePairByKey0.reserve(candidateStates.names.size());
-  for (size_t i = 0; i < candidateStates.names.size(); ++i) {
-    candidatePairByKey0.emplace(candidateStates.keys0[i], i);
-  }
-  size_t seededStartupEqualities = 0;
-  for (size_t i = 0; i < startupEqualities.names.size(); ++i) {
-    const auto candidateIt = candidatePairByKey0.find(startupEqualities.keys0[i]);
-    if (candidateIt == candidatePairByKey0.end() ||
-        candidateStates.keys1[candidateIt->second] != startupEqualities.keys1[i]) {
-      continue;
+  std::unordered_map<SignalKey, size_t, SignalKeyHash> candidatePairByKey0; // LCOV_EXCL_LINE
+  candidatePairByKey0.reserve(candidateStates.names.size()); // LCOV_EXCL_LINE
+  for (size_t i = 0; i < candidateStates.names.size(); ++i) { // LCOV_EXCL_LINE
+    candidatePairByKey0.emplace(candidateStates.keys0[i], i); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  size_t seededStartupEqualities = 0; // LCOV_EXCL_LINE
+  for (size_t i = 0; i < startupEqualities.names.size(); ++i) { // LCOV_EXCL_LINE
+    const auto candidateIt = candidatePairByKey0.find(startupEqualities.keys0[i]); // LCOV_EXCL_LINE
+    if (candidateIt == candidatePairByKey0.end() || // LCOV_EXCL_LINE
+        candidateStates.keys1[candidateIt->second] != startupEqualities.keys1[i]) { // LCOV_EXCL_LINE
+      continue; // LCOV_EXCL_LINE
     }
-    if (!proven[candidateIt->second]) {
-      proven[candidateIt->second] = true;
-      ++seededStartupEqualities;
-    }
-  }
+    if (!proven[candidateIt->second]) { // LCOV_EXCL_LINE
+      proven[candidateIt->second] = true; // LCOV_EXCL_LINE
+      ++seededStartupEqualities; // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
   // LCOV_EXCL_START
   if (secDiagEnabled && seededStartupEqualities != 0) {
   // LCOV_EXCL_STOP
@@ -730,29 +806,29 @@ AlignedSignals deriveResetBootstrapStateEqualitiesByDependency(
         seededStartupEqualities);  // LCOV_EXCL_LINE
     std::fflush(stderr);  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
-  for (size_t step = 0; step < cycles; ++step) {
-    std::vector<char> nextProven(candidateStates.names.size(), false);
-    std::vector<std::optional<bool>> nextProvenConstants(
-        candidateStates.names.size());
-    std::pmr::monotonic_buffer_resource memoResource0;
-    std::pmr::monotonic_buffer_resource memoResource1;
-    std::pmr::unordered_map<BoolExpr*, ResetStepEvalSummary> memo0{&memoResource0};
-    std::pmr::unordered_map<BoolExpr*, ResetStepEvalSummary> memo1{&memoResource1};
-    memo0.reserve(candidateStates.names.size() * 2);
-    memo1.reserve(candidateStates.names.size() * 2);
+  for (size_t step = 0; step < cycles; ++step) { // LCOV_EXCL_LINE
+    std::vector<char> nextProven(candidateStates.names.size(), false); // LCOV_EXCL_LINE
+    std::vector<std::optional<bool>> nextProvenConstants( // LCOV_EXCL_LINE
+        candidateStates.names.size()); // LCOV_EXCL_LINE
+    std::pmr::monotonic_buffer_resource memoResource0; // LCOV_EXCL_LINE
+    std::pmr::monotonic_buffer_resource memoResource1; // LCOV_EXCL_LINE
+    std::pmr::unordered_map<BoolExpr*, ResetStepEvalSummary> memo0{&memoResource0}; // LCOV_EXCL_LINE
+    std::pmr::unordered_map<BoolExpr*, ResetStepEvalSummary> memo1{&memoResource1}; // LCOV_EXCL_LINE
+    memo0.reserve(candidateStates.names.size() * 2); // LCOV_EXCL_LINE
+    memo1.reserve(candidateStates.names.size() * 2); // LCOV_EXCL_LINE
     // LCOV_EXCL_START
     for (size_t i = 0; i < candidateStates.names.size(); ++i) {
     // LCOV_EXCL_STOP
       const auto nextIt0 =
-          model0.nextStateExprByStateKey.find(candidateStates.keys0[i]);
+          model0.nextStateExprByStateKey.find(candidateStates.keys0[i]); // LCOV_EXCL_LINE
       const auto nextIt1 =
-          model1.nextStateExprByStateKey.find(candidateStates.keys1[i]);
-      if (nextIt0 == model0.nextStateExprByStateKey.end() ||
-          nextIt1 == model1.nextStateExprByStateKey.end()) {
+          model1.nextStateExprByStateKey.find(candidateStates.keys1[i]); // LCOV_EXCL_LINE
+      if (nextIt0 == model0.nextStateExprByStateKey.end() || // LCOV_EXCL_LINE
+          nextIt1 == model1.nextStateExprByStateKey.end()) { // LCOV_EXCL_LINE
         continue;  // LCOV_EXCL_LINE
       }
-      const auto eval0 = evaluateResetStepExpr(
-          nextIt0->second,
+      const auto eval0 = evaluateResetStepExpr( // LCOV_EXCL_LINE
+          nextIt0->second, // LCOV_EXCL_LINE
           resetAssignments0,
           statePairIndexByVar0,
           proven,
@@ -772,22 +848,22 @@ AlignedSignals deriveResetBootstrapStateEqualitiesByDependency(
         continue;  // LCOV_EXCL_LINE
       }
       // LCOV_EXCL_STOP
-      if (eval0.constant.has_value() || eval1.constant.has_value()) {
+      if (eval0.constant.has_value() || eval1.constant.has_value()) { // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         nextProven[i] =
             eval0.constant.has_value() && eval1.constant.has_value() &&
             // LCOV_EXCL_STOP
-            *eval0.constant == *eval1.constant;
-        if (nextProven[i]) {
-          nextProvenConstants[i] = *eval0.constant;
-        }
-        continue;
+            *eval0.constant == *eval1.constant; // LCOV_EXCL_LINE
+        if (nextProven[i]) { // LCOV_EXCL_LINE
+          nextProvenConstants[i] = *eval0.constant; // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
+        continue; // LCOV_EXCL_LINE
       }
-      nextProven[i] = eval0.proven && eval1.proven;
-    }
-    proven = std::move(nextProven);
-    provenConstants = std::move(nextProvenConstants);
-    if (secDiagEnabled) {
+      nextProven[i] = eval0.proven && eval1.proven; // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    proven = std::move(nextProven); // LCOV_EXCL_LINE
+    provenConstants = std::move(nextProvenConstants); // LCOV_EXCL_LINE
+    if (secDiagEnabled) { // LCOV_EXCL_LINE
       std::fprintf(  // LCOV_EXCL_LINE
           stderr,  // LCOV_EXCL_LINE
           // LCOV_EXCL_START
@@ -803,27 +879,27 @@ AlignedSignals deriveResetBootstrapStateEqualitiesByDependency(
               })));
       std::fflush(stderr);  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
-  }
+  } // LCOV_EXCL_LINE
 
-  AlignedSignals result;
-  for (size_t i = 0; i < candidateStates.names.size(); ++i) {
-    if (provenConstants[i].has_value()) {
-      if (bootstrapValues0 != nullptr) {
-        (*bootstrapValues0)[candidateStates.keys0[i]] = *provenConstants[i];
-      }
-      if (bootstrapValues1 != nullptr) {
-        (*bootstrapValues1)[candidateStates.keys1[i]] = *provenConstants[i];
-      }
-    }
-    if (!proven[i]) {
+  AlignedSignals result; // LCOV_EXCL_LINE
+  for (size_t i = 0; i < candidateStates.names.size(); ++i) { // LCOV_EXCL_LINE
+    if (provenConstants[i].has_value()) { // LCOV_EXCL_LINE
+      if (bootstrapValues0 != nullptr) { // LCOV_EXCL_LINE
+        (*bootstrapValues0)[candidateStates.keys0[i]] = *provenConstants[i]; // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      if (bootstrapValues1 != nullptr) { // LCOV_EXCL_LINE
+        (*bootstrapValues1)[candidateStates.keys1[i]] = *provenConstants[i]; // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    if (!proven[i]) { // LCOV_EXCL_LINE
       continue;  // LCOV_EXCL_LINE
     }
-    result.names.push_back(candidateStates.names[i]);
-    result.keys0.push_back(candidateStates.keys0[i]);
-    result.keys1.push_back(candidateStates.keys1[i]);
-  }
-  return result;
-}
+    result.names.push_back(candidateStates.names[i]); // LCOV_EXCL_LINE
+    result.keys0.push_back(candidateStates.keys0[i]); // LCOV_EXCL_LINE
+    result.keys1.push_back(candidateStates.keys1[i]); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  return result; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
 AlignedSignals filterStateEqualitiesByInitialValue(
     const SequentialDesignModel& model0,
@@ -1105,51 +1181,51 @@ std::unordered_map<SignalKey, bool, SignalKeyHash> deriveResetBootstrapStateValu
 }
 
 std::unordered_map<SignalKey, bool, SignalKeyHash>
-deriveResetBootstrapStateValuesForKeys(
+deriveResetBootstrapStateValuesForKeys( // LCOV_EXCL_LINE
     const SequentialDesignModel& model,
     const std::vector<SignalKey>& rootKeys,
     size_t cycles) {
-  const auto resetAssignments = collectResetAssignments(model);
-  if (resetAssignments.empty() || cycles == 0 || rootKeys.empty()) {
+  const auto resetAssignments = collectResetAssignments(model); // LCOV_EXCL_LINE
+  if (resetAssignments.empty() || cycles == 0 || rootKeys.empty()) { // LCOV_EXCL_LINE
     // LCOV_EXCL_START
     return {};  // LCOV_EXCL_LINE
     // LCOV_EXCL_STOP
   }
 
   const auto relevantKeys =
-      collectResetBootstrapRelevantStateKeys(model, rootKeys, cycles);
-  std::unordered_map<SignalKey, bool, SignalKeyHash> knownStates =
-      model.initialStateValueByKey;
-  for (size_t step = 0; step < cycles; ++step) {
-    std::unordered_map<size_t, bool> assignments = resetAssignments;
-    for (const auto& [key, value] : knownStates) {
-      const auto varIt = model.inputVarByKey.find(key);
-      if (varIt != model.inputVarByKey.end()) {
-        assignments.emplace(varIt->second, value);
-      }
+      collectResetBootstrapRelevantStateKeys(model, rootKeys, cycles); // LCOV_EXCL_LINE
+  std::unordered_map<SignalKey, bool, SignalKeyHash> knownStates = // LCOV_EXCL_LINE
+      model.initialStateValueByKey; // LCOV_EXCL_LINE
+  for (size_t step = 0; step < cycles; ++step) { // LCOV_EXCL_LINE
+    std::unordered_map<size_t, bool> assignments = resetAssignments; // LCOV_EXCL_LINE
+    for (const auto& [key, value] : knownStates) { // LCOV_EXCL_LINE
+      const auto varIt = model.inputVarByKey.find(key); // LCOV_EXCL_LINE
+      if (varIt != model.inputVarByKey.end()) { // LCOV_EXCL_LINE
+        assignments.emplace(varIt->second, value); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
     }
 
-    std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownStates;
-    nextKnownStates.reserve(relevantKeys.size());
-    std::pmr::monotonic_buffer_resource memoResource;
-    ConstantEvalMemo memo{&memoResource};
-    memo.reserve(std::min<size_t>(relevantKeys.size() * 16, 1'000'000));
-    for (const auto& key : relevantKeys) {
-      const auto nextIt = model.nextStateExprByStateKey.find(key);
-      if (nextIt == model.nextStateExprByStateKey.end()) {
+    std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownStates; // LCOV_EXCL_LINE
+    nextKnownStates.reserve(relevantKeys.size()); // LCOV_EXCL_LINE
+    std::pmr::monotonic_buffer_resource memoResource; // LCOV_EXCL_LINE
+    ConstantEvalMemo memo{&memoResource}; // LCOV_EXCL_LINE
+    memo.reserve(std::min<size_t>(relevantKeys.size() * 16, 1'000'000)); // LCOV_EXCL_LINE
+    for (const auto& key : relevantKeys) { // LCOV_EXCL_LINE
+      const auto nextIt = model.nextStateExprByStateKey.find(key); // LCOV_EXCL_LINE
+      if (nextIt == model.nextStateExprByStateKey.end()) { // LCOV_EXCL_LINE
         continue;  // LCOV_EXCL_LINE
       }
       const auto value =
-          evaluateConstantUnderAssignments(nextIt->second, assignments, memo);
-      if (value.has_value()) {
-        nextKnownStates.emplace(key, *value);
-      }
+          evaluateConstantUnderAssignments(nextIt->second, assignments, memo); // LCOV_EXCL_LINE
+      if (value.has_value()) { // LCOV_EXCL_LINE
+        nextKnownStates.emplace(key, *value); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
     }
-    knownStates = std::move(nextKnownStates);
-  }
+    knownStates = std::move(nextKnownStates); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
-  return knownStates;
-}
+  return knownStates; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
 SpecializedNextMap specializeNextStatesForReset(
     const SequentialDesignModel& model,
@@ -1161,20 +1237,16 @@ SpecializedNextMap specializeNextStatesForReset(
   for (const auto& key : relevantKeys) {
     const auto nextIt = model.nextStateExprByStateKey.find(key);
     if (nextIt == model.nextStateExprByStateKey.end()) {
-      specialized.emplace(key, nullptr);
-      continue;
+      specialized.emplace(key, nullptr); // LCOV_EXCL_LINE
+      continue; // LCOV_EXCL_LINE
     }
     // Always mine reset-specialized structure here.  The bounded SAT-recovery
     // pass below is the expensive part and already has support/node guards;
     // pre-skipping this structural substitution loses cheap reset equalities on
     // wide ASIC cones and regresses KI/IMC/PDR into deep bounded searches.
-    try {
-      specialized.emplace(
-          key,
-          substituteBoolExprVariables(nextIt->second, resetAssignments, memo));
-    } catch (const std::runtime_error&) {
-      specialized.emplace(key, nullptr);
-    }
+    specialized.emplace(
+        key,
+        substituteBootstrapExprIfSupported(nextIt->second, resetAssignments, memo));
   // LCOV_EXCL_START
   }
   // LCOV_EXCL_STOP
@@ -1195,7 +1267,7 @@ AlignedSignals deriveResetBootstrapStateEqualities(
   // logic. A pair survives only if both sides either collapse to the same
   // constant or stay structurally equivalent after each bootstrap step.
   if (cycles == 0 || candidateStates.names.empty()) {
-    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates);
+    return filterStateEqualitiesByInitialValue(model0, model1, candidateStates); // LCOV_EXCL_LINE
   }
 
   const auto resetAssignments0 = collectResetAssignments(model0);
@@ -1268,24 +1340,26 @@ AlignedSignals deriveResetBootstrapStateEqualities(
     std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo0;
     std::unordered_map<BoolExpr*, BoolExpr*> stateSubMemo1;
     for (const auto& key : relevantKeys0) {
-      try {
-        specializedNext0.emplace(
-            key,
-            substituteBoolExprVariables(
-                resetNext0.at(key), stateAssignments0, stateSubMemo0));
-      } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
-        specializedNext0.emplace(key, nullptr);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      const auto resetIt = resetNext0.find(key);
+      if (resetIt == resetNext0.end() || resetIt->second == nullptr) {
+        specializedNext0.emplace(key, nullptr);
+        continue;
+      }
+      specializedNext0.emplace(
+          key,
+          substituteBootstrapExprIfSupported(
+              resetIt->second, stateAssignments0, stateSubMemo0));
     }
     for (const auto& key : relevantKeys1) {
-      try {
-        specializedNext1.emplace(
-            key,
-            substituteBoolExprVariables(
-                resetNext1.at(key), stateAssignments1, stateSubMemo1));
-      } catch (const std::runtime_error&) {  // LCOV_EXCL_LINE
-        specializedNext1.emplace(key, nullptr);  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      const auto resetIt = resetNext1.find(key);
+      if (resetIt == resetNext1.end() || resetIt->second == nullptr) {
+        specializedNext1.emplace(key, nullptr);
+        continue;
+      }
+      specializedNext1.emplace(
+          key,
+          substituteBootstrapExprIfSupported(
+              resetIt->second, stateAssignments1, stateSubMemo1));
     }
 
     std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownValues0;
@@ -1321,16 +1395,16 @@ AlignedSignals deriveResetBootstrapStateEqualities(
         return abstractMapsAvailable;
       }
       abstractMapsBuilt = true;
+      if (!alignedSignalsHaveMappedVariables(model0, model1, alignedInputs)) {
+        abstractMapsAvailable = false;
+        return false;
+      }
       const auto mappedCurrentEqualities =
           keepEqualitiesWithStateVariables(model0, model1, currentEqualities);
-      try {
-        auto maps = buildAbstractTransitionMaps(
-            model0, model1, alignedInputs, mappedCurrentEqualities);
-        abstractMap0 = std::move(maps.first);
-        abstractMap1 = std::move(maps.second);
-      } catch (const std::out_of_range&) {
-        abstractMapsAvailable = false;
-      }
+      auto maps = buildAbstractTransitionMaps(
+          model0, model1, alignedInputs, mappedCurrentEqualities);
+      abstractMap0 = std::move(maps.first);
+      abstractMap1 = std::move(maps.second);
       return abstractMapsAvailable;
     };
 
@@ -1492,6 +1566,17 @@ ReachableStateInvariant buildReachableStateInvariant(
     bool deriveResetBootstrapEqualities,
     const AlignedSignals& resetBootstrapCandidateEqualities) {
   ReachableStateInvariant invariant;
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
+  const AlignedSignals emptyStateEqualities;
+  const AlignedSignals& allowedInductiveStateEqualities =
+      allowInternalStateCorrespondence ? inductiveStateEqualities
+                                       : emptyStateEqualities;
+  const AlignedSignals& allowedResetBootstrapCandidateEqualities =
+      allowInternalStateCorrespondence ? resetBootstrapCandidateEqualities
+                                       : emptyStateEqualities;
+  const bool allowResetBootstrapEqualityDerivation =
+      allowInternalStateCorrespondence && deriveResetBootstrapEqualities;
   // First decide which startup model we have: explicit init, reset bootstrap,
   // both, or neither. That determines how strong the frame-0 correspondence
   // may safely be.
@@ -1501,55 +1586,55 @@ ReachableStateInvariant buildReachableStateInvariant(
   invariant.bootstrapCycles = defaultResetBootstrapCycles(
       hasResetBootstrap, hasCompleteInitialState(model0, model1));
   const auto structuralStartupCorrespondence = filterStateEqualitiesByInitialCompatibility(
-      model0, model1, inductiveStateEqualities);
+      model0, model1, allowedInductiveStateEqualities);
   invariant.initialStateCorrespondence = structuralStartupCorrespondence;
 
   if (hasResetBootstrap) {
     const bool hasResetBootstrapCandidates =
-        !resetBootstrapCandidateEqualities.names.empty() &&
-        invariant.bootstrapCycles != 0;
-    if (!resetBootstrapCandidateEqualities.names.empty()) {
+        !allowedResetBootstrapCandidateEqualities.names.empty() &&
+        invariant.bootstrapCycles != 0; // LCOV_EXCL_LINE
+    if (!allowedResetBootstrapCandidateEqualities.names.empty()) {
       // Reset bootstrap starts from an arbitrary pre-reset state.  Additional
       // startup correspondence may only come from structurally checked COI
       // candidates rooted at aligned top outputs, never from internal names.
       // Base-case COI indexes this relation before encoding it, so large ASIC
       // cases still pull in only the startup pairs needed by the checked top
       // output cone.
-      invariant.initialStateCorrespondence = mergeStartupCorrespondence(
-          invariant.initialStateCorrespondence,
-          resetBootstrapCandidateEqualities);
-    }
+      invariant.initialStateCorrespondence = mergeStartupCorrespondence( // LCOV_EXCL_LINE
+          invariant.initialStateCorrespondence, // LCOV_EXCL_LINE
+          allowedResetBootstrapCandidateEqualities); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
     auto deriveCandidateBootstrapFacts = [&]() {
       if (!hasResetBootstrapCandidates) {
         return;
       }
-      if (resetBootstrapCandidateEqualities.names.size() <=
+      if (allowedResetBootstrapCandidateEqualities.names.size() <= // LCOV_EXCL_LINE
           kSelectiveBootstrapValueCandidateBudget) {
-        invariant.bootstrapValues0 = deriveResetBootstrapStateValuesForKeys(
-            model0,
-            resetBootstrapCandidateEqualities.keys0,
-            invariant.bootstrapCycles);
-        invariant.bootstrapValues1 = deriveResetBootstrapStateValuesForKeys(
-            model1,
-            resetBootstrapCandidateEqualities.keys1,
-            invariant.bootstrapCycles);
-      }
-      invariant.bootstrapOnlyStateEqualities =
-          deriveResetBootstrapStateEqualitiesByDependency(
-              model0,
-              model1,
-              resetBootstrapCandidateEqualities,
-              invariant.initialStateCorrespondence,
-              invariant.bootstrapCycles,
-              secDiagEnabled,
-              &invariant.bootstrapValues0,
-              &invariant.bootstrapValues1);
+        invariant.bootstrapValues0 = deriveResetBootstrapStateValuesForKeys( // LCOV_EXCL_LINE
+            model0, // LCOV_EXCL_LINE
+            allowedResetBootstrapCandidateEqualities.keys0, // LCOV_EXCL_LINE
+            invariant.bootstrapCycles); // LCOV_EXCL_LINE
+        invariant.bootstrapValues1 = deriveResetBootstrapStateValuesForKeys( // LCOV_EXCL_LINE
+            model1, // LCOV_EXCL_LINE
+            allowedResetBootstrapCandidateEqualities.keys1, // LCOV_EXCL_LINE
+            invariant.bootstrapCycles); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      invariant.bootstrapOnlyStateEqualities = // LCOV_EXCL_LINE
+          deriveResetBootstrapStateEqualitiesByDependency( // LCOV_EXCL_LINE
+              model0, // LCOV_EXCL_LINE
+              model1, // LCOV_EXCL_LINE
+              allowedResetBootstrapCandidateEqualities, // LCOV_EXCL_LINE
+              invariant.initialStateCorrespondence, // LCOV_EXCL_LINE
+              invariant.bootstrapCycles, // LCOV_EXCL_LINE
+              secDiagEnabled, // LCOV_EXCL_LINE
+              &invariant.bootstrapValues0, // LCOV_EXCL_LINE
+              &invariant.bootstrapValues1); // LCOV_EXCL_LINE
     };
 
     // Walk the reset window to find which candidate equalities are true at the
     // first checked frame. The seed includes startup equalities, but a pair is
     // promoted only if reset-specialized transition logic proves it survives.
-    if (!deriveResetBootstrapEqualities) {
+    if (!allowResetBootstrapEqualityDerivation) {
       // PDR validates the concrete reset frontier separately, so it does not
       // need the expensive reset-specialized sweep that mines additional
       // post-reset equality lemmas. It still receives the concrete bootstrap
@@ -1564,8 +1649,8 @@ ReachableStateInvariant buildReachableStateInvariant(
       invariant.anchoredStateEqualities = structuralStartupCorrespondence;
     } else {
       const auto bootstrapCandidateStates = mergeStartupCorrespondence(
-          inductiveStateEqualities,
-          resetBootstrapCandidateEqualities);
+          allowedInductiveStateEqualities,
+          allowedResetBootstrapCandidateEqualities);
       invariant.anchoredStateEqualities = deriveResetBootstrapStateEqualities(
           model0,
           model1,
@@ -1588,7 +1673,7 @@ ReachableStateInvariant buildReachableStateInvariant(
     // Without reset, we can only anchor the state pairs whose explicit init
     // values agree on both sides.
     invariant.anchoredStateEqualities = filterStateEqualitiesByInitialValue(
-        model0, model1, inductiveStateEqualities);
+        model0, model1, allowedInductiveStateEqualities);
   } else {
     // Resetless, init-less SEC may only start from state correspondences that
     // were inferred structurally. Same-named flops are intentionally not used

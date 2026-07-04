@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,12 +42,25 @@ struct ExtractedBoundaryReportEntry {  // LCOV_EXCL_LINE
   std::string connectivitySkip;
 };
 
+struct SequentialEquivalenceUnprovenOutput { // LCOV_EXCL_LINE
+  size_t index = 0;
+  std::string name;
+};
+
+struct SequentialEquivalenceProofProgress { // LCOV_EXCL_LINE
+  std::string engineLabel;
+  size_t provenOutputs = 0;
+  size_t totalOutputs = 0;
+  std::vector<SequentialEquivalenceUnprovenOutput> unprovenOutputs;
+};
+
 struct SequentialEquivalenceResult {  // LCOV_EXCL_LINE
   SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Unsupported;
   size_t bound = 0;
   std::string reason;
   size_t coveredOutputs = 0;
   size_t totalOutputs = 0;
+  std::optional<SequentialEquivalenceProofProgress> proofProgress;
   std::vector<std::string> skippedObservedOutputs;
   std::vector<std::string> resetUnanchoredSkippedOutputs;
   std::vector<std::string> multiClockDomainSkippedOutputs;
@@ -93,5 +107,50 @@ class SequentialEquivalenceStrategy {
   SecEngine secEngine_;
   SecEncoding encoding_;
 };
+
+namespace detail {
+
+constexpr size_t kMinPdrDualRailFrameZeroValidationOutputs = 256;
+constexpr size_t kMaxPdrDualRailFrameZeroValidationOutputs = 384;
+constexpr size_t kMaxPdrDualRailFrameZeroValidationStateSymbols = 1000000;
+constexpr size_t kMaxDualRailGlobalBootstrapEqualityOutputs = 384;
+
+SequentialEquivalenceProofProgress buildSecEngineProofProgress(
+    const std::string& engineLabel,
+    const std::vector<std::string>& observedOutputNames,
+    size_t totalOutputCount,
+    size_t provenOutputCount);
+
+std::vector<std::string> buildSecEngineProofProgressDiagLines(
+    const std::string& engineLabel,
+    const std::vector<std::string>& observedOutputNames,
+    size_t totalOutputCount,
+    size_t provenOutputCount);
+
+inline bool shouldSkipDualRailGlobalBootstrapEqualityMining( // LCOV_EXCL_LINE
+    SecEngine secEngine,
+    SecEncoding encoding,
+    size_t observedOutputSurface) {
+  return (secEngine == SecEngine::KInduction || // LCOV_EXCL_LINE
+          secEngine == SecEngine::Imc) && // LCOV_EXCL_LINE
+         encoding == SecEncoding::DualRailSteady && // LCOV_EXCL_LINE
+         observedOutputSurface > kMaxDualRailGlobalBootstrapEqualityOutputs; // LCOV_EXCL_LINE
+}
+
+inline bool shouldDeferPdrDualRailFrameZeroValidation( // LCOV_EXCL_LINE
+    size_t observedOutputSurface,
+    size_t railStateSymbolSurface) {
+  if (observedOutputSurface > kMaxPdrDualRailFrameZeroValidationOutputs) { // LCOV_EXCL_LINE
+    return true; // LCOV_EXCL_LINE
+  }
+  // A mid-wide output bus can still be too expensive when compact extraction
+  // expands the rail state into a very large surface.  Keep small probe designs
+  // on the exact validation path, but let PDR own huge SoC surfaces directly.
+  return observedOutputSurface >= kMinPdrDualRailFrameZeroValidationOutputs && // LCOV_EXCL_LINE
+         railStateSymbolSurface > // LCOV_EXCL_LINE
+             kMaxPdrDualRailFrameZeroValidationStateSymbols;
+} // LCOV_EXCL_LINE
+
+}  // namespace detail
 
 }  // namespace KEPLER_FORMAL::SEC

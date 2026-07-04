@@ -3,6 +3,7 @@
 
 #include "SNLTruthTableTree.h"
 #include "SNLTruthTable.h"
+#include "SNLLogicCloud.h"
 #include "DNL.h"
 #include "NLDB.h"
 #include "NLLibrary.h"
@@ -54,6 +55,20 @@ static naja::DNL::DNLID findDNLTermIDByInstanceAndTerm(const char* instanceName,
     }
     if (instance->getName().getString() == instanceName &&
         term.getSnlBitTerm()->getName().getString() == termName) {
+      return id;
+    }
+  }
+  return naja::DNL::DNLID_MAX;
+}
+
+static naja::DNL::DNLID findDNLTopTermIDByName(const char* termName) {
+  auto* dnl = naja::DNL::get();
+  for (naja::DNL::DNLID id = 0; id <= dnl->getNBterms(); ++id) {
+    const auto& term = dnl->getDNLTerminalFromID(id);
+    if (term.isNull() || !term.isTopPort()) {
+      continue;
+    }
+    if (term.getSnlBitTerm()->getName().getString() == termName) {
       return id;
     }
   }
@@ -288,6 +303,125 @@ TEST(SNLTruthTableTreeApiTest, ConstantRootHasNoBorderLeavesAndEvaluates) {
   EXPECT_EQ(tree.getBorderLeavesSize(), 0u);
   EXPECT_FALSE(tree.eval({}));
   EXPECT_THROW(tree.eval({true}), std::invalid_argument);
+
+  naja::DNL::destroy();
+  universe->destroy();
+}
+
+TEST(SNLTruthTableTreeApiTest, ConstantConcatRemovesBorderLeaf) {
+  auto* universe = NLUniverse::create();
+  auto* db = NLDB::create(universe);
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto* constantModel =
+      SNLDesign::create(primitives, SNLDesign::Type::Primitive, NLName("CONB"));
+  auto* constantOutput =
+      SNLScalarTerm::create(constantModel, SNLTerm::Direction::Output, NLName("LO"));
+  SNLDesignModeling::setTruthTable(
+      constantModel, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+
+  auto* bufferModel =
+      SNLDesign::create(primitives, SNLDesign::Type::Primitive, NLName("BUF"));
+  auto* bufferInput =
+      SNLScalarTerm::create(bufferModel, SNLTerm::Direction::Input, NLName("A"));
+  auto* bufferOutput =
+      SNLScalarTerm::create(bufferModel, SNLTerm::Direction::Output, NLName("X"));
+  SNLDesignModeling::setTruthTable(
+      bufferModel, SNLTruthTable(1, 0b10, SNLTruthTable::fullDependencies(1)));
+
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName("top"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  auto* tie0 = SNLInstance::create(top, constantModel, NLName("tie0"));
+  auto* buf = SNLInstance::create(top, bufferModel, NLName("buf"));
+  auto* constNet = SNLScalarNet::create(top, NLName("net_const"));
+  auto* outNet = SNLScalarNet::create(top, NLName("net_out"));
+
+  tie0->getInstTerm(constantOutput)->setNet(constNet);
+  buf->getInstTerm(bufferInput)->setNet(constNet);
+  buf->getInstTerm(bufferOutput)->setNet(outNet);
+  topOut->setNet(outNet);
+
+  universe->setTopDesign(top);
+  naja::DNL::destroy();
+  auto* dnl = naja::DNL::get();
+  ASSERT_NE(dnl, nullptr);
+  const auto topOutID = findDNLTopTermIDByName("out");
+  ASSERT_NE(topOutID, naja::DNL::DNLID_MAX);
+
+  std::vector<bool> primaryInputs(dnl->getNBterms() + 1, false);
+  std::vector<bool> primaryOutputs(dnl->getNBterms() + 1, false);
+  primaryOutputs[topOutID] = true;
+
+  SNLLogicCloud cloud(topOutID, primaryInputs, primaryOutputs);
+  EXPECT_NO_THROW(cloud.compute());
+  EXPECT_EQ(cloud.getTruthTable().getBorderLeavesSize(), 0u);
+  EXPECT_TRUE(cloud.getInputs().empty());
+
+  naja::DNL::destroy();
+  universe->destroy();
+}
+
+TEST(SNLTruthTableTreeApiTest, SharedConstantConcatRemovesAllBorderLeaves) {
+  auto* universe = NLUniverse::create();
+  auto* db = NLDB::create(universe);
+  auto* primitives =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  auto* constantModel =
+      SNLDesign::create(primitives, SNLDesign::Type::Primitive, NLName("CONB"));
+  auto* constantOutput =
+      SNLScalarTerm::create(constantModel, SNLTerm::Direction::Output, NLName("LO"));
+  SNLDesignModeling::setTruthTable(
+      constantModel, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
+
+  auto* orModel =
+      SNLDesign::create(primitives, SNLDesign::Type::Primitive, NLName("OR2"));
+  auto* orInputA =
+      SNLScalarTerm::create(orModel, SNLTerm::Direction::Input, NLName("A"));
+  auto* orInputB =
+      SNLScalarTerm::create(orModel, SNLTerm::Direction::Input, NLName("B"));
+  auto* orOutput =
+      SNLScalarTerm::create(orModel, SNLTerm::Direction::Output, NLName("X"));
+  SNLDesignModeling::setTruthTable(
+      orModel, SNLTruthTable(2, 0b1110, SNLTruthTable::fullDependencies(2)));
+
+  auto* top =
+      SNLDesign::create(library, SNLDesign::Type::Standard, NLName("top"));
+  auto* topOut =
+      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
+  auto* tie0 = SNLInstance::create(top, constantModel, NLName("tie0"));
+  auto* or2 = SNLInstance::create(top, orModel, NLName("or2"));
+  auto* constNet = SNLScalarNet::create(top, NLName("net_const"));
+  auto* outNet = SNLScalarNet::create(top, NLName("net_out"));
+
+  tie0->getInstTerm(constantOutput)->setNet(constNet);
+  or2->getInstTerm(orInputA)->setNet(constNet);
+  or2->getInstTerm(orInputB)->setNet(constNet);
+  or2->getInstTerm(orOutput)->setNet(outNet);
+  topOut->setNet(outNet);
+
+  universe->setTopDesign(top);
+  naja::DNL::destroy();
+  auto* dnl = naja::DNL::get();
+  ASSERT_NE(dnl, nullptr);
+  const auto topOutID = findDNLTopTermIDByName("out");
+  ASSERT_NE(topOutID, naja::DNL::DNLID_MAX);
+
+  std::vector<bool> primaryInputs(dnl->getNBterms() + 1, false);
+  std::vector<bool> primaryOutputs(dnl->getNBterms() + 1, false);
+  primaryOutputs[topOutID] = true;
+
+  SNLLogicCloud cloud(topOutID, primaryInputs, primaryOutputs);
+  EXPECT_NO_THROW(cloud.compute());
+  EXPECT_EQ(cloud.getTruthTable().getBorderLeavesSize(), 0u);
+  EXPECT_TRUE(cloud.getInputs().empty());
 
   naja::DNL::destroy();
   universe->destroy();

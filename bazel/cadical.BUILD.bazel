@@ -53,11 +53,13 @@ cc_library(
             "src/cadical.cpp",
             "src/mobical.cpp",
         ],
-    ) + glob(["src/*.c"]),
+    ) + glob(["src/*.c"]) + [
+        "contrib/craigtracer.cpp",
+    ],
     hdrs = glob([
         "src/*.h",
         "src/*.hpp",
-    ]),
+    ]) + glob(["contrib/*.hpp"]),
     copts = [
         "-DNBUILD",
         "-DNDEBUG",
@@ -65,6 +67,9 @@ cc_library(
         "-DQUIET",
         "-DNCLOSEFROM",
     ] + CADICAL_KITTEN_SYMBOL_PREFIX_COPTS,
-    includes = ["src"],
+    includes = [
+        "src",
+        "contrib",
+    ],
     visibility = ["//visibility:public"],
 )

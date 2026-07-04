@@ -303,6 +303,18 @@ struct SecBoundaryAbstractionGuard {
   bool oldValue_;
 };
 
+struct SecInternalStateCorrespondenceGuard {
+  SecInternalStateCorrespondenceGuard()
+      : oldValue_(
+            KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {}
+
+  ~SecInternalStateCorrespondenceGuard() {
+    KEPLER_FORMAL::Config::setSecInternalStateCorrespondence(oldValue_);
+  }
+
+  bool oldValue_;
+};
+
 struct CurrentPathGuard {
   CurrentPathGuard(): oldPath_(std::filesystem::current_path()) {}
 
@@ -1991,8 +2003,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecUnsupportedMismatchLogUsesUnsupportedResul
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
-  EXPECT_NE(contents.find("SEC cannot run on this design pair:"),
-            std::string::npos);
+  EXPECT_NE(contents.find("SEC workflow failed:"), std::string::npos);
   EXPECT_NE(contents.find("Mismatched observed output sets"), std::string::npos);
 
   std::filesystem::remove(cfgPath);
@@ -2237,7 +2248,8 @@ TEST_F(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
 
   const auto contents = readFileContents(logPath);
   EXPECT_NE(
-      contents.find("SEC output coverage: 50.00% (1/2 covered/existing outputs)."),
+      contents.find(
+          "SEC checked-output coverage: 50.00% (1/2 covered/existing outputs)."),
       std::string::npos);
   EXPECT_NE(
       contents.find(
@@ -2815,6 +2827,48 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedBeforeFormat) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST_F(KeplerFormalCliTests, CliSecInternalStateCorrespondenceAcceptedBeforeFormat) {
+  SecInternalStateCorrespondenceGuard correspondenceGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-v",
+                   "sec",
+                   "-k",
+                   "4",
+                   "--sec-encoding",
+                   "binary",
+                   "--sec-internal-state-correspondence",
+                   "-naja_if",
+                   fixture.design0IfPath.string(),
+                   fixture.design1IfPath.string()}),
+      EXIT_SUCCESS);
+  EXPECT_TRUE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, CliNoSecInternalStateCorrespondenceAcceptedBeforeFormat) {
+  SecInternalStateCorrespondenceGuard correspondenceGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-v",
+                   "sec",
+                   "-k",
+                   "4",
+                   "--sec-encoding",
+                   "binary",
+                   "--no-sec-internal-state-correspondence",
+                   "-naja_if",
+                   fixture.design0IfPath.string(),
+                   fixture.design1IfPath.string()}),
+      EXIT_SUCCESS);
+  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST_F(KeplerFormalCliTests, CliMissingVerificationAfterFormatFails) {
   EXPECT_EQ(runWithArgs({"kepler-formal", "-verilog", "--verification"}), EXIT_FAILURE);
 }
@@ -2918,6 +2972,48 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedAfterFormat) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST_F(KeplerFormalCliTests, CliSecInternalStateCorrespondenceAcceptedAfterFormat) {
+  SecInternalStateCorrespondenceGuard correspondenceGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-naja_if",
+                   "-v",
+                   "sec",
+                   "-k",
+                   "4",
+                   "--sec-encoding",
+                   "binary",
+                   "--sec-internal-state-correspondence",
+                   fixture.design0IfPath.string(),
+                   fixture.design1IfPath.string()}),
+      EXIT_SUCCESS);
+  EXPECT_TRUE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, CliNoSecInternalStateCorrespondenceAcceptedAfterFormat) {
+  SecInternalStateCorrespondenceGuard correspondenceGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+
+  EXPECT_EQ(
+      runWithArgs({"kepler-formal",
+                   "-naja_if",
+                   "-v",
+                   "sec",
+                   "-k",
+                   "4",
+                   "--sec-encoding",
+                   "binary",
+                   "--no-sec-internal-state-correspondence",
+                   fixture.design0IfPath.string(),
+                   fixture.design1IfPath.string()}),
+      EXIT_SUCCESS);
+  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",
@@ -2946,6 +3042,42 @@ TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, ConfigSecInternalStateCorrespondenceAccepted) {
+  SecInternalStateCorrespondenceGuard correspondenceGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: sec\n"
+      "sec_encoding: binary\n"
+      "max_k: 4\n"
+      "sec_internal_state_correspondence: true\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_TRUE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, ConfigSecInternalStateCorrespondenceRejectsNonScalar) {
+  SecInternalStateCorrespondenceGuard correspondenceGuard;
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: sec\n"
+      "sec_encoding: binary\n"
+      "max_k: 4\n"
+      "sec_internal_state_correspondence: [true]\n"
+      "input_paths:\n"
+      "  - a.capnp\n"
+      "  - b.capnp\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  EXPECT_FALSE(KEPLER_FORMAL::Config::getSecInternalStateCorrespondence());
+  std::filesystem::remove(cfgPath);
 }
 
 TEST_F(KeplerFormalCliTests, ConfigSecUnsupportedMismatchFails) {

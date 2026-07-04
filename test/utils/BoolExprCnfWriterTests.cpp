@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #include "BoolExpr.h"
 #include "BoolExprCache.h"
@@ -22,6 +23,72 @@ class BoolExprCnfWriterTests : public ::testing::Test {
     KEPLER_FORMAL::BoolExprCache::destroy();
   }
 };
+
+BoolExpr* maybeNegated(BoolExpr* expr, bool positive) {
+  return positive ? expr : BoolExpr::Not(expr);
+}
+
+BoolExpr* makeTwoLiteralTerm(BoolExpr* a,
+                             bool aPositive,
+                             BoolExpr* b,
+                             bool bPositive) {
+  return BoolExpr::And(
+      maybeNegated(a, aPositive),
+      maybeNegated(b, bPositive));
+}
+
+BoolExpr* makeThreeLiteralTerm(BoolExpr* a,
+                               bool aPositive,
+                               BoolExpr* b,
+                               bool bPositive,
+                               BoolExpr* c,
+                               bool cPositive) {
+  return BoolExpr::And(
+      makeTwoLiteralTerm(a, aPositive, b, bPositive),
+      maybeNegated(c, cPositive));
+}
+
+BoolExpr* makeOr3(BoolExpr* first, BoolExpr* second, BoolExpr* third) {
+  return BoolExpr::Or(BoolExpr::Or(first, second), third);
+}
+
+BoolExpr* makeOr4(BoolExpr* first,
+                  BoolExpr* second,
+                  BoolExpr* third,
+                  BoolExpr* fourth) {
+  return BoolExpr::Or(makeOr3(first, second, third), fourth);
+}
+
+bool evaluateThreeInputExpr(BoolExpr* expr, bool a, bool b, bool c) {
+  return expr->evaluate({{2, a}, {3, b}, {4, c}});
+}
+
+void expectEquivalentForThreeInputs(BoolExpr* actual, BoolExpr* expected) {
+  for (size_t values = 0; values < 8; ++values) {
+    const bool a = (values & 1u) != 0;
+    const bool b = (values & 2u) != 0;
+    const bool c = (values & 4u) != 0;
+    EXPECT_EQ(
+        evaluateThreeInputExpr(actual, a, b, c),
+        evaluateThreeInputExpr(expected, a, b, c));
+  }
+}
+
+std::string makeAllocationOrderSensitiveExprText(bool reverseOrder) {
+  BoolExprCache::destroy();
+  BoolExpr* lowVars = nullptr;
+  BoolExpr* highVars = nullptr;
+  if (reverseOrder) {
+    highVars = BoolExpr::And(BoolExpr::Var(4), BoolExpr::Var(5));
+    lowVars = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+  } else {
+    lowVars = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+    highVars = BoolExpr::And(BoolExpr::Var(4), BoolExpr::Var(5));
+  }
+  const std::string text = BoolExpr::Or(lowVars, highVars)->toString();
+  BoolExprCache::destroy();
+  return text;
+}
 
 }  // namespace
 
@@ -84,6 +151,84 @@ TEST_F(BoolExprCnfWriterTests, BoolExprCacheDestroyKeepsCacheReusable) {
   ASSERT_NE(afterDestroy, nullptr);
   EXPECT_EQ(afterDestroy->getOp(), Op::AND);
   EXPECT_EQ(afterDestroy, BoolExpr::And(BoolExpr::Var(55), BoolExpr::Var(56)));
+}
+
+TEST_F(BoolExprCnfWriterTests,
+       CommutativeExprOrderingIgnoresAllocationOrder) {
+  EXPECT_EQ(
+      makeAllocationOrderSensitiveExprText(/*reverseOrder=*/false),
+      makeAllocationOrderSensitiveExprText(/*reverseOrder=*/true));
+}
+
+TEST_F(BoolExprCnfWriterTests, NormalizeArithmeticRewritesFullAdderSumDnf) {
+  BoolExpr* a = BoolExpr::Var(2);
+  BoolExpr* b = BoolExpr::Var(3);
+  BoolExpr* c = BoolExpr::Var(4);
+  BoolExpr* dnf = makeOr4(
+      makeThreeLiteralTerm(a, true, b, false, c, false),
+      makeThreeLiteralTerm(a, false, b, true, c, false),
+      makeThreeLiteralTerm(a, false, b, false, c, true),
+      makeThreeLiteralTerm(a, true, b, true, c, true));
+  BoolExpr* expected = BoolExpr::Xor(BoolExpr::Xor(a, b), c);
+
+  BoolExpr* normalized = BoolExpr::normalizeArithmetic(dnf);
+
+  EXPECT_NE(normalized, dnf);
+  expectEquivalentForThreeInputs(normalized, expected);
+}
+
+TEST_F(BoolExprCnfWriterTests, NormalizeArithmeticRewritesFullAdderCarryDnf) {
+  BoolExpr* a = BoolExpr::Var(2);
+  BoolExpr* b = BoolExpr::Var(3);
+  BoolExpr* c = BoolExpr::Var(4);
+  BoolExpr* dnf = makeOr4(
+      makeThreeLiteralTerm(a, true, b, true, c, false),
+      makeThreeLiteralTerm(a, true, b, false, c, true),
+      makeThreeLiteralTerm(a, false, b, true, c, true),
+      makeThreeLiteralTerm(a, true, b, true, c, true));
+  BoolExpr* expected = BoolExpr::Or(
+      BoolExpr::And(a, b),
+      BoolExpr::And(c, BoolExpr::Xor(a, b)));
+
+  BoolExpr* normalized = BoolExpr::normalizeArithmetic(dnf);
+
+  EXPECT_NE(normalized, dnf);
+  expectEquivalentForThreeInputs(normalized, expected);
+}
+
+TEST_F(BoolExprCnfWriterTests,
+       NormalizeArithmeticRewritesMinimizedFullAdderCarry) {
+  BoolExpr* a = BoolExpr::Var(2);
+  BoolExpr* b = BoolExpr::Var(3);
+  BoolExpr* c = BoolExpr::Var(4);
+  BoolExpr* majority = makeOr3(
+      makeTwoLiteralTerm(a, true, b, true),
+      makeTwoLiteralTerm(a, true, c, true),
+      makeTwoLiteralTerm(b, true, c, true));
+  BoolExpr* expected = BoolExpr::Or(
+      BoolExpr::And(a, b),
+      BoolExpr::And(c, BoolExpr::Xor(a, b)));
+
+  BoolExpr* normalized = BoolExpr::normalizeArithmetic(majority);
+
+  EXPECT_NE(normalized, majority);
+  expectEquivalentForThreeInputs(normalized, expected);
+}
+
+TEST_F(BoolExprCnfWriterTests,
+       NormalizeArithmeticRejectsIncompleteSumLookalike) {
+  BoolExpr* a = BoolExpr::Var(2);
+  BoolExpr* b = BoolExpr::Var(3);
+  BoolExpr* c = BoolExpr::Var(4);
+  BoolExpr* lookalike = makeOr4(
+      a,
+      b,
+      c,
+      makeThreeLiteralTerm(a, true, b, true, c, true));
+
+  BoolExpr* normalized = BoolExpr::normalizeArithmetic(lookalike);
+
+  EXPECT_EQ(normalized, lookalike);
 }
 
 TEST_F(BoolExprCnfWriterTests, DumpToFileAndInvalidPath) {

@@ -4,10 +4,13 @@
 #pragma once
 
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include "../../config/Config.h"
 #include "kinduction/KInductionEngine.h"
 #include "kinduction/KInductionProblem.h"
+#include "kinduction/OutputBatching.h"
 
 namespace KEPLER_FORMAL::SEC {
 
@@ -21,7 +24,27 @@ struct IMCResult {
   IMCStatus status = IMCStatus::Inconclusive;
   size_t bound = 0;
   std::optional<KInductionResult::CounterexampleWitness> witness;
+  // Batched Craig IMC reports the first output index it could not prove so the
+  // SEC strategy layer can format a uniform engine progress diagnostic.
+  std::optional<size_t> firstUnprovenOutput;
 };
+
+// IMC-specific batching for large dual-rail Craig proofs. Unlike the shared
+// KI batcher, this also checks marginal support growth so wide unrelated cones
+// are split before launching an expensive interpolation query.
+std::vector<std::pair<size_t, size_t>> buildLargeDualRailCraigImcOutputBatches(
+    const KInductionProblem& problem,
+    const OutputBatchingLimits& limits);
+
+// Test-visible strict projection cap used by the large dual-rail Craig path.
+size_t largeDualRailCraigImcProjectionStateLimit();
+
+// Test-visible policy for combining two previously proved Craig helpers.  The
+// merged helper is still strict IMC: both inputs are Craig-derived inductive
+// invariants from the same SEC problem.
+bool shouldCombineCraigHelpersForSmallRawSingleton(
+    bool useSmallRawSingletonInvariant,
+    bool reusableInvariantHasRegions);
 
 // Interpolation-Based Model Checking over the extracted SEC problem. It keeps
 // counterexample discovery on the shared BMC path, then grows a proof frontier

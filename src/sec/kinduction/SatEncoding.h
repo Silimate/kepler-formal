@@ -3,9 +3,8 @@
 
 #pragma once
 
-#include <array>
 #include <cstddef>
-#include <memory_resource>
+#include <cstdint>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -76,8 +75,27 @@ class FrameFormulaEncoder {
   const std::unordered_map<size_t, int>& leafLits() const;
 
  private:
+  struct BoolExprPtrHash {
+    size_t operator()(const BoolExpr* node) const noexcept;
+  };
+
+  struct BoolExprPtrEqual {
+    bool operator()(const BoolExpr* lhs, const BoolExpr* rhs) const noexcept;
+  };
+
+  struct CachedNodeLit {
+    BoolExpr* node = nullptr;
+    int lit = 0;
+  };
+
   size_t mappedSymbol(size_t symbol) const;
   void reserveNodeCache();
+  static size_t nodeCacheBucketCountFor(size_t desiredEntries);
+  static size_t nodeCacheSlotFor(BoolExpr* node, size_t mask);
+  void reserveNodeCacheSlots(size_t desiredEntries);
+  void insertCachedLiteral(BoolExpr* node, int lit);
+  int findCachedLiteral(BoolExpr* node) const;
+  int cachedLiteral(BoolExpr* node) const;
   void cacheEncodedLiteral(BoolExpr* node, int lit);
   int getConstLit(bool value);
   bool isConstLit(int lit, bool value);
@@ -87,13 +105,17 @@ class FrameFormulaEncoder {
   const std::unordered_map<size_t, size_t>* symbolMap_ = nullptr;
   bool createMissingLeaves_ = false;
   size_t expectedNodeHint_ = 0;
-  // PDR creates many short-lived encoders while asking predecessor queries.
-  // A normal unordered_map allocates one node at a time for every BoolExpr DAG
-  // node in each query. The monotonic arena keeps those temporary allocations
-  // local to the encoder and releases them in one shot when the query ends.
-  std::array<std::byte, 16 * 1024> nodeArenaBuffer_{};
-  std::pmr::monotonic_buffer_resource nodeArena_;
-  std::pmr::unordered_map<BoolExpr*, int> nodeToLit_;
+  // SEC creates many short-lived encoders while asking local SAT queries.
+  // Keep this cache flat so each BoolExpr DAG node insertion is one table probe
+  // instead of a per-node unordered_map allocation.
+  std::vector<CachedNodeLit> nodeToLit_;
+  // Hot encoder probes run millions of times in dual-rail transition CNF
+  // construction. Keep raw accessors beside the owning vector so lookup avoids
+  // repeated std::vector size/data calls while preserving vector ownership.
+  CachedNodeLit* nodeToLitData_ = nullptr;
+  const CachedNodeLit* nodeToLitConstData_ = nullptr;
+  size_t nodeToLitMask_ = 0;
+  size_t nodeToLitSize_ = 0;
   size_t nodeMapReservedEntries_ = 0;
   std::optional<int> trueLit_;
 };

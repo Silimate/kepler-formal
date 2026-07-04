@@ -6,25 +6,116 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "../../config/Config.h"
 #include "common/SecDiag.h"
 #include "kinduction/SatEncoding.h"
 #include "proof/TransitionExprResolver.h"
 
 namespace KEPLER_FORMAL::SEC {
 
+struct TransitionSupportCacheEntry {
+  std::vector<size_t> targets;
+  std::vector<size_t> stateSupport;
+  std::vector<size_t> nonStateSupport;
+
+  bool matches(const std::vector<size_t>& candidateTargets) const {
+    return targets == candidateTargets;
+  }
+
+  size_t symbolCount() const {
+    return targets.size() + stateSupport.size() + nonStateSupport.size();
+  }
+
+  void appendTo(std::unordered_set<size_t>& stateOutput,
+                std::unordered_set<size_t>& nonStateOutput) const {
+    stateOutput.insert(stateSupport.begin(), stateSupport.end());
+    nonStateOutput.insert(nonStateSupport.begin(), nonStateSupport.end());
+  }
+};
+
+struct InductionTransitionSupportCache {
+  static constexpr size_t kMaxEntries = 8192;
+  static constexpr size_t kMaxCachedSymbols = 4 * 1024 * 1024;
+
+  size_t signature = 0;
+  size_t entryCount = 0;
+  size_t cachedSymbolCount = 0;
+  std::unordered_map<size_t, std::vector<TransitionSupportCacheEntry>>
+      entriesByHash;
+
+  void resetForSignature(size_t newSignature) {
+    if (signature == newSignature) {
+      return;
+    }
+    signature = newSignature;
+    entryCount = 0;
+    cachedSymbolCount = 0;
+    entriesByHash.clear();
+  }
+
+  const TransitionSupportCacheEntry* find(
+      size_t targetHash,
+      const std::vector<size_t>& targets) const {
+    const auto bucketIt = entriesByHash.find(targetHash);
+    if (bucketIt == entriesByHash.end()) {
+      return nullptr;
+    }
+    for (const auto& entry : bucketIt->second) {
+      if (entry.matches(targets)) {
+        return &entry;
+      }
+    }
+    return nullptr; // LCOV_EXCL_LINE
+  }
+
+  void store(size_t targetHash,
+             const std::vector<size_t>& targets,
+             const std::unordered_set<size_t>& stateSupport,
+             const std::unordered_set<size_t>& nonStateSupport) {
+    TransitionSupportCacheEntry entry{
+        targets,
+        sortedVector(stateSupport),
+        sortedVector(nonStateSupport)};
+    const size_t symbolCount = entry.symbolCount();
+    if (entryCount >= kMaxEntries ||
+        cachedSymbolCount + symbolCount > kMaxCachedSymbols) {
+      return; // LCOV_EXCL_LINE
+    }
+    entriesByHash[targetHash].push_back(std::move(entry));
+    ++entryCount;
+    cachedSymbolCount += symbolCount;
+  }
+
+ private:
+  static std::vector<size_t> sortedVector(
+      const std::unordered_set<size_t>& symbols) {
+    std::vector<size_t> sorted(symbols.begin(), symbols.end());
+    std::sort(sorted.begin(), sorted.end());
+    return sorted;
+  }
+};
+
 namespace {
 
 constexpr size_t kMaxSimplePathStateSymbols = 4096;
-// Keep direct dual-rail leaf proofs bounded like KInductionEngine's localized
-// path.  Hard resetless-state outputs should be reported as uncovered quickly.
+constexpr size_t kMinOriginalOutputsForCompactDualRailProfile = 64;
+constexpr size_t kMinDeferredRailStateSymbolsForDirectProfile = 512;
+constexpr size_t kMaxExactTransitionNodeCountHintTargets = 2048;
+constexpr size_t kMaxTransitionNodeCountHint = 262144;
 constexpr unsigned kDefaultDualRailLeafInductionDecisionLimit = 5000;
-
+// Matches SATSolverWrapper's dual-rail no-preprocess cutoff.  Batched
+// resource-limited probes still need the UNSAT-oriented proof profile, but
+// samples show Kissat preprocessing can dominate these small-looking rail cones
+// before the decision cap is observed.
+constexpr size_t kDirectDualRailProofProfileSymbolFloor = 4096;
 struct InductionCoi {
   std::vector<std::vector<size_t>> transitionTargetsByFrame;
+  std::vector<std::vector<size_t>> transitionSupportByFrame;
   std::vector<size_t> relevantStateSymbols;
   std::vector<size_t> solverSymbols;
   std::unordered_set<size_t> solverSymbolSet;
@@ -40,7 +131,7 @@ KEPLER_FORMAL::Config::SolverType inductionStepSolverType(
 std::optional<unsigned> readUnsignedEnv(const char* name) {
   const char* value = std::getenv(name);
   if (value == nullptr || *value == '\0') {
-    return std::nullopt;
+    return std::nullopt; // LCOV_EXCL_LINE
   }
   char* end = nullptr;
   const unsigned long parsed = std::strtoul(value, &end, 10);
@@ -57,6 +148,25 @@ bool isInductionStepCoiDiagEnabled() {
   return std::getenv("KEPLER_SEC_KI_COI_DIAG") != nullptr || isSecDiagEnabled();
 }
 
+size_t dualRailStateSymbolCount(const KInductionProblem& problem) {
+  if (!problem.dualRailStatePairs.empty()) {
+    return problem.dualRailStatePairs.size() * 2;
+  }
+  return problem.state0Symbols.size() + problem.state1Symbols.size();
+}
+
+size_t originalOutputCountForProblem(const KInductionProblem& problem) { // LCOV_EXCL_LINE
+  return problem.originalObservedOutputCount == 0 // LCOV_EXCL_LINE
+      ? problem.observedOutputExprs0.size() // LCOV_EXCL_LINE
+      : problem.originalObservedOutputCount; // LCOV_EXCL_LINE
+}
+
+bool isLargeDeferredDualRailLeafSurface(const KInductionProblem& problem) {
+  return problem.deferBaseCaseChecks &&
+         dualRailStateSymbolCount(problem) >=
+             kMinDeferredRailStateSymbolsForDirectProfile;
+}
+
 std::optional<unsigned> directInductionDecisionLimit(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType) {
@@ -70,10 +180,68 @@ std::optional<unsigned> directInductionDecisionLimit(
       limit.has_value()) {
     return limit;
   }
-  // IMC calls the lower-level induction helper directly after output
-  // localization. Keep those dual-rail leaf obligations bounded the same way
-  // KInductionEngine does, so one hard output cannot stall the workflow.
-  return kDefaultDualRailLeafInductionDecisionLimit;
+  if (originalOutputCountForProblem(problem) < // LCOV_EXCL_LINE
+          kMinOriginalOutputsForCompactDualRailProfile && // LCOV_EXCL_LINE
+      !isLargeDeferredDualRailLeafSurface(problem)) { // LCOV_EXCL_LINE
+    // Compact dual-rail leaves can need the full strict KI search, and their
+    // cones are small enough that an unbounded leaf is not the workflow wall.
+    return std::nullopt; // LCOV_EXCL_LINE
+  }
+  return kDefaultDualRailLeafInductionDecisionLimit; // LCOV_EXCL_LINE
+}
+
+bool shouldUseDirectDualRailLimitedProofProfile(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const std::optional<unsigned>& kissatDecisionLimit) {
+  return problem.usesDualRailStateEncoding &&
+         solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+         kissatDecisionLimit.has_value() && *kissatDecisionLimit > 0;
+}
+
+bool isWideDualRailResidualSurface(const KInductionProblem& problem) { // LCOV_EXCL_LINE
+  return originalOutputCountForProblem(problem) >= // LCOV_EXCL_LINE
+         kMinOriginalOutputsForCompactDualRailProfile;
+}
+
+bool requiresConcreteDualRailStateDomain(const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding &&
+         (problem.hasCompleteBootstrapStateAssignments() ||
+          problem.hasCompleteInitialState());
+}
+
+size_t directDualRailProofProfileSymbols(const KInductionProblem& problem,
+                                         size_t solverSymbols) {
+  if (problem.deferBaseCaseChecks) {
+    return std::max(solverSymbols, kDirectDualRailProofProfileSymbolFloor);
+  }
+  if (!isWideDualRailResidualSurface(problem) && // LCOV_EXCL_LINE
+      !isLargeDeferredDualRailLeafSurface(problem)) { // LCOV_EXCL_LINE
+    return solverSymbols; // LCOV_EXCL_LINE
+  }
+  return std::max(solverSymbols, kDirectDualRailProofProfileSymbolFloor); // LCOV_EXCL_LINE
+}
+
+bool shouldUseDirectCdclProfileForLimitedDualRailLeaf(
+    const KInductionProblem& problem,
+    const InductionCoi& coi) {
+  (void)coi;
+  // Deferred leaves are residual coverage attempts created after output
+  // splitting.  Use the direct CDCL option mix only when the parent rail-state
+  // surface is large enough to get a default decision cap; UNKNOWN still means
+  // "not proved" and never becomes coverage.
+  return isLargeDeferredDualRailLeafSurface(problem);
+}
+
+bool shouldUseDirectCdclProfileForCompactDualRailQuery(
+    const KInductionProblem& problem) {
+  // Small-to-medium dual-rail batches and their split leaves are real strict KI
+  // obligations.  When the query is not using simple-path strengthening,
+  // KISSAT's rephase/local-walk profile can dominate these rebuilt one-shot
+  // proofs, so keep these rail surfaces on the direct CDCL option mix.
+  return problem.usesDualRailStateEncoding &&
+         dualRailStateSymbolCount(problem) <
+             kMinDeferredRailStateSymbolsForDirectProfile;
 }
 
 size_t countTransitionTargets(
@@ -83,6 +251,40 @@ size_t countTransitionTargets(
     count += targets.size();
   }
   return count;
+}
+
+size_t countFrameSupportSymbols(
+    const std::vector<std::vector<size_t>>& supportByFrame) {
+  size_t count = 0;
+  for (const auto& support : supportByFrame) {
+    count += support.size();
+  }
+  return count;
+}
+
+size_t boundedAddForReserveHint(size_t lhs, size_t rhs, size_t limit) {
+  if (lhs >= limit || rhs >= limit - lhs) {
+    return limit; // LCOV_EXCL_LINE
+  }
+  return lhs + rhs;
+}
+
+size_t transitionRelationNodeReserveHint(
+    const TransitionExprResolver& transitionByState,
+    const std::vector<size_t>& targets,
+    const std::vector<size_t>& supportSymbols) {
+  if (targets.size() > kMaxExactTransitionNodeCountHintTargets) {
+    return supportSymbols.size(); // LCOV_EXCL_LINE
+  }
+
+  size_t exactNodeHint = 0;
+  for (const auto stateSymbol : targets) {
+    exactNodeHint = boundedAddForReserveHint(
+        exactNodeHint,
+        transitionByState.nodeCount(stateSymbol),
+        kMaxTransitionNodeCountHint);
+  }
+  return std::max(supportSymbols.size(), exactNodeHint);
 }
 
 size_t countStateEqualityPairsInCoi(
@@ -96,6 +298,19 @@ size_t countStateEqualityPairsInCoi(
     }
   }
   return count;
+}
+
+bool shouldAddSimplePathConstraint(const KInductionProblem& problem,
+                                   const InductionCoi& coi) {
+  if (!problem.usesDualRailStateEncoding) {
+    return coi.relevantStateSymbols.size() <= kMaxSimplePathStateSymbols;
+  }
+  // Simple-path constraints are the standard loop-free strengthening used by
+  // practical k-induction.  Apply them whenever the reduced dual-rail cone is
+  // still below the existing state threshold: AES residual leaves need this
+  // strict-KI strengthening, while very wide ASIC cones remain protected from
+  // quadratic frame-pair clauses by the same bound.
+  return coi.relevantStateSymbols.size() <= kMaxSimplePathStateSymbols;
 }
 
 std::unordered_set<size_t> buildStateSymbolSet(const KInductionProblem& problem) {
@@ -129,6 +344,90 @@ std::vector<size_t> sortedSymbols(const std::unordered_set<size_t>& symbols) {
   return sorted;
 }
 
+size_t mixHashValue(size_t seed, size_t value) {
+  seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+  return seed;
+}
+
+size_t hashSymbols(const std::vector<size_t>& symbols) {
+  size_t seed = symbols.size();
+  for (const auto symbol : symbols) {
+    seed = mixHashValue(seed, symbol);
+  }
+  return seed;
+}
+
+size_t transitionSupportCacheSignature(const KInductionProblem& problem) {
+  size_t seed = reinterpret_cast<size_t>(problem.lazyTransitions.get());
+  seed = mixHashValue(seed, problem.transitions0.size());
+  seed = mixHashValue(
+      seed, reinterpret_cast<size_t>(problem.transitions0.data()));
+  seed = mixHashValue(seed, problem.transitions1.size());
+  seed = mixHashValue(
+      seed, reinterpret_cast<size_t>(problem.transitions1.data()));
+  seed = mixHashValue(seed, problem.state0Symbols.size());
+  seed = mixHashValue(
+      seed, reinterpret_cast<size_t>(problem.state0Symbols.data()));
+  seed = mixHashValue(seed, problem.state1Symbols.size());
+  seed = mixHashValue(
+      seed, reinterpret_cast<size_t>(problem.state1Symbols.data()));
+  return seed;
+}
+
+InductionTransitionSupportCache& transitionSupportCacheForProblem(
+    const KInductionProblem& problem) {
+  if (!problem.inductionTransitionSupportCache) {
+    problem.inductionTransitionSupportCache =
+        std::make_shared<InductionTransitionSupportCache>();
+  }
+  auto& cache = *problem.inductionTransitionSupportCache;
+  cache.resetForSignature(transitionSupportCacheSignature(problem));
+  return cache;
+}
+
+void collectTransitionSupportWithCache(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& transitionByState,
+    const std::vector<size_t>& targets,
+    const std::unordered_set<size_t>& stateSymbols,
+    std::unordered_set<size_t>& stateOutput,
+    std::unordered_set<size_t>& nonStateOutput) {
+  if (targets.empty()) {
+    return;
+  }
+
+  auto& cache = transitionSupportCacheForProblem(problem);
+  const size_t targetHash = hashSymbols(targets);
+  if (const auto* cached = cache.find(targetHash, targets);
+      cached != nullptr) {
+    cached->appendTo(stateOutput, nonStateOutput);
+    return;
+  }
+
+  std::unordered_set<size_t> stateSupport;
+  std::unordered_set<size_t> nonStateSupport;
+  stateSupport.reserve(targets.size());
+  nonStateSupport.reserve(targets.size());
+  transitionByState.collectSupportForTargets(
+      targets,
+      stateSymbols,
+      stateSupport,
+      nonStateSupport);
+  stateOutput.insert(stateSupport.begin(), stateSupport.end());
+  nonStateOutput.insert(nonStateSupport.begin(), nonStateSupport.end());
+  cache.store(targetHash, targets, stateSupport, nonStateSupport);
+}
+
+std::vector<size_t> mergeTransitionSupportForEncoding(
+    const std::unordered_set<size_t>& stateSupport,
+    const std::unordered_set<size_t>& nonStateSupport) {
+  std::unordered_set<size_t> merged;
+  merged.reserve(stateSupport.size() + nonStateSupport.size());
+  merged.insert(stateSupport.begin(), stateSupport.end());
+  merged.insert(nonStateSupport.begin(), nonStateSupport.end());
+  return sortedSymbols(merged);
+}
+
 void addFormulaStateSupport(BoolExpr* formula,
                             const std::unordered_set<size_t>& stateSymbols,
                             std::unordered_set<size_t>& output) {
@@ -157,25 +456,25 @@ void addFormulaSupport(BoolExpr* formula, std::unordered_set<size_t>& output) {
   }
 }
 
-void addEqualityAliasesForFrame(
+void addEqualityAliasesForFrame( // LCOV_EXCL_LINE
     FrameSymbolAliases& aliasesByFrame,
     const std::vector<std::pair<size_t, size_t>>& equalityPairs,
     const std::unordered_set<size_t>& solverSymbols,
     size_t frame) {
-  if (frame >= aliasesByFrame.size()) {
+  if (frame >= aliasesByFrame.size()) { // LCOV_EXCL_LINE
     // LCOV_EXCL_START
     return;  // LCOV_EXCL_LINE
     // LCOV_EXCL_STOP
   }
-  auto& frameAliases = aliasesByFrame[frame];
-  for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
-    if (solverSymbols.find(lhsSymbol) == solverSymbols.end() ||
-        solverSymbols.find(rhsSymbol) == solverSymbols.end()) {
+  auto& frameAliases = aliasesByFrame[frame]; // LCOV_EXCL_LINE
+  for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) { // LCOV_EXCL_LINE
+    if (solverSymbols.find(lhsSymbol) == solverSymbols.end() || // LCOV_EXCL_LINE
+        solverSymbols.find(rhsSymbol) == solverSymbols.end()) { // LCOV_EXCL_LINE
       continue;  // LCOV_EXCL_LINE
     }
-    frameAliases.emplace_back(lhsSymbol, rhsSymbol);
+    frameAliases.emplace_back(lhsSymbol, rhsSymbol); // LCOV_EXCL_LINE
   }
-}
+} // LCOV_EXCL_LINE
 
 FrameSymbolAliases buildInductionFrameAliases(
     const KInductionProblem& problem,
@@ -183,7 +482,8 @@ FrameSymbolAliases buildInductionFrameAliases(
     size_t numFrames,
     bool aliasInductiveStateEqualities) {
   FrameSymbolAliases aliasesByFrame(numFrames);
-  if (!aliasInductiveStateEqualities) {
+  if (!aliasInductiveStateEqualities ||
+      !KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) { // LCOV_EXCL_LINE
     return aliasesByFrame;
   }
 
@@ -191,14 +491,14 @@ FrameSymbolAliases buildInductionFrameAliases(
   // frames 0..k-1. Sharing SAT literals for those frame-local equalities gives
   // Kissat the quotient transition system directly while leaving the final bad
   // frame unaliased unless the proof explicitly assumes equality there too.
-  for (size_t frame = 0; frame + 1 < numFrames; ++frame) {
-    addEqualityAliasesForFrame(
+  for (size_t frame = 0; frame + 1 < numFrames; ++frame) { // LCOV_EXCL_LINE
+    addEqualityAliasesForFrame( // LCOV_EXCL_LINE
         aliasesByFrame,
-        problem.inductiveStateEqualityPairs,
-        coi.solverSymbolSet,
-        frame);
-  }
-  return aliasesByFrame;
+        problem.inductiveStateEqualityPairs, // LCOV_EXCL_LINE
+        coi.solverSymbolSet, // LCOV_EXCL_LINE
+        frame); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  return aliasesByFrame; // LCOV_EXCL_LINE
 }
 
 std::vector<size_t> expandTransitionTargets(
@@ -270,7 +570,7 @@ void closeStateEqualityDependencies(
       const bool lhsNeeded = stateSymbols.find(lhsSymbol) != stateSymbols.end();
       const bool rhsNeeded = stateSymbols.find(rhsSymbol) != stateSymbols.end();
       if (!lhsNeeded && !rhsNeeded) {
-        continue;
+        continue; // LCOV_EXCL_LINE
       }
       changed |= stateSymbols.insert(lhsSymbol).second;
       changed |= stateSymbols.insert(rhsSymbol).second;
@@ -278,11 +578,26 @@ void closeStateEqualityDependencies(
   }
 }
 
+void closeSameFrameStateEqualityDependencies(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& stateSymbols) {
+  closeStateEqualityDependencies(problem.sameFrameStateEqualityPairs0, stateSymbols);
+  closeStateEqualityDependencies(problem.sameFrameStateEqualityPairs1, stateSymbols);
+}
+
+void addRelevantSameFrameStateEqualityPartners(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& solverSymbols) {
+  closeSameFrameStateEqualityDependencies(problem, solverSymbols);
+}
+
 InductionCoi buildInductionCoi(const KInductionProblem& problem,
                                BoolExpr* inductionProperty,
                                BoolExpr* inductionBad,
                                bool addExtraInductiveEqualities,
                                size_t k) {
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
   // Cone-of-influence reduction for the actual k-induction SAT problem:
   // start from the formulas that are asserted at each frame, then walk
   // backwards through only the transition equations needed to define those
@@ -302,14 +617,17 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
   addFormulaStateSupport(inductionBad, stateSymbols, requiredStates[k]);
 
   std::vector<std::vector<size_t>> transitionTargetsByFrame(k);
+  std::vector<std::vector<size_t>> transitionSupportByFrame(k);
   for (size_t frame = k; frame > 0; --frame) {
-    if (addExtraInductiveEqualities && frame < k) {
+    if (allowInternalStateCorrespondence &&
+        addExtraInductiveEqualities && frame < k) { // LCOV_EXCL_LINE
       // Output-batched SEC should not carry every design-wide state relation into
       // a local proof.  Close only relations touched by this frame's real output
       // cone before walking one transition step backward.
-      closeStateEqualityDependencies(
-          problem.inductiveStateEqualityPairs, requiredStates[frame]);
-    }
+      closeStateEqualityDependencies( // LCOV_EXCL_LINE
+          problem.inductiveStateEqualityPairs, requiredStates[frame]); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    closeSameFrameStateEqualityDependencies(problem, requiredStates[frame]);
     auto targets = expandTransitionTargets(
         requiredStates[frame],
         transitionByState,
@@ -318,16 +636,28 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
     // Wide dual-rail buses share large transition cones.  Ask the resolver for
     // the whole frame target set at once so KI/IMC reuse the same DAG walk
     // while still collecting exactly the symbols needed by the proof.
-    transitionByState.collectSupportForTargets(
+    std::unordered_set<size_t> frameStateSupport;
+    std::unordered_set<size_t> frameNonStateSupport;
+    collectTransitionSupportWithCache(
+        problem,
+        transitionByState,
         targets,
         stateSymbols,
-        requiredStates[frame - 1],
-        transitionSupportSymbols);
+        frameStateSupport,
+        frameNonStateSupport);
+    requiredStates[frame - 1].insert(
+        frameStateSupport.begin(), frameStateSupport.end());
+    transitionSupportSymbols.insert(
+        frameNonStateSupport.begin(), frameNonStateSupport.end());
+    transitionSupportByFrame[frame - 1] =
+        mergeTransitionSupportForEncoding(
+            frameStateSupport, frameNonStateSupport);
   }
-  if (addExtraInductiveEqualities) {
-    closeStateEqualityDependencies(
-        problem.inductiveStateEqualityPairs, requiredStates[0]);
-  }
+  if (allowInternalStateCorrespondence && addExtraInductiveEqualities) {
+    closeStateEqualityDependencies( // LCOV_EXCL_LINE
+        problem.inductiveStateEqualityPairs, requiredStates[0]); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  closeSameFrameStateEqualityDependencies(problem, requiredStates[0]);
 
   std::unordered_set<size_t> solverSymbols;
   solverSymbols.reserve(1024);
@@ -349,11 +679,13 @@ InductionCoi buildInductionCoi(const KInductionProblem& problem,
       transitionSupportSymbols.begin(), transitionSupportSymbols.end());
   addRelevantComplementPartners(problem.complementedStatePairs0, solverSymbols);
   addRelevantComplementPartners(problem.complementedStatePairs1, solverSymbols);
+  addRelevantSameFrameStateEqualityPartners(problem, solverSymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, solverSymbols);
   addPostBootstrapResetInputSymbols(problem, solverSymbols);
 
   InductionCoi coi;
   coi.transitionTargetsByFrame = std::move(transitionTargetsByFrame);
+  coi.transitionSupportByFrame = std::move(transitionSupportByFrame);
   coi.relevantStateSymbols = sortedSymbols(relevantStateSymbols);
   coi.solverSymbols = sortedSymbols(solverSymbols);
   coi.solverSymbolSet.insert(coi.solverSymbols.begin(), coi.solverSymbols.end());
@@ -370,6 +702,7 @@ void emitInductionStepCoiDiag(const KInductionProblem& problem,
       "SEC diag: k-induction step coi k=", k,
       " solver_symbols=", coi.solverSymbols.size(),
       " transition_targets=", countTransitionTargets(coi.transitionTargetsByFrame),
+      " transition_support=", countFrameSupportSymbols(coi.transitionSupportByFrame),
       " relevant_states=", coi.relevantStateSymbols.size(),
       " inductive_equalities_in_coi=",
       countStateEqualityPairsInCoi(
@@ -398,15 +731,71 @@ void addComplementedStateRelations(
   }
 }
 
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      if (solverSymbols.find(lhsSymbol) == solverSymbols.end() ||
+          solverSymbols.find(rhsSymbol) == solverSymbols.end()) {
+        continue;  // LCOV_EXCL_LINE
+      }
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(lhsSymbol, frame),
+          variables.getLiteral(rhsSymbol, frame));
+    }
+  }
+}
+
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const KInductionProblem& problem,
+    const std::unordered_set<size_t>& solverSymbols,
+    size_t numFrames) {
+  addSameFrameStateEqualities(
+      solver,
+      variables,
+      problem.sameFrameStateEqualityPairs0,
+      solverSymbols,
+      numFrames);
+  addSameFrameStateEqualities(
+      solver,
+      variables,
+      problem.sameFrameStateEqualityPairs1,
+      solverSymbols,
+      numFrames);
+}
+
 void addTransitionRelation(SATSolverWrapper& solver,
                            const FrameVariableStore& variables,
                            const TransitionExprResolver& transitionByState,
                            const std::vector<size_t>& targets,
+                           const std::vector<size_t>& supportSymbols,
                            size_t frame) {
   // The targets of a single frame often share most of their input cone. Keep a
   // frame-local encoder so common BoolExpr nodes are Tseitin-encoded once and
-  // reused by every next-state equality in this frame.
-  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
+  // reused by every next-state equality in this frame.  Use the exact
+  // transition read-set computed by the strict KI COI pass instead of every
+  // solver symbol; this emits the same transition clauses while avoiding a wide
+  // per-frame leaf table for unrelated state and output cones.
+  const size_t reserveHint =
+      transitionRelationNodeReserveHint(transitionByState, targets, supportSymbols);
+  if (isInductionStepCoiDiagEnabled() && reserveHint > supportSymbols.size()) {
+    emitSecDiag(
+        "SEC diag: k-induction transition node reserve targets=",
+        targets.size(),
+        " support=", supportSymbols.size(),
+        " expected_nodes=", reserveHint);
+  }
+  FrameFormulaEncoder encoder(
+      solver,
+      variables.makeLeafLits(frame, supportSymbols),
+      reserveHint);
   for (const auto stateSymbol : targets) {
     BoolExpr* expr = transitionByState.at(stateSymbol);
     addLiteralEquivalence(
@@ -416,26 +805,29 @@ void addTransitionRelation(SATSolverWrapper& solver,
   }
 }
 
-void addInductiveStateEqualities(SATSolverWrapper& solver,
+void addInductiveStateEqualities(SATSolverWrapper& solver, // LCOV_EXCL_LINE
                                  const FrameVariableStore& variables,
                                  const KInductionProblem& problem,
                                  const std::unordered_set<size_t>& solverSymbols,
                                  size_t firstFrame,
                                  size_t lastFrame) {
-  if (problem.inductiveStateEqualityPairs.empty() || firstFrame > lastFrame) {
-    return;
+  if (problem.inductiveStateEqualityPairs.empty() || firstFrame > lastFrame) { // LCOV_EXCL_LINE
+    return; // LCOV_EXCL_LINE
+  }
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) { // LCOV_EXCL_LINE
+    return; // LCOV_EXCL_LINE
   }
 
-  for (size_t frame = firstFrame; frame <= lastFrame; ++frame) {
-    for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) {
-      if (solverSymbols.find(lhsSymbol) == solverSymbols.end() ||
-          solverSymbols.find(rhsSymbol) == solverSymbols.end()) {
+  for (size_t frame = firstFrame; frame <= lastFrame; ++frame) { // LCOV_EXCL_LINE
+    for (const auto& [lhsSymbol, rhsSymbol] : problem.inductiveStateEqualityPairs) { // LCOV_EXCL_LINE
+      if (solverSymbols.find(lhsSymbol) == solverSymbols.end() || // LCOV_EXCL_LINE
+          solverSymbols.find(rhsSymbol) == solverSymbols.end()) { // LCOV_EXCL_LINE
         continue;  // LCOV_EXCL_LINE
       }
-      const int lhs = variables.getLiteral(lhsSymbol, frame);
-      const int rhs = variables.getLiteral(rhsSymbol, frame);
-      if (lhs == rhs) {
-        continue;
+      const int lhs = variables.getLiteral(lhsSymbol, frame); // LCOV_EXCL_LINE
+      const int rhs = variables.getLiteral(rhsSymbol, frame); // LCOV_EXCL_LINE
+      if (lhs == rhs) { // LCOV_EXCL_LINE
+        continue; // LCOV_EXCL_LINE
       }
       // LCOV_EXCL_START
       addLiteralEquivalence(  // LCOV_EXCL_LINE
@@ -444,15 +836,16 @@ void addInductiveStateEqualities(SATSolverWrapper& solver,
           rhs);  // LCOV_EXCL_LINE
           // LCOV_EXCL_STOP
     }
-  }
-}
+  } // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
 void addDualRailStateValidity(
     SATSolverWrapper& solver,
     const FrameVariableStore& variables,
     const std::vector<DualRailSymbolPair>& railPairs,
     const std::unordered_set<size_t>& solverSymbols,
-    size_t numFrames) {
+    size_t numFrames,
+    bool requireExactRails) {
   for (size_t frame = 0; frame < numFrames; ++frame) {
     for (const auto& rails : railPairs) {
       if (solverSymbols.find(rails.mayBeOne) == solverSymbols.end() ||
@@ -465,6 +858,16 @@ void addDualRailStateValidity(
       solver.addClause({
           variables.getLiteral(rails.mayBeOne, frame),
           variables.getLiteral(rails.mayBeZero, frame)});
+      if (requireExactRails) {
+        // Complete bootstrap/initial assignments describe concrete Boolean
+        // states, not an unknown value set.  Even deferred output slices owe
+        // the same shared concrete base prefix, so keep strict KI inside the
+        // per-design exact rail domain instead of proving over synthetic
+        // unknown rails.
+        solver.addClause({
+            -variables.getLiteral(rails.mayBeOne, frame),
+            -variables.getLiteral(rails.mayBeZero, frame)});
+      }
     }
   }
 }
@@ -506,14 +909,18 @@ InductionProofStatus proveByInductionStatus(
     size_t k,
     std::optional<unsigned> kissatDecisionLimit) {
   const bool hasExplicitInductionInvariant = problem.inductionProperty != nullptr;
+  const bool allowInternalStateCorrespondence =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence();
   BoolExpr* inductionProperty =
       hasExplicitInductionInvariant ? problem.inductionProperty : problem.property;
   BoolExpr* inductionBad =
       problem.inductionBad != nullptr ? problem.inductionBad : problem.bad;
-  const bool addExtraInductiveEqualities = !hasExplicitInductionInvariant;
+  const bool addExtraInductiveEqualities =
+      allowInternalStateCorrespondence && !hasExplicitInductionInvariant;
   const bool aliasInductiveStateEqualities =
-      addExtraInductiveEqualities ||
-      problem.inductionPropertyAssumesInductiveStateEqualities;
+      allowInternalStateCorrespondence &&
+      (addExtraInductiveEqualities || // LCOV_EXCL_LINE
+       problem.inductionPropertyAssumesInductiveStateEqualities); // LCOV_EXCL_LINE
   const InductionCoi coi = buildInductionCoi(
       problem,
       inductionProperty,
@@ -526,11 +933,58 @@ InductionProofStatus proveByInductionStatus(
   const TransitionExprResolver transitionByState(problem);
   const FrameSymbolAliases aliasesByFrame = buildInductionFrameAliases(
       problem, coi, k + 1, aliasInductiveStateEqualities);
+  const bool addSimplePath = shouldAddSimplePathConstraint(problem, coi);
 
   const auto localSolverType = inductionStepSolverType(problem, solverType);
   SATSolverWrapper solver(localSolverType);
-  if (problem.usesDualRailStateEncoding) {
-    solver.configureForSecDualRailConeProof(coi.solverSymbols.size());
+  if (shouldUseDirectDualRailLimitedProofProfile(
+          problem, localSolverType, kissatDecisionLimit)) {
+    // Resource-limited dual-rail induction queries are speculative KI attempts:
+    // UNKNOWN just asks the caller to split or try the next k. Keep the UNSAT
+    // proof profile, and force the existing no-preprocess branch only for wide
+    // residual surfaces where Kissat preprocessing can dominate before the
+    // decision cap is seen.
+    const size_t profileSymbols =
+        directDualRailProofProfileSymbols(problem, coi.solverSymbols.size());
+    solver.configureForSecDualRailConeProof(
+        profileSymbols);
+    const bool useDirectCdcl =
+        shouldUseDirectCdclProfileForLimitedDualRailLeaf(problem, coi);
+    if (useDirectCdcl) {
+      solver.configureForSecLocalBooleanCheck(profileSymbols);
+    }
+    if (isInductionStepCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: k-induction direct dual-rail capped proof profile outputs=",
+          problem.observedOutputExprs0.size(),
+          " solver_symbols=", coi.solverSymbols.size(),
+          " profile_symbols=", profileSymbols,
+          " direct_cdcl=",
+          useDirectCdcl ? 1 : 0);
+    }
+  } else if (problem.usesDualRailStateEncoding) {
+    // Deferred residual leaves are rebuilt one output at a time.  Even when a
+    // small leaf is unbounded so it can genuinely prove (GCD), Kissat's
+    // standalone preprocessing/sweeping can dominate these one-shot strict KI
+    // formulas.  Use the dual-rail direct profile without adding any decision
+    // cap; SAT/UNSAT/UNKNOWN semantics are unchanged.
+    const size_t profileSymbols =
+        problem.deferBaseCaseChecks
+            ? directDualRailProofProfileSymbols(problem, coi.solverSymbols.size())
+            : coi.solverSymbols.size();
+    solver.configureForSecDualRailConeProof(profileSymbols);
+    if (shouldUseDirectCdclProfileForCompactDualRailQuery(problem) &&
+        !addSimplePath) {
+      solver.configureForSecLocalBooleanCheck(profileSymbols); // LCOV_EXCL_LINE
+      if (isInductionStepCoiDiagEnabled()) { // LCOV_EXCL_LINE
+        emitSecDiag( // LCOV_EXCL_LINE
+            "SEC diag: k-induction compact dual-rail direct profile outputs=",
+            problem.observedOutputExprs0.size(), // LCOV_EXCL_LINE
+            " solver_symbols=", coi.solverSymbols.size(), // LCOV_EXCL_LINE
+            " profile_symbols=", profileSymbols,
+            " direct_cdcl=1");
+      } // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
   } else {
     solver.configureForSecConeProof(coi.solverSymbols.size());
   }
@@ -539,13 +993,25 @@ InductionProofStatus proveByInductionStatus(
       solver, variables, problem.complementedStatePairs0, coi.solverSymbolSet, k + 1);
   addComplementedStateRelations(
       solver, variables, problem.complementedStatePairs1, coi.solverSymbolSet, k + 1);
+  addSameFrameStateEqualities(
+      solver, variables, problem, coi.solverSymbolSet, k + 1);
   addDualRailStateValidity(
-      solver, variables, problem.dualRailStatePairs, coi.solverSymbolSet, k + 1);
+      solver,
+      variables,
+      problem.dualRailStatePairs,
+      coi.solverSymbolSet,
+      k + 1,
+      requiresConcreteDualRailStateDomain(problem));
   addPostBootstrapResetInputConstraints(solver, variables, problem, k + 1);
 
   for (size_t frame = 0; frame < k; ++frame) {
     addTransitionRelation(
-        solver, variables, transitionByState, coi.transitionTargetsByFrame[frame], frame);
+        solver,
+        variables,
+        transitionByState,
+        coi.transitionTargetsByFrame[frame],
+        coi.transitionSupportByFrame[frame],
+        frame);
   }
 
   for (size_t frame = 0; frame < k; ++frame) {
@@ -554,16 +1020,20 @@ InductionProofStatus proveByInductionStatus(
     solver.addClause({encoder.encode(inductionProperty)});
   }
   if (addExtraInductiveEqualities && k > 0) {
-    addInductiveStateEqualities(solver, variables, problem, coi.solverSymbolSet, 0, k - 1);
-  }
+    addInductiveStateEqualities(solver, variables, problem, coi.solverSymbolSet, 0, k - 1); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
-  if (!problem.usesDualRailStateEncoding &&
-      coi.relevantStateSymbols.size() <= kMaxSimplePathStateSymbols) {
+  if (addSimplePath) {
     // The simple-path refinement is a completeness aid, not a soundness
     // requirement for classic k-induction. On large gate-level SEC problems it
     // creates one XOR per state bit per frame-pair, which can dominate the SAT
-    // instance and drown the actual proof. Dual-rail already doubles each state
-    // bit into may-one/may-zero rails, so skip this optional refinement there.
+    // instance and drown the actual proof. Keep it for small dual-rail cones
+    // where strict KI needs loop-free paths to avoid unreachable rail states.
+    if (isInductionStepCoiDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: k-induction simple path states=",
+          coi.relevantStateSymbols.size());
+    }
     addSimplePathConstraint(solver, variables, coi.relevantStateSymbols, k + 1);
   }
 

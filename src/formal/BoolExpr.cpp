@@ -2,11 +2,238 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "BoolExpr.h"
+
+#include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstdint>
+#include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace KEPLER_FORMAL {
+
+namespace {
+
+struct ArithmeticLiteral {
+    BoolExpr* atom = nullptr;
+    bool positive = true;
+};
+
+struct ArithmeticTermMask {
+    uint8_t seenMask = 0;
+    uint8_t positiveMask = 0;
+};
+
+bool arithmeticTermMaskLess(const ArithmeticTermMask& lhs,
+                            const ArithmeticTermMask& rhs) {
+    if (lhs.seenMask != rhs.seenMask) {
+        return lhs.seenMask < rhs.seenMask;
+    }
+    return lhs.positiveMask < rhs.positiveMask;
+}
+
+bool arithmeticTermMasksEqual(const ArithmeticTermMask& lhs,
+                              const ArithmeticTermMask& rhs) {
+    return lhs.seenMask == rhs.seenMask &&
+           lhs.positiveMask == rhs.positiveMask;
+}
+
+void collectOrTerms(BoolExpr* expr, std::vector<BoolExpr*>& terms) {
+    if (expr == nullptr) {
+        return;  // LCOV_EXCL_LINE
+    }
+    if (expr->getOp() == Op::OR) {
+        collectOrTerms(expr->getLeft(), terms);
+        collectOrTerms(expr->getRight(), terms);
+        return;
+    }
+    terms.push_back(expr);
+}
+
+bool appendAndLiterals(BoolExpr* expr,
+                       std::vector<ArithmeticLiteral>& literals) {
+    if (expr == nullptr) {
+        return false;  // LCOV_EXCL_LINE
+    }
+    if (expr->getOp() == Op::AND) {
+        return appendAndLiterals(expr->getLeft(), literals) &&
+               appendAndLiterals(expr->getRight(), literals);
+    }
+
+    ArithmeticLiteral literal;
+    if (expr->getOp() == Op::NOT) {
+        literal.atom = expr->getLeft();
+        literal.positive = false;
+    } else {
+        literal.atom = expr;
+        literal.positive = true;
+    }
+    if (literal.atom == nullptr) {
+        return false;  // LCOV_EXCL_LINE
+    }
+    literals.push_back(literal);
+    return true;
+}
+
+std::optional<ArithmeticTermMask> buildArithmeticTermMask(
+    const std::vector<ArithmeticLiteral>& literals,
+    const std::array<BoolExpr*, 3>& atoms) {
+    ArithmeticTermMask result;
+    for (const auto& literal : literals) {
+        size_t index = atoms.size();
+        for (size_t i = 0; i < atoms.size(); ++i) {
+            if (atoms[i] == literal.atom) {
+                index = i;
+                break;
+            }
+        }
+        if (index == atoms.size()) {
+            return std::nullopt;
+        }
+        const uint8_t bit = static_cast<uint8_t>(1u << index);
+        if ((result.seenMask & bit) != 0) {
+            return std::nullopt;
+        }
+        result.seenMask = static_cast<uint8_t>(result.seenMask | bit);
+        if (literal.positive) {
+            result.positiveMask =
+                static_cast<uint8_t>(result.positiveMask | bit);
+        }
+    }
+    if (result.seenMask == 0) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+bool termMasksMatch(std::vector<ArithmeticTermMask> masks,
+                    std::initializer_list<ArithmeticTermMask> expected) {
+    std::sort(masks.begin(), masks.end(), arithmeticTermMaskLess);
+    std::vector<ArithmeticTermMask> expectedMasks(expected.begin(), expected.end());
+    std::sort(expectedMasks.begin(), expectedMasks.end(), arithmeticTermMaskLess);
+    return masks.size() == expectedMasks.size() &&
+           std::equal(
+               masks.begin(),
+               masks.end(),
+               expectedMasks.begin(),
+               arithmeticTermMasksEqual);
+}
+
+BoolExpr* rewriteArithmeticPattern(BoolExpr* expr) {
+    std::vector<BoolExpr*> terms;
+    collectOrTerms(expr, terms);
+    if (terms.size() != 3 && terms.size() != 4) {
+        return expr;
+    }
+
+    std::vector<BoolExpr*> uniqueAtoms;
+    std::vector<std::vector<ArithmeticLiteral>> termLiterals;
+    termLiterals.reserve(terms.size());
+    for (BoolExpr* term : terms) {
+        std::vector<ArithmeticLiteral> literals;
+        if (!appendAndLiterals(term, literals)) {
+            return expr;  // LCOV_EXCL_LINE
+        }
+        if (literals.empty() || literals.size() > 3) {
+            return expr;
+        }
+        for (const auto& literal : literals) {
+            if (std::find(uniqueAtoms.begin(), uniqueAtoms.end(), literal.atom) ==
+                uniqueAtoms.end()) {
+                uniqueAtoms.push_back(literal.atom);
+            }
+        }
+        termLiterals.push_back(std::move(literals));
+    }
+    if (uniqueAtoms.size() != 3) {
+        return expr;
+    }
+
+    std::sort(uniqueAtoms.begin(), uniqueAtoms.end(), [](BoolExpr* lhs, BoolExpr* rhs) {
+        return *lhs < *rhs;
+    });
+
+    std::array<BoolExpr*, 3> atoms{};
+    size_t atomIndex = 0;
+    for (BoolExpr* atom : uniqueAtoms) {
+        atoms[atomIndex++] = atom;
+    }
+
+    std::vector<ArithmeticTermMask> masks;
+    masks.reserve(termLiterals.size());
+    for (const auto& literals : termLiterals) {
+        const auto mask = buildArithmeticTermMask(literals, atoms);
+        if (!mask.has_value()) {
+            return expr;
+        }
+        masks.push_back(*mask);
+    }
+
+    BoolExpr* propagate = BoolExpr::Xor(atoms[0], atoms[1]);
+    if (termMasksMatch(
+            masks,
+            {{7, 1}, {7, 2}, {7, 4}, {7, 7}})) {
+        return BoolExpr::Xor(propagate, atoms[2]);
+    }
+
+    // Normalize full-adder carry from either full minterms or minimized
+    // ab|ac|bc form. Both shapes are common after liberty truth-table import.
+    if (termMasksMatch(
+            masks,
+            {{7, 3}, {7, 5}, {7, 6}, {7, 7}}) ||
+        termMasksMatch(
+            masks,
+            {{3, 3}, {5, 5}, {6, 6}})) {
+        return BoolExpr::Or(
+            BoolExpr::And(atoms[0], atoms[1]),
+            BoolExpr::And(atoms[2], propagate));
+    }
+    return expr;
+}
+
+BoolExpr* normalizeArithmeticImpl(
+    BoolExpr* expr,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
+    if (expr == nullptr) {
+        return nullptr;
+    }
+    if (const auto memoIt = memo.find(expr); memoIt != memo.end()) {
+        return memoIt->second;
+    }
+
+    BoolExpr* normalized = expr;
+    switch (expr->getOp()) {
+    case Op::VAR:
+    case Op::NONE:
+        break;
+    case Op::NOT:
+        normalized = BoolExpr::Not(normalizeArithmeticImpl(expr->getLeft(), memo));
+        break;
+    case Op::AND:
+        normalized = BoolExpr::And(
+            normalizeArithmeticImpl(expr->getLeft(), memo),
+            normalizeArithmeticImpl(expr->getRight(), memo));
+        break;
+    case Op::OR:
+        normalized = BoolExpr::Or(
+            normalizeArithmeticImpl(expr->getLeft(), memo),
+            normalizeArithmeticImpl(expr->getRight(), memo));
+        normalized = rewriteArithmeticPattern(normalized);
+        break;
+    case Op::XOR:
+        normalized = BoolExpr::Xor(
+            normalizeArithmeticImpl(expr->getLeft(), memo),
+            normalizeArithmeticImpl(expr->getRight(), memo));
+        break;
+    }
+    memo.emplace(expr, normalized);
+    return normalized;
+}
+
+}  // namespace
 
 // static definitions
 // tbb::concurrent_unordered_map<BoolExprCache::Key,
@@ -33,6 +260,20 @@ BoolExpr::BoolExpr(Op op, size_t id,
         left_  = a;
         right_ = b;
     }
+
+    auto mix = [](uint64_t seed, uint64_t value) {
+        seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+        return BoolExpr::splitmix64(seed);
+    };
+    structuralHash_ =
+        BoolExpr::splitmix64(static_cast<uint64_t>(op_) ^ HASH_SEED);
+    structuralHash_ = mix(structuralHash_, static_cast<uint64_t>(varID_));
+    structuralHash_ = mix(
+        structuralHash_,
+        left_ == nullptr ? 0x6a09e667f3bcc909ULL : left_->structuralHash_);
+    structuralHash_ = mix(
+        structuralHash_,
+        right_ == nullptr ? 0xbb67ae8584caa73bULL : right_->structuralHash_);
 }
 
 /// Intern+construct a new node if needed
@@ -166,6 +407,17 @@ BoolExpr* BoolExpr::Xor(
     // BoolExprCache::Key k{Op::XOR, 0, a, b};
     BoolExprCache::Key k{Op::XOR, 0, (b < a) ? a : b, (b < a) ? b : a};
     return createNode(k);
+}
+
+BoolExpr* BoolExpr::normalizeArithmetic(BoolExpr* e) {
+    std::unordered_map<BoolExpr*, BoolExpr*> memo;
+    return normalizeArithmetic(e, memo);
+}
+
+BoolExpr* BoolExpr::normalizeArithmetic(
+    BoolExpr* e,
+    std::unordered_map<BoolExpr*, BoolExpr*>& memo) {
+    return normalizeArithmeticImpl(e, memo);
 }
 
 // Print routines unchanged…

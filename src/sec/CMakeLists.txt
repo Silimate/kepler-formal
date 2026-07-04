@@ -4,6 +4,7 @@
 add_library(kepler_sec STATIC
     common/BoolExprUtils.cpp
     common/ProofProblemDebug.cpp
+    imc/CraigInterpolatingModelChecker.cpp
     imc/ExactInterpolantSynthesizer.cpp
     imc/IMCEngine.cpp
     kinduction/KInductionEngine.cpp

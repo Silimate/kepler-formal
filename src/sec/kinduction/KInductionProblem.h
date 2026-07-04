@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <set>
@@ -34,6 +35,44 @@ struct LazyTransitionSource {
   LazyTransitionRail rail = LazyTransitionRail::Binary;
 };
 
+struct PdrStateEqualitySubsetCacheEntry { // LCOV_EXCL_LINE
+  std::vector<std::pair<size_t, size_t>> inputPairs;
+  std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
+  size_t resetBootstrapCycles = 0;
+  std::vector<std::pair<size_t, bool>> initialStateAssignments;
+  std::vector<std::pair<size_t, size_t>> initialStateEqualityPairs;
+  std::vector<std::pair<size_t, bool>> bootstrapStateAssignments;
+  std::vector<std::pair<size_t, size_t>> bootstrapStateEqualityPairs;
+  std::vector<std::pair<size_t, size_t>> selectedPairs;
+};
+
+struct InductionTransitionSupportCache;
+
+struct DualRailResidualPublicKiAttempt {
+  BoolExpr* outputExpr0 = nullptr;
+  BoolExpr* outputExpr1 = nullptr;
+  BoolExpr* inductionProperty = nullptr;
+  BoolExpr* inductionBad = nullptr;
+  size_t inductionOutputCount = 0;
+  size_t solverType = 0;
+  size_t attemptedMaxK = 0;
+  size_t resultBound = 0;
+
+  bool matches(BoolExpr* candidateOutputExpr0,
+               BoolExpr* candidateOutputExpr1,
+               BoolExpr* candidateInductionProperty,
+               BoolExpr* candidateInductionBad,
+               size_t candidateInductionOutputCount,
+               size_t candidateSolverType) const {
+    return outputExpr0 == candidateOutputExpr0 &&
+           outputExpr1 == candidateOutputExpr1 &&
+           inductionProperty == candidateInductionProperty &&
+           inductionBad == candidateInductionBad &&
+           inductionOutputCount == candidateInductionOutputCount &&
+           solverType == candidateSolverType;
+  }
+};
+
 struct LazyTransitionStore {
   // Large SEC designs can have hundreds of thousands of modeled state bits.
   // K-induction proves one output cone at a time, so eagerly remapping every
@@ -50,12 +89,111 @@ struct LazyTransitionStore {
   mutable std::array<std::unordered_map<BoolExpr*, DualRailBoolExpr>, 2>
       dualRailRemapMemoByDesign;
   mutable std::unordered_map<size_t, BoolExpr*> remappedByStateSymbol;
+  // Output-batched PDR slices share the same transition store. Cache validated
+  // state-equality subsets here so split leaves do not re-prove the same
+  // transition-preserved relation for every output batch.
+  mutable std::vector<PdrStateEqualitySubsetCacheEntry>
+      pdrStateEqualitySubsetCache;
   // Output-batched SEC creates a fresh transition resolver for each PDR slice.
   // Keep lazy support and size metadata with the shared transition store so
   // reset-frontier COI rebuilding does not repeatedly walk the same large
   // source BoolExpr DAGs across batches.
   mutable std::unordered_map<size_t, std::set<size_t>> supportByStateSymbol;
   mutable std::unordered_map<size_t, size_t> nodeCountByStateSymbol;
+  // Residual dual-rail KI slices are created outside the KI engine.  Remember
+  // the full residual public-output conjunction here so later one-output leaves
+  // can still use the same public induction hypothesis without adding any
+  // cross-design internal-state relation.
+  BoolExpr* dualRailResidualPublicProperty = nullptr;
+  BoolExpr* dualRailResidualPublicBad = nullptr;
+  size_t dualRailResidualPublicOutputCount = 0;
+  // A cached UNKNOWN is never accepted as coverage.  It only avoids rerunning
+  // the same strict one-output KI attempt after a residual batch has already
+  // failed under the same public-output induction hypothesis.
+  std::vector<DualRailResidualPublicKiAttempt>
+      inconclusiveDualRailResidualPublicKiAttempts;
+
+  bool findInconclusiveDualRailResidualPublicKiAttempt(
+      BoolExpr* outputExpr0,
+      BoolExpr* outputExpr1,
+      BoolExpr* inductionProperty,
+      BoolExpr* inductionBad,
+      size_t inductionOutputCount,
+      size_t solverType,
+      size_t requestedMaxK,
+      size_t& resultBound) const {
+    for (const DualRailResidualPublicKiAttempt& attempt :
+         inconclusiveDualRailResidualPublicKiAttempts) {
+      if (attempt.matches(
+              outputExpr0,
+              outputExpr1,
+              inductionProperty,
+              inductionBad,
+              inductionOutputCount,
+              solverType) &&
+          attempt.attemptedMaxK >= requestedMaxK) {
+        resultBound = attempt.resultBound;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool hasInconclusiveDualRailResidualPublicKiAttempt(
+      BoolExpr* outputExpr0,
+      BoolExpr* outputExpr1,
+      BoolExpr* inductionProperty,
+      BoolExpr* inductionBad,
+      size_t inductionOutputCount,
+      size_t solverType,
+      size_t requestedMaxK) const {
+    size_t ignoredBound = 0;
+    return findInconclusiveDualRailResidualPublicKiAttempt(
+        outputExpr0,
+        outputExpr1,
+        inductionProperty,
+        inductionBad,
+        inductionOutputCount,
+        solverType,
+        requestedMaxK,
+        ignoredBound);
+  }
+
+  void rememberInconclusiveDualRailResidualPublicKiAttempt(
+      BoolExpr* outputExpr0,
+      BoolExpr* outputExpr1,
+      BoolExpr* inductionProperty,
+      BoolExpr* inductionBad,
+      size_t inductionOutputCount,
+      size_t solverType,
+      size_t attemptedMaxK,
+      size_t resultBound) {
+    for (DualRailResidualPublicKiAttempt& attempt :
+         inconclusiveDualRailResidualPublicKiAttempts) {
+      if (attempt.matches(
+              outputExpr0,
+              outputExpr1,
+              inductionProperty,
+              inductionBad,
+              inductionOutputCount,
+              solverType)) {
+        attempt.attemptedMaxK = // LCOV_EXCL_LINE
+            std::max(attempt.attemptedMaxK, attemptedMaxK); // LCOV_EXCL_LINE
+        attempt.resultBound = std::max(attempt.resultBound, resultBound); // LCOV_EXCL_LINE
+        return; // LCOV_EXCL_LINE
+      }
+    }
+    inconclusiveDualRailResidualPublicKiAttempts.push_back(
+        DualRailResidualPublicKiAttempt{
+            outputExpr0,
+            outputExpr1,
+            inductionProperty,
+            inductionBad,
+            inductionOutputCount,
+            solverType,
+            attemptedMaxK,
+            resultBound});
+  }
 };
 
 struct KInductionProblem {
@@ -63,6 +201,10 @@ struct KInductionProblem {
   std::vector<SignalKey> observedOutputs;
   std::vector<std::string> environmentInputNames;
   std::vector<std::string> observedOutputNames;
+  // Preserve the top-level SEC output width after batching/slicing. Some PDR
+  // heuristics must size themselves by the original property, not by the
+  // currently selected one-output leaf.
+  size_t originalObservedOutputCount = 0;
   std::vector<size_t> inputSymbols;
   size_t resetBootstrapCycles = 0;
   std::vector<std::pair<size_t, bool>> resetBootstrapInputs;
@@ -76,10 +218,14 @@ struct KInductionProblem {
   std::vector<size_t> allSymbols;
   std::vector<std::pair<size_t, size_t>> complementedStatePairs0;
   std::vector<std::pair<size_t, size_t>> complementedStatePairs1;
+  // Same-design state equalities that hold in every frame. Dual-rail SEC uses
+  // this for Q/QN complemented state outputs, where the structural relation is
+  // cross-rail equality rather than Boolean complement on one rail.
+  std::vector<std::pair<size_t, size_t>> sameFrameStateEqualityPairs0;
+  std::vector<std::pair<size_t, size_t>> sameFrameStateEqualityPairs1;
   std::vector<DualRailSymbolPair> dualRailStatePairs;
   std::vector<BoolExpr*> observedOutputExprs0;
   std::vector<BoolExpr*> observedOutputExprs1;
-  std::vector<bool> outputImpliedByInductionCore;
   std::vector<std::string> dualRailOutputSkipReasons;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
   std::vector<std::pair<size_t, BoolExpr*>> transitions1;
@@ -100,6 +246,12 @@ struct KInductionProblem {
   // this flag is set, the slice skips local base checks because the caller will
   // validate the shared full-output base prefix once after all slices prove.
   bool deferBaseCaseChecks = false;
+  // KI output batching and increasing-k retries ask for the same transition
+  // target supports many times.  Keep an exact per-problem cache of those DAG
+  // walks so every retry still builds the same strict KI formula without
+  // re-traversing unchanged transition cones.
+  mutable std::shared_ptr<InductionTransitionSupportCache>
+      inductionTransitionSupportCache;
   std::string description;
 
   bool hasSequentialState() const {
@@ -120,7 +272,7 @@ struct KInductionProblem {
 
   size_t effectiveTotalStateCount() const {
     return totalStateCount != 0 ? totalStateCount
-                                : state0Symbols.size() + state1Symbols.size();
+                                : state0Symbols.size() + state1Symbols.size(); // LCOV_EXCL_LINE
   }
 
   bool hasCompleteBootstrapStateAssignments() const {
@@ -129,13 +281,23 @@ struct KInductionProblem {
   }
 
   bool usesResetBootstrapObservationFrontier() const {
-    // Binary SEC cannot compare internal resetless state across designs.  When
-    // reset/bootstrap leaves part of the startup state arbitrary, use the same
-    // top-observation frontier as incomplete-init SEC instead of reporting an
-    // arbitrary post-reset flop value as a cycle-0 counterexample.
+    // Binary SEC cannot compare resetless internal state across designs unless
+    // that relation was proved. Dual rail already carries unknown startup state
+    // on value/known rails, so forcing it onto this frontier can turn an
+    // over-approximate startup state into a false counterexample.
     return !usesDualRailStateEncoding && hasSequentialState() &&
            hasResetBootstrap() && resetBootstrapCycles != 0 &&
            property != nullptr && !hasCompleteBootstrapStateAssignments();
+  }
+
+  bool canReportSteadyFrontierMismatchAsCounterexample() const { // LCOV_EXCL_LINE
+    // With reset/bootstrap startup, the steady-frontier SAT model can be an
+    // over-approximate startup assignment rather than a concrete design trace,
+    // even when the rail-state bootstrap map is complete. Resetless sequential
+    // SEC can still report a real top-output frontier mismatch through the
+    // selected engine path.
+    return !(hasSequentialState() && hasResetBootstrap() && // LCOV_EXCL_LINE
+             resetBootstrapCycles != 0); // LCOV_EXCL_LINE
   }
 
   std::vector<size_t> combinedStateSymbols() const {

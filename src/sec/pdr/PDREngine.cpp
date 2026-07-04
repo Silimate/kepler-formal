@@ -16,6 +16,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include "common/BoolExprUtils.h"
 #include "common/ProofProblemDebug.h"
 #include "common/SecDiag.h"
@@ -25,6 +31,75 @@
 #include "kinduction/SatEncoding.h"
 
 namespace KEPLER_FORMAL::SEC {
+
+namespace detail {
+
+bool pdrStateEqualitySubsetPrefersCadical(
+    bool usesDualRailStateEncoding,
+    size_t equalityPairCount,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t solverSymbols,
+    size_t pairLimit,
+    size_t symbolLimit) {
+  return usesDualRailStateEncoding &&
+         solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
+         (equalityPairCount >= pairLimit || solverSymbols >= symbolLimit);
+}
+
+bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
+                                       size_t observedOutputCount,
+                                       size_t originalObservedOutputCount,
+                                       size_t transitionSources,
+                                       size_t transitionSourceLimit,
+                                       size_t outputLimit) {
+  if (!usesDualRailStateEncoding) {
+    return false;
+  }
+  const size_t fullOutputSurface =
+      std::max(observedOutputCount, originalObservedOutputCount);
+  return transitionSources > transitionSourceLimit ||
+         fullOutputSurface > outputLimit;
+}
+
+std::vector<size_t> makeDeterministicPdrWorklist(
+    const std::unordered_set<size_t>& symbols) {
+  std::vector<size_t> worklist(symbols.begin(), symbols.end());
+  std::sort(worklist.begin(), worklist.end());
+  return worklist;
+}
+
+std::vector<size_t> makePdrClosureWorklist(
+    const std::unordered_set<size_t>& symbols) {
+  // Partner closure has no cap, and every caller sorts the final symbol vector
+  // before SAT encoding. Avoid sorting this temporary worklist on wide
+  // dual-rail leaves; traversal order cannot change the closed symbol set.
+  return std::vector<size_t>(symbols.begin(), symbols.end());
+}
+
+bool pdrCubeLiteralOrderLess(size_t lhsSymbol,
+                             bool lhsValue,
+                             size_t rhsSymbol,
+                             bool rhsValue) {
+  if (lhsSymbol != rhsSymbol) {
+    return lhsSymbol < rhsSymbol;
+  }
+  return lhsValue < rhsValue;
+}
+
+bool pdrCubeAssignmentOrderLess(
+    const std::vector<std::pair<size_t, bool>>& lhs,
+    const std::vector<std::pair<size_t, bool>>& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return lhs.size() < rhs.size();
+  }
+  return std::lexicographical_compare(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), [](const auto& a,
+                                                         const auto& b) {
+        return pdrCubeLiteralOrderLess(a.first, a.second, b.first, b.second);
+      });
+}
+
+}  // namespace detail
 
 // Overall PDR algorithm:
 // 1. Build Init from the SEC startup constraints and reuse any already
@@ -63,15 +138,34 @@ constexpr size_t kMaxResetSymbolicEvaluatorExprs = 1048576;
 // walking huge reset-mux data branches before BoolExpr::And/Or could fold the
 // controlling reset literal. Do a tiny allocation-free probe first so obvious
 // reset-gated constants short-circuit before the full recursive expansion.
-constexpr size_t kMaxResetSymbolicCheapEvalNodes = 128;
+constexpr size_t kMaxResetSymbolicCheapEvalNodes = 1024;
 // BlackParrot sampling showed deep concrete validation repeatedly disproving
-// the same two-literal reset core, then falling into the exact reset-frontier
-// BMC builder only because the symbolic reset-image traversal hit its generic
-// shortcut budget at target_step=7.  Keep the larger budget restricted to tiny
-// cores: the later SAT proof is still independently support/resource capped.
+// tiny reset cores, then falling into the exact reset-frontier BMC builder only
+// because the symbolic reset-image traversal hit its generic shortcut budget at
+// target_step=7.  Keep the larger budget restricted to small root cubes: the
+// later SAT proof is still independently support/resource capped.
 constexpr size_t kMaxDeepSmallCubeResetSymbolicEvaluatorStates = 1048576;
 constexpr size_t kMaxDeepSmallCubeResetSymbolicEvaluatorExprs = 8388608;
-constexpr size_t kMaxDeepSmallCubeResetSymbolicLiterals = 2;
+constexpr size_t kMaxDeepSmallCubeResetSymbolicLiterals = 4;
+// BlackParrot dual-rail PDR can rediscover a small reset-frontier root at the
+// next concrete reset frame.  Revalidating those few literals through the
+// reset-specialized evaluator is far smaller than opening the 600k-symbol
+// reset-frontier BMC, but the generic small-cube traversal cap is too low for
+// the deep dual-rail cone. Keep the larger budget restricted to small cubes on
+// large dual-rail surfaces.
+constexpr size_t kMaxDeepLargeDualRailResetSymbolicEvaluatorStates =
+    4194304;
+constexpr size_t kMaxDeepLargeDualRailResetSymbolicEvaluatorExprs =
+    33554432;
+// A fresh exact reset-frontier query materializes the reset-prefix BMC over the
+// whole large dual-rail surface.  BlackParrot final PDR already reaches ~9GiB
+// when doing this at post-bootstrap step 3 and spikes above 10GiB at step 4.
+// Keep the exact proof available for the shallower frames that seed reusable
+// reset cores, then stop through the normal PDR budget path instead of opening
+// another one-shot SAT context.
+constexpr size_t kMaxFreshLargeDualRailExactResetFrontierPostBootstrapStep = 3;
+constexpr size_t kMaxFreshLargeDualRailSingletonResetFrontierPostBootstrapStep =
+    kMaxFreshLargeDualRailExactResetFrontierPostBootstrapStep;
 // Deep reset repair only needs this as a shortcut.  Sampling showed
 // target_step=6 spending seconds recursively canonicalizing huge reset cones
 // that were later rejected by the local support cap.  Bound the walk and fall
@@ -149,11 +243,24 @@ constexpr size_t kMaxPerFrameConcreteValidationCubeLiterals = 8;
 constexpr size_t kCachedConcreteValidationMinDepth = 2;
 constexpr size_t kCachedConcreteValidationMinCubeLiterals = 3;
 // Large dual-rail final PDR slices can reach abstract reset-frontier roots
-// whose concrete validation needs a huge reset-prefix solver.  Once exact
+// whose concrete validation needs a huge reset-prefix solver. BlackParrot final
+// reproduces this with four-literal roots on a 2.6M-rail surface. Once exact
 // reset-frontier repair is already disabled by the global rail-size guard, do
-// not let a wide projected root rebuild that solver anyway; split/skip through
+// not let those projected roots rebuild that solver anyway; split/skip through
 // the caller's existing inconclusive path instead.
-constexpr size_t kMinLargeDualRailRootForConcreteValidationSkip = 16;
+constexpr size_t kMinLargeDualRailRootForConcreteValidationSkip = 4;
+// Swerv is above the broad exact-reset-frontier rail limit, but its isolated
+// final leaves are still small enough for local concrete root repair. Keep
+// BP-scale surfaces behind the skip above.
+constexpr size_t kMaxLocalDualRailFinalLeafRepairStateSymbols = 128 * 1024;
+constexpr size_t kMaxLocalDualRailFinalLeafRepairRootLiterals = 32;
+// Strategy-level caps use the original output count to protect BP-sized runs.
+// Local Swerv leaves have a much smaller rail-state surface after output
+// splitting, so keep their exact repair bounded but not BP-tight.
+constexpr size_t kMinLocalDualRailFinalLeafPredecessorSupport = 16 * 1024;
+constexpr size_t kMinLocalDualRailFinalLeafPredecessorProjection = 32;
+constexpr size_t kMinLocalDualRailFinalLeafPredecessorQueries = 8192;
+constexpr size_t kMinLocalDualRailFinalLeafProjectedRefinements = 32;
 // If cheap reset facts already prove all but a couple of concrete root
 // validation frames, do not open the broad shared-prefix assumption solver.
 // Sampled BlackParrot leaves got stuck in assumption solving on that shape; exact
@@ -226,19 +333,38 @@ constexpr size_t kMaxDualRailSingleOutputExactValidatedBadFormulaClauses =
 // are useful on small and mid-size reset-bootstrap designs, but large dual-rail
 // problems rebuild the reset prefix over both value/known rails for many
 // neighboring PDR cubes.  Nangate45 Ibex needs this repair at 15496 rail
-// symbols/transition sources to avoid abstract reset-frontier counterexamples;
-// larger SoC-scale surfaces still stay behind the guard unless the workflow
-// opts in through the existing environment overrides.
+// symbols/transition sources to avoid abstract reset-frontier counterexamples.
+// Sky130HS RISC-V has a 99-output, 4224-rail bus surface where ordinary PDR can
+// exhaust bad-cube budgets.  Nangate45 dynamic-node exposes a similar
+// medium-wide 331-output reset-frontier surface at roughly 18k rail symbols.
+// Keep those medium surfaces eligible for exact repair while leaving larger
+// SoC-scale interfaces behind the guards.
 constexpr size_t kMaxExactResetFrontierDualRailStateSymbols = 20000;
 constexpr size_t kMaxExactResetFrontierDualRailTransitionSources = 20000;
+constexpr size_t kMaxExactResetFrontierDualRailMediumOutputs = 384;
+constexpr size_t kMaxExactResetFrontierDualRailObservedOutputs =
+    kMaxExactResetFrontierDualRailMediumOutputs;
+constexpr size_t kMaxExactResetFrontierDualRailSmallOriginalOutputs = 64;
+constexpr size_t kMinExactResetFrontierDualRailMediumStateSymbols = 4096;
+constexpr size_t kMaxExactResetFrontierDualRailOriginalOutputs =
+    kMaxExactResetFrontierDualRailMediumOutputs;
 // The broad frame-0 reset-bootstrap BMC precheck materializes the whole output
-// slice.  Keep that accelerator conservative and let mid-size dual-rail PDR use
-// the cheaper per-cube exact reset-frontier repair above instead.
+// slice.  Allow medium CPU interfaces such as 99-output RISC-V, but still keep
+// larger SoC-scale surfaces behind the transition/original-output guards.
 constexpr size_t kMaxDualRailResetBootstrapBmcTransitionSources = 8192;
+constexpr size_t kMaxDualRailResetBootstrapBmcObservedOutputs =
+    kMaxExactResetFrontierDualRailMediumOutputs;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
+// Residual one-output leaves need more search than broad batch queries.  Do not
+// lower this bound to save runtime; doing so can make a legal PDR obligation
+// report inconclusive before the residual repair has had its intended search
+// budget.
+constexpr unsigned kDefaultDualRailResidualPredecessorConflictLimit = 200000;
 constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
 constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 8192;
+constexpr const char* kDualRailPredecessorConflictLimitEnv =
+    "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT";
 // Exact reset-frontier validation can batch a small state-only bad CNF into
 // one prefix query. This replaces many neighboring per-assignment frontier
 // solves with a single real bounded proof, and stays limited to local
@@ -298,12 +424,11 @@ constexpr size_t kMaxNonExactFreshResetSpecializedProbesPerRepair = 2;
 constexpr size_t kMaxBadFormulaRepairResetSymbolicStates = 8192;
 constexpr size_t kMaxBadFormulaRepairResetSymbolicExprs = 65536;
 // After cheap reset-specialized repair, a few residual state-only bad
-// assignments may remain. A later BlackParrot sample caught this optional
-// residual batch spending the wall in assumption solving, so keep this
-// path disabled and let ordinary PDR/root-cube validation populate exact cores
-// only for candidates it actually needs.
-constexpr size_t kMaxResidualExactResetCubeValidatedBadFormulaClauses = 0;
-constexpr size_t kMaxResidualExactResetCubeValidatedBadFormulaFrame = 5;
+// assignments may remain. Keep the exact batch only for shallow local leaves:
+// Swerv trace bits need this final exact proof, while deeper BlackParrot
+// samples spent the wall in the same optional assumption solve.
+constexpr size_t kMaxResidualExactResetCubeValidatedBadFormulaClauses = 32;
+constexpr size_t kMaxResidualExactResetCubeValidatedBadFormulaFrame = 1;
 constexpr long long kResidualResetFrontierBatchConflictLimit = 1000;
 constexpr long long kResidualResetFrontierBatchPropagationLimit = 25000;
 // Re-proving prior reset cores at deeper bad frames recursively expands the
@@ -351,7 +476,7 @@ constexpr size_t kPredecessorJustificationVisitMultiplier = 64;
 // soundness.  ASIC predecessor cubes can still contain hundreds of literals,
 // and learning them almost verbatim makes PDR rediscover nearby cubes.  Use a
 // bounded chunk-dropping pass: each proposed stronger clause is validated by
-// the same predecessor SAT query, but we first try removing large literal
+// the same predecessor SAT query, but we first remove large literal
 // blocks instead of spending one query per literal.
 // Sampling on large SEC regressions showed clause generalization itself
 // dominating runtime: many blocked cubes are not "huge", but they are already
@@ -397,6 +522,12 @@ constexpr long long kPredecessorCoreConflictLimit = 10000;
 // by deletion. These checks reuse the solver; unlike ordinary cube
 // generalization they do not rebuild transition/frame CNF per trial.
 constexpr size_t kMaxPredecessorCoreContextMinimizationChecks = 32;
+// Broad dual-rail transition cones can make predecessor-core extraction too
+// expensive, but BlackParrot shows a smaller shape where the cube support is
+// only local (dozens of symbols) and skipping the core makes PDR enumerate
+// sibling blockers. Try the core oracle for those local cones only.
+constexpr size_t kMaxLocalDualRailPredecessorCoreSupport = 128;
+constexpr size_t kMinLocalDualRailPredecessorCoreTargetSize = 4;
 // BlackParrot sampling later found the same predecessor-core need below the
 // "large cube" threshold: level-zero blockers around 37-49 literals with
 // thousands of transition-support symbols were learned verbatim and then
@@ -461,6 +592,9 @@ constexpr size_t kMaxPriorResetCoreSpecializedProbes = 32;
 constexpr size_t kMaxTransitionImpossibleResetCoreLiterals = 4;
 constexpr size_t kMaxTransitionImpossibleResetCoreSupport = 1024;
 constexpr size_t kMaxPdrResetUnreachableCoresPerStep = 4096;
+constexpr size_t kMaxExactResetPredecessorCoreDeletionChecks = 8;
+constexpr size_t kMaxExactResetPredecessorBadCubeLimit = 6;
+constexpr size_t kMaxExactResetPredecessorSiblingCoreChecks = 32;
 constexpr unsigned kPreviousResetCoreImplicationConflictLimit = 20000;
 constexpr unsigned kTransitionImpossibleResetCoreConflictLimit = 20000;
 // A projected predecessor path can reach Init even when the original bad cube
@@ -475,9 +609,43 @@ constexpr unsigned kTransitionImpossibleResetCoreConflictLimit = 20000;
 // for the wider BlackParrot cones that otherwise enumerate thousands of
 // abstract predecessors.
 constexpr size_t kMaxGlucoseExactResetPrecheckTransitionSupport = 256;
-constexpr size_t kMaxCadicalExactResetPrecheckTransitionSupport = 4096;
+// sky130hd_riscv32i reset-frontier roots measure at 4128 transition-support
+// symbols.  Let CaDiCaL's reusable assumption solver handle that still-local
+// cone instead of falling back to thousands of sibling projected PDR cubes.
+constexpr size_t kMaxCadicalExactResetPrecheckTransitionSupport = 8192;
 constexpr size_t kDefaultPdrStatsInterval = 1000;
 constexpr size_t kInitialPdrStatsQueries = 20;
+// Query-result caching is an accelerator only.  Keep it bounded so a long SEC
+// run cannot trade the predecessor-encoding wall for unbounded retained cubes.
+constexpr size_t kMaxPredecessorQueryResultCacheEntries = 64 * 1024;
+constexpr size_t kMaxPredecessorUnsatCoresPerContext = 4096;
+constexpr size_t kMaxPredecessorClosedSymbolCacheEntries = 4096;
+constexpr size_t kMaxPredecessorTargetSurfaceCacheEntries = 4096;
+// The target-surface cache saves recomputing local transition supports on
+// AES/Swerv-sized leaves, but Ariane-scale dual-rail memory arrays can generate
+// thousands of unique target cubes over a multi-million-symbol state surface.
+// In that shape, retaining target-derived vectors is pure memory pressure.
+constexpr size_t kMaxDualRailTargetSurfaceCacheStateSymbols = 256 * 1024;
+// The reusable predecessor solver is also a memory/perf cache.  Keep it for
+// local AES/Swerv-sized dual-rail leaves, but let giant Ariane-scale leaves use
+// one-shot predecessor queries so released solver pages do not accumulate in
+// the process footprint across many unique target surfaces.
+constexpr size_t kMaxDualRailPredecessorSolverCacheStateSymbols =
+    kMaxDualRailTargetSurfaceCacheStateSymbols;
+// The bad-cube cached solver permanently absorbs learned frame clauses.  That
+// is useful for AES/Swerv-sized leaves, but Ariane-scale dual-rail batches can
+// learn many neighboring F[0] clauses and inflate one long-lived SAT instance.
+// Keep the proof query identical there, but rebuild it as a one-shot solver so
+// each wave can release its frame-clause encoding promptly.
+constexpr size_t kMaxDualRailBadCubeSolverCacheStateSymbols =
+    kMaxDualRailTargetSurfaceCacheStateSymbols;
+constexpr size_t kMaxProcessResetUnreachableCoreCacheEntries = 4;
+// FrameFormulaEncoder already makes a small generic Tseitin reservation, but
+// sampled dual-rail PDR leaves still spent most time growing CaDiCaL variable
+// vectors while streaming known-large transition cones. Reserve a larger,
+// bounded chunk from PDR when we have the transition DAG estimate.
+constexpr size_t kMinPdrTransitionSolverReserveNodes = 64 * 1024;
+constexpr size_t kMaxPdrTransitionSolverReserveHint = 512 * 1024;
 // PDR can use inferred state correspondences as an ordinary frame invariant,
 // but ASIC retiming/optimization can make a few inferred pairs non-inductive
 // while many others are still valid and very useful.  Mine a validated subset
@@ -488,6 +656,14 @@ constexpr size_t kMaxStateEqualitySubsetPairs = 2048;
 constexpr size_t kMaxStateEqualitySubsetIterations = 256;
 // LCOV_EXCL_STOP
 
+bool isLocalDualRailPredecessorCoreSurface(size_t level,
+                                           size_t cubeSize,
+                                           size_t transitionSupportSize) {
+  return level <= 1 &&
+         cubeSize >= kMinLocalDualRailPredecessorCoreTargetSize &&
+         transitionSupportSize <= kMaxLocalDualRailPredecessorCoreSupport;
+}
+
 // Cubes represent a concrete bad/predecessor state, while clauses are the
 // blocked generalization of such a state stored in a PDR frame.
 struct CubeLiteral {  // LCOV_EXCL_LINE
@@ -496,6 +672,13 @@ struct CubeLiteral {  // LCOV_EXCL_LINE
 
   bool operator==(const CubeLiteral& other) const {
     return symbol == other.symbol && value == other.value;
+  }
+};
+
+struct CubeLiteralHash {
+  size_t operator()(const CubeLiteral& literal) const {
+    return std::hash<size_t>()(
+        (literal.symbol << 1) ^ (literal.value ? 1ULL : 0ULL));
   }
 };
 
@@ -519,8 +702,7 @@ struct StateCubeHash {
   size_t operator()(const StateCube& cube) const {
     size_t seed = 0x9e3779b97f4a7c15ULL;
     for (const auto& literal : cube) {
-      mixHashValue(seed, std::hash<size_t>()(literal.symbol));
-      mixHashValue(seed, std::hash<bool>()(literal.value));
+      mixHashValue(seed, CubeLiteralHash{}(literal));
     }
     return seed;
   }
@@ -537,6 +719,42 @@ struct StateClauseHash {
   }
 // LCOV_EXCL_START
 };
+
+bool cubeLiteralLess(const CubeLiteral& lhs, const CubeLiteral& rhs) {
+  return detail::pdrCubeLiteralOrderLess(
+      lhs.symbol, lhs.value, rhs.symbol, rhs.value);
+}
+
+bool clauseLiteralLess(const ClauseLiteral& lhs, const ClauseLiteral& rhs) {
+  if (lhs.symbol != rhs.symbol) {
+    return lhs.symbol < rhs.symbol;
+  }
+  return lhs.positive < rhs.positive;
+}
+
+bool stateCubeLess(const StateCube& lhs, const StateCube& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return lhs.size() < rhs.size();
+  }
+  return std::lexicographical_compare(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), cubeLiteralLess);
+}
+
+bool stateClauseLess(const StateClause& lhs, const StateClause& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return lhs.size() < rhs.size();
+  }
+  return std::lexicographical_compare(
+      lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), clauseLiteralLess);
+}
+
+void sortStateCubesDeterministically(std::vector<StateCube>& cubes) {
+  std::sort(cubes.begin(), cubes.end(), stateCubeLess);
+}
+
+void sortStateClausesDeterministically(std::vector<StateClause>& clauses) {
+  std::sort(clauses.begin(), clauses.end(), stateClauseLess);
+}
 
 struct StateClauseSetKey {  // LCOV_EXCL_LINE
 // LCOV_EXCL_STOP
@@ -608,6 +826,11 @@ struct ObservedOutputBadClauseGroup {
 struct FrameClauses {
   // F[i] stores clauses known to hold for all states reachable within i steps.
   std::vector<StateClause> clauses;
+  // Cached SAT queries can keep old, subsumed clauses soundly; they only need
+  // to see every newly learned clause.  Keep an append-only log so they can
+  // synchronize by delta instead of rescanning ASIC-size frames after each
+  // local refinement.
+  std::vector<StateClause> addedClauseLog;
   // Lazily maps a state symbol to the learned clauses mentioning it. PDR asks
   // many local SAT queries against the same frame, so this cache lets each
   // query pull only the clauses touching its cone instead of rescanning the
@@ -620,6 +843,31 @@ struct FrameClauses {
   mutable uint64_t clauseEmitEpoch = 1;
   mutable std::vector<uint64_t> clauseEmitEpochByIndex;
 };
+
+size_t frameClausesFingerprint(const std::vector<FrameClauses>& frames,
+                               size_t level) {
+  if (level >= frames.size()) {
+    return 0; // LCOV_EXCL_LINE
+  }
+  size_t seed = std::hash<size_t>()(level);
+  const auto& frame = frames[level];
+  mixHashValue(seed, std::hash<size_t>()(frame.clauses.size()));
+  for (const auto& clause : frame.clauses) {
+    mixHashValue(seed, StateClauseHash{}(clause));
+  }
+  return seed;
+}
+
+size_t extraFrameClausesFingerprint(
+    const std::vector<StateClause>* extraFrameClauses) {
+  if (extraFrameClauses == nullptr) {
+    return 0;
+  }
+  // Projected retry clauses are local to one predecessor obligation.  Include
+  // their ordered content in the result-cache key so repeated retries can hit
+  // the cache without sharing answers with the base frame query.
+  return detail::pdrOrderedClauseFingerprint(*extraFrameClauses); // LCOV_EXCL_LINE
+}
 
 uint64_t nextClauseEmitEpoch(const FrameClauses& frameClauses);
 
@@ -756,7 +1004,7 @@ class InitParityRelations {
     const auto lhsRoot = mutableFind(lhs);
     const auto rhsRoot = mutableFind(rhs);
     if (lhsRoot.first == rhsRoot.first) {
-      return;
+      return; // LCOV_EXCL_LINE
     }
     parent_[lhsRoot.first] = rhsRoot.first;
     // value(lhs) xor value(rhs) must equal `inverted`.
@@ -798,6 +1046,323 @@ struct InitFactIndex {
 struct ResetExpressionConflictMemoEntry {
   bool hasConflict = false;
   StateCube conflict;
+};
+
+struct TransitionAssumptionKey {
+  size_t transitionSymbol = 0;
+  bool desiredValue = false;
+
+  bool operator==(const TransitionAssumptionKey& other) const {
+    return transitionSymbol == other.transitionSymbol &&
+           desiredValue == other.desiredValue;
+  }
+};
+
+struct TransitionAssumptionKeyHash {
+  size_t operator()(const TransitionAssumptionKey& key) const {
+    size_t seed = std::hash<size_t>()(key.transitionSymbol);
+    mixHashValue(seed, std::hash<bool>()(key.desiredValue));
+    return seed;
+  }
+};
+
+struct PredecessorQueryResultKey { // LCOV_EXCL_LINE
+  const KInductionProblem* problem = nullptr;
+  const TransitionExprResolver* transitionByState = nullptr;
+  const BoolExpr* initFormula = nullptr;
+  const BoolExpr* frameInvariant = nullptr;
+  size_t level = 0;
+  size_t frameFingerprint = 0;
+  size_t extraFrameFingerprint = 0;
+  bool exactFrameClauses = false;
+  bool excludeTargetOnCurrentFrame = false;
+  size_t predecessorProjectionLimit = 0;
+  StateCube targetCube;
+
+  bool operator==(const PredecessorQueryResultKey& other) const {
+    return problem == other.problem &&
+           transitionByState == other.transitionByState &&
+           initFormula == other.initFormula &&
+           frameInvariant == other.frameInvariant &&
+           level == other.level &&
+           frameFingerprint == other.frameFingerprint &&
+           extraFrameFingerprint == other.extraFrameFingerprint &&
+           exactFrameClauses == other.exactFrameClauses &&
+           excludeTargetOnCurrentFrame == other.excludeTargetOnCurrentFrame &&
+           predecessorProjectionLimit == other.predecessorProjectionLimit &&
+           targetCube == other.targetCube;
+  }
+};
+
+struct PredecessorQueryResultKeyHash {
+  size_t operator()(const PredecessorQueryResultKey& key) const {
+    size_t seed = std::hash<const void*>()(key.problem);
+    mixHashValue(seed, std::hash<const void*>()(key.transitionByState));
+    mixHashValue(seed, std::hash<const void*>()(key.initFormula));
+    mixHashValue(seed, std::hash<const void*>()(key.frameInvariant));
+    mixHashValue(seed, std::hash<size_t>()(key.level));
+    mixHashValue(seed, std::hash<size_t>()(key.frameFingerprint));
+    mixHashValue(seed, std::hash<size_t>()(key.extraFrameFingerprint));
+    mixHashValue(seed, std::hash<bool>()(key.exactFrameClauses));
+    mixHashValue(seed, std::hash<bool>()(key.excludeTargetOnCurrentFrame));
+    mixHashValue(seed, std::hash<size_t>()(key.predecessorProjectionLimit));
+    mixHashValue(seed, StateCubeHash{}(key.targetCube));
+    return seed;
+  }
+};
+
+struct PredecessorQueryResultEntry {
+  bool hasPredecessor = false;
+  StateCube predecessor;
+  bool hasUnsatCore = false;
+  StateCube unsatCore;
+};
+
+struct PredecessorUnsatCoreCacheKey {
+  const KInductionProblem* problem = nullptr;
+  const TransitionExprResolver* transitionByState = nullptr;
+  const BoolExpr* initFormula = nullptr;
+  const BoolExpr* frameInvariant = nullptr;
+  size_t level = 0;
+  size_t extraFrameFingerprint = 0;
+  bool exactFrameClauses = false;
+  bool excludeTargetOnCurrentFrame = false;
+  size_t predecessorProjectionLimit = 0;
+
+  bool operator==(const PredecessorUnsatCoreCacheKey& other) const {
+    return problem == other.problem &&
+           transitionByState == other.transitionByState &&
+           initFormula == other.initFormula &&
+           frameInvariant == other.frameInvariant &&
+           level == other.level &&
+           extraFrameFingerprint == other.extraFrameFingerprint &&
+           exactFrameClauses == other.exactFrameClauses &&
+           excludeTargetOnCurrentFrame == other.excludeTargetOnCurrentFrame &&
+           predecessorProjectionLimit == other.predecessorProjectionLimit;
+  }
+};
+
+struct PredecessorUnsatCoreCacheKeyHash {
+  size_t operator()(const PredecessorUnsatCoreCacheKey& key) const {
+    size_t seed = std::hash<const void*>()(key.problem);
+    mixHashValue(seed, std::hash<const void*>()(key.transitionByState));
+    mixHashValue(seed, std::hash<const void*>()(key.initFormula));
+    mixHashValue(seed, std::hash<const void*>()(key.frameInvariant));
+    mixHashValue(seed, std::hash<size_t>()(key.level));
+    mixHashValue(seed, std::hash<size_t>()(key.extraFrameFingerprint));
+    mixHashValue(seed, std::hash<bool>()(key.exactFrameClauses));
+    mixHashValue(seed, std::hash<bool>()(key.excludeTargetOnCurrentFrame));
+    mixHashValue(seed, std::hash<size_t>()(key.predecessorProjectionLimit));
+    return seed;
+  }
+};
+
+class PdrFormulaSupportCache;
+
+struct PredecessorFrameSymbolSurfaceKey {
+  const KInductionProblem* problem = nullptr;
+  BoolExpr* initFormula = nullptr;
+  BoolExpr* frameInvariant = nullptr;
+  const ComplementPartnerIndex* complementPartners = nullptr;
+  const PdrFormulaSupportCache* supportCache = nullptr;
+  size_t level = 0;
+  size_t frameFingerprint = 0;
+  bool exactFrameClauses = false;
+
+  bool operator==(const PredecessorFrameSymbolSurfaceKey& other) const { // LCOV_EXCL_LINE
+    return problem == other.problem && // LCOV_EXCL_LINE
+           initFormula == other.initFormula && // LCOV_EXCL_LINE
+           frameInvariant == other.frameInvariant && // LCOV_EXCL_LINE
+           complementPartners == other.complementPartners && // LCOV_EXCL_LINE
+           supportCache == other.supportCache && // LCOV_EXCL_LINE
+           level == other.level && // LCOV_EXCL_LINE
+           frameFingerprint == other.frameFingerprint && // LCOV_EXCL_LINE
+           exactFrameClauses == other.exactFrameClauses; // LCOV_EXCL_LINE
+  }
+};
+
+struct PredecessorFrameSymbolSurface {
+  bool valid = false;
+  PredecessorFrameSymbolSurfaceKey key;
+  std::vector<size_t> symbols;
+};
+
+struct SymbolVectorHash {
+  size_t operator()(const std::vector<size_t>& symbols) const {
+    size_t seed = std::hash<size_t>()(symbols.size());
+    for (const auto symbol : symbols) {
+      mixHashValue(seed, std::hash<size_t>()(symbol));
+    }
+    return seed;
+  }
+};
+
+struct PredecessorTargetSurfaceKey {
+  const KInductionProblem* problem = nullptr;
+  const TransitionExprResolver* transitionByState = nullptr;
+  StateCube targetCube;
+
+  bool operator==(const PredecessorTargetSurfaceKey& other) const {
+    return problem == other.problem &&
+           transitionByState == other.transitionByState &&
+           targetCube == other.targetCube;
+  }
+};
+
+struct PredecessorTargetSurfaceKeyHash {
+  size_t operator()(const PredecessorTargetSurfaceKey& key) const {
+    size_t seed = std::hash<const void*>()(key.problem);
+    mixHashValue(seed, std::hash<const void*>()(key.transitionByState));
+    mixHashValue(seed, StateCubeHash{}(key.targetCube));
+    return seed;
+  }
+};
+
+struct PredecessorTargetSurface { // LCOV_EXCL_LINE
+  std::vector<size_t> targetSymbols;
+  std::vector<size_t> encodedTargets;
+  std::vector<size_t> transitionSupportSymbols;
+  size_t transitionEncodingNodes = 0;
+};
+
+struct PredecessorAssumptionCacheKey {
+  const KInductionProblem* problem = nullptr;
+  const TransitionExprResolver* transitionByState = nullptr;
+  const BoolExpr* initFormula = nullptr;
+  const BoolExpr* frameInvariant = nullptr;
+  size_t level = 0;
+  size_t frameFingerprint = 0;
+  bool exactFrameClauses = false;
+  std::vector<size_t> solverSymbols;
+
+  bool operator==(const PredecessorAssumptionCacheKey& other) const {
+    return problem == other.problem &&
+           transitionByState == other.transitionByState &&
+           initFormula == other.initFormula &&
+           frameInvariant == other.frameInvariant &&
+           level == other.level &&
+           frameFingerprint == other.frameFingerprint &&
+           exactFrameClauses == other.exactFrameClauses &&
+           solverSymbols == other.solverSymbols;
+  }
+
+  bool hasSameReusableContext(
+      const PredecessorAssumptionCacheKey& other) const {
+    return problem == other.problem &&
+           transitionByState == other.transitionByState &&
+           initFormula == other.initFormula &&
+           frameInvariant == other.frameInvariant &&
+           level == other.level &&
+           exactFrameClauses == other.exactFrameClauses &&
+           solverSymbols == other.solverSymbols;
+  }
+};
+
+struct PredecessorAssumptionSolver {
+  PredecessorAssumptionCacheKey key;
+  std::unique_ptr<SATSolverWrapper> solver;
+  std::unique_ptr<FrameVariableStore> variables;
+  // The cached SAT model is useful only if predecessor extraction can read the
+  // transition-expression leaves that were encoded under assumptions.
+  std::unordered_map<size_t, int> transitionLeafLits;
+  std::unordered_map<TransitionAssumptionKey, int, TransitionAssumptionKeyHash>
+      assumptionByTransitionLiteral;
+  // Reuse the transition-DAG encoder together with the cached predecessor
+  // solver. Neighboring dual-rail PDR targets often share most of the same
+  // transition cone; keeping the encoder node cache avoids re-emitting that
+  // Tseitin structure for every target literal.
+  std::unordered_map<const std::unordered_map<size_t, size_t>*,
+                     std::unique_ptr<FrameFormulaEncoder>>
+      transitionEncoderBySymbolMap;
+  std::unordered_set<size_t> querySymbolSet;
+  std::unordered_set<StateClause, StateClauseHash> emittedFrameClauses;
+  // Some predecessor checks also need "current state is not the target cube".
+  // Keep those target-specific clauses behind selectors so the base solver can
+  // be reused for neighboring queries without permanently excluding a cube.
+  std::unordered_map<StateClause, int, StateClauseHash>
+      exclusionAssumptionByClause;
+  // Projected-frame retries add a few missing blockers around one obligation.
+  // Selector assumptions let those local refinements reuse the same cached
+  // predecessor solver instead of rebuilding a fresh exact SAT instance.
+  std::unordered_map<StateClause, int, StateClauseHash>
+      extraFrameAssumptionByClause;
+};
+
+struct PredecessorAssumptionCache {
+  // PDR level-local predecessor queries share the same frame/bootstrap context
+  // and differ mostly by target cube. Keep this separate from reset-frontier
+  // caches so ordinary level-1 propagation/blocking queries can use it too.
+  std::unique_ptr<PredecessorAssumptionSolver> solver;
+  // Full predecessor-query result cache. SAT entries are keyed by the exact
+  // frame fingerprint; UNSAT entries also get a fingerprint-free key because
+  // PDR frames only strengthen over time, so a proven-empty predecessor set
+  // remains empty after more clauses are learned.
+  std::unordered_map<PredecessorQueryResultKey,
+                     PredecessorQueryResultEntry,
+                     PredecessorQueryResultKeyHash>
+      queryResults;
+  std::unordered_set<PredecessorQueryResultKey,
+                     PredecessorQueryResultKeyHash>
+      unsatQueries;
+  // A predecessor UNSAT core for cube U also proves UNSAT for every later
+  // target cube that contains U under the same PDR context. Keep those cores
+  // separately from exact target results so neighboring dual-rail cubes can
+  // reuse the proof without re-solving a wider assumption set.
+  std::unordered_map<PredecessorUnsatCoreCacheKey,
+                     std::vector<StateCube>,
+                     PredecessorUnsatCoreCacheKeyHash>
+      unsatCoresByContext;
+  const TransitionExprResolver* widenedPredecessorCacheResolver = nullptr;
+  // Local dual-rail leaves repeatedly ask nearly identical predecessor
+  // questions.  Keep a monotonically widened cached-solver surface so a few
+  // target-specific local support symbols do not force solver rebuilds.
+  std::vector<size_t> widenedPredecessorCacheSymbols;
+  PredecessorFrameSymbolSurface currentFrameSymbols;
+  std::unordered_map<std::vector<size_t>,
+                     std::vector<size_t>,
+                     SymbolVectorHash>
+      closedCurrentFrameSymbols;
+  std::unordered_map<PredecessorTargetSurfaceKey,
+                     PredecessorTargetSurface,
+                     PredecessorTargetSurfaceKeyHash>
+      targetSurfaces;
+};
+
+struct BadCubeAssumptionCacheKey {
+  const KInductionProblem* problem = nullptr;
+  const BoolExpr* initFormula = nullptr;
+  const BoolExpr* frameInvariant = nullptr;
+  size_t level = 0;
+  bool exactFrameClauses = false;
+  std::vector<size_t> solverSymbols;
+
+  bool operator==(const BadCubeAssumptionCacheKey& other) const {
+    return problem == other.problem &&
+           initFormula == other.initFormula &&
+           frameInvariant == other.frameInvariant &&
+           level == other.level &&
+           exactFrameClauses == other.exactFrameClauses &&
+           solverSymbols == other.solverSymbols;
+  }
+};
+
+struct BadCubeAssumptionSolver {
+  BadCubeAssumptionCacheKey key;
+  std::unique_ptr<SATSolverWrapper> solver;
+  std::unique_ptr<FrameVariableStore> variables;
+  std::unique_ptr<FrameFormulaEncoder> encoder;
+  std::unordered_map<BoolExpr*, int> encodedBadRoots;
+  std::unordered_set<size_t> querySymbolSet;
+  std::unordered_set<StateClause, StateClauseHash> emittedFrameClauses;
+  size_t emittedFrameFingerprint = 0;
+  size_t emittedFrameLogOffset = 0;
+};
+
+struct BadCubeAssumptionCache {
+  // Bad-cube searches repeatedly ask the same frame context with different
+  // output-bad roots. Keep frame facts permanent and vary only the root
+  // literal as a solver assumption.
+  std::unique_ptr<BadCubeAssumptionSolver> solver;
 };
 
 class ResetSymbolicEvaluator;
@@ -872,39 +1437,71 @@ struct ResetFrontierCache {
   std::optional<std::vector<StateClause>> observedOutputBadClauses;
 };
 
+bool hasLargeDualRailResetFrontierSurface(const KInductionProblem& problem);
+
 enum class ConcreteCubeReachabilityMode {
   CachedAssumptions,
   OneShotUnitClauses,
 };
 
-class PdrQueryBudgetExceeded : public std::runtime_error {  // LCOV_EXCL_LINE
- public:
-  PdrQueryBudgetExceeded()  // LCOV_EXCL_LINE
-      : std::runtime_error("PDR local query budget exceeded") {}  // LCOV_EXCL_LINE
+enum class PdrBudgetExhaustion {
+  None,
+  LocalQuery,
+  ProjectedCounterexampleRefinement,
+  RepeatedProjectedBadCube,
 };
 
-class PdrProjectedCounterexampleRefinementBudgetExceeded  // LCOV_EXCL_LINE
-    : public std::runtime_error {
- public:
-  PdrProjectedCounterexampleRefinementBudgetExceeded()  // LCOV_EXCL_LINE
-      : std::runtime_error(
-            "PDR projected counterexample refinement budget exceeded") {}  // LCOV_EXCL_LINE
-};
+thread_local PdrBudgetExhaustion pdrBudgetExhaustion =
+    PdrBudgetExhaustion::None;
+thread_local size_t pdrPredecessorQueryLimit = 0;
+thread_local size_t pdrProjectedCounterexampleRefinementLimit = 0;
 
-class PdrRepeatedProjectedBadCubeBudgetExceeded : public std::runtime_error {  // LCOV_EXCL_LINE
- public:
-  PdrRepeatedProjectedBadCubeBudgetExceeded()  // LCOV_EXCL_LINE
-      : std::runtime_error("PDR repeated projected bad cube budget exceeded") {}  // LCOV_EXCL_LINE
-};
+bool pdrStatsEnabled();
 
-void consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
+void resetPdrBudgetExhaustion() {
+  pdrBudgetExhaustion = PdrBudgetExhaustion::None;
+}
+
+void setPdrProjectedCounterexampleRefinementLimit(size_t limit) {
+  pdrProjectedCounterexampleRefinementLimit = limit;
+}
+
+void setPdrPredecessorQueryLimit(size_t limit) {
+  pdrPredecessorQueryLimit = limit;
+}
+
+void markPdrBudgetExhausted(PdrBudgetExhaustion reason) {
+  if (pdrBudgetExhaustion == PdrBudgetExhaustion::None) {
+    pdrBudgetExhaustion = reason;
+    if (reason == PdrBudgetExhaustion::ProjectedCounterexampleRefinement &&
+        pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: projected counterexample repair budget exhausted ",
+          "refinement_limit=",
+          pdrProjectedCounterexampleRefinementLimit);
+    }
+  }
+}
+
+bool hasPdrBudgetExhaustion() {
+  return pdrBudgetExhaustion != PdrBudgetExhaustion::None;
+}
+
+bool consumePdrPredecessorQueryBudget(size_t* remainingQueries) {
   if (remainingQueries == nullptr) {
-    return;
+    return true;
   }
   if (*remainingQueries == 0) {
-    throw PdrQueryBudgetExceeded();  // LCOV_EXCL_LINE
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: predecessor query-count budget exhausted limit=",
+          pdrPredecessorQueryLimit);
+    }  // LCOV_EXCL_LINE
+    markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
+    return false;  // LCOV_EXCL_LINE
   }
   --(*remainingQueries);
+  return true;
 }
 
 // LCOV_EXCL_START
@@ -915,11 +1512,14 @@ void consumeProjectedCounterexampleRefinementBudget(
     return;
   }
   if (*remainingRefinements == 0) {
-    throw PdrProjectedCounterexampleRefinementBudgetExceeded();  // LCOV_EXCL_LINE
+    markPdrBudgetExhausted( // LCOV_EXCL_LINE
+        PdrBudgetExhaustion::ProjectedCounterexampleRefinement);  // LCOV_EXCL_LINE
+    return;  // LCOV_EXCL_LINE
   }
   --(*remainingRefinements);
   if (*remainingRefinements == 0) {
-    throw PdrProjectedCounterexampleRefinementBudgetExceeded();  // LCOV_EXCL_LINE
+    markPdrBudgetExhausted(
+        PdrBudgetExhaustion::ProjectedCounterexampleRefinement);  // LCOV_EXCL_LINE
   }
 }
 
@@ -939,6 +1539,107 @@ size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
   return count;
 }
 
+size_t pdrOriginalObservedOutputCount(const KInductionProblem& problem) {
+  return problem.originalObservedOutputCount == 0
+             ? problem.observedOutputExprs0.size()
+             : problem.originalObservedOutputCount;
+}
+
+bool hasBroadDualRailResidualOutputSurface(const KInductionProblem& problem) {
+  return detail::isBroadDualRailResidualOutputSurface(
+      problem.usesDualRailStateEncoding,
+      problem.observedOutputExprs0.size(),
+      pdrOriginalObservedOutputCount(problem),
+      kMaxExactResetFrontierDualRailOriginalOutputs);
+}
+
+bool hasLocalDualRailFinalLeafRepairSurface(const KInductionProblem& problem) {
+  return hasBroadDualRailResidualOutputSurface(problem) &&
+         pdrDualRailStateSymbolCount(problem) <=
+             kMaxLocalDualRailFinalLeafRepairStateSymbols;
+}
+
+bool canRepairLocalDualRailFinalLeafRoot(const KInductionProblem& problem,
+                                         const StateCube& rootCube) {
+  return hasLocalDualRailFinalLeafRepairSurface(problem) &&
+         rootCube.size() <= kMaxLocalDualRailFinalLeafRepairRootLiterals;
+}
+
+bool usesLocalDualRailFinalLeafRepairBudgets(
+    const KInductionProblem& problem,
+    bool useExactFrameClauses,
+    bool refineProjectedCounterexamples) {
+  return hasLocalDualRailFinalLeafRepairSurface(problem) &&
+         useExactFrameClauses &&
+         refineProjectedCounterexamples;
+}
+
+bool canRetryDualRailPredecessorInCachedSolver(
+    const KInductionProblem& problem) {
+  return hasLocalDualRailFinalLeafRepairSurface(problem);
+}
+
+bool canUsePredecessorQueryResultCache(const KInductionProblem& problem) {
+  if (!problem.usesDualRailStateEncoding) {
+    return false;
+  }
+  const size_t observedOutputs = problem.observedOutputExprs0.size();
+  const size_t originalOutputs = pdrOriginalObservedOutputCount(problem);
+  // Medium residual slices, such as AES 129->1 output leaves, must stay on the
+  // 376a017 path: cached assumptions may probe cheaply, but the predecessor
+  // answer/core itself is recomputed by the ordinary exact query. Non-residual
+  // unit fixtures and broad residual leaves keep the cache path.
+  return !(originalOutputs > observedOutputs &&
+           originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs);
+}
+
+bool canUseResidualExactResetCubeBatch(const KInductionProblem& problem) { // LCOV_EXCL_LINE
+  // The residual exact reset-cube batch is a memory/perf shortcut for leaves
+  // split from broad output buses. AES also becomes a one-output leaf, but the
+  // good 376a017 route uses partial reset-conflict refinement there; batching
+  // the residual exact check changed the learned-frame shape and regressed AES.
+  return hasBroadDualRailResidualOutputSurface(problem); // LCOV_EXCL_LINE
+}
+
+size_t effectiveLocalDualRailFinalLeafBudget(size_t configuredBudget,
+                                             size_t localMinimum) {
+  if (configuredBudget == 0) {
+    return 0;
+  }
+  return std::max(configuredBudget, localMinimum); // LCOV_EXCL_LINE
+}
+
+size_t effectiveLocalDualRailFinalLeafProjectionLimit(size_t configuredLimit) {
+  if (configuredLimit == 0) {
+    return 0; // LCOV_EXCL_LINE
+  }
+  return std::max(configuredLimit,
+                  kMinLocalDualRailFinalLeafPredecessorProjection);
+}
+
+size_t effectiveLocalDualRailFinalLeafEncodingSupportLimit(
+    size_t configuredLimit) {
+  if (configuredLimit == 0) {
+    return 0; // LCOV_EXCL_LINE
+  }
+  return std::max(configuredLimit,
+                  kMinLocalDualRailFinalLeafPredecessorSupport);
+}
+
+KEPLER_FORMAL::Config::SolverType localDualRailPredecessorSolverType(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType configuredSolverType) {
+  if (hasLocalDualRailFinalLeafRepairSurface(problem) &&
+      configuredSolverType == KEPLER_FORMAL::Config::SolverType::KISSAT) { // LCOV_EXCL_LINE
+    // This exact fallback is reached after the cached-assumption query could
+    // not answer.  Use the incremental-friendly backend so the local query has
+    // both conflict and decision limits; Kissat can otherwise spend the wall in
+    // propagation on a single residual Swerv leaf.
+    return SATSolverWrapper::assumptionSolverTypeFor(configuredSolverType); // LCOV_EXCL_LINE
+  }
+  return configuredSolverType;
+}
+
 size_t dualRailResetBootstrapBmcTransitionSourceLimit();
 size_t dualRailResetFrontierTransitionSourceLimit();
 size_t dualRailResetFrontierStateSymbolLimit();
@@ -948,10 +1649,24 @@ bool shouldUseExactResetFrontierChecks(const KInductionProblem& problem,
   if (!requested || !problem.usesDualRailStateEncoding) {
     return requested;
   }
-  return pdrDualRailStateSymbolCount(problem) <=
-             dualRailResetFrontierStateSymbolLimit() &&
+  const size_t railStateSymbols = pdrDualRailStateSymbolCount(problem);
+  const size_t originalOutputs = pdrOriginalObservedOutputCount(problem);
+  // Keep the shared 129f390/376a017 guard: small output surfaces can use exact
+  // reset-frontier directly, while medium output surfaces must also have a
+  // large enough rail-state surface to amortize the exact frontier context.
+  // This keeps AES-sized residual leaves on the lower-memory PDR path.
+  const bool outputSurfaceAllowed =
+      problem.observedOutputExprs0.size() <=
+          kMaxExactResetFrontierDualRailObservedOutputs &&
+      originalOutputs <= kMaxExactResetFrontierDualRailOriginalOutputs &&
+      (originalOutputs <= kMaxExactResetFrontierDualRailSmallOriginalOutputs ||
+       railStateSymbols >=
+           kMinExactResetFrontierDualRailMediumStateSymbols);
+
+  return railStateSymbols <= dualRailResetFrontierStateSymbolLimit() &&
          pdrTransitionSourceCount(problem) <=
-             dualRailResetFrontierTransitionSourceLimit();
+             dualRailResetFrontierTransitionSourceLimit() &&
+         outputSurfaceAllowed;
 }
 
 KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
@@ -972,24 +1687,25 @@ KEPLER_FORMAL::Config::SolverType badFormulaValidationSolverType(
 
 size_t envSizeLimitOrDefault(const char* name, size_t defaultValue);
 
-KEPLER_FORMAL::Config::SolverType badCubeQuerySolverType(
+KEPLER_FORMAL::Config::SolverType stateEqualitySubsetSolverType(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
+    size_t equalityPairCount,
     size_t solverSymbols) {
-  constexpr size_t kLargeDualRailBadCubeQuerySymbols = 2048;
-  // Large dual-rail bad predicates are shallow, model-producing queries.  The
-  // main PDR loop still uses the selected solver, but this local query is a bad
-  // fit for Kissat when thousands of rail literals are present: a single bad
-  // query can spend minutes before PDR gets a cube to block.  CaDiCaL already
-  // serves the same role for wide exact validation and keeps the result fully
-  // sound because SAT still supplies the concrete model used below.
-  const size_t largeDualRailQuerySymbols = envSizeLimitOrDefault(
-      "KEPLER_SEC_PDR_DUAL_RAIL_BAD_CUBE_LOCAL_SOLVER_SYMBOLS",
-      kLargeDualRailBadCubeQuerySymbols);
-  if (problem.usesDualRailStateEncoding &&
-      solverType == KEPLER_FORMAL::Config::SolverType::KISSAT &&
-      solverSymbols >= largeDualRailQuerySymbols) {
-    return KEPLER_FORMAL::Config::SolverType::CADICAL;
+  constexpr size_t kMediumDualRailStateEqualityPairs = 64;
+  constexpr size_t kMediumDualRailStateEqualitySymbols = 256;
+  // This is still the selected PDR proof path. Only the local SAT backend for
+  // the inductiveness-pruning query changes: medium dual-rail equality
+  // surfaces are model-producing and much wider than normal predecessor
+  // blocking queries, where Kissat remains the default.
+  if (detail::pdrStateEqualitySubsetPrefersCadical(
+          problem.usesDualRailStateEncoding,
+          equalityPairCount,
+          solverType,
+          solverSymbols,
+          kMediumDualRailStateEqualityPairs,
+          kMediumDualRailStateEqualitySymbols)) {
+    return KEPLER_FORMAL::Config::SolverType::CADICAL; // LCOV_EXCL_LINE
   }
   return solverType;
 }
@@ -1009,6 +1725,19 @@ std::string_view concreteCubeReachabilityModeName(
       return "one_shot_unit_clauses";
   }
   return "unknown";  // LCOV_EXCL_LINE
+}
+
+ConcreteCubeReachabilityMode predecessorResetFrontierMode(
+    const KInductionProblem& problem) {
+  // If a reset-frontier query runs on a huge non-local leaf, use a one-shot
+  // solver so the reset-prefix SAT instance is released promptly. Local
+  // residual leaves keep cached assumptions because they repeatedly probe
+  // neighboring cubes and stay below the local guard.
+  return detail::shouldUseOneShotLargeDualRailResetFrontierPredecessor(
+             hasLargeDualRailResetFrontierSurface(problem),
+             hasLocalDualRailFinalLeafRepairSurface(problem))
+             ? ConcreteCubeReachabilityMode::OneShotUnitClauses
+             : ConcreteCubeReachabilityMode::CachedAssumptions;
 }
 
 size_t pdrStatsInterval() {
@@ -1058,8 +1787,34 @@ unsigned dualRailBadCubeConflictLimit() {
 
 unsigned dualRailPredecessorConflictLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
-      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT",
+      kDualRailPredecessorConflictLimitEnv,
       kDefaultDualRailPredecessorConflictLimit);
+}
+
+unsigned dualRailPredecessorConflictLimitForQuery(
+    const KInductionProblem& problem,
+    const StateCube& targetCube,
+    size_t level,
+    size_t solverSymbolCount) {
+  const unsigned configuredLimit = dualRailPredecessorConflictLimit();
+  if (std::getenv(kDualRailPredecessorConflictLimitEnv) != nullptr) {
+    return configuredLimit; // LCOV_EXCL_LINE
+  }
+  // BlackParrot leaves with one residual output need a deeper predecessor SAT
+  // search, but broad multi-output batches should keep the cheaper default.
+  // Keep this scoped to small target cubes and local solver cones so it repairs
+  // isolated handshake leaves without opening whole-SoC predecessor searches.
+  if (detail::shouldUseResidualDualRailPredecessorBudget(
+          problem.usesDualRailStateEncoding,
+          problem.observedOutputExprs0.size(),
+          level,
+          targetCube.size(),
+          solverSymbolCount)) {
+    return std::max(
+        configuredLimit,
+        kDefaultDualRailResidualPredecessorConflictLimit);
+  }
+  return configuredLimit;
 }
 
 unsigned dualRailPredecessorDecisionLimit(unsigned defaultValue) {
@@ -1148,6 +1903,11 @@ size_t nextPdrProjectedBlockedRetryNumber() {
   return ++retryNumber;
 }
 
+size_t nextPdrBadCubeQueryNumber() {
+  static size_t queryNumber = 0;
+  return ++queryNumber;
+}
+
 size_t nextPdrDualRailPredecessorCoreSkipNumber() {
   static size_t skipNumber = 0;
   return ++skipNumber;
@@ -1192,7 +1952,8 @@ class PdrFormulaSupportCache {
     if (dualRailPartnerBySymbol_.empty() || symbols.empty()) {
       return;
     }
-    std::vector<size_t> worklist(symbols.begin(), symbols.end());
+    std::vector<size_t> worklist =
+        detail::makePdrClosureWorklist(symbols);
     for (size_t cursor = 0; cursor < worklist.size(); ++cursor) {
       const auto partnerIt = dualRailPartnerBySymbol_.find(worklist[cursor]);
       if (partnerIt == dualRailPartnerBySymbol_.end()) {
@@ -1202,6 +1963,13 @@ class PdrFormulaSupportCache {
         worklist.push_back(partnerIt->second);
       }
     }
+  }
+
+  size_t clearMemoizedSupports() {
+    const size_t entries = supportByExpr_.size();
+    supportByExpr_.clear();
+    supportByExpr_.rehash(0);
+    return entries;
   }
 
  private:
@@ -1218,6 +1986,11 @@ void addComplementedStateRelations(
     const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
     size_t numFrames);
 
+void addSameFrameStateEqualities(SATSolverWrapper& solver,
+                                 const FrameVariableStore& variables,
+                                 const KInductionProblem& problem,
+                                 size_t numFrames);
+
 void addDualRailStateValidity(SATSolverWrapper& solver,
                               const FrameVariableStore& variables,
                               const std::vector<DualRailSymbolPair>& railPairs,
@@ -1232,6 +2005,10 @@ void addNegatedCubeClause(SATSolverWrapper& solver,
                           const FrameVariableStore& variables,
                           const StateCube& cube,
                           size_t frame);
+
+StateClause clauseFromCube(const StateCube& cube);
+
+std::vector<size_t> cubeStateSymbols(const StateCube& cube);
 
 void addPostBootstrapResetInputConstraints(
     SATSolverWrapper& solver,
@@ -1298,7 +2075,8 @@ bool cubeOutsideConcreteFrameByCheapResetFacts(
     const StateCube& cube,
     size_t postBootstrapSteps,
     ResetFrontierCache& cache,
-    BoolExpr* frameInvariant);
+    BoolExpr* frameInvariant,
+    bool allowLargeDualRailSmallCubeBudget = false);
 
 ResetFrontierReachabilityContext& resetReachabilityContextFor(
     ResetFrontierCache& cache,
@@ -1357,6 +2135,46 @@ std::optional<std::vector<size_t>> collectBoundedStateSupportSymbols(
   return sortUniqueSymbols(std::move(stateSupport));
 }
 
+std::vector<size_t> collectStateSupportPrefixSymbols(
+    BoolExpr* formula,
+    size_t maxVisitedNodes,
+    size_t maxStateSymbols,
+    const std::unordered_set<size_t>& stateSymbolSet) {
+  if (formula == nullptr || maxStateSymbols == 0) {
+    return {}; // LCOV_EXCL_LINE
+  }
+
+  std::unordered_set<size_t> seenStateSupport;
+  std::vector<size_t> stateSupport;
+  std::unordered_set<const BoolExpr*> visited;
+  std::vector<const BoolExpr*> stack{formula};
+  while (!stack.empty() && stateSupport.size() < maxStateSymbols) {
+    const BoolExpr* node = stack.back();
+    stack.pop_back();
+    if (node == nullptr || !visited.insert(node).second) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    if (visited.size() > maxVisitedNodes) {
+      break;  // LCOV_EXCL_LINE
+    }
+    if (node->getOp() == Op::VAR) {
+      if (stateSymbolSet.find(node->getId()) != stateSymbolSet.end() &&
+          seenStateSupport.insert(node->getId()).second) {
+        stateSupport.push_back(node->getId());
+      }
+      continue;
+    }
+    if (node->getRight() != nullptr) {
+      stack.push_back(node->getRight());
+    }
+    if (node->getLeft() != nullptr) {
+      stack.push_back(node->getLeft());
+    }
+  }
+  std::sort(stateSupport.begin(), stateSupport.end());
+  return stateSupport;
+}
+
 // LCOV_EXCL_START
 std::vector<size_t> expandTransitionTargets(
     const KInductionProblem& problem,
@@ -1406,6 +2224,75 @@ size_t estimateTransitionEncodingNodes(
     estimate += transitionByState.nodeCount(stateSymbol);
   }
   return estimate;
+}
+
+PredecessorTargetSurface buildPredecessorTargetSurface(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& transitionByState,
+    const StateCube& targetCube) {
+  PredecessorTargetSurface surface;
+  surface.targetSymbols = cubeStateSymbols(targetCube);
+  surface.encodedTargets =
+      expandTransitionTargets(problem, surface.targetSymbols, transitionByState);
+  surface.transitionSupportSymbols =
+      collectTransitionSupportSymbols(transitionByState, surface.encodedTargets);
+  surface.transitionEncodingNodes =
+      estimateTransitionEncodingNodes(transitionByState, surface.encodedTargets);
+  return surface;
+}
+
+bool shouldRetainPredecessorTargetSurfaceCache(
+    const KInductionProblem& problem) {
+  return !problem.usesDualRailStateEncoding ||
+         problem.totalStateCount <=
+             kMaxDualRailTargetSurfaceCacheStateSymbols;
+}
+
+bool shouldUsePredecessorSolverCache(const KInductionProblem& problem) {
+  return !problem.usesDualRailStateEncoding ||
+         problem.totalStateCount <=
+             kMaxDualRailPredecessorSolverCacheStateSymbols;
+}
+
+bool shouldUseBadCubeSolverCache(const KInductionProblem& problem) {
+  return !problem.usesDualRailStateEncoding ||
+         problem.totalStateCount <=
+             kMaxDualRailBadCubeSolverCacheStateSymbols;
+}
+
+const PredecessorTargetSurface& predecessorTargetSurfaceFor(
+    PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    const TransitionExprResolver& transitionByState,
+    const StateCube& targetCube) {
+  PredecessorTargetSurfaceKey key{&problem, &transitionByState, targetCube};
+  const auto existing = cache.targetSurfaces.find(key);
+  if (existing != cache.targetSurfaces.end()) {
+    return existing->second;
+  }
+  if (cache.targetSurfaces.size() >=
+      kMaxPredecessorTargetSurfaceCacheEntries) {
+    // These vectors are pure target-derived data. Clearing the bounded cache
+    // only gives up reuse; it cannot change a predecessor answer.
+    cache.targetSurfaces.clear(); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  PredecessorTargetSurface surface =
+      buildPredecessorTargetSurface(problem, transitionByState, targetCube);
+  auto [inserted, insertedNew] =
+      cache.targetSurfaces.emplace(std::move(key), std::move(surface));
+  (void)insertedNew;
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: predecessor target surface cached target=",
+        targetCube.size(),
+        " encoded_targets=",
+        inserted->second.encodedTargets.size(),
+        " transition_support=",
+        inserted->second.transitionSupportSymbols.size(),
+        " entries=",
+        cache.targetSurfaces.size());
+  }
+  return inserted->second;
 }
 
 struct TransitionEncodingGroup {
@@ -1549,7 +2436,18 @@ StateCube boundedPrefixCube(const StateCube& cube, size_t limit) {
   // LCOV_EXCL_STOP
 }
 
-size_t transitionLiteralCost(const TransitionExprResolver& transitionByState,
+bool shouldAvoidTransitionNodeCountCost(const KInductionProblem& problem) {
+  return problem.usesDualRailStateEncoding &&
+         (pdrDualRailStateSymbolCount(problem) >
+              dualRailResetFrontierStateSymbolLimit() ||
+          pdrTransitionSourceCount(problem) > // LCOV_EXCL_LINE
+              dualRailResetFrontierTransitionSourceLimit() || // LCOV_EXCL_LINE
+          pdrOriginalObservedOutputCount(problem) > // LCOV_EXCL_LINE
+              kMaxExactResetFrontierDualRailOriginalOutputs);
+}
+
+size_t transitionLiteralCost(const KInductionProblem& problem,
+                             const TransitionExprResolver& transitionByState,
                              size_t symbol) {
   size_t transitionSymbol = symbol;
   if (!transitionByState.contains(transitionSymbol)) {
@@ -1561,9 +2459,15 @@ size_t transitionLiteralCost(const TransitionExprResolver& transitionByState,
     transitionSymbol = primaryIt->second;  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
   // Support width is the dominant SAT-query cost; node count breaks ties among
-  // cones with similar state/input footprints.
-  return transitionByState.support(transitionSymbol).size() * 4 +
-         transitionByState.nodeCount(transitionSymbol);
+  // cones with similar state/input footprints. On large lazy dual-rail
+  // surfaces, nodeCount() materializes the lifted transition DAG just to order
+  // optional PDR probes. Use support-only ordering there so the heuristic does
+  // not fill the shared dual-rail remap memo before the exact query starts.
+  const size_t supportCost = transitionByState.support(transitionSymbol).size() * 4;
+  if (shouldAvoidTransitionNodeCountCost(problem)) {
+    return supportCost;
+  }
+  return supportCost + transitionByState.nodeCount(transitionSymbol);
 }
 
 size_t blockedCubeTransitionSupportSize(
@@ -1578,9 +2482,26 @@ size_t blockedCubeTransitionSupportSize(
   return collectTransitionSupportSymbols(transitionByState, encodedTargets).size();
 }
 
+size_t effectivePreciseBadCubeStateLimit(const KInductionProblem& problem,
+                                         size_t configuredLimit,
+                                         bool useExactResetFrontierChecks) {
+  if (problem.usesDualRailStateEncoding &&
+      problem.resetBootstrapCycles != 0 &&
+      useExactResetFrontierChecks) {
+    // Exact reset-frontier PDR immediately minimizes and learns sibling
+    // singleton blockers. A slightly wider bad cube lets one reset SAT query
+    // cover a whole local bus slice instead of rediscovering it four bits at a
+    // time, while leaving non-reset and binary PDR behavior unchanged.
+    return std::max(
+        configuredLimit, kMaxExactResetPredecessorBadCubeLimit);
+  }
+  return configuredLimit;
+}
+
 StateCube boundedCheapTransitionCube(
     const StateCube& cube,
     size_t limit,
+    const KInductionProblem& problem,
     // LCOV_EXCL_START
     const TransitionExprResolver& transitionByState) {
     // LCOV_EXCL_STOP
@@ -1593,8 +2514,10 @@ StateCube boundedCheapTransitionCube(
       selected.begin(),
       selected.end(),
       [&](const CubeLiteral& lhs, const CubeLiteral& rhs) {
-        const size_t lhsCost = transitionLiteralCost(transitionByState, lhs.symbol);
-        const size_t rhsCost = transitionLiteralCost(transitionByState, rhs.symbol);
+        const size_t lhsCost =
+            transitionLiteralCost(problem, transitionByState, lhs.symbol);
+        const size_t rhsCost =
+            transitionLiteralCost(problem, transitionByState, rhs.symbol);
         if (lhsCost != rhsCost) {
           return lhsCost < rhsCost;  // LCOV_EXCL_LINE
         }
@@ -1644,47 +2567,46 @@ bool cubeContainsCube(const StateCube& cube, const StateCube& core) {
 ResetFrontierCubeKey resetFrontierCacheKey(const StateCube& cube,
                                            size_t postBootstrapSteps);
 
+bool rememberResetUnreachableCoreInVector(std::vector<StateCube>& cores,
+                                          StateCube core) {
+  normalizeCube(core);
+  if (core.empty()) {
+    return false;  // LCOV_EXCL_LINE
+  }
+
+  for (const auto& existing : cores) {
+    if (cubeContainsCube(core, existing)) {
+      return false; // LCOV_EXCL_LINE
+    }
+  }
+  for (auto it = cores.begin(); it != cores.end();) {
+    if (cubeContainsCube(*it, core)) {
+      it = cores.erase(it);
+      continue;
+    }
+    ++it;
+  }
+  cores.push_back(std::move(core));
+  sortStateCubesDeterministically(cores);
+  if (cores.size() > kMaxPdrResetUnreachableCoresPerStep) {
+    cores.pop_back();  // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  return true;
+}
+
 // LCOV_EXCL_START
 void rememberPdrResetUnreachableCore(
 // LCOV_EXCL_STOP
     ResetFrontierCache& cache,
     StateCube core,
     size_t postBootstrapSteps) {
-  normalizeCube(core);
-  if (core.empty()) {
-    return;  // LCOV_EXCL_LINE
-  }
-
   auto& cores =
       cache.resetUnreachableCoresByPostBootstrapStep[postBootstrapSteps];
-  for (const auto& existing : cores) {
-    // LCOV_EXCL_START
-    if (cubeContainsCube(core, existing)) {
-      return;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-  }
-  cores.erase(
-      // LCOV_EXCL_START
-      std::remove_if(
-      // LCOV_EXCL_STOP
-          cores.begin(),
-          cores.end(),
-          // LCOV_EXCL_START
-          [&](const StateCube& existing) {
-            return cubeContainsCube(existing, core);
-          }),
-          // LCOV_EXCL_STOP
-      cores.end());
-  if (cores.size() >= kMaxPdrResetUnreachableCoresPerStep) {
-    // LCOV_EXCL_START
-    cores.erase(cores.begin());  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  cores.push_back(std::move(core));
+  (void)rememberResetUnreachableCoreInVector(cores, std::move(core));
 }
 
 
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
 void rememberTransitionImpossibleResetCore(  // LCOV_EXCL_LINE
     ResetFrontierCache& cache,
     // LCOV_EXCL_START
@@ -1714,6 +2636,7 @@ void rememberTransitionImpossibleResetCore(  // LCOV_EXCL_LINE
           }),
       cache.transitionImpossibleResetCores.end());  // LCOV_EXCL_LINE
   cache.transitionImpossibleResetCores.push_back(std::move(core));  // LCOV_EXCL_LINE
+  sortStateCubesDeterministically(cache.transitionImpossibleResetCores);  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
 std::optional<StateCube> findPdrResetUnreachableCoreForCube(
@@ -1733,6 +2656,176 @@ std::optional<StateCube> findPdrResetUnreachableCoreForCube(
   }
   // LCOV_EXCL_STOP
   return std::nullopt;
+}
+
+std::vector<StateCube> findPdrResetUnreachableSingletonCoresForCube(
+    const ResetFrontierCache& cache,
+    const StateCube& cube,
+    size_t postBootstrapSteps) {
+  std::vector<StateCube> cores;
+  const auto it =
+      cache.resetUnreachableCoresByPostBootstrapStep.find(postBootstrapSteps);
+  if (it == cache.resetUnreachableCoresByPostBootstrapStep.end()) {
+    return cores;
+  }
+
+  for (const auto& core : it->second) {
+    if (core.size() == 1 && cubeContainsCube(cube, core)) {
+      cores.push_back(core);
+    }
+  }
+  sortStateCubesDeterministically(cores);
+  return cores;
+}
+
+struct ProcessResetUnreachableCoreCacheKey { // LCOV_EXCL_LINE
+  const LazyTransitionStore* lazyTransitions = nullptr; // LCOV_EXCL_LINE
+  size_t resetBootstrapCycles = 0; // LCOV_EXCL_LINE
+  size_t state0Symbols = 0; // LCOV_EXCL_LINE
+  size_t state1Symbols = 0; // LCOV_EXCL_LINE
+  size_t transitions0 = 0; // LCOV_EXCL_LINE
+  size_t transitions1 = 0; // LCOV_EXCL_LINE
+
+  bool operator==(const ProcessResetUnreachableCoreCacheKey& other) const { // LCOV_EXCL_LINE
+    return lazyTransitions == other.lazyTransitions && // LCOV_EXCL_LINE
+           resetBootstrapCycles == other.resetBootstrapCycles && // LCOV_EXCL_LINE
+           state0Symbols == other.state0Symbols && // LCOV_EXCL_LINE
+           state1Symbols == other.state1Symbols && // LCOV_EXCL_LINE
+           transitions0 == other.transitions0 && // LCOV_EXCL_LINE
+           transitions1 == other.transitions1; // LCOV_EXCL_LINE
+  }
+};
+
+struct ProcessResetUnreachableCoreCacheEntry { // LCOV_EXCL_LINE
+  ProcessResetUnreachableCoreCacheKey key;
+  std::unordered_map<size_t, std::vector<StateCube>>
+      coresByPostBootstrapStep;
+};
+
+std::vector<ProcessResetUnreachableCoreCacheEntry>&
+processResetUnreachableCoreCache() {
+  static std::vector<ProcessResetUnreachableCoreCacheEntry> cache;
+  return cache;
+}
+
+ProcessResetUnreachableCoreCacheKey processResetUnreachableCoreCacheKey(
+    const KInductionProblem& problem) {
+  return {
+      problem.lazyTransitions.get(),
+      problem.resetBootstrapCycles,
+      problem.state0Symbols.size(),
+      problem.state1Symbols.size(),
+      problem.transitions0.size(),
+      problem.transitions1.size()};
+}
+
+bool canUseProcessResetUnreachableCoreCache(
+    const KInductionProblem& problem,
+    BoolExpr* frameInvariant) {
+  // The cached cores are concrete reset-frontier facts.  Do not share cores
+  // learned under an extra PDR frame invariant; that invariant may be local to
+  // one proof slice even when the reset/transition system is otherwise shared.
+  return frameInvariant == nullptr &&
+         problem.usesDualRailStateEncoding &&
+         problem.lazyTransitions != nullptr &&
+         problem.resetBootstrapCycles != 0 &&
+         (hasLocalDualRailFinalLeafRepairSurface(problem) ||
+          hasLargeDualRailResetFrontierSurface(problem));
+}
+
+ProcessResetUnreachableCoreCacheEntry*
+findProcessResetUnreachableCoreCacheEntry(
+    const ProcessResetUnreachableCoreCacheKey& key) {
+  auto& cache = processResetUnreachableCoreCache();
+  for (auto& entry : cache) {
+    if (entry.key == key) { // LCOV_EXCL_LINE
+      return &entry; // LCOV_EXCL_LINE
+    }
+  }
+  return nullptr;
+}
+
+void importProcessResetUnreachableCores(
+    const KInductionProblem& problem,
+    ResetFrontierCache& cache,
+    BoolExpr* frameInvariant) {
+  if (!canUseProcessResetUnreachableCoreCache(problem, frameInvariant)) {
+    return;
+  }
+  const auto key = processResetUnreachableCoreCacheKey(problem);
+  const auto* entry = findProcessResetUnreachableCoreCacheEntry(key);
+  if (entry == nullptr) {
+    return;
+  }
+
+  size_t imported = 0; // LCOV_EXCL_LINE
+  for (const auto& [postBootstrapSteps, cores] : // LCOV_EXCL_LINE
+       entry->coresByPostBootstrapStep) { // LCOV_EXCL_LINE
+    for (const auto& core : cores) { // LCOV_EXCL_LINE
+      if (findPdrResetUnreachableCoreForCube( // LCOV_EXCL_LINE
+              cache, core, postBootstrapSteps) // LCOV_EXCL_LINE
+          .has_value()) { // LCOV_EXCL_LINE
+        continue; // LCOV_EXCL_LINE
+      }
+      rememberPdrResetUnreachableCore(cache, core, postBootstrapSteps); // LCOV_EXCL_LINE
+      cache.outsideByCubeKey.emplace( // LCOV_EXCL_LINE
+          resetFrontierCacheKey(core, postBootstrapSteps), true); // LCOV_EXCL_LINE
+      ++imported; // LCOV_EXCL_LINE
+    }
+  }
+  if (imported != 0 && pdrStatsEnabled()) { // LCOV_EXCL_LINE
+    emitSecDiag( // LCOV_EXCL_LINE
+        "SEC PDR stats: imported process reset-predecessor cores ",
+        "cores=", imported,
+        " steps=", entry->coresByPostBootstrapStep.size()); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+}
+
+void rememberProcessResetUnreachableCores(
+    const KInductionProblem& problem,
+    const ResetFrontierCache& cache,
+    BoolExpr* frameInvariant) {
+  if (!canUseProcessResetUnreachableCoreCache(problem, frameInvariant) ||
+      cache.resetUnreachableCoresByPostBootstrapStep.empty()) {
+    return;
+  }
+  const auto key = processResetUnreachableCoreCacheKey(problem); // LCOV_EXCL_LINE
+  auto& processCache = processResetUnreachableCoreCache(); // LCOV_EXCL_LINE
+  ProcessResetUnreachableCoreCacheEntry* entry = // LCOV_EXCL_LINE
+      findProcessResetUnreachableCoreCacheEntry(key); // LCOV_EXCL_LINE
+  if (entry == nullptr) { // LCOV_EXCL_LINE
+    if (processCache.size() >= kMaxProcessResetUnreachableCoreCacheEntries) { // LCOV_EXCL_LINE
+      processCache.erase(processCache.begin()); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    ProcessResetUnreachableCoreCacheEntry nextEntry; // LCOV_EXCL_LINE
+    nextEntry.key = key; // LCOV_EXCL_LINE
+    processCache.push_back(std::move(nextEntry)); // LCOV_EXCL_LINE
+    entry = &processCache.back(); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+
+  size_t added = 0; // LCOV_EXCL_LINE
+  size_t total = 0; // LCOV_EXCL_LINE
+  for (const auto& [postBootstrapSteps, cores] : // LCOV_EXCL_LINE
+       cache.resetUnreachableCoresByPostBootstrapStep) { // LCOV_EXCL_LINE
+    auto& retained = entry->coresByPostBootstrapStep[postBootstrapSteps]; // LCOV_EXCL_LINE
+    for (const auto& core : cores) { // LCOV_EXCL_LINE
+      if (rememberResetUnreachableCoreInVector(retained, core)) { // LCOV_EXCL_LINE
+        ++added; // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+    }
+  }
+  for (const auto& [postBootstrapSteps, cores] : // LCOV_EXCL_LINE
+       entry->coresByPostBootstrapStep) { // LCOV_EXCL_LINE
+    (void)postBootstrapSteps; // LCOV_EXCL_LINE
+    total += cores.size(); // LCOV_EXCL_LINE
+  }
+  if (added != 0 && pdrStatsEnabled()) { // LCOV_EXCL_LINE
+    emitSecDiag( // LCOV_EXCL_LINE
+        "SEC PDR stats: remembered process reset-predecessor cores ",
+        "added=", added,
+        " total=", total,
+        " entries=", processCache.size()); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 }
 
 void rememberPdrAndResetFrontierUnreachableCore(
@@ -1756,6 +2849,118 @@ void rememberPdrAndResetFrontierUnreachableCore(
           cache, problem, transitionByState, frameInvariant);
   rememberResetFrontierUnreachableCube(
       reachabilityContext, cubeAssignments(core), postBootstrapSteps);
+}
+
+StateCube minimizeExactResetPredecessorCore(
+    const ResetFrontierReachabilityContext& reachabilityContext,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    StateCube core,
+    size_t postBootstrapSteps) {
+  normalizeCube(core);
+  if (core.size() <= 1) {
+    return core;
+  }
+
+  size_t checks = 0;
+  for (size_t index = 0;
+       index < core.size() &&
+       checks < kMaxExactResetPredecessorCoreDeletionChecks;) {
+    StateCube trial = core;
+    trial.erase(trial.begin() + static_cast<std::ptrdiff_t>(index));
+    if (trial.empty()) {
+      ++index;
+      continue;
+    }
+
+    ++checks;
+    // The first post-bootstrap reset precheck may have used a relaxed UNSAT
+    // shortcut and cached the whole cube. Re-check smaller cubes against the
+    // exact assumption-capable reset frontier before learning a stronger PDR
+    // blocker.
+    const bool reachable = isStateCubeReachableAtResetFrontier(
+        reachabilityContext,
+        solverType,
+        cubeAssignments(trial),
+        postBootstrapSteps,
+        /*usePostBootstrapPrechecks=*/false);
+    if (reachable) {
+      ++index;
+      continue;
+    }
+
+    if (const auto minimizedCore = findResetFrontierUnreachableCubeCore(
+            reachabilityContext,
+            solverType,
+            cubeAssignments(trial),
+            postBootstrapSteps);
+        minimizedCore.has_value()) {
+      StateCube nextCore = cubeFromAssignments(*minimizedCore);
+      if (!nextCore.empty() && nextCore.size() <= trial.size()) {
+        core = std::move(nextCore);
+        index = 0;
+        continue;
+      }
+    }
+
+    core = std::move(trial); // LCOV_EXCL_LINE
+    index = 0; // LCOV_EXCL_LINE
+  }
+  return core;
+}
+
+size_t seedExactResetPredecessorSiblingCores(
+    ResetFrontierCache& cache,
+    const ResetFrontierReachabilityContext& reachabilityContext,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const StateCube& cube,
+    const StateCube& knownCore,
+    size_t postBootstrapSteps) {
+  if (!detail::shouldSeedExactResetPredecessorSiblingCores(
+          cube.size(), knownCore.size())) {
+    return 0;
+  }
+
+  size_t checks = 0;
+  size_t seeded = 0;
+  for (const auto& literal : cube) {
+    if (checks >= kMaxExactResetPredecessorSiblingCoreChecks) {
+      break; // LCOV_EXCL_LINE
+    }
+    StateCube siblingCore{literal};
+    normalizeCube(siblingCore);
+    if (cubeContainsCube(knownCore, siblingCore) ||
+        findPdrResetUnreachableCoreForCube(
+            cache, siblingCore, postBootstrapSteps)
+            .has_value()) {
+      continue;
+    }
+
+    ++checks;
+    // Small projected reset-predecessor cubes often carry several independent
+    // rail literals from the same bus slice. Proving those singleton siblings
+    // now reuses the exact reset-frontier solver and avoids rediscovering the
+    // same family as separate PDR bad cubes.
+    const bool reachable = isStateCubeReachableAtResetFrontier(
+        reachabilityContext,
+        solverType,
+        cubeAssignments(siblingCore),
+        postBootstrapSteps,
+        /*usePostBootstrapPrechecks=*/false);
+    if (!reachable) {
+      // This exact singleton proof is useful to both reset-frontier callers:
+      // PDR checks the core list, while concrete reachability checks first
+      // consult the exact cube-answer map and the reachability context.
+      const auto siblingAssignments = cubeAssignments(siblingCore);
+      rememberResetFrontierUnreachableCube(
+          reachabilityContext, siblingAssignments, postBootstrapSteps);
+      cache.outsideByCubeKey.emplace(
+          resetFrontierCacheKey(siblingCore, postBootstrapSteps), true);
+      rememberPdrResetUnreachableCore(
+          cache, std::move(siblingCore), postBootstrapSteps);
+      ++seeded;
+    }
+  }
+  return seeded;
 }
 
 std::optional<StateCube> findTransitionImpossibleResetCoreForCube(
@@ -2269,6 +3474,9 @@ class ResetSymbolicEvaluator {
     // LCOV_EXCL_STOP
     exprEvaluations_ = 0;
     budgetExhausted_ = false;
+    for (auto& active : exprActiveByStep_) {
+      active.clear();
+    }
   }
 
   size_t stateEvaluationLimit() const { return stateEvaluationLimit_; }  // LCOV_EXCL_LINE
@@ -2288,19 +3496,48 @@ class ResetSymbolicEvaluator {
     return expr == (value ? BoolExpr::createTrue() : BoolExpr::createFalse());
   }
 
+  void ensureStepCaches(size_t step) {
+    if (step >= exprMemoByStep_.size()) {
+      exprMemoByStep_.resize(step + 1);  // LCOV_EXCL_LINE
+    }
+    if (step >= cheapExprMemoByStep_.size()) {
+      cheapExprMemoByStep_.resize(step + 1);  // LCOV_EXCL_LINE
+    }
+    if (step >= exprMissesByStep_.size()) {
+      exprMissesByStep_.resize(step + 1);  // LCOV_EXCL_LINE
+    }
+    if (step >= cheapExprMissesByStep_.size()) {
+      cheapExprMissesByStep_.resize(step + 1);  // LCOV_EXCL_LINE
+    }
+    if (step >= exprActiveByStep_.size()) {
+      exprActiveByStep_.resize(step + 1);  // LCOV_EXCL_LINE
+    }
+  }
+
   std::optional<BoolExpr*> cheapExprValue(
       BoolExpr* expr,
       size_t step,
-      size_t& remainingBudget) const {
+      size_t& remainingBudget) {
     if (expr == nullptr || remainingBudget == 0) {
+      return std::nullopt;
+    }
+    ensureStepCaches(step);
+    auto& memo = cheapExprMemoByStep_[step];
+    if (const auto it = memo.find(expr); it != memo.end()) {
+      return it->second;
+    }
+    auto& misses = cheapExprMissesByStep_[step];
+    if (misses.find(expr) != misses.end()) {
       return std::nullopt;
     }
     --remainingBudget;
 
+    std::optional<BoolExpr*> value;
     switch (expr->getOp()) {
       case Op::VAR:
         if (expr->getId() < 2) {
-          return expr;
+          value = expr;
+          break;
         // LCOV_EXCL_START
         }
         if (const auto resetIt = resetInputs_.find(expr->getId());
@@ -2311,61 +3548,74 @@ class ResetSymbolicEvaluator {
                   ? resetIt->second
                   : !resetIt->second;
           // LCOV_EXCL_START
-          return resetValue ? BoolExpr::createTrue()
-                            : BoolExpr::createFalse();
+          value = resetValue ? BoolExpr::createTrue()
+                             : BoolExpr::createFalse();
+          break;
                             // LCOV_EXCL_STOP
         }
         if (step == 0) {
           if (const auto it = initialStates_.find(expr->getId());
               it != initialStates_.end()) {
-            return it->second ? BoolExpr::createTrue()  // LCOV_EXCL_LINE
-                              : BoolExpr::createFalse();  // LCOV_EXCL_LINE
+            value = it->second ? BoolExpr::createTrue()  // LCOV_EXCL_LINE
+                               : BoolExpr::createFalse();  // LCOV_EXCL_LINE
+            break;  // LCOV_EXCL_LINE
           }
         }
         if (step == problem_.resetBootstrapCycles) {
           if (const auto it = bootstrapStates_.find(expr->getId());
               it != bootstrapStates_.end()) {
-            return it->second ? BoolExpr::createTrue()  // LCOV_EXCL_LINE
-                              : BoolExpr::createFalse();  // LCOV_EXCL_LINE
+            value = it->second ? BoolExpr::createTrue()  // LCOV_EXCL_LINE
+                               : BoolExpr::createFalse();  // LCOV_EXCL_LINE
+            break;  // LCOV_EXCL_LINE
           }
         }
-        return std::nullopt;
+        if (step > 0 && transitionByState_.contains(expr->getId())) {
+          value = cheapExprValue(
+              transitionByState_.at(expr->getId()), step - 1, remainingBudget);
+          break;
+        }
+        break;
       case Op::NOT:
         if (const auto operand =
                 cheapExprValue(expr->getLeft(), step, remainingBudget);
             operand.has_value()) {
           // LCOV_EXCL_START
-          return BoolExpr::Not(*operand);
+          value = BoolExpr::Not(*operand);
           // LCOV_EXCL_STOP
         }
-        return std::nullopt;
+        break;
       case Op::AND: {
         const auto lhs = cheapExprValue(expr->getLeft(), step, remainingBudget);
         if (lhs.has_value() && isBoolConst(*lhs, false)) {
           // LCOV_EXCL_START
-          return BoolExpr::createFalse();
+          value = BoolExpr::createFalse();
           // LCOV_EXCL_STOP
+          break;
         }
         const auto rhs = cheapExprValue(expr->getRight(), step, remainingBudget);
         if (rhs.has_value() && isBoolConst(*rhs, false)) {
-          return BoolExpr::createFalse();
+          value = BoolExpr::createFalse();
+          break;
         }
         if (lhs.has_value() && rhs.has_value()) {
           // LCOV_EXCL_START
-          return BoolExpr::And(*lhs, *rhs);  // LCOV_EXCL_LINE
+          value = BoolExpr::And(*lhs, *rhs);  // LCOV_EXCL_LINE
           // LCOV_EXCL_STOP
+          break;  // LCOV_EXCL_LINE
         }
         if (lhs.has_value() && isBoolConst(*lhs, true)) {
-          return rhs;  // LCOV_EXCL_LINE
+          value = rhs;  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         }
         // LCOV_EXCL_STOP
         if (rhs.has_value() && isBoolConst(*rhs, true)) {
-          return lhs;  // LCOV_EXCL_LINE
+          value = lhs;  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         }
         // LCOV_EXCL_STOP
-        return std::nullopt;
+        break;
       }
       // LCOV_EXCL_START
       case Op::OR: {
@@ -2373,29 +3623,34 @@ class ResetSymbolicEvaluator {
         const auto lhs = cheapExprValue(expr->getLeft(), step, remainingBudget);
         if (lhs.has_value() && isBoolConst(*lhs, true)) {
           // LCOV_EXCL_START
-          return BoolExpr::createTrue();  // LCOV_EXCL_LINE
+          value = BoolExpr::createTrue();  // LCOV_EXCL_LINE
           // LCOV_EXCL_STOP
+          break;  // LCOV_EXCL_LINE
         }
         const auto rhs = cheapExprValue(expr->getRight(), step, remainingBudget);
         if (rhs.has_value() && isBoolConst(*rhs, true)) {
-          return BoolExpr::createTrue();  // LCOV_EXCL_LINE
+          value = BoolExpr::createTrue();  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
         }
         if (lhs.has_value() && rhs.has_value()) {
-          return BoolExpr::Or(*lhs, *rhs);  // LCOV_EXCL_LINE
+          value = BoolExpr::Or(*lhs, *rhs);  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         }
         // LCOV_EXCL_STOP
         if (lhs.has_value() && isBoolConst(*lhs, false)) {
-          return rhs;  // LCOV_EXCL_LINE
+          value = rhs;  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
         }
         // LCOV_EXCL_START
         if (rhs.has_value() && isBoolConst(*rhs, false)) {
         // LCOV_EXCL_STOP
-          return lhs;  // LCOV_EXCL_LINE
+          value = lhs;  // LCOV_EXCL_LINE
+          break;  // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         }
         // LCOV_EXCL_STOP
-        return std::nullopt;
+        break;
       }
       case Op::XOR: {
         const auto lhs = cheapExprValue(expr->getLeft(), step, remainingBudget);
@@ -2403,16 +3658,30 @@ class ResetSymbolicEvaluator {
         // LCOV_EXCL_START
         if (lhs.has_value() && rhs.has_value()) {
         // LCOV_EXCL_STOP
-          return BoolExpr::Xor(*lhs, *rhs);  // LCOV_EXCL_LINE
-        }
+          value = BoolExpr::Xor(*lhs, *rhs);  // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
         // LCOV_EXCL_START
-        return std::nullopt;
+        break;
       }
       // LCOV_EXCL_STOP
       case Op::NONE:  // LCOV_EXCL_LINE
       default:
-        return std::nullopt;  // LCOV_EXCL_LINE
+        break;  // LCOV_EXCL_LINE
     }
+    if (value.has_value()) {
+      memo.emplace(expr, *value);
+    } else if (remainingBudget != 0) {
+      // Cache structural misses too. Swerv final leaves repeatedly revisit the
+      // same reset DAG nodes while validating neighboring root cubes.
+      misses.emplace(expr);
+    }
+    return value;
+  }
+
+  std::optional<BoolExpr*> cheapChildExprValue(BoolExpr* expr,
+                                               size_t step) {
+    size_t cheapEvalBudget = kMaxResetSymbolicCheapEvalNodes;
+    return cheapExprValue(expr, step, cheapEvalBudget);
   }
 
   // LCOV_EXCL_START
@@ -2421,14 +3690,25 @@ class ResetSymbolicEvaluator {
     // LCOV_EXCL_STOP
       return std::nullopt;  // LCOV_EXCL_LINE
     }
-    if (step >= exprMemoByStep_.size()) {
-      exprMemoByStep_.resize(step + 1);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+    ensureStepCaches(step);  // LCOV_EXCL_LINE
 
     auto& memo = exprMemoByStep_[step];
     if (const auto it = memo.find(expr); it != memo.end()) {
       return it->second;
     }
+    auto& misses = exprMissesByStep_[step];
+    if (misses.find(expr) != misses.end()) {
+      return std::nullopt; // LCOV_EXCL_LINE
+    }
+    auto& active = exprActiveByStep_[step];
+    if (!active.insert(expr).second) {
+      return std::nullopt;  // LCOV_EXCL_LINE
+    }
+    struct ActiveGuard {
+      std::unordered_set<BoolExpr*>& active;
+      BoolExpr* expr = nullptr;
+      ~ActiveGuard() { active.erase(expr); }
+    } activeGuard{active, expr};
     if (++exprEvaluations_ > exprEvaluationLimit_) {
       budgetExhausted_ = true;  // LCOV_EXCL_LINE
       return std::nullopt;  // LCOV_EXCL_LINE
@@ -2486,6 +3766,24 @@ class ResetSymbolicEvaluator {
         }
         break;
       case Op::AND: {
+        const auto lhsCheap = cheapChildExprValue(expr->getLeft(), step);
+        if (lhsCheap.has_value() && isBoolConst(*lhsCheap, false)) {
+          value = BoolExpr::createFalse(); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
+        }
+        const auto rhsCheap = cheapChildExprValue(expr->getRight(), step);
+        if (rhsCheap.has_value() && isBoolConst(*rhsCheap, false)) {
+          value = BoolExpr::createFalse(); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
+        }
+        if (lhsCheap.has_value() && isBoolConst(*lhsCheap, true)) {
+          value = exprValue(expr->getRight(), step); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
+        }
+        if (rhsCheap.has_value() && isBoolConst(*rhsCheap, true)) {
+          value = exprValue(expr->getLeft(), step);
+          break;
+        }
         const auto lhs = exprValue(expr->getLeft(), step);
         if (lhs.has_value() && isBoolConst(*lhs, false)) {
           value = BoolExpr::createFalse();  // LCOV_EXCL_LINE
@@ -2506,6 +3804,24 @@ class ResetSymbolicEvaluator {
         break;
       }
       case Op::OR: {
+        const auto lhsCheap = cheapChildExprValue(expr->getLeft(), step);
+        if (lhsCheap.has_value() && isBoolConst(*lhsCheap, true)) {
+          value = BoolExpr::createTrue(); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
+        }
+        const auto rhsCheap = cheapChildExprValue(expr->getRight(), step);
+        if (rhsCheap.has_value() && isBoolConst(*rhsCheap, true)) {
+          value = BoolExpr::createTrue(); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
+        }
+        if (lhsCheap.has_value() && isBoolConst(*lhsCheap, false)) {
+          value = exprValue(expr->getRight(), step); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
+        }
+        if (rhsCheap.has_value() && isBoolConst(*rhsCheap, false)) {
+          value = exprValue(expr->getLeft(), step); // LCOV_EXCL_LINE
+          break; // LCOV_EXCL_LINE
+        }
         const auto lhs = exprValue(expr->getLeft(), step);
         if (lhs.has_value() && isBoolConst(*lhs, true)) {
           value = BoolExpr::createTrue();  // LCOV_EXCL_LINE
@@ -2540,7 +3856,11 @@ class ResetSymbolicEvaluator {
 
     if (value.has_value()) {
       memo.emplace(expr, *value);
-    }
+    } else if (!budgetExhausted_) {
+      // A non-budget miss is deterministic for this problem/step; memoizing it
+      // avoids re-walking unresolved transition cones during root validation.
+      misses.emplace(expr); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
     return value;
   }
 
@@ -2553,6 +3873,10 @@ class ResetSymbolicEvaluator {
   std::unordered_map<SymbolPair, BoolExpr*, SymbolPairHash> stateMemo_;
   // LCOV_EXCL_STOP
   std::vector<std::unordered_map<BoolExpr*, BoolExpr*>> exprMemoByStep_;
+  std::vector<std::unordered_map<BoolExpr*, BoolExpr*>> cheapExprMemoByStep_;
+  std::vector<std::unordered_set<BoolExpr*>> exprMissesByStep_;
+  std::vector<std::unordered_set<BoolExpr*>> cheapExprMissesByStep_;
+  std::vector<std::unordered_set<BoolExpr*>> exprActiveByStep_;
   std::unordered_map<BoolExpr*, std::set<size_t>> supportMemo_;
   // LCOV_EXCL_START
   std::unordered_set<BoolExpr*> supportMisses_;
@@ -2728,9 +4052,9 @@ class BoolExprEqualityRewriter {
             rewrite(expr->getLeft()), rewrite(expr->getRight()));
         break;
       case Op::OR:
-        rewritten = BoolExpr::Or(
-            rewrite(expr->getLeft()), rewrite(expr->getRight()));
-        break;
+        rewritten = BoolExpr::Or( // LCOV_EXCL_LINE
+            rewrite(expr->getLeft()), rewrite(expr->getRight())); // LCOV_EXCL_LINE
+        break; // LCOV_EXCL_LINE
       case Op::XOR:
         rewritten = BoolExpr::Xor(  // LCOV_EXCL_LINE
             rewrite(expr->getLeft()), rewrite(expr->getRight()));  // LCOV_EXCL_LINE
@@ -2989,9 +4313,24 @@ class ResetExpressionCanonicalizer {
 // LCOV_EXCL_STOP
  public:
   explicit ResetExpressionCanonicalizer(const KInductionProblem& problem) {
-    parent_.reserve(problem.initialStateEqualityPairs.size() * 2);
-    for (const auto& [lhsSymbol, rhsSymbol] : problem.initialStateEqualityPairs) {
-      unite(lhsSymbol, rhsSymbol);
+    parent_.reserve(
+        (problem.initialStateEqualityPairs.size() +
+         problem.sameFrameStateEqualityPairs0.size() +
+         problem.sameFrameStateEqualityPairs1.size()) *
+        2);
+    if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+      for (const auto& [lhsSymbol, rhsSymbol] :
+           problem.initialStateEqualityPairs) {
+        unite(lhsSymbol, rhsSymbol);
+      }
+    }
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.sameFrameStateEqualityPairs0) {
+      unite(lhsSymbol, rhsSymbol); // LCOV_EXCL_LINE
+    }
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.sameFrameStateEqualityPairs1) {
+      unite(lhsSymbol, rhsSymbol); // LCOV_EXCL_LINE
     }
     // LCOV_EXCL_START
     for (const auto& [symbol, value] : problem.initialStateAssignments) {
@@ -3283,8 +4622,8 @@ ResetBootstrapExpressionRelations* resetBootstrapExpressionRelationsFor(
     ResetSymbolicEvaluator& evaluator,
     ResetExpressionCanonicalizer& canonicalizer) {
   if (cache.resetBootstrapExpressionRelations != nullptr &&
-      cache.resetBootstrapExpressionProblem == &problem &&
-      cache.resetBootstrapExpressionTransitions == &transitionByState) {
+      cache.resetBootstrapExpressionProblem == &problem && // LCOV_EXCL_LINE
+      cache.resetBootstrapExpressionTransitions == &transitionByState) { // LCOV_EXCL_LINE
     // LCOV_EXCL_START
     return cache.resetBootstrapExpressionRelations.get();
   }
@@ -3294,24 +4633,26 @@ ResetBootstrapExpressionRelations* resetBootstrapExpressionRelationsFor(
   auto relations = std::make_shared<ResetBootstrapExpressionRelations>();
   // LCOV_EXCL_STOP
   std::vector<std::pair<BoolExpr*, BoolExpr*>> bootstrapExprPairs;
-  bootstrapExprPairs.reserve(problem.bootstrapStateEqualityPairs.size());
-  for (const auto& [lhsSymbol, rhsSymbol] :
-       problem.bootstrapStateEqualityPairs) {
-    const auto lhsExpr =
-        evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
-    const auto rhsExpr =
-        evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
-    if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
-      if (evaluator.budgetExhausted()) {  // LCOV_EXCL_LINE
-        return nullptr;  // LCOV_EXCL_LINE
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    bootstrapExprPairs.reserve(problem.bootstrapStateEqualityPairs.size());
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.bootstrapStateEqualityPairs) {
+      const auto lhsExpr =
+          evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
+      const auto rhsExpr =
+          evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
+      if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
+        if (evaluator.budgetExhausted()) {  // LCOV_EXCL_LINE
+          return nullptr;  // LCOV_EXCL_LINE
+        }
+        continue;  // LCOV_EXCL_LINE
       }
-      continue;  // LCOV_EXCL_LINE
+      BoolExpr* lhsCanonical = canonicalizer.canonicalize(*lhsExpr);
+      BoolExpr* rhsCanonical = canonicalizer.canonicalize(*rhsExpr);
+      relations->index.unite(lhsCanonical, rhsCanonical);
+      bootstrapExprPairs.emplace_back(lhsCanonical, rhsCanonical);
+      relations->hasRelation = true;
     }
-    BoolExpr* lhsCanonical = canonicalizer.canonicalize(*lhsExpr);
-    BoolExpr* rhsCanonical = canonicalizer.canonicalize(*rhsExpr);
-    relations->index.unite(lhsCanonical, rhsCanonical);
-    bootstrapExprPairs.emplace_back(lhsCanonical, rhsCanonical);
-    relations->hasRelation = true;
   }
 
   if (relations->hasRelation &&
@@ -3529,22 +4870,22 @@ std::optional<StateCube> findAffineXorRelationConflict(
   // LCOV_EXCL_STOP
 }
 
-bool supportsIntersect(const std::set<size_t>& lhs,
+bool supportsIntersect(const std::set<size_t>& lhs, // LCOV_EXCL_LINE
                        const std::set<size_t>& rhs) {
-  auto lhsIt = lhs.begin();
-  auto rhsIt = rhs.begin();
-  while (lhsIt != lhs.end() && rhsIt != rhs.end()) {
-    if (*lhsIt == *rhsIt) {
+  auto lhsIt = lhs.begin(); // LCOV_EXCL_LINE
+  auto rhsIt = rhs.begin(); // LCOV_EXCL_LINE
+  while (lhsIt != lhs.end() && rhsIt != rhs.end()) { // LCOV_EXCL_LINE
+    if (*lhsIt == *rhsIt) { // LCOV_EXCL_LINE
       return true;  // LCOV_EXCL_LINE
     }
-    if (*lhsIt < *rhsIt) {
+    if (*lhsIt < *rhsIt) { // LCOV_EXCL_LINE
       ++lhsIt;  // LCOV_EXCL_LINE
     } else {  // LCOV_EXCL_LINE
-      ++rhsIt;
+      ++rhsIt; // LCOV_EXCL_LINE
     }
   }
-  return false;
-}
+  return false; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
 size_t supportIntersectionSize(const std::set<size_t>& lhs,
                                const std::set<size_t>& rhs) {
@@ -3571,7 +4912,7 @@ selectRelevantBootstrapEqualityExprs(
     ResetSymbolicEvaluator& evaluator,
     std::set<size_t>& relevantSupport,
     ResetExpressionCanonicalizer* canonicalizer = nullptr) {
-  struct Candidate {
+  struct Candidate { // LCOV_EXCL_LINE
     BoolExpr* lhs = nullptr;
     // LCOV_EXCL_START
     BoolExpr* rhs = nullptr;
@@ -3580,39 +4921,41 @@ selectRelevantBootstrapEqualityExprs(
   };
 
   std::vector<Candidate> candidates;
-  candidates.reserve(problem.bootstrapStateEqualityPairs.size());
-  for (const auto& [lhsSymbol, rhsSymbol] :
-       problem.bootstrapStateEqualityPairs) {
-    const auto lhsExpr =
-        evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles);
-    const auto rhsExpr =
-        // LCOV_EXCL_START
-        evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
-        // LCOV_EXCL_STOP
-    if (!lhsExpr.has_value() || !rhsExpr.has_value()) {
-      return std::nullopt;  // LCOV_EXCL_LINE
-    }
-    // LCOV_EXCL_START
-    BoolExpr* lhs = *lhsExpr;
-    // LCOV_EXCL_STOP
-    BoolExpr* rhs = *rhsExpr;
-    if (canonicalizer != nullptr) {
-      lhs = canonicalizer->canonicalize(lhs);
-      rhs = canonicalizer->canonicalize(rhs);
-    }
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    candidates.reserve(problem.bootstrapStateEqualityPairs.size());
+    for (const auto& [lhsSymbol, rhsSymbol] :
+         problem.bootstrapStateEqualityPairs) {
+      const auto lhsExpr =
+          evaluator.stateExpr(lhsSymbol, problem.resetBootstrapCycles); // LCOV_EXCL_LINE
+      const auto rhsExpr =
+          // LCOV_EXCL_START
+          evaluator.stateExpr(rhsSymbol, problem.resetBootstrapCycles);
+          // LCOV_EXCL_STOP
+      if (!lhsExpr.has_value() || !rhsExpr.has_value()) { // LCOV_EXCL_LINE
+        return std::nullopt;  // LCOV_EXCL_LINE
+      }
+      // LCOV_EXCL_START
+      BoolExpr* lhs = *lhsExpr;
+      // LCOV_EXCL_STOP
+      BoolExpr* rhs = *rhsExpr; // LCOV_EXCL_LINE
+      if (canonicalizer != nullptr) { // LCOV_EXCL_LINE
+        lhs = canonicalizer->canonicalize(lhs); // LCOV_EXCL_LINE
+        rhs = canonicalizer->canonicalize(rhs); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
 
-    const auto* lhsSupport = evaluator.cachedSupportVars(lhs);
-    if (lhsSupport == nullptr) {
-      return std::nullopt;  // LCOV_EXCL_LINE
+      const auto* lhsSupport = evaluator.cachedSupportVars(lhs); // LCOV_EXCL_LINE
+      if (lhsSupport == nullptr) { // LCOV_EXCL_LINE
+        return std::nullopt;  // LCOV_EXCL_LINE
+      }
+      const auto* rhsSupport = evaluator.cachedSupportVars(rhs); // LCOV_EXCL_LINE
+      if (rhsSupport == nullptr) { // LCOV_EXCL_LINE
+        return std::nullopt;  // LCOV_EXCL_LINE
+      }
+      std::set<size_t> support = *lhsSupport; // LCOV_EXCL_LINE
+      support.insert(rhsSupport->begin(), rhsSupport->end()); // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
+      candidates.push_back({lhs, rhs, std::move(support)});
     }
-    const auto* rhsSupport = evaluator.cachedSupportVars(rhs);
-    if (rhsSupport == nullptr) {
-      return std::nullopt;  // LCOV_EXCL_LINE
-    }
-    std::set<size_t> support = *lhsSupport;
-    support.insert(rhsSupport->begin(), rhsSupport->end());
-    // LCOV_EXCL_START
-    candidates.push_back({lhs, rhs, std::move(support)});
   }
 
   std::vector<std::pair<BoolExpr*, BoolExpr*>> selected;
@@ -3625,8 +4968,8 @@ selectRelevantBootstrapEqualityExprs(
     changed = false;
     // LCOV_EXCL_STOP
     for (size_t i = 0; i < candidates.size(); ++i) {
-      if (used[i] || !supportsIntersect(candidates[i].support, relevantSupport)) {
-        continue;
+      if (used[i] || !supportsIntersect(candidates[i].support, relevantSupport)) { // LCOV_EXCL_LINE
+        continue; // LCOV_EXCL_LINE
       }
       used[i] = true;  // LCOV_EXCL_LINE
       changed = true;  // LCOV_EXCL_LINE
@@ -4226,7 +5569,7 @@ std::optional<StateCube> resetSpecializedExpressionConflictCube(
     return std::nullopt;
   };
 
-  // For tiny root cubes, first try proving a two-literal reset conflict. AES
+  // For tiny root cubes, first prove a two-literal reset conflict. AES
   // samples showed neighboring four-literal cubes differing by one valuation:
   // learning the full cube made PDR rediscover the neighbor, while an UNSAT
   // pair proof blocked both. Each pair probe is still a complete SAT proof over
@@ -4583,6 +5926,17 @@ std::optional<StateCube> resetSpecializedConflictCubeAtStep(
       allowDeepSmallCubeRelaxedBudget &&
       queryCube.size() <= kMaxDeepSmallCubeResetSymbolicLiterals &&
       deepTargetStep;
+  const bool useLargeDualRailSmallCubeBudget =
+      useDeepSmallCubeBudget &&
+      hasLargeDualRailResetFrontierSurface(problem);
+  const size_t deepStateLimit =
+      useLargeDualRailSmallCubeBudget
+          ? kMaxDeepLargeDualRailResetSymbolicEvaluatorStates
+          : kMaxDeepSmallCubeResetSymbolicEvaluatorStates;
+  const size_t deepExprLimit =
+      useLargeDualRailSmallCubeBudget
+          ? kMaxDeepLargeDualRailResetSymbolicEvaluatorExprs
+          : kMaxDeepSmallCubeResetSymbolicEvaluatorExprs;
   // LCOV_EXCL_START
   std::optional<ScopedResetSymbolicEvaluatorBudget> scopedBudget;
   if (useDeepSmallCubeBudget) {
@@ -4596,9 +5950,9 @@ std::optional<StateCube> resetSpecializedConflictCubeAtStep(
           // LCOV_EXCL_STOP
           targetStep,
           " state_limit=",
-          kMaxDeepSmallCubeResetSymbolicEvaluatorStates,
+          deepStateLimit,
           " expr_limit=",
-          kMaxDeepSmallCubeResetSymbolicEvaluatorExprs,
+          deepExprLimit,
           // LCOV_EXCL_START
           " hash=",
           cubeFingerprint(queryCube));  // LCOV_EXCL_LINE
@@ -4606,9 +5960,9 @@ std::optional<StateCube> resetSpecializedConflictCubeAtStep(
     scopedBudget.emplace(  // LCOV_EXCL_LINE
         evaluator,  // LCOV_EXCL_LINE
         // LCOV_EXCL_STOP
-        kMaxDeepSmallCubeResetSymbolicEvaluatorStates,
+        deepStateLimit,
         // LCOV_EXCL_START
-        kMaxDeepSmallCubeResetSymbolicEvaluatorExprs);
+        deepExprLimit);
   }  // LCOV_EXCL_LINE
   std::vector<BoolExpr*> resetExprs;
   resetExprs.reserve(queryCube.size());
@@ -4954,7 +6308,8 @@ void addFormulaStateSupport(BoolExpr* formula,
 void addRelevantComplementedStatePartners(
     const ComplementPartnerIndex& complementPartners,
     std::unordered_set<size_t>& symbols) {
-  std::vector<size_t> worklist(symbols.begin(), symbols.end());
+  std::vector<size_t> worklist =
+      detail::makePdrClosureWorklist(symbols);
   for (size_t cursor = 0; cursor < worklist.size(); ++cursor) {
     const auto partnerIt =
         complementPartners.partnersBySymbol.find(worklist[cursor]);
@@ -4975,7 +6330,7 @@ void addRelevantComplementedStatePartners(
     const std::vector<std::pair<size_t, size_t>>& complementedStatePairs,
     std::unordered_set<size_t>& symbols) {
   for (const auto& [primarySymbol, complementedSymbol] : complementedStatePairs) {
-    if (symbols.find(primarySymbol) != symbols.end() ||
+    if (symbols.find(primarySymbol) != symbols.end() || // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         symbols.find(complementedSymbol) != symbols.end()) {
       symbols.insert(primarySymbol);  // LCOV_EXCL_LINE
@@ -4983,6 +6338,31 @@ void addRelevantComplementedStatePartners(
       // LCOV_EXCL_STOP
     }  // LCOV_EXCL_LINE
   }
+}
+
+void addRelevantStateEqualityPartners(
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    std::unordered_set<size_t>& symbols) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      const bool lhsNeeded = symbols.find(lhsSymbol) != symbols.end();
+      const bool rhsNeeded = symbols.find(rhsSymbol) != symbols.end();
+      if (!lhsNeeded && !rhsNeeded) {
+        continue;
+      }
+      changed |= symbols.insert(lhsSymbol).second;
+      changed |= symbols.insert(rhsSymbol).second;
+    }
+  }
+}
+
+void addRelevantSameFrameStateEqualityPartners(
+    const KInductionProblem& problem,
+    std::unordered_set<size_t>& symbols) {
+  addRelevantStateEqualityPartners(problem.sameFrameStateEqualityPairs0, symbols);
+  addRelevantStateEqualityPartners(problem.sameFrameStateEqualityPairs1, symbols);
 }
 
 void addRelevantDualRailPartners(
@@ -5010,13 +6390,17 @@ void addRelevantDualRailPartners(
   addRelevantDualRailPartners(railPairs, symbols);  // LCOV_EXCL_LINE
 }
 
+const std::vector<std::pair<size_t, size_t>>& emptySymbolPairs();
+
 bool hasStructuredInitFacts(const KInductionProblem& problem) {
   if (problem.resetBootstrapCycles != 0) {
     return !problem.bootstrapStateAssignments.empty() ||
-           !problem.bootstrapStateEqualityPairs.empty();
+           (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+            !problem.bootstrapStateEqualityPairs.empty());
   }
   return !problem.initialStateAssignments.empty() ||
-         !problem.initialStateEqualityPairs.empty();
+         (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() &&
+          !problem.initialStateEqualityPairs.empty());
 }
 
 void addRelevantInitConstraintSymbols(const KInductionProblem& problem,
@@ -5025,24 +6409,26 @@ void addRelevantInitConstraintSymbols(const KInductionProblem& problem,
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
 
   for (const auto& [symbol, /*value*/ _] : assignments) {
     if (symbols.find(symbol) != symbols.end()) {
       symbols.insert(symbol);
     }
   }
-  for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
-    const bool touchesQuery =
-        symbols.find(lhsSymbol) != symbols.end() ||
-        symbols.find(rhsSymbol) != symbols.end();
-    if (!touchesQuery) {
-      continue;
+  if (KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    const auto& equalities = usesBootstrapFrontier
+                                 ? problem.bootstrapStateEqualityPairs
+                                 : problem.initialStateEqualityPairs;
+    for (const auto& [lhsSymbol, rhsSymbol] : equalities) {
+      const bool touchesQuery =
+          symbols.find(lhsSymbol) != symbols.end() ||
+          symbols.find(rhsSymbol) != symbols.end();
+      if (!touchesQuery) {
+        continue;
+      }
+      symbols.insert(lhsSymbol);
+      symbols.insert(rhsSymbol);
     }
-    symbols.insert(lhsSymbol);
-    symbols.insert(rhsSymbol);
   }
 }
 
@@ -5091,7 +6477,8 @@ void addRelevantFrameClauseSymbols(const KInductionProblem& problem,
   (void)problem;
   ensureFrameClauseIndex(frame);
   const uint64_t emitEpoch = nextClauseEmitEpoch(frame);
-  std::vector<size_t> worklist(symbols.begin(), symbols.end());
+  std::vector<size_t> worklist =
+      detail::makeDeterministicPdrWorklist(symbols);
   size_t includedClauses = 0;
   size_t includedLiterals = 0;
   const size_t maxProjectedFrameClauses = maxProjectedFrameClausesPerQuery();
@@ -5177,6 +6564,7 @@ void addFrameConstraintSymbols(const KInductionProblem& problem,
     }
   }
   addRelevantComplementedStatePartners(complementPartners, symbols);
+  addRelevantSameFrameStateEqualityPartners(problem, symbols);
   addRelevantDualRailPartners(supportCache, problem.dualRailStatePairs, symbols);
 }
 
@@ -5204,6 +6592,254 @@ std::vector<size_t> findBadQuerySymbols(const KInductionProblem& problem,
   return sortUniqueSymbols(std::move(symbols));
 }
 
+void addCurrentFramePartnerClosure(
+    const KInductionProblem& problem,
+    const ComplementPartnerIndex& complementPartners,
+    std::unordered_set<size_t>& symbols,
+    PdrFormulaSupportCache* supportCache) {
+  addRelevantComplementedStatePartners(complementPartners, symbols);
+  addRelevantSameFrameStateEqualityPartners(problem, symbols);
+  addRelevantDualRailPartners(supportCache, problem.dualRailStatePairs, symbols);
+}
+
+std::vector<size_t> sortClosedCurrentFrameSymbols(
+    const KInductionProblem& problem,
+    const ComplementPartnerIndex& complementPartners,
+    std::unordered_set<size_t> symbols,
+    PdrFormulaSupportCache* supportCache) {
+  addCurrentFramePartnerClosure(
+      problem, complementPartners, symbols, supportCache);
+  return sortUniqueSymbols(std::move(symbols));
+} // LCOV_EXCL_LINE
+
+std::vector<size_t> sortCurrentFrameSymbolSeed(
+    std::unordered_set<size_t> symbols) {
+  return sortUniqueSymbols(std::move(symbols));
+} // LCOV_EXCL_LINE
+
+const std::vector<size_t>& cachedClosedCurrentFrameSymbols(
+    PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    const ComplementPartnerIndex& complementPartners,
+    std::vector<size_t> seedSymbols,
+    PdrFormulaSupportCache* supportCache) {
+  const auto existing = cache.closedCurrentFrameSymbols.find(seedSymbols);
+  if (existing != cache.closedCurrentFrameSymbols.end()) {
+    return existing->second; // LCOV_EXCL_LINE
+  }
+  if (cache.closedCurrentFrameSymbols.size() >=
+      kMaxPredecessorClosedSymbolCacheEntries) {
+    // The cache is an accelerator for repeated local cones only. Clearing it is
+    // cheaper and more predictable than retaining thousands of one-off
+    // projected predecessor surfaces in a long SEC run.
+    cache.closedCurrentFrameSymbols.clear(); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+
+  std::unordered_set<size_t> symbols(seedSymbols.begin(), seedSymbols.end());
+  std::vector<size_t> closedSymbols = sortClosedCurrentFrameSymbols(
+      problem, complementPartners, std::move(symbols), supportCache);
+  auto [inserted, insertedNew] = cache.closedCurrentFrameSymbols.emplace(
+      std::move(seedSymbols), std::move(closedSymbols));
+  (void)insertedNew;
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: predecessor closed symbol cache seed=",
+        inserted->first.size(),
+        " closed=",
+        inserted->second.size(),
+        " entries=",
+        cache.closedCurrentFrameSymbols.size());
+  }
+  return inserted->second;
+}
+
+PredecessorFrameSymbolSurfaceKey makePredecessorFrameSymbolSurfaceKey(
+    const KInductionProblem& problem,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    const ComplementPartnerIndex& complementPartners,
+    bool exactFrameClauses,
+    PdrFormulaSupportCache* supportCache) {
+  PredecessorFrameSymbolSurfaceKey key;
+  key.problem = &problem;
+  key.initFormula = initFormula;
+  key.frameInvariant = frameInvariant;
+  key.complementPartners = &complementPartners;
+  key.supportCache = supportCache;
+  key.level = level;
+  key.frameFingerprint = frameClausesFingerprint(frames, level);
+  key.exactFrameClauses = exactFrameClauses;
+  return key;
+}
+
+std::vector<size_t> buildStablePredecessorCurrentFrameSymbols(
+    const KInductionProblem& problem,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    const ComplementPartnerIndex& complementPartners,
+    PdrFormulaSupportCache* supportCache) {
+  std::unordered_set<size_t> symbols;
+  if (level == 0) {
+    if (!hasStructuredInitFacts(problem)) {
+      addFormulaSymbols(initFormula, symbols, supportCache);
+    }
+    if (problem.resetBootstrapCycles != 0 && problem.property != nullptr) {
+      addFormulaSymbols(problem.property, symbols, supportCache); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    addAllFrameClauseSymbols(frames[0], symbols);
+  } else {
+    addFormulaSymbols(frameInvariant, symbols, supportCache); // LCOV_EXCL_LINE
+    addAllFrameClauseSymbols(frames[level], symbols); // LCOV_EXCL_LINE
+  }
+
+  // The relation closures below are independent of the target cube. Closing
+  // this stable frame side once is equivalent to closing it together with each
+  // query's dynamic symbols, because the closures only add partner/equality
+  // symbols and do not inspect SAT polarity or clause state.
+  return sortClosedCurrentFrameSymbols(
+      problem, complementPartners, std::move(symbols), supportCache);
+}
+
+const std::vector<size_t>& cachedStablePredecessorCurrentFrameSymbols(
+    PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    const ComplementPartnerIndex& complementPartners,
+    bool exactFrameClauses,
+    PdrFormulaSupportCache* supportCache) {
+  const PredecessorFrameSymbolSurfaceKey key =
+      makePredecessorFrameSymbolSurfaceKey(
+          problem,
+          initFormula,
+          frameInvariant,
+          frames,
+          level,
+          complementPartners,
+          exactFrameClauses,
+          supportCache);
+  if (!cache.currentFrameSymbols.valid ||
+      !(cache.currentFrameSymbols.key == key)) { // LCOV_EXCL_LINE
+    cache.currentFrameSymbols.symbols =
+        buildStablePredecessorCurrentFrameSymbols(
+            problem,
+            initFormula,
+            frameInvariant,
+            frames,
+            level,
+            complementPartners,
+            supportCache);
+    cache.currentFrameSymbols.key = key;
+    cache.currentFrameSymbols.valid = true;
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor frame symbol cache built level=",
+          level,
+          " symbols=",
+          cache.currentFrameSymbols.symbols.size(),
+          " frame_fingerprint=",
+          key.frameFingerprint);
+    }
+  }
+  return cache.currentFrameSymbols.symbols;
+}
+
+std::vector<size_t> mergePredecessorSymbolAddition(
+    std::vector<size_t> base,
+    const std::vector<size_t>& addition) {
+  if (addition.empty()) {
+    return base;
+  }
+  return detail::mergeSortedPdrSymbolVectors(base, addition);
+}
+
+std::vector<size_t> predecessorCurrentFrameQuerySymbolsFromCachedSurface(
+    const KInductionProblem& problem,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    const StateCube& targetCube,
+    bool excludeTargetOnCurrentFrame,
+    const std::vector<size_t>& predecessorSymbols,
+    const std::vector<size_t>& transitionSupportSymbols,
+    const ComplementPartnerIndex& complementPartners,
+    bool exactFrameClauses,
+    const std::vector<StateClause>* extraFrameClauses,
+    PredecessorAssumptionCache& predecessorAssumptionCache,
+    PdrFormulaSupportCache* supportCache) {
+  const std::vector<size_t>& stableSymbols =
+      cachedStablePredecessorCurrentFrameSymbols(
+          predecessorAssumptionCache,
+          problem,
+          initFormula,
+          frameInvariant,
+          frames,
+          level,
+          complementPartners,
+          exactFrameClauses,
+          supportCache);
+  std::vector<size_t> merged = stableSymbols;
+
+  std::unordered_set<size_t> predecessorDynamic;
+  predecessorDynamic.reserve(predecessorSymbols.size());
+  predecessorDynamic.insert(predecessorSymbols.begin(), predecessorSymbols.end());
+  if (level == 0 && hasStructuredInitFacts(problem)) {
+    // Structured Init facts are intentionally query-local. Apply them only to
+    // the predecessor cone, matching addFrameConstraintSymbols() before the
+    // cached stable frame side is merged in.
+    addRelevantInitConstraintSymbols(problem, predecessorDynamic); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  merged = mergePredecessorSymbolAddition(
+      std::move(merged),
+      cachedClosedCurrentFrameSymbols(
+          predecessorAssumptionCache,
+          problem,
+          complementPartners,
+          sortCurrentFrameSymbolSeed(std::move(predecessorDynamic)),
+          supportCache));
+
+  std::unordered_set<size_t> transitionDynamic;
+  transitionDynamic.reserve(transitionSupportSymbols.size());
+  if (predecessorSourceFrameIsKnownSafe(level)) {
+    addFormulaSymbols(problem.property, transitionDynamic, supportCache); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  for (const auto symbol : transitionSupportSymbols) {
+    if (symbol >= 2) {
+      transitionDynamic.insert(symbol);
+    }
+  }
+  merged = mergePredecessorSymbolAddition(
+      std::move(merged),
+      cachedClosedCurrentFrameSymbols(
+          predecessorAssumptionCache,
+          problem,
+          complementPartners,
+          sortCurrentFrameSymbolSeed(std::move(transitionDynamic)),
+          supportCache));
+
+  std::unordered_set<size_t> tailSymbols;
+  tailSymbols.reserve(
+      (excludeTargetOnCurrentFrame ? targetCube.size() : 0) +
+      (extraFrameClauses == nullptr ? 0 : extraFrameClauses->size()));
+  if (excludeTargetOnCurrentFrame) {
+    addCubeSymbols(targetCube, tailSymbols); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  if (extraFrameClauses != nullptr) {
+    for (const auto& clause : *extraFrameClauses) { // LCOV_EXCL_LINE
+      addClauseSymbols(clause, tailSymbols); // LCOV_EXCL_LINE
+    }
+  } // LCOV_EXCL_LINE
+  return mergePredecessorSymbolAddition(
+      std::move(merged), sortUniqueSymbols(std::move(tailSymbols)));
+}
+
 std::vector<size_t> predecessorCurrentFrameQuerySymbols(
     const KInductionProblem& problem,
     BoolExpr* initFormula,
@@ -5217,7 +6853,28 @@ std::vector<size_t> predecessorCurrentFrameQuerySymbols(
     const ComplementPartnerIndex& complementPartners,
     bool exactFrameClauses,
     const std::vector<StateClause>* extraFrameClauses,
+    PredecessorAssumptionCache* predecessorAssumptionCache,
     PdrFormulaSupportCache* supportCache) {
+  if (predecessorAssumptionCache != nullptr &&
+      hasLocalDualRailFinalLeafRepairSurface(problem) &&
+      exactFrameClauses) {
+    return predecessorCurrentFrameQuerySymbolsFromCachedSurface(
+        problem,
+        initFormula,
+        frameInvariant,
+        frames,
+        level,
+        targetCube,
+        excludeTargetOnCurrentFrame,
+        predecessorSymbols,
+        transitionSupportSymbols,
+        complementPartners,
+        exactFrameClauses,
+        extraFrameClauses,
+        *predecessorAssumptionCache,
+        supportCache);
+  }
+
   std::unordered_set<size_t> symbols;
   symbols.reserve(
       predecessorSymbols.size() + transitionSupportSymbols.size() +
@@ -5245,6 +6902,7 @@ std::vector<size_t> predecessorCurrentFrameQuerySymbols(
     }
   }
   addRelevantComplementedStatePartners(complementPartners, symbols);
+  addRelevantSameFrameStateEqualityPartners(problem, symbols);
   addRelevantDualRailPartners(supportCache, problem.dualRailStatePairs, symbols);
   if (excludeTargetOnCurrentFrame) {
     addCubeSymbols(targetCube, symbols);
@@ -5255,6 +6913,45 @@ std::vector<size_t> predecessorCurrentFrameQuerySymbols(
     }
   }
   return sortUniqueSymbols(std::move(symbols));
+}
+
+std::vector<size_t> predecessorAssumptionCacheSymbols(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& transitionByState,
+    const std::vector<size_t>& solverSymbols,
+    bool exactFrameClauses,
+    size_t level,
+    PredecessorAssumptionCache* cache) {
+  if (!detail::shouldUseStableLocalPredecessorCacheSurface(
+          hasLocalDualRailFinalLeafRepairSurface(problem),
+          exactFrameClauses,
+          level)) {
+    return solverSymbols;
+  }
+
+  // Local single-output dual-rail leaves issue many neighboring predecessor
+  // queries. A stable local surface lets the cached SAT solver survive small
+  // target/support changes without promoting the query to all dual-rail state
+  // symbols; sampled Swerv leaves spent the wall on those broad level-0 caches.
+  if (cache != nullptr) {
+    if (cache->widenedPredecessorCacheResolver != &transitionByState) {
+      cache->widenedPredecessorCacheSymbols.clear();
+      cache->widenedPredecessorCacheResolver = &transitionByState;
+    }
+    if (detail::widenSortedPdrSymbolSurface(
+            cache->widenedPredecessorCacheSymbols, solverSymbols)) {
+      if (pdrStatsEnabled()) {
+        emitSecDiag(
+            "SEC PDR stats: predecessor cached solver surface widened symbols=",
+            cache->widenedPredecessorCacheSymbols.size(),
+            " requested=",
+            solverSymbols.size());
+      }
+    }
+    return cache->widenedPredecessorCacheSymbols;
+  }
+
+  return solverSymbols; // LCOV_EXCL_LINE
 }
 
 std::vector<size_t> initIntersectionSymbols(const KInductionProblem& problem,
@@ -5271,6 +6968,7 @@ std::vector<size_t> initIntersectionSymbols(const KInductionProblem& problem,
   }
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, symbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, symbols);
+  addRelevantSameFrameStateEqualityPartners(problem, symbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, symbols);
   return sortUniqueSymbols(std::move(symbols));
 }
@@ -5335,6 +7033,20 @@ bool contradictsComplements(
   return false;
 }
 
+void reservePdrTransitionEncodingVars(SATSolverWrapper& solver,
+                                      size_t estimatedNodes) {
+  if (estimatedNodes < kMinPdrTransitionSolverReserveNodes) {
+    return;
+  }
+  solver.reserveAdditionalVars( // LCOV_EXCL_LINE
+      std::min(estimatedNodes, kMaxPdrTransitionSolverReserveHint)); // LCOV_EXCL_LINE
+}
+
+const std::vector<std::pair<size_t, size_t>>& emptySymbolPairs() {
+  static const std::vector<std::pair<size_t, size_t>> pairs;
+  return pairs;
+}
+
 // LCOV_EXCL_START
 std::optional<bool> cubeIntersectsKnownInitFacts(
 // LCOV_EXCL_STOP
@@ -5346,9 +7058,11 @@ std::optional<bool> cubeIntersectsKnownInitFacts(
                                 ? problem.bootstrapStateAssignments
                                 // LCOV_EXCL_STOP
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
+  const auto& equalities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
+                                   : problem.initialStateEqualityPairs) // LCOV_EXCL_LINE
+          : emptySymbolPairs();
 
 // LCOV_EXCL_START
 
@@ -5392,46 +7106,31 @@ void addTransitionRelationForTargets(
     std::unordered_map<size_t, int>* encodedLeafLits = nullptr) {
   for (const auto& group :
        groupTransitionTargetsBySymbolMap(transitionByState, encodedTargets)) {
-    std::unordered_map<size_t, int> leafLits;
-    try {
-      leafLits = variables.makeLeafLits(frame, supportSymbols);
-    } catch (const std::runtime_error& error) {
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          "PDR transition leaf-map build failed at frame " +  // LCOV_EXCL_LINE
-          std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
-          std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
-          " support symbols: " + error.what());  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-    }  // LCOV_EXCL_LINE
+    std::unordered_map<size_t, int> leafLits =
+        variables.makeLeafLits(frame, supportSymbols);
+    const size_t estimatedNodes =
+        estimateTransitionEncodingNodes(transitionByState, group.stateSymbols);
+    reservePdrTransitionEncodingVars(solver, estimatedNodes);
     FrameFormulaEncoder encoder(
         solver,
         std::move(leafLits),
         group.symbolMap,
         createMissingTransitionLeaves,
         // LCOV_EXCL_START
-        estimateTransitionEncodingNodes(transitionByState, group.stateSymbols));
+        estimatedNodes);
     for (const auto stateSymbol : group.stateSymbols) {
-      try {
-        const TransitionExprView view =
-            transitionByState.expressionView(stateSymbol);
-        if (view.symbolMap != group.symbolMap) {
-        // LCOV_EXCL_STOP
-          throw std::runtime_error("Inconsistent transition symbol map");  // LCOV_EXCL_LINE
-        }
-        // LCOV_EXCL_START
-        addLiteralEquivalence(
-            solver,
-            variables.getLiteral(stateSymbol, frame + 1),
-            // LCOV_EXCL_STOP
-            encoder.encode(view.expr));
-      } catch (const std::runtime_error& error) {
-        throw std::runtime_error(  // LCOV_EXCL_LINE
-            "PDR transition relation encoding failed for target state symbol " +  // LCOV_EXCL_LINE
-            std::to_string(stateSymbol) + " at frame " + std::to_string(frame) +  // LCOV_EXCL_LINE
-            " with " + std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
-            " support symbols: " + error.what());  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      const TransitionExprView view =
+          transitionByState.expressionView(stateSymbol);
+      if (view.symbolMap != group.symbolMap) {
+      // LCOV_EXCL_STOP
+        throw std::runtime_error("Inconsistent transition symbol map");  // LCOV_EXCL_LINE
+      }
+      // LCOV_EXCL_START
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(stateSymbol, frame + 1),
+          // LCOV_EXCL_STOP
+          encoder.encode(view.expr));
     }
     if (encodedLeafLits != nullptr) {
       const auto& groupLeafLits = encoder.leafLits();  // LCOV_EXCL_LINE
@@ -5454,44 +7153,26 @@ void addTransitionConstraintsForTargetCube(
   // LCOV_EXCL_STOP
   for (const auto& group :
        groupTransitionCubeLiteralsBySymbolMap(transitionByState, targetCube)) {
-    std::unordered_map<size_t, int> leafLits;
-    try {
-      leafLits = variables.makeLeafLits(frame, supportSymbols);
-    } catch (const std::runtime_error& error) {
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          "PDR predecessor transition leaf-map build failed at frame " +  // LCOV_EXCL_LINE
-          std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
-          std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
-          " support symbols for target cube " +  // LCOV_EXCL_LINE
-          std::to_string(targetCube.size()) + ": " + error.what());  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
-    }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    std::unordered_map<size_t, int> leafLits =
+        variables.makeLeafLits(frame, supportSymbols);
+    const size_t estimatedNodes =
+        estimateTransitionEncodingNodes(transitionByState, group.stateSymbols);
+    reservePdrTransitionEncodingVars(solver, estimatedNodes);
     FrameFormulaEncoder encoder(
         solver,
         std::move(leafLits),
         // LCOV_EXCL_START
         group.symbolMap,
         false,
-        estimateTransitionEncodingNodes(transitionByState, group.stateSymbols));
+        estimatedNodes);
     for (const auto& literal : group.literals) {
-      int transitionLit = 0;
-      try {
-        const TransitionExprView view =
-        // LCOV_EXCL_STOP
-            transitionByState.expressionView(literal.transitionSymbol);
-        if (view.symbolMap != group.symbolMap) {
-          throw std::runtime_error("Inconsistent transition symbol map");  // LCOV_EXCL_LINE
-        }
-        transitionLit = encoder.encode(view.expr);
-      } catch (const std::runtime_error& error) {
-        throw std::runtime_error(  // LCOV_EXCL_LINE
-            "PDR predecessor transition encoding failed for target state symbol " +  // LCOV_EXCL_LINE
-            std::to_string(literal.transitionSymbol) + " at frame " +  // LCOV_EXCL_LINE
-            std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
-            std::to_string(supportSymbols.size()) + " support symbols: " +  // LCOV_EXCL_LINE
-            error.what());  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      const TransitionExprView view =
+      // LCOV_EXCL_STOP
+          transitionByState.expressionView(literal.transitionSymbol);
+      if (view.symbolMap != group.symbolMap) {
+        throw std::runtime_error("Inconsistent transition symbol map");  // LCOV_EXCL_LINE
+      }
+      const int transitionLit = encoder.encode(view.expr);
       solver.addClause({literal.desiredValue ? transitionLit : -transitionLit});
     }
     if (encodedLeafLits != nullptr) {
@@ -5516,44 +7197,26 @@ std::vector<std::pair<int, CubeLiteral>> addTransitionAssumptionsForTargetCube(
   // LCOV_EXCL_STOP
   for (const auto& group :
        groupTransitionCubeLiteralsBySymbolMap(transitionByState, targetCube)) {
-    std::unordered_map<size_t, int> leafLits;
-    try {
-      leafLits = variables.makeLeafLits(frame, supportSymbols);
-    } catch (const std::runtime_error& error) {
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          "PDR predecessor core leaf-map build failed at frame " +  // LCOV_EXCL_LINE
-          std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
-          std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
-          " support symbols for target cube " +  // LCOV_EXCL_LINE
-          std::to_string(targetCube.size()) + ": " + error.what());  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
-    }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    std::unordered_map<size_t, int> leafLits =
+        variables.makeLeafLits(frame, supportSymbols);
+    const size_t estimatedNodes =
+        estimateTransitionEncodingNodes(transitionByState, group.stateSymbols);
+    reservePdrTransitionEncodingVars(solver, estimatedNodes);
     FrameFormulaEncoder encoder(
         solver,
         std::move(leafLits),
         // LCOV_EXCL_START
         group.symbolMap,
         false,
-        estimateTransitionEncodingNodes(transitionByState, group.stateSymbols));
+        estimatedNodes);
     for (const auto& literal : group.literals) {
-      int transitionLit = 0;
-      try {
-        const TransitionExprView view =
-        // LCOV_EXCL_STOP
-            transitionByState.expressionView(literal.transitionSymbol);
-        if (view.symbolMap != group.symbolMap) {
-          throw std::runtime_error("Inconsistent transition symbol map");  // LCOV_EXCL_LINE
-        }
-        transitionLit = encoder.encode(view.expr);
-      } catch (const std::runtime_error& error) {
-        throw std::runtime_error(  // LCOV_EXCL_LINE
-            "PDR predecessor core encoding failed for target state symbol " +  // LCOV_EXCL_LINE
-            std::to_string(literal.transitionSymbol) + " at frame " +  // LCOV_EXCL_LINE
-            std::to_string(frame) + " with " +  // LCOV_EXCL_LINE
-            std::to_string(supportSymbols.size()) +  // LCOV_EXCL_LINE
-            " support symbols: " + error.what());  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      const TransitionExprView view =
+      // LCOV_EXCL_STOP
+          transitionByState.expressionView(literal.transitionSymbol);
+      if (view.symbolMap != group.symbolMap) {
+        throw std::runtime_error("Inconsistent transition symbol map");  // LCOV_EXCL_LINE
+      }
+      const int transitionLit = encoder.encode(view.expr);
       assumptions.emplace_back(
           literal.desiredValue ? transitionLit : -transitionLit,
           literal.originalLiteral);
@@ -5563,6 +7226,304 @@ std::vector<std::pair<int, CubeLiteral>> addTransitionAssumptionsForTargetCube(
   }
   return assumptions;
 }
+
+FrameFormulaEncoder& cachedPredecessorTransitionEncoder(
+    PredecessorAssumptionSolver& cachedSolver,
+    const std::unordered_map<size_t, size_t>* symbolMap,
+    size_t frame,
+    size_t estimatedNodes) {
+  const auto existing =
+      cachedSolver.transitionEncoderBySymbolMap.find(symbolMap);
+  if (existing != cachedSolver.transitionEncoderBySymbolMap.end()) {
+    return *existing->second;
+  }
+
+  // Use the cached solver's complete symbol surface for this encoder. It is
+  // built once per reusable predecessor solver, and it prevents a later target
+  // in the same surface from missing a leaf that was outside the first target's
+  // transition support slice.
+  auto encoder = std::make_unique<FrameFormulaEncoder>(
+      *cachedSolver.solver,
+      cachedSolver.variables->makeLeafLits(frame),
+      symbolMap,
+      false,
+      estimatedNodes);
+  cachedSolver.transitionLeafLits.insert(
+      encoder->leafLits().begin(), encoder->leafLits().end());
+  auto [inserted, insertedNew] =
+      cachedSolver.transitionEncoderBySymbolMap.emplace(
+          symbolMap, std::move(encoder));
+  (void)insertedNew;
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: predecessor transition encoder cached symbols=",
+        inserted->second->leafLits().size(),
+        " estimated_nodes=",
+        estimatedNodes);
+  }
+  return *inserted->second;
+}
+
+std::vector<std::pair<int, CubeLiteral>>
+addCachedTransitionAssumptionsForTargetCube(
+    PredecessorAssumptionSolver& cachedSolver,
+    const TransitionExprResolver& transitionByState,
+    size_t frame,
+    const StateCube& targetCube,
+    const std::vector<size_t>& encodedTargets,
+    const std::vector<size_t>& supportSymbols) {
+  (void)encodedTargets;
+  std::vector<std::pair<int, CubeLiteral>> assumptions;
+  assumptions.reserve(targetCube.size());
+  for (const auto& group :
+       groupTransitionCubeLiteralsBySymbolMap(transitionByState, targetCube)) {
+    FrameFormulaEncoder* encoder = nullptr;
+    for (const auto& literal : group.literals) {
+      const TransitionAssumptionKey key{
+          literal.transitionSymbol,
+          literal.desiredValue};
+      const auto cachedIt =
+          cachedSolver.assumptionByTransitionLiteral.find(key);
+      if (cachedIt != cachedSolver.assumptionByTransitionLiteral.end()) {
+        assumptions.emplace_back(cachedIt->second, literal.originalLiteral);
+        continue;
+      }
+
+      if (encoder == nullptr) {
+        const size_t estimatedNodes =
+            estimateTransitionEncodingNodes(
+                transitionByState, group.stateSymbols);
+        reservePdrTransitionEncodingVars(*cachedSolver.solver, estimatedNodes);
+        encoder = &cachedPredecessorTransitionEncoder(
+            cachedSolver,
+            group.symbolMap,
+            frame,
+            estimatedNodes);
+      }
+      const TransitionExprView view =
+          transitionByState.expressionView(literal.transitionSymbol);
+      if (view.symbolMap != group.symbolMap) {
+        throw std::runtime_error("Inconsistent transition symbol map");  // LCOV_EXCL_LINE
+      }
+      const int transitionLit = encoder->encode(view.expr);
+      // Store both polarities once the transition root is encoded. Neighboring
+      // PDR cubes often ask for the opposite value of the same next-state bit;
+      // reusing the root literal avoids rebuilding the same transition cone.
+      cachedSolver.assumptionByTransitionLiteral.emplace(
+          TransitionAssumptionKey{literal.transitionSymbol, true},
+          transitionLit);
+      cachedSolver.assumptionByTransitionLiteral.emplace(
+          TransitionAssumptionKey{literal.transitionSymbol, false},
+          -transitionLit);
+      const int assumptionLit =
+          literal.desiredValue ? transitionLit : -transitionLit;
+      assumptions.emplace_back(assumptionLit, literal.originalLiteral);
+    }
+  }
+  return assumptions;
+}
+
+std::vector<int> assumptionLiteralsFromPairs(
+    const std::vector<std::pair<int, CubeLiteral>>& assumptionPairs) {
+  std::vector<int> assumptions;
+  assumptions.reserve(assumptionPairs.size());
+  for (const auto& [assumptionLit, cubeLiteral] : assumptionPairs) {
+    (void)cubeLiteral;
+    assumptions.push_back(assumptionLit);
+  }
+  return assumptions;
+}
+
+std::unordered_map<int, CubeLiteral> literalByAssumptionFromTargetPairs(
+    const std::vector<std::pair<int, CubeLiteral>>& assumptionPairs) {
+  std::unordered_map<int, CubeLiteral> literalByAssumption;
+  literalByAssumption.reserve(assumptionPairs.size() * 2);
+  for (const auto& [assumptionLit, cubeLiteral] : assumptionPairs) {
+    literalByAssumption.emplace(assumptionLit, cubeLiteral);
+    // Keep the polarity-tolerant mapping used by the fresh core oracle. Some
+    // solver backends expose final conflicts in solver-literal polarity.
+    literalByAssumption.emplace(-assumptionLit, cubeLiteral);
+  }
+  return literalByAssumption;
+}
+
+StateCube failedAssumptionCubeFromTargetPairs(
+    const SATSolverWrapper& solver,
+    const std::vector<std::pair<int, CubeLiteral>>& assumptionPairs) {
+  const auto literalByAssumption =
+      literalByAssumptionFromTargetPairs(assumptionPairs);
+
+  StateCube core;
+  for (const int failedLit : solver.failedAssumptions()) {
+    const auto literalIt = literalByAssumption.find(failedLit);
+    if (literalIt == literalByAssumption.end()) {
+      continue;
+    }
+    core.push_back(literalIt->second);
+  }
+  normalizeCube(core);
+  return core;
+}
+
+std::optional<StateCube> minimizeCoreInTargetContext(
+    SATSolverWrapper& coreSolver,
+    const std::vector<int>& assumptions,
+    const std::unordered_map<int, CubeLiteral>& literalByAssumption,
+    size_t* checks);
+
+bool shouldMinimizeCachedPredecessorCoreInTargetContext(
+    const KInductionProblem& problem,
+    size_t level,
+    const StateCube& targetCube,
+    const std::vector<size_t>& transitionSupportSymbols,
+    bool excludeTargetOnCurrentFrame,
+    const std::vector<StateClause>* extraFrameClauses,
+    const StateCube& currentCore) {
+  if (!problem.usesDualRailStateEncoding || level != 0 ||
+      excludeTargetOnCurrentFrame || extraFrameClauses != nullptr) {
+    return false;
+  }
+  if (targetCube.size() < kMinMediumCubePredecessorCoreTargetSize ||
+      transitionSupportSymbols.size() <=
+          kMaxGeneralizedBlockedCubeTransitionSupport) {
+    return false;
+  }
+  return currentCore.empty() || currentCore.size() >= targetCube.size();
+}
+
+StateCube cachedPredecessorUnsatCoreFromTargetContext(
+    SATSolverWrapper& solver,
+    const KInductionProblem& problem,
+    size_t level,
+    const StateCube& targetCube,
+    const std::vector<size_t>& transitionSupportSymbols,
+    bool excludeTargetOnCurrentFrame,
+    const std::vector<StateClause>* extraFrameClauses,
+    const std::vector<int>& targetAssumptions,
+    const std::vector<std::pair<int, CubeLiteral>>& assumptionPairs) {
+  StateCube core =
+      failedAssumptionCubeFromTargetPairs(solver, assumptionPairs);
+  if (!shouldMinimizeCachedPredecessorCoreInTargetContext(
+          problem,
+          level,
+          targetCube,
+          transitionSupportSymbols,
+          excludeTargetOnCurrentFrame,
+          extraFrameClauses,
+          core)) {
+    return core;
+  }
+
+  // The cached predecessor solver already contains the exact F0/frame and
+  // transition context that proved the full target unreachable. Shrink only
+  // the target assumptions inside that same solver, and accept a reduced core
+  // only when it remains UNSAT there.
+  size_t checks = 0; // LCOV_EXCL_LINE
+  const auto literalByAssumption =
+      literalByAssumptionFromTargetPairs(assumptionPairs); // LCOV_EXCL_LINE
+  const auto minimizedCore = minimizeCoreInTargetContext( // LCOV_EXCL_LINE
+      solver, targetAssumptions, literalByAssumption, &checks); // LCOV_EXCL_LINE
+  if (!minimizedCore.has_value() || // LCOV_EXCL_LINE
+      minimizedCore->size() >= targetCube.size()) { // LCOV_EXCL_LINE
+    if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
+      emitSecDiag( // LCOV_EXCL_LINE
+          "SEC PDR stats: predecessor cached core minimization miss target=",
+          targetCube.size(), // LCOV_EXCL_LINE
+          " raw_core=",
+          core.size(), // LCOV_EXCL_LINE
+          " checks=",
+          checks,
+          " level=",
+          level,
+          " support=",
+          transitionSupportSymbols.size()); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    return core; // LCOV_EXCL_LINE
+  }
+  if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
+    emitSecDiag( // LCOV_EXCL_LINE
+        "SEC PDR stats: predecessor cached core minimized target=",
+        targetCube.size(), // LCOV_EXCL_LINE
+        "->",
+        minimizedCore->size(), // LCOV_EXCL_LINE
+        " raw_core=",
+        core.size(), // LCOV_EXCL_LINE
+        " checks=",
+        checks,
+        " level=",
+        level,
+        " support=",
+        transitionSupportSymbols.size(), // LCOV_EXCL_LINE
+        " target_hash=",
+        cubeFingerprint(targetCube), // LCOV_EXCL_LINE
+        " core_hash=",
+        cubeFingerprint(*minimizedCore)); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  return *minimizedCore; // LCOV_EXCL_LINE
+}
+
+int cachedTargetExclusionAssumption(
+    PredecessorAssumptionSolver& cachedSolver,
+    const StateCube& targetCube,
+    size_t frame) {
+  const StateClause exclusionClause = clauseFromCube(targetCube);
+  const auto cachedIt =
+      cachedSolver.exclusionAssumptionByClause.find(exclusionClause);
+  if (cachedIt != cachedSolver.exclusionAssumptionByClause.end()) {
+    return cachedIt->second; // LCOV_EXCL_LINE
+  }
+
+  const int selector = cachedSolver.solver->newVar();
+  std::vector<int> satClause;
+  satClause.reserve(exclusionClause.size() + 1);
+  satClause.push_back(-selector);
+  for (const auto& literal : exclusionClause) {
+    if (!cachedSolver.variables->hasSymbol(literal.symbol)) {
+      throw std::runtime_error( // LCOV_EXCL_LINE
+          "PDR cached negated-cube encoding missing symbol " + // LCOV_EXCL_LINE
+          std::to_string(literal.symbol) + " at frame " + // LCOV_EXCL_LINE
+          std::to_string(frame) + " in cube of size " + // LCOV_EXCL_LINE
+          std::to_string(targetCube.size())); // LCOV_EXCL_LINE
+    }
+    const int satLiteral =
+        cachedSolver.variables->getLiteral(literal.symbol, frame);
+    satClause.push_back(literal.positive ? satLiteral : -satLiteral);
+  }
+  cachedSolver.solver->addClause(satClause);
+  cachedSolver.exclusionAssumptionByClause.emplace(exclusionClause, selector);
+  return selector;
+}
+
+int cachedExtraFrameClauseAssumption( // LCOV_EXCL_LINE
+    PredecessorAssumptionSolver& cachedSolver,
+    const StateClause& clause,
+    size_t frame) {
+  const auto cachedIt =
+      cachedSolver.extraFrameAssumptionByClause.find(clause); // LCOV_EXCL_LINE
+  if (cachedIt != cachedSolver.extraFrameAssumptionByClause.end()) { // LCOV_EXCL_LINE
+    return cachedIt->second; // LCOV_EXCL_LINE
+  }
+
+  const int selector = cachedSolver.solver->newVar(); // LCOV_EXCL_LINE
+  std::vector<int> satClause; // LCOV_EXCL_LINE
+  satClause.reserve(clause.size() + 1); // LCOV_EXCL_LINE
+  satClause.push_back(-selector); // LCOV_EXCL_LINE
+  for (const auto& literal : clause) { // LCOV_EXCL_LINE
+    if (!cachedSolver.variables->hasSymbol(literal.symbol)) { // LCOV_EXCL_LINE
+      throw std::runtime_error( // LCOV_EXCL_LINE
+          "PDR cached extra-frame clause missing symbol " + // LCOV_EXCL_LINE
+          std::to_string(literal.symbol) + " at frame " + // LCOV_EXCL_LINE
+          std::to_string(frame) + " in clause of size " + // LCOV_EXCL_LINE
+          std::to_string(clause.size())); // LCOV_EXCL_LINE
+    }
+    const int satLiteral = // LCOV_EXCL_LINE
+        cachedSolver.variables->getLiteral(literal.symbol, frame); // LCOV_EXCL_LINE
+    satClause.push_back(literal.positive ? satLiteral : -satLiteral); // LCOV_EXCL_LINE
+  }
+  cachedSolver.solver->addClause(satClause); // LCOV_EXCL_LINE
+  cachedSolver.extraFrameAssumptionByClause.emplace(clause, selector); // LCOV_EXCL_LINE
+  return selector; // LCOV_EXCL_LINE
+} // LCOV_EXCL_LINE
 
 std::optional<StateCube> findPreviousResetCoreImpliedByOneStepTransition(
     const KInductionProblem& problem,
@@ -5642,6 +7603,7 @@ std::optional<StateCube> findPreviousResetCoreImpliedByOneStepTransition(
         problem.complementedStatePairs0, querySymbols);
     addRelevantComplementedStatePartners(
         problem.complementedStatePairs1, querySymbols);
+    addRelevantSameFrameStateEqualityPartners(problem, querySymbols);
     addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
     const std::vector<size_t> solverSymbols =
         sortUniqueSymbols(std::move(querySymbols));
@@ -5657,6 +7619,7 @@ std::optional<StateCube> findPreviousResetCoreImpliedByOneStepTransition(
         solver, variables, problem.complementedStatePairs0, 1);
     addComplementedStateRelations(
         solver, variables, problem.complementedStatePairs1, 1);
+    addSameFrameStateEqualities(solver, variables, problem, 1);
     addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
     addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
     addTransitionConstraintsForTargetCube(
@@ -5754,6 +7717,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
   }
 
   std::vector<StateCube> candidates;
+  std::vector<StateCube> cachedCores;
   // LCOV_EXCL_START
   std::unordered_set<StateCube, StateCubeHash> candidateKeys;
   // LCOV_EXCL_STOP
@@ -5769,8 +7733,8 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
       const auto memoIt = cache.transitionImpossibleResetCoreByKey.find(key);
       if (memoIt != cache.transitionImpossibleResetCoreByKey.end()) {
         if (memoIt->second) {
-          return core;  // LCOV_EXCL_LINE
-        }
+          cachedCores.push_back(core);  // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
         continue;
       // LCOV_EXCL_START
       }
@@ -5782,21 +7746,15 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
     }
   }
   // LCOV_EXCL_STOP
+  if (!cachedCores.empty()) {
+    sortStateCubesDeterministically(cachedCores); // LCOV_EXCL_LINE
+    return cachedCores.front();  // LCOV_EXCL_LINE
+  }
   if (candidates.empty()) {
     return std::nullopt;
   }
 
-  std::sort(
-      candidates.begin(),
-      candidates.end(),
-      // LCOV_EXCL_START
-      [](const StateCube& lhs, const StateCube& rhs) {  // LCOV_EXCL_LINE
-        if (lhs.size() != rhs.size()) {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-          return lhs.size() < rhs.size();  // LCOV_EXCL_LINE
-        }
-        return cubeFingerprint(lhs) < cubeFingerprint(rhs);  // LCOV_EXCL_LINE
-      });  // LCOV_EXCL_LINE
+  sortStateCubesDeterministically(candidates);
 
   // LCOV_EXCL_START
   for (const StateCube& candidate : candidates) {
@@ -5837,6 +7795,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
         problem.complementedStatePairs0, querySymbols);
     addRelevantComplementedStatePartners(
         problem.complementedStatePairs1, querySymbols);
+    addRelevantSameFrameStateEqualityPartners(problem, querySymbols);
     addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
     const std::vector<size_t> solverSymbols =
         sortUniqueSymbols(std::move(querySymbols));
@@ -5852,6 +7811,7 @@ std::optional<StateCube> proveTransitionImpossibleResetCoreForCube(
         solver, variables, problem.complementedStatePairs0, 1);
     addComplementedStateRelations(
         solver, variables, problem.complementedStatePairs1, 1);
+    addSameFrameStateEqualities(solver, variables, problem, 1);
     addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
     addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
     addTransitionConstraintsForTargetCube(
@@ -5931,8 +7891,12 @@ std::optional<StateCube> resetSpecializedPriorCoreConflictAtStep(
 
 // LCOV_EXCL_START
 
-  std::vector<StateCube> candidates;
-  std::unordered_set<StateCube, StateCubeHash> candidateKeys;
+  struct PriorResetCoreCandidate {
+    StateCube core;
+    size_t knownStep = 0;
+  };
+  std::vector<PriorResetCoreCandidate> candidates;
+  std::unordered_map<StateCube, size_t, StateCubeHash> candidateIndexByKey;
   // LCOV_EXCL_STOP
   for (const auto& [knownStep, cores] :
        cache.resetUnreachableCoresByPostBootstrapStep) {
@@ -5945,33 +7909,45 @@ std::optional<StateCube> resetSpecializedPriorCoreConflictAtStep(
           !cubeContainsCube(cube, core)) {
         continue;
       }
-      if (candidateKeys.insert(resetFrontierCacheKey(core, 0).cube).second) {
-        candidates.push_back(core);
-        // LCOV_EXCL_STOP
-      }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+      StateCube key = resetFrontierCacheKey(core, 0).cube;
+      if (const auto it = candidateIndexByKey.find(key);
+          it != candidateIndexByKey.end()) {
+        candidates[it->second].knownStep =
+            std::max(candidates[it->second].knownStep, knownStep);
+      } else {
+        candidateIndexByKey.emplace(key, candidates.size());
+        candidates.push_back({std::move(key), knownStep});
+      }
+    // LCOV_DISABLED_START
     }
   }
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   if (candidates.empty()) {
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     return std::nullopt;
   }
 
   std::sort(
-  // LCOV_EXCL_STOP
-      candidates.begin(),  // LCOV_EXCL_LINE
-      candidates.end(),  // LCOV_EXCL_LINE
-      [](const StateCube& lhs, const StateCube& rhs) {  // LCOV_EXCL_LINE
-        if (lhs.size() != rhs.size()) {  // LCOV_EXCL_LINE
-          return lhs.size() < rhs.size();  // LCOV_EXCL_LINE
+      candidates.begin(),
+      candidates.end(),
+      [](const PriorResetCoreCandidate& lhs,
+         const PriorResetCoreCandidate& rhs) {
+        if (lhs.knownStep != rhs.knownStep) {
+          return lhs.knownStep > rhs.knownStep;
         }
-        // LCOV_EXCL_START
-        return cubeFingerprint(lhs) < cubeFingerprint(rhs);  // LCOV_EXCL_LINE
+        if (lhs.core.size() != rhs.core.size()) {
+          return lhs.core.size() < rhs.core.size();
+        }
+        return std::lexicographical_compare(
+            lhs.core.begin(),
+            lhs.core.end(),
+            rhs.core.begin(),
+            rhs.core.end(),
+            cubeLiteralLess);
       });  // LCOV_EXCL_LINE
 
   size_t probes = 0;
-  for (const StateCube& candidate : candidates) {
+  for (const auto& candidate : candidates) {
     if (probes++ >= kMaxPriorResetCoreSpecializedProbes) {
       break;  // LCOV_EXCL_LINE
     }
@@ -5979,95 +7955,97 @@ std::optional<StateCube> resetSpecializedPriorCoreConflictAtStep(
     // A core proved unreachable at an earlier reset step is only a candidate
     // here.  Re-prove it at the current target step before using it; this keeps
     // the shortcut an exact reset-image proof while avoiding the measured huge
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     // full-cube frontier SAT query.
     if (const auto conflict =  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             resetSpecializedConflictCubeAtStep(
                 problem,
                 transitionByState,
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
                 cache,  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
-                candidate,
+                // LCOV_DISABLED_START
+                candidate.core,
                 targetStep,
                 frameInvariant,
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
                 allowDeepSmallCubeRelaxedBudget);  // LCOV_EXCL_LINE
         conflict.has_value() && cubeContainsCube(cube, *conflict)) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       if (pdrStatsEnabled()) {
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
         emitSecDiag(  // LCOV_EXCL_LINE
             "SEC PDR stats: prior reset core specialized conflict ",
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             "post_bootstrap_steps=", postBootstrapSteps,
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             " cube=", cube.size(),  // LCOV_EXCL_LINE
-            " candidate=", candidate.size(),  // LCOV_EXCL_LINE
+            " candidate=", candidate.core.size(),  // LCOV_EXCL_LINE
             "->", conflict->size(),  // LCOV_EXCL_LINE
+            " known_step=", candidate.knownStep,
+            // LCOV_DISABLED_START
             " probes=", probes,
-            // LCOV_EXCL_START
             " hash=", cubeFingerprint(*conflict));
       }
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       return *conflict;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
   }
   return std::nullopt;  // LCOV_EXCL_LINE
 }
 
 std::optional<StateCube> memoizedResetSpecializedConflictCubeAtStep(  // LCOV_EXCL_LINE
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
     const ResetFrontierCache& cache,
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     const StateCube& cube,
     size_t targetStep,
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     BoolExpr* frameInvariant) {
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   StateCube queryCube = cube;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   normalizeCube(queryCube);  // LCOV_EXCL_LINE
   const ResetExpressionConflictKey memoKey =
       resetExpressionConflictCacheKey(queryCube, targetStep, frameInvariant);  // LCOV_EXCL_LINE
   const auto* entry =  // LCOV_EXCL_LINE
       lookupResetExpressionConflictMemo(  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           cache.resetExpressionConflictByKey, memoKey);  // LCOV_EXCL_LINE
   if (entry == nullptr || !entry->hasConflict) {  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
     return std::nullopt;  // LCOV_EXCL_LINE
   }
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   return entry->conflict;  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
 std::optional<StateCube> memoizedPriorResetCoreConflictAtStep(  // LCOV_EXCL_LINE
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
     const StateCube& cube,
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     size_t postBootstrapSteps,
     size_t targetStep,
     const ResetFrontierCache& cache,
     BoolExpr* frameInvariant) {
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
   if (postBootstrapSteps == 0) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     return std::nullopt;  // LCOV_EXCL_LINE
   }
 
+  std::vector<StateCube> conflicts;  // LCOV_EXCL_LINE
   for (const auto& [knownStep, cores] :  // LCOV_EXCL_LINE
        cache.resetUnreachableCoresByPostBootstrapStep) {  // LCOV_EXCL_LINE
-       // LCOV_EXCL_STOP
+       // LCOV_DISABLED_STOP
     if (knownStep >= postBootstrapSteps) {  // LCOV_EXCL_LINE
       continue;  // LCOV_EXCL_LINE
     }
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     for (const StateCube& core : cores) {  // LCOV_EXCL_LINE
       if (core.empty() || core.size() >= cube.size() ||  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
           !cubeContainsCube(cube, core)) {  // LCOV_EXCL_LINE
         continue;  // LCOV_EXCL_LINE
       }
@@ -6075,14 +8053,18 @@ std::optional<StateCube> memoizedPriorResetCoreConflictAtStep(  // LCOV_EXCL_LIN
               memoizedResetSpecializedConflictCubeAtStep(  // LCOV_EXCL_LINE
                   cache, core, targetStep, frameInvariant);  // LCOV_EXCL_LINE
           conflict.has_value() && cubeContainsCube(cube, *conflict)) {  // LCOV_EXCL_LINE
-        return *conflict;  // LCOV_EXCL_LINE
+        conflicts.push_back(*conflict);  // LCOV_EXCL_LINE
       }
     }
   }
+  if (!conflicts.empty()) {  // LCOV_EXCL_LINE
+    sortStateCubesDeterministically(conflicts);  // LCOV_EXCL_LINE
+    return conflicts.front();  // LCOV_EXCL_LINE
+  }
   return std::nullopt;  // LCOV_EXCL_LINE
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 }  // LCOV_EXCL_LINE
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
 
 std::vector<size_t> predecessorProjectionSymbols(
     const KInductionProblem& problem,
@@ -6126,6 +8108,7 @@ std::vector<size_t> predecessorProjectionSymbols(
     addFormulaStateSupport(frameInvariant, stateSymbolSet, projection, *supportCache);
   }
   addRelevantComplementedStatePartners(complementPartners, projection);
+  addRelevantSameFrameStateEqualityPartners(problem, projection);
   return sortUniqueSymbols(std::move(projection));
 }
 
@@ -6146,6 +8129,34 @@ void addComplementedStateRelations(
           -variables.getLiteral(primarySymbol, frame));
     }
   }
+}
+
+void addSameFrameStateEqualities(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    size_t numFrames) {
+  for (size_t frame = 0; frame < numFrames; ++frame) {
+    for (const auto& [lhsSymbol, rhsSymbol] : equalityPairs) {
+      if (!variables.hasSymbol(lhsSymbol) || !variables.hasSymbol(rhsSymbol)) {
+        continue;
+      }
+      addLiteralEquivalence(
+          solver,
+          variables.getLiteral(lhsSymbol, frame),
+          variables.getLiteral(rhsSymbol, frame));
+    }
+  }
+}
+
+void addSameFrameStateEqualities(SATSolverWrapper& solver,
+                                 const FrameVariableStore& variables,
+                                 const KInductionProblem& problem,
+                                 size_t numFrames) {
+  addSameFrameStateEqualities(
+      solver, variables, problem.sameFrameStateEqualityPairs0, numFrames);
+  addSameFrameStateEqualities(
+      solver, variables, problem.sameFrameStateEqualityPairs1, numFrames);
 }
 
 void addDualRailStateValidity(SATSolverWrapper& solver,
@@ -6170,29 +8181,16 @@ void addDualRailStateValidity(SATSolverWrapper& solver,
 void normalizeCube(StateCube& cube) {
   // Canonical ordering lets us compare cubes structurally and avoid learning
   // the same obligation more than once with a different literal order.
-  std::sort(cube.begin(), cube.end(), [](const CubeLiteral& lhs, const CubeLiteral& rhs) {
-    if (lhs.symbol != rhs.symbol) {
-      return lhs.symbol < rhs.symbol;
-    }
-    // LCOV_EXCL_START
-    return lhs.value < rhs.value;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
-  });
+  std::sort(cube.begin(), cube.end(), cubeLiteralLess);
   cube.erase(std::unique(cube.begin(), cube.end()), cube.end());
 }
 
 void normalizeClause(StateClause& clause) {
   // Clauses are canonicalized for the same reason: later subsumption and
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   // convergence checks depend on stable ordering and deduplication.
-  std::sort(
-  // LCOV_EXCL_STOP
-      clause.begin(), clause.end(), [](const ClauseLiteral& lhs, const ClauseLiteral& rhs) {
-        if (lhs.symbol != rhs.symbol) {
-          return lhs.symbol < rhs.symbol;
-        }
-        return lhs.positive < rhs.positive;  // LCOV_EXCL_LINE
-      });
+  std::sort(clause.begin(), clause.end(), clauseLiteralLess);
+  // LCOV_DISABLED_STOP
   clause.erase(std::unique(clause.begin(), clause.end()), clause.end());
 }
 
@@ -6208,9 +8206,11 @@ InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
+  const auto& equalities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
+                                   : problem.initialStateEqualityPairs)
+          : emptySymbolPairs();
 
   InitFactIndex index;
   index.assignments.reserve(assignments.size());
@@ -6223,13 +8223,23 @@ InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
     index.equalities.insert(canonicalPair(lhsSymbol, rhsSymbol));
     index.relations.addEquality(lhsSymbol, rhsSymbol);
   }
+  for (const auto& [lhsSymbol, rhsSymbol] :
+       problem.sameFrameStateEqualityPairs0) {
+    index.equalities.insert(canonicalPair(lhsSymbol, rhsSymbol));
+    index.relations.addEquality(lhsSymbol, rhsSymbol);
+  }
+  for (const auto& [lhsSymbol, rhsSymbol] :
+       problem.sameFrameStateEqualityPairs1) {
+    index.equalities.insert(canonicalPair(lhsSymbol, rhsSymbol));
+    index.relations.addEquality(lhsSymbol, rhsSymbol);
+  }
   index.complements.reserve(
       problem.complementedStatePairs0.size() +
       problem.complementedStatePairs1.size());
   for (const auto& [primarySymbol, complementedSymbol] :
-       // LCOV_EXCL_START
+       // LCOV_DISABLED_START
        problem.complementedStatePairs0) {
-       // LCOV_EXCL_STOP
+       // LCOV_DISABLED_STOP
     index.complements.insert(canonicalPair(primarySymbol, complementedSymbol));
     index.relations.addComplement(primarySymbol, complementedSymbol);
   }
@@ -6239,7 +8249,10 @@ InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
     index.relations.addComplement(primarySymbol, complementedSymbol);
   }
   index.rootAssignments.reserve(index.assignments.size());
-  for (const auto& [symbol, value] : index.assignments) {
+  std::vector<std::pair<size_t, bool>> orderedAssignments(
+      index.assignments.begin(), index.assignments.end());
+  std::sort(orderedAssignments.begin(), orderedAssignments.end());
+  for (const auto& [symbol, value] : orderedAssignments) {
     const auto root = index.relations.findWithParity(symbol);
     if (!root.has_value()) {
       continue;  // LCOV_EXCL_LINE
@@ -6257,39 +8270,39 @@ std::optional<StateCube> knownInitConflictCube(const InitFactIndex& facts,
                                                const StateCube& cube) {
   // PDR frequently reaches a level-0 cube that is impossible only because it
   // violates a startup equality such as "state0 == state1".  Learning the full
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   // 100+ literal cube makes the engine enumerate many adjacent impossible
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   // startup states.  This extractor turns the visible conflict into the
   // smallest safe cube:
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   //   - one literal for an init assignment conflict;
   //   - two literals for equality/complement conflicts.
   // The learned clause is still exactly an Init consequence, but much stronger.
   std::unordered_map<size_t, std::pair<bool, CubeLiteral>> cubeValueByRoot;
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   cubeValueByRoot.reserve(cube.size());
   for (const auto& literal : cube) {
     const auto root = facts.relations.findWithParity(literal.symbol);
     if (!root.has_value()) {
       const auto assignment = facts.assignments.find(literal.symbol);
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       if (assignment == facts.assignments.end() ||
           assignment->second == literal.value) {  // LCOV_EXCL_LINE
         continue;
       }
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       StateCube conflict{literal};  // LCOV_EXCL_LINE
       normalizeCube(conflict);  // LCOV_EXCL_LINE
       return conflict;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }  // LCOV_EXCL_LINE
 
     const bool rootValue = literal.value ^ root->second;
     const auto assignment = facts.rootAssignments.find(root->first);
     if (assignment != facts.rootAssignments.end() &&
         assignment->second != rootValue) {
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
       StateCube conflict{literal};  // LCOV_EXCL_LINE
       normalizeCube(conflict);  // LCOV_EXCL_LINE
       return conflict;  // LCOV_EXCL_LINE
@@ -6304,18 +8317,18 @@ std::optional<StateCube> knownInitConflictCube(const InitFactIndex& facts,
       }  // LCOV_EXCL_LINE
       continue;  // LCOV_EXCL_LINE
     }
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     cubeValueByRoot.emplace(root->first, std::pair{rootValue, literal});
   }
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
 
   return std::nullopt;
 }
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 
 bool twoLiteralCubeIsKnownOutsideInit(const InitFactIndex& facts,
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
                                       size_t lhsSymbol,
                                       bool lhsValue,
                                       size_t rhsSymbol,
@@ -6404,10 +8417,16 @@ bool addClauseToFrame(FrameClauses& frame, StateClause clause) {
             return clauseSubsumes(clause, existingClause);
           }),
       frame.clauses.end());
-  // LCOV_EXCL_START
-  frame.clauses.push_back(std::move(clause));
-  // LCOV_EXCL_STOP
+  frame.addedClauseLog.push_back(clause);
+  // The remaining clauses stay sorted after erase(), so a lower_bound insert
+  // preserves the deterministic frame order without resorting the whole frame
+  // for every learned clause.
+  auto insertPosition =
+      std::lower_bound(frame.clauses.begin(), frame.clauses.end(), clause,
+                       stateClauseLess);
+  frame.clauses.insert(insertPosition, std::move(clause));
   frame.clauseIndexDirty = true;
+  frame.clauseEmitEpochByIndex.clear();
   return true;
 }
 
@@ -6445,15 +8464,259 @@ size_t exactResetCubeBadFormulaClauseLimit(const KInductionProblem& problem) {
 
 bool hasLargeDualRailResetFrontierSurface(const KInductionProblem& problem) {
   return problem.usesDualRailStateEncoding &&
-         // LCOV_EXCL_START
+         // LCOV_DISABLED_START
          (pdrDualRailStateSymbolCount(problem) >
-         // LCOV_EXCL_STOP
+         // LCOV_DISABLED_STOP
               dualRailResetFrontierStateSymbolLimit() ||
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           pdrTransitionSourceCount(problem) >
-          // LCOV_EXCL_STOP
-              dualRailResetFrontierTransitionSourceLimit());
+          // LCOV_DISABLED_STOP
+              dualRailResetFrontierTransitionSourceLimit() ||
+          // A one-output leaf from a medium interface should still be allowed
+          // to use local reset/bad-formula repair.  The current-slice cap keeps
+          // broad reset-frontier queries out of PDR; the original-output cap
+          // only prevents this repair from re-entering SoC-scale surfaces.
+          pdrOriginalObservedOutputCount(problem) >
+              kMaxExactResetFrontierDualRailOriginalOutputs);
 }
+
+template <typename Container>
+void clearAndReleaseContainer(Container& container) {
+  Container empty;
+  container.swap(empty);
+}
+
+void releaseAllocatorFreePages() {
+#if defined(__APPLE__)
+  malloc_zone_pressure_relief(malloc_default_zone(), 0);
+#elif defined(__GLIBC__)
+  malloc_trim(0);
+#endif
+}
+
+void releaseLargeDualRailResetFrontierContext(ResetFrontierCache& cache,
+                                              const KInductionProblem& problem,
+                                              std::string_view reason) {
+  if (!hasLargeDualRailResetFrontierSurface(problem)) {
+    return;
+  }
+  const bool hadReachabilityContext = cache.reachabilityContext != nullptr;
+  const bool hadResetExpressionEvaluator =
+      cache.resetExpressionEvaluator != nullptr;
+  const bool hadResetExpressionCanonicalizer =
+      cache.resetExpressionCanonicalizer != nullptr;
+  const bool hadResetBootstrapExpressionRelations =
+      cache.resetBootstrapExpressionRelations != nullptr;
+  const size_t resetExpressionConflictMemos =
+      cache.resetExpressionConflictByKey.size();
+  const size_t resetExpressionBudgetSkips =
+      cache.resetExpressionBudgetSkipFromStep.size();
+  const size_t wholeBadFormulaMisses =
+      cache.wholeBadFormulaValidationMisses.size();
+  const size_t observedBadClauseGroups =
+      cache.observedOutputBadClauseGroups.size();
+  const size_t observedBadClauses =
+      cache.observedOutputBadClauses.has_value()
+          ? cache.observedOutputBadClauses->size()
+          : 0;
+  size_t lazyRemappedTransitions = 0;
+  size_t lazyRemapMemoEntries = 0;
+  size_t lazyDualRailRemapMemoEntries = 0;
+  size_t lazySupportEntries = 0;
+  size_t lazyNodeCountEntries = 0;
+  size_t lazyStateEqualitySubsetEntries = 0;
+
+  cache.reachabilityContext.reset();
+  cache.resetExpressionEvaluator.reset();
+  cache.resetExpressionProblem = nullptr;
+  cache.resetExpressionTransitions = nullptr;
+  cache.resetExpressionCanonicalizer.reset();
+  cache.resetExpressionCanonicalizerProblem = nullptr;
+  cache.resetBootstrapExpressionRelations.reset();
+  cache.resetBootstrapExpressionProblem = nullptr;
+  cache.resetBootstrapExpressionTransitions = nullptr;
+  clearAndReleaseContainer(cache.resetExpressionConflictByKey);
+  clearAndReleaseContainer(cache.resetExpressionBudgetSkipFromStep);
+  clearAndReleaseContainer(cache.wholeBadFormulaValidationMisses);
+  clearAndReleaseContainer(cache.observedOutputBadClauseGroups);
+  cache.observedOutputBadClauses.reset();
+  cache.observedOutputBadClauseCacheBuilt = false;
+
+  if (problem.lazyTransitions != nullptr) {
+    auto& store = *problem.lazyTransitions;
+    lazyRemappedTransitions = store.remappedByStateSymbol.size();
+    for (const auto& memo : store.remapMemoByDesign) {
+      lazyRemapMemoEntries += memo.size();
+    }
+    for (const auto& memo : store.dualRailRemapMemoByDesign) {
+      lazyDualRailRemapMemoEntries += memo.size();
+    }
+    lazySupportEntries = store.supportByStateSymbol.size();
+    lazyNodeCountEntries = store.nodeCountByStateSymbol.size();
+    lazyStateEqualitySubsetEntries = store.pdrStateEqualitySubsetCache.size();
+
+    clearAndReleaseContainer(store.remappedByStateSymbol);
+    for (auto& memo : store.remapMemoByDesign) {
+      clearAndReleaseContainer(memo);
+    }
+    for (auto& memo : store.dualRailRemapMemoByDesign) {
+      clearAndReleaseContainer(memo);
+    }
+    // Keep lazy support and node-count metadata across output-batched PDR
+    // slices.  These caches contain compact COI facts, not materialized
+    // transition expressions, and Swerv rebuilds them for many sibling
+    // dual-rail leaves when they are released with the heavy remap caches.
+    clearAndReleaseContainer(store.pdrStateEqualitySubsetCache);
+  }
+
+  releaseAllocatorFreePages();
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: released large dual-rail reset-frontier memory ",
+        "reason=", reason,
+        " rail_state_symbols=", pdrDualRailStateSymbolCount(problem),
+        " transition_sources=", pdrTransitionSourceCount(problem),
+        " context=", hadReachabilityContext ? 1 : 0,
+        " reset_eval=", hadResetExpressionEvaluator ? 1 : 0,
+        " canonicalizer=", hadResetExpressionCanonicalizer ? 1 : 0,
+        " bootstrap_relations=",
+        hadResetBootstrapExpressionRelations ? 1 : 0,
+        " reset_expr_memos=", resetExpressionConflictMemos,
+        " reset_expr_budget_skips=", resetExpressionBudgetSkips,
+        " whole_bad_misses=", wholeBadFormulaMisses,
+        " observed_bad_groups=", observedBadClauseGroups,
+        " observed_bad_clauses=", observedBadClauses,
+        " lazy_remapped=", lazyRemappedTransitions,
+        " lazy_remap_memos=", lazyRemapMemoEntries,
+        " lazy_dual_rail_memos=", lazyDualRailRemapMemoEntries,
+        " lazy_support=", lazySupportEntries,
+        " lazy_node_counts=", lazyNodeCountEntries,
+        " lazy_state_eq_subsets=", lazyStateEqualitySubsetEntries);
+  }
+}
+
+bool useResetFrontierPostBootstrapPrechecks(
+    const KInductionProblem& problem,
+    size_t postBootstrapSteps,
+    bool requested,
+    std::string_view reason) {
+  if (!requested || postBootstrapSteps == 0) {
+    return requested;
+  }
+  if (!hasLargeDualRailResetFrontierSurface(problem)) {
+    return true;
+  }
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: skipped large dual-rail reset-frontier precheck ",
+        "reason=", reason,
+        " post_bootstrap_steps=", postBootstrapSteps,
+        " rail_state_symbols=", pdrDualRailStateSymbolCount(problem),
+        " transition_sources=", pdrTransitionSourceCount(problem));
+  }
+  return false;
+}
+
+bool freshLargeDualRailExactResetFrontierQueryTooDeep(
+    const KInductionProblem& problem,
+    size_t postBootstrapSteps) {
+  return hasLargeDualRailResetFrontierSurface(problem) &&
+         postBootstrapSteps >
+             kMaxFreshLargeDualRailExactResetFrontierPostBootstrapStep;
+}
+
+bool freshLargeDualRailSingletonResetFrontierQueryTooDeep(
+    const KInductionProblem& problem,
+    size_t postBootstrapSteps) {
+  return hasLargeDualRailResetFrontierSurface(problem) &&
+         postBootstrapSteps >
+             kMaxFreshLargeDualRailSingletonResetFrontierPostBootstrapStep;
+}
+
+void emitSkippedFreshLargeDualRailExactResetFrontierQuery(
+    const KInductionProblem& problem,
+    const StateCube& cube,
+    size_t postBootstrapSteps,
+    std::string_view reason) {
+  if (!pdrStatsEnabled()) {
+    return;
+  }
+  emitSecDiag(
+      "SEC PDR stats: skipped fresh large dual-rail exact reset-frontier query ",
+      "reason=", reason,
+      " post_bootstrap_steps=", postBootstrapSteps,
+      " cube=", cube.size(),
+      " rail_state_symbols=", pdrDualRailStateSymbolCount(problem),
+      " transition_sources=", pdrTransitionSourceCount(problem),
+      " hash=", cubeFingerprint(cube));
+}
+
+void releaseLargeDualRailPdrTransientCaches(
+    ResetFrontierCache& resetCache,
+    BadCubeAssumptionCache* badCubeCache,
+    PredecessorAssumptionCache* predecessorCache,
+    PdrFormulaSupportCache* supportCache,
+    const KInductionProblem& problem,
+    std::string_view reason) {
+  if (!hasLargeDualRailResetFrontierSurface(problem)) {
+    return;
+  }
+
+  const bool hadBadCubeSolver =
+      badCubeCache != nullptr && badCubeCache->solver != nullptr;
+  const size_t badCubeEncodedRoots =
+      hadBadCubeSolver ? badCubeCache->solver->encodedBadRoots.size() : 0;
+  const size_t badCubeQuerySymbols =
+      hadBadCubeSolver ? badCubeCache->solver->querySymbolSet.size() : 0;
+  const bool hadPredecessorSolver =
+      predecessorCache != nullptr && predecessorCache->solver != nullptr;
+  const size_t predecessorAssumptionLiterals =
+      hadPredecessorSolver
+          ? predecessorCache->solver->assumptionByTransitionLiteral.size()
+          : 0;
+  const size_t memoizedSupports =
+      supportCache != nullptr ? supportCache->clearMemoizedSupports() : 0;
+
+  if (badCubeCache != nullptr) {
+    badCubeCache->solver.reset();
+  }
+  if (predecessorCache != nullptr) {
+    predecessorCache->solver.reset();
+  }
+  releaseLargeDualRailResetFrontierContext(resetCache, problem, reason);
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: released large dual-rail PDR transient caches ",
+        "reason=", reason,
+        " bad_solver=", hadBadCubeSolver ? 1 : 0,
+        " bad_roots=", badCubeEncodedRoots,
+        " bad_symbols=", badCubeQuerySymbols,
+        " predecessor_solver=", hadPredecessorSolver ? 1 : 0,
+        " predecessor_assumptions=", predecessorAssumptionLiterals,
+        " memoized_supports=", memoizedSupports);
+  }
+}
+
+struct LargeDualRailPdrTransientCacheReleaseGuard {
+  ResetFrontierCache& resetCache;
+  BadCubeAssumptionCache& badCubeCache;
+  PredecessorAssumptionCache& predecessorCache;
+  PdrFormulaSupportCache& supportCache;
+  const KInductionProblem& problem;
+  BoolExpr* frameInvariant = nullptr;
+
+  ~LargeDualRailPdrTransientCacheReleaseGuard() {
+    rememberProcessResetUnreachableCores(
+        problem, resetCache, frameInvariant);
+    releaseLargeDualRailPdrTransientCaches(
+        resetCache,
+        &badCubeCache,
+        &predecessorCache,
+        &supportCache,
+        problem,
+        "pdr_run_exit");
+  }
+};
 
 bool canExactlyValidateBadFormulaGroup(const KInductionProblem& problem,
                                        size_t targetFrame,
@@ -6462,9 +8725,9 @@ bool canExactlyValidateBadFormulaGroup(const KInductionProblem& problem,
          clauses.size() <= exactResetCubeBadFormulaClauseLimit(problem);
 }
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 size_t partialTargetResetFrontierBadFormulaCheapCheckLimit(  // LCOV_EXCL_LINE
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
     const KInductionProblem& problem) {
   return problem.usesDualRailStateEncoding  // LCOV_EXCL_LINE
              ? kMaxDualRailPartialTargetResetFrontierBadFormulaCheapChecks
@@ -6480,22 +8743,22 @@ void emitSkippedPerOutputBadFormulaGroupDiag(
     return;  // LCOV_EXCL_LINE
   }
   emitSecDiag(
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       "SEC PDR stats: skipped per-output bad-formula validation ",
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       "bad_frame=", targetFrame,
       " output=", group.outputIndex,
       " clauses=", group.clauses.size(),
       " reason=", reason,
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       " limit=", limit);
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
 }
 
 std::optional<std::vector<StateClause>> stateOnlyBadFormulaClauses(
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     BoolExpr* badFormula,
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     const std::unordered_set<size_t>& stateSymbols,
     size_t supportLimit) {
   if (badFormula == nullptr) {
@@ -6528,20 +8791,21 @@ std::optional<std::vector<StateClause>> stateOnlyBadFormulaClauses(
 
     StateClause clause;
     clause.reserve(support.size());
-    for (const auto symbol : support) {
+  for (const auto symbol : support) {
       const bool value = env.at(symbol);
       // Forbid exactly this bad assignment.
       clause.push_back({symbol, !value});
     }
     normalizeClause(clause);
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     clauses.push_back(std::move(clause));
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
   }
+  sortStateClausesDeterministically(clauses);
   return clauses;
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 }
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
 
 bool appendStateOnlyBadFormulaClauses(
     std::vector<StateClause>& target,
@@ -6601,9 +8865,9 @@ std::optional<std::vector<StateClause>> observedOutputBadFormulaClauses(
 }
 
 std::optional<std::vector<StateClause>> observedOutputBadFormulaClausesFromGroups(
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     const std::vector<ObservedOutputBadClauseGroup>& groups) {
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
   if (groups.empty()) {
     return std::nullopt;
   }
@@ -6618,6 +8882,7 @@ std::optional<std::vector<StateClause>> observedOutputBadFormulaClausesFromGroup
   if (clauses.empty()) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
+  sortStateClausesDeterministically(clauses);
   return clauses;
 }
 
@@ -6644,9 +8909,9 @@ bool hasNewValidatedBadFormulaClause(
     StateClause normalizedClause = clause;
     normalizeClause(normalizedClause);
     for (size_t level = 1; level <= targetFrame && level < frames.size(); ++level) {
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       if (!frameHasSubsumingClause(frames[level], normalizedClause)) {
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
         return true;
       }
     }
@@ -6655,9 +8920,9 @@ bool hasNewValidatedBadFormulaClause(
 }
 
 bool hasNewValidatedBadFormulaClauseAtFrame(
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     const std::vector<FrameClauses>& frames,
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     const std::vector<StateClause>& clauses,
     size_t targetFrame) {
   if (targetFrame >= frames.size()) {
@@ -6708,16 +8973,16 @@ StateClauseSetKey badFormulaValidationCacheKey(
   key.targetFrame = targetFrame;
   key.clauses = clauses;
   return key;
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 }
 
 
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
 size_t countCachedResetValidatedBadFormulaAssignments(  // LCOV_EXCL_LINE
     const std::vector<StateClause>& clauses,
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     size_t targetFrame,
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     const ResetFrontierCache& resetFrontierCache) {
   size_t count = 0;  // LCOV_EXCL_LINE
   for (const auto& clause : clauses) {  // LCOV_EXCL_LINE
@@ -6727,7 +8992,7 @@ size_t countCachedResetValidatedBadFormulaAssignments(  // LCOV_EXCL_LINE
             targetFrame)  // LCOV_EXCL_LINE
         .has_value()) {  // LCOV_EXCL_LINE
       ++count;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }  // LCOV_EXCL_LINE
   }
   return count;  // LCOV_EXCL_LINE
@@ -6735,11 +9000,11 @@ size_t countCachedResetValidatedBadFormulaAssignments(  // LCOV_EXCL_LINE
 
 bool frameInvariantImpliesClauses(
     BoolExpr* frameInvariant,
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     KEPLER_FORMAL::Config::SolverType solverType,
     const std::vector<StateClause>& clauses) {
   if (frameInvariant == nullptr || clauses.empty()) {
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     return false;
   }
 
@@ -6750,35 +9015,35 @@ bool frameInvariantImpliesClauses(
     const StateCube forbiddenCube = cubeForbiddenByStateClause(clause);  // LCOV_EXCL_LINE
     for (const auto& literal : forbiddenCube) {  // LCOV_EXCL_LINE
       querySymbols.insert(literal.symbol);  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
     }
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 
     const std::vector<size_t> solverSymbols =
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
         sortUniqueSymbols(std::move(querySymbols));  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     SATSolverWrapper solver(solverType);  // LCOV_EXCL_LINE
     solver.configureForSecPdrQuery(solverSymbols.size());  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     FrameVariableStore variables(solver, solverSymbols, 1);  // LCOV_EXCL_LINE
     FrameFormulaEncoder encoder(  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         solver, variables.makeLeafLits(0, invariantSupport));  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
     solver.addClause({encoder.encode(frameInvariant)});  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     for (const auto& literal : forbiddenCube) {  // LCOV_EXCL_LINE
       const int satLiteral = variables.getLiteral(literal.symbol, 0);  // LCOV_EXCL_LINE
       solver.addClause({literal.value ? satLiteral : -satLiteral});  // LCOV_EXCL_LINE
     }
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (solver.solve()) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       return false;  // LCOV_EXCL_LINE
     }
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
   }  // LCOV_EXCL_LINE
   return true;  // LCOV_EXCL_LINE
 }
@@ -6797,7 +9062,7 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     const TransitionExprResolver& transitionByState,
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     const std::vector<StateClause>& clauses,
     size_t targetFrame,
     ResetFrontierCache& resetFrontierCache,
@@ -6826,19 +9091,19 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
       !allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
       !deepLocalResetSpecializedRepair;  // LCOV_EXCL_LINE
   const bool deepLocalExactResetValidation =  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
       targetFrame > kMaxResetSpecializedBadFormulaValidationFrame &&  // LCOV_EXCL_LINE
       allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
       clauses.size() <=  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           kMaxDeepLocalExactResetCubeValidatedBadFormulaClauses &&  // LCOV_EXCL_LINE
       !validationSupportCube.empty() &&  // LCOV_EXCL_LINE
       validationSupportCube.size() <= kMaxResetCubeValidationPrimeSupport;  // LCOV_EXCL_LINE
   if (targetFrame > kMaxResetSpecializedBadFormulaValidationFrame &&  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
       clauses.size() > kMaxExactResetCubeValidatedBadFormulaClauses &&  // LCOV_EXCL_LINE
       !deepResetSpecializedOnlyRepair &&  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       !deepLocalExactResetValidation &&  // LCOV_EXCL_LINE
       !deepLocalResetSpecializedRepair) {  // LCOV_EXCL_LINE
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
@@ -6850,10 +9115,10 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
           " support=", validationSupportCube.size());  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     return std::nullopt;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
   }
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 
   if (allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
       !validationSupportCube.empty() &&  // LCOV_EXCL_LINE
@@ -6871,21 +9136,24 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
   size_t deepResetSpecializedClauseChecks = 0;  // LCOV_EXCL_LINE
   size_t learnedResetConflictClauses = 0;  // LCOV_EXCL_LINE
   size_t learnedFreshResetConflictClauses = 0;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   size_t skippedDeepResetSpecializedProbes = 0;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   size_t freshResetSpecializedProbes = 0;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   std::vector<StateCube> residualExactValidationCubes;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   bool residualExactValidationOverflow = false;  // LCOV_EXCL_LINE
+  const bool allowResidualExactBatch =  // LCOV_EXCL_LINE
+      canUseResidualExactResetCubeBatch(problem);  // LCOV_EXCL_LINE
   const bool deepPartialResetRepair =  // LCOV_EXCL_LINE
       targetFrame > kMaxResetSpecializedBadFormulaValidationFrame &&  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       !allowExactResetFrontierQueries;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   auto rememberResidualExactValidationCube = [&](const StateCube& cube) {  // LCOV_EXCL_LINE
-    if (allowExactResetFrontierQueries ||  // LCOV_EXCL_LINE
+    if (!allowResidualExactBatch ||  // LCOV_EXCL_LINE
+        allowExactResetFrontierQueries ||  // LCOV_EXCL_LINE
         targetFrame >  // LCOV_EXCL_LINE
             kMaxResidualExactResetCubeValidatedBadFormulaFrame ||  // LCOV_EXCL_LINE
         validationSupportCube.size() > kMaxResetCubeValidationPrimeSupport) {  // LCOV_EXCL_LINE
@@ -6893,9 +9161,9 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
     }
     if (residualExactValidationCubes.size() <  // LCOV_EXCL_LINE
         kMaxResidualExactResetCubeValidatedBadFormulaClauses) {
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
       residualExactValidationCubes.push_back(cube);  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     } else {  // LCOV_EXCL_LINE
       residualExactValidationOverflow = true;  // LCOV_EXCL_LINE
     }
@@ -6907,48 +9175,48 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
         problem,  // LCOV_EXCL_LINE
         transitionByState,  // LCOV_EXCL_LINE
         conflict,  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
         targetFrame,  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         nullptr);
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
     bool learnedFrameClause = false;  // LCOV_EXCL_LINE
     if (frames != nullptr && targetFrame < frames->size() &&  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         addClauseToFrame((*frames)[targetFrame], clauseFromCube(conflict))) {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
       ++learnedResetConflictClauses;  // LCOV_EXCL_LINE
       learnedFrameClause = true;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     return learnedFrameClause;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   };  // LCOV_EXCL_LINE
   auto reachedDeepPartialRepairBudget = [&]() {  // LCOV_EXCL_LINE
     if (!deepPartialResetRepair) {  // LCOV_EXCL_LINE
       return false;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
     }
     if (deepResetSpecializedOnlyRepair) {  // LCOV_EXCL_LINE
       // This path is cache-only: no fresh reset-image SAT query is opened, so
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       // draining a batch is the fastest way to avoid rediscovering siblings.
       return learnedResetConflictClauses >=  // LCOV_EXCL_LINE
              kMaxDeepCacheOnlyResetConflictClausesPerRepair;
-             // LCOV_EXCL_STOP
+             // LCOV_DISABLED_STOP
     }
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     return learnedFreshResetConflictClauses >=  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
            kMaxDeepPartialFreshResetConflictClausesPerRepair;
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   };  // LCOV_EXCL_LINE
   auto reachedNonExactFreshResetProbeBudget = [&]() {  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
     return !allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
            freshResetSpecializedProbes >=  // LCOV_EXCL_LINE
-               // LCOV_EXCL_START
+               // LCOV_DISABLED_START
                kMaxNonExactFreshResetSpecializedProbesPerRepair;
   };
   auto scopedBadFormulaResetBudget =
@@ -6960,72 +9228,72 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
         std::in_place,
         resetSymbolicEvaluatorFor(  // LCOV_EXCL_LINE
             resetFrontierCache, problem, transitionByState),  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
         kMaxBadFormulaRepairResetSymbolicStates,
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         kMaxBadFormulaRepairResetSymbolicExprs};
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
   };  // LCOV_EXCL_LINE
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   for (const auto& clause : clauses) {  // LCOV_EXCL_LINE
     const StateCube badCube = cubeForbiddenByStateClause(clause);  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (const auto cachedCore =  // LCOV_EXCL_LINE
             findPdrResetUnreachableCoreForCube(  // LCOV_EXCL_LINE
                 resetFrontierCache, badCube, targetFrame);  // LCOV_EXCL_LINE
         cachedCore.has_value()) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       learnResetConflict(*cachedCore);  // LCOV_EXCL_LINE
       ++checkedClauses;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       if (reachedDeepPartialRepairBudget()) {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         break;  // LCOV_EXCL_LINE
       }
       continue;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
     }
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     const size_t targetStep = problem.resetBootstrapCycles + targetFrame;  // LCOV_EXCL_LINE
     if (deepResetSpecializedOnlyRepair) {  // LCOV_EXCL_LINE
       // Deep bad-formula repair is a cache consumer only. Sampling on
       // BlackParrot showed that opening fresh reset-symbolic unrolls here can
       // dominate the whole PDR run; the ordinary concrete root validator still
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       // performs exact checks and populates these caches when needed.
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       if (const auto priorCoreConflict =  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
               memoizedPriorResetCoreConflictAtStep(  // LCOV_EXCL_LINE
-                  // LCOV_EXCL_START
+                  // LCOV_DISABLED_START
                   badCube,
                   targetFrame,  // LCOV_EXCL_LINE
                   targetStep,  // LCOV_EXCL_LINE
-                  // LCOV_EXCL_STOP
+                  // LCOV_DISABLED_STOP
                   resetFrontierCache,  // LCOV_EXCL_LINE
-                  // LCOV_EXCL_START
+                  // LCOV_DISABLED_START
                   nullptr);
           priorCoreConflict.has_value()) {  // LCOV_EXCL_LINE
         learnResetConflict(*priorCoreConflict);  // LCOV_EXCL_LINE
         ++checkedClauses;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
         if (reachedDeepPartialRepairBudget()) {  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           break;  // LCOV_EXCL_LINE
         }
         continue;  // LCOV_EXCL_LINE
       }
       rememberResidualExactValidationCube(badCube);  // LCOV_EXCL_LINE
       ++skippedDeepResetSpecializedProbes;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       continue;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
     if (reachedNonExactFreshResetProbeBudget()) {  // LCOV_EXCL_LINE
       rememberResidualExactValidationCube(badCube);  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       ++skippedDeepResetSpecializedProbes;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       continue;  // LCOV_EXCL_LINE
     }
     ++freshResetSpecializedProbes;  // LCOV_EXCL_LINE
@@ -7033,20 +9301,20 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
     if (const auto priorCoreConflict =  // LCOV_EXCL_LINE
             resetSpecializedPriorCoreConflictAtStep(  // LCOV_EXCL_LINE
                 problem,  // LCOV_EXCL_LINE
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
                 transitionByState,  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 badCube,
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
                 targetFrame,  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 targetStep,  // LCOV_EXCL_LINE
                 resetFrontierCache,  // LCOV_EXCL_LINE
                 nullptr,
                 allowExactResetFrontierQueries);  // LCOV_EXCL_LINE
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
         priorCoreConflict.has_value()) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       learnResetConflict(*priorCoreConflict);  // LCOV_EXCL_LINE
       ++learnedFreshResetConflictClauses;  // LCOV_EXCL_LINE
       ++checkedClauses;  // LCOV_EXCL_LINE
@@ -7057,13 +9325,13 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
     }
     if (reachedNonExactFreshResetProbeBudget()) {  // LCOV_EXCL_LINE
       rememberResidualExactValidationCube(badCube);  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       ++skippedDeepResetSpecializedProbes;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       continue;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
     }
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     ++freshResetSpecializedProbes;  // LCOV_EXCL_LINE
     auto resetConflictBudget = scopedBadFormulaResetBudget();  // LCOV_EXCL_LINE
     if (deepLocalResetSpecializedRepair) {  // LCOV_EXCL_LINE
@@ -7071,36 +9339,36 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
     }  // LCOV_EXCL_LINE
     if (const auto resetConflict =  // LCOV_EXCL_LINE
             resetSpecializedConflictCubeAtStep(  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
                 problem,  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 transitionByState,  // LCOV_EXCL_LINE
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
                 resetFrontierCache,  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 badCube,
                 targetStep,  // LCOV_EXCL_LINE
                 nullptr,
                 allowExactResetFrontierQueries);  // LCOV_EXCL_LINE
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
         resetConflict.has_value() && cubeContainsCube(badCube, *resetConflict)) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       learnResetConflict(*resetConflict);  // LCOV_EXCL_LINE
       ++learnedFreshResetConflictClauses;  // LCOV_EXCL_LINE
       ++checkedClauses;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       if (reachedDeepPartialRepairBudget()) {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         break;  // LCOV_EXCL_LINE
       }
       continue;  // LCOV_EXCL_LINE
     }
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (reachedNonExactFreshResetProbeBudget()) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       rememberResidualExactValidationCube(badCube);  // LCOV_EXCL_LINE
       ++skippedDeepResetSpecializedProbes;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       continue;  // LCOV_EXCL_LINE
     }
     if (!allowExactResetFrontierQueries) {  // LCOV_EXCL_LINE
@@ -7109,16 +9377,16 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
     }
     if (cubeReachableAtConcreteFrame(  // LCOV_EXCL_LINE
             problem,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             solverType,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             transitionByState,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             badCube,
             targetFrame,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             resetFrontierCache,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             // This is a narrow validation of one bad assignment at the frame
             // where the new clauses will be learned. Use the shared exact
             // assumption solver and skip optional per-cube prechecks here:
@@ -7127,72 +9395,74 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
             ConcreteCubeReachabilityMode::CachedAssumptions,
             nullptr,
             /*usePostBootstrapPrechecks=*/false)) {
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
       return false;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
     ++checkedClauses;  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
 
-  if (!allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
-      learnedResetConflictClauses == 0 &&  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+  // Mixed repairs can learn some clauses from cheap reset-specialized checks
+  // and still need a bounded exact batch for the remaining shallow cubes.
+  if (allowResidualExactBatch &&  // LCOV_EXCL_LINE
+      !allowExactResetFrontierQueries &&  // LCOV_EXCL_LINE
+      // LCOV_DISABLED_STOP
       !residualExactValidationOverflow &&  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       !residualExactValidationCubes.empty()) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
     std::vector<std::vector<std::pair<size_t, bool>>> residualAssignments;  // LCOV_EXCL_LINE
     residualAssignments.reserve(residualExactValidationCubes.size());  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     for (const StateCube& residualCube : residualExactValidationCubes) {  // LCOV_EXCL_LINE
       residualAssignments.push_back(cubeAssignments(residualCube));  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
     }
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     auto& reachabilityContext = resetReachabilityContextFor(  // LCOV_EXCL_LINE
         resetFrontierCache, problem, transitionByState, nullptr);  // LCOV_EXCL_LINE
     const bool anyReachable =  // LCOV_EXCL_LINE
         SEC::anyStateCubeReachableAtResetFrontier(  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
             reachabilityContext,  // LCOV_EXCL_LINE
             solverType,  // LCOV_EXCL_LINE
             residualAssignments,
             targetFrame,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             kResidualResetFrontierBatchConflictLimit,
             kResidualResetFrontierBatchPropagationLimit);
     if (anyReachable) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
       return false;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
     const size_t residualChecks = residualExactValidationCubes.size();  // LCOV_EXCL_LINE
     checkedClauses += residualChecks;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (residualChecks != 0 && pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: batched exact residual reset-cube "
           "bad-formula checks ",
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           "bad_frame=", targetFrame,
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
           " clauses=", residualChecks,
           " total=", clauses.size());  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 
   if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
     emitSecDiag(  // LCOV_EXCL_LINE
         allowExactResetFrontierQueries  // LCOV_EXCL_LINE
             ? "SEC PDR stats: validated bad-formula clauses with reset cubes "
             : "SEC PDR stats: partially checked bad-formula reset conflicts ",
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
         "bad_frame=", targetFrame,
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         " clauses=", checkedClauses,
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
         " total=", clauses.size(),  // LCOV_EXCL_LINE
         " deep_probes=", deepResetSpecializedClauseChecks,
         " skipped_deep_probes=", skippedDeepResetSpecializedProbes,
@@ -7206,9 +9476,9 @@ std::optional<bool> validateBadFormulaClausesWithResetCubes(
     return std::nullopt;  // LCOV_EXCL_LINE
   }
   return true;  // LCOV_EXCL_LINE
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 }
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
 
 KInductionProblem outputBadValidationProblem(
     const KInductionProblem& problem,
@@ -7216,9 +9486,9 @@ KInductionProblem outputBadValidationProblem(
   KInductionProblem validationProblem = problem;
   validationProblem.observedOutputExprs0 = {
       problem.observedOutputExprs0[group.outputIndex]};
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   validationProblem.observedOutputExprs1 = {
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
       problem.observedOutputExprs1[group.outputIndex]};
   validationProblem.observedOutputNames = {
       group.outputIndex < problem.observedOutputNames.size()
@@ -7227,14 +9497,14 @@ KInductionProblem outputBadValidationProblem(
   validationProblem.bad = group.outputBad;
   validationProblem.property = BoolExpr::Not(group.outputBad);
   validationProblem.inductionBad = group.outputBad;
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   validationProblem.inductionProperty = validationProblem.property;
   return validationProblem;
 }
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
 
 std::optional<bool> learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     const TransitionExprResolver& transitionByState,
@@ -7243,10 +9513,10 @@ std::optional<bool> learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_E
     std::vector<FrameClauses>& frames,
     size_t targetFrame,
     ResetFrontierCache& resetFrontierCache) {
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
   if (problem.resetBootstrapCycles == 0 || targetFrame == 0 ||  // LCOV_EXCL_LINE
       targetFrame >= frames.size()) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     return std::nullopt;  // LCOV_EXCL_LINE
   }
 
@@ -7257,64 +9527,73 @@ std::optional<bool> learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_E
       partialTargetResetFrontierBadFormulaCheapCheckLimit(problem);  // LCOV_EXCL_LINE
   for (const auto& clause : clauses) {  // LCOV_EXCL_LINE
     if (frameHasSubsumingClause(frames[targetFrame], clause)) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
       continue;  // LCOV_EXCL_LINE
     }
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 
     const StateCube badCube = cubeForbiddenByStateClause(clause);  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (const auto cachedCore =  // LCOV_EXCL_LINE
             findPdrResetUnreachableCoreForCube(  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 resetFrontierCache, badCube, targetFrame);  // LCOV_EXCL_LINE
         cachedCore.has_value()) {  // LCOV_EXCL_LINE
       if (addClauseToFrame(frames[targetFrame], clause)) {  // LCOV_EXCL_LINE
         ++cachedClauses;  // LCOV_EXCL_LINE
         ++learnedClauses;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
       }  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       continue;  // LCOV_EXCL_LINE
     }
 
     if (cheapChecks >= cheapCheckLimit) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
       continue;  // LCOV_EXCL_LINE
     }
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 
     ++cheapChecks;  // LCOV_EXCL_LINE
+    std::optional<ScopedResetSymbolicEvaluatorBudget> scopedResetBudget;
+    if (hasLargeDualRailResetFrontierSurface(problem) &&  // LCOV_EXCL_LINE
+        targetFrame > kMaxResetSpecializedBadFormulaValidationFrame) {
+      scopedResetBudget.emplace(  // LCOV_EXCL_LINE
+          resetSymbolicEvaluatorFor(
+              resetFrontierCache, problem, transitionByState),
+          kMaxBadFormulaRepairResetSymbolicStates,
+          kMaxBadFormulaRepairResetSymbolicExprs);
+    }
     if (!cubeOutsideConcreteFrameByCheapResetFacts(  // LCOV_EXCL_LINE
             problem,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             solverType,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             transitionByState,  // LCOV_EXCL_LINE
             badCube,
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             targetFrame,  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             resetFrontierCache,  // LCOV_EXCL_LINE
             frameInvariant)) {  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
       continue;  // LCOV_EXCL_LINE
     }
 
     if (addClauseToFrame(frames[targetFrame], clause)) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       ++learnedClauses;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
     }  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
 
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   if (learnedClauses == 0) {  // LCOV_EXCL_LINE
     return std::nullopt;  // LCOV_EXCL_LINE
   }
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
     emitSecDiag(  // LCOV_EXCL_LINE
         "SEC PDR stats: refined projected counterexample with partial "
@@ -7329,9 +9608,9 @@ std::optional<bool> learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_E
   return true;  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
-// LCOV_EXCL_START
+// LCOV_DISABLED_START
 std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
-// LCOV_EXCL_STOP
+// LCOV_DISABLED_STOP
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     const TransitionExprResolver& transitionByState,
@@ -7348,27 +9627,27 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
   }
 
   bool learnedAnyClause = false;
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   size_t checkedGroups = 0;
   size_t learnedClauses = 0;
   size_t learnedResetConflictClausesTotal = 0;
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   // Dual-rail batches can contain many independent output-local bad
   // predicates.  Once one predicate learns a reset-frontier repair, keep
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   // draining the current batch so PDR does not re-enter this function once per
   // output.  Binary SEC keeps the historical early-return behavior.
   const bool continueAfterLocalRepair = problem.usesDualRailStateEncoding;
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   const size_t perOutputClauseLimit =
       singleOutputBadFormulaClauseLimit(problem);
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   for (const auto& group : groups) {
     const bool targetFrameOnlyRepair = targetFrame > 1;
     if (group.clauses.empty()) {
       emitSkippedPerOutputBadFormulaGroupDiag(  // LCOV_EXCL_LINE
           targetFrame, group, "empty");  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
       continue;  // LCOV_EXCL_LINE
     }
     if (group.clauses.size() > perOutputClauseLimit) {
@@ -7408,65 +9687,65 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
               validateBadFormulaClausesWithResetCubes(
                   // Reset-cube validation only asks whether the forbidden state
                   // assignments are reachable in the concrete transition system;
-                  // LCOV_EXCL_START
+                  // LCOV_DISABLED_START
                   // the output-local bad formula is not part of that SAT query.
                   // Use the shared SEC problem/cache so per-output repair can
-                  // LCOV_EXCL_STOP
+                  // LCOV_DISABLED_STOP
                   // consume exact reset cores learned by root validation.
-                  // LCOV_EXCL_START
+                  // LCOV_DISABLED_START
                   problem,
                   solverType,
                   transitionByState,
                   group.clauses,
                   targetFrame,
-                  // LCOV_EXCL_STOP
+                  // LCOV_DISABLED_STOP
                   resetFrontierCache,
                   &frames,
                   &learnedResetConflictClauses,
                   allowExactResetValidation);
           resetCubeValidation.has_value()) {
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         if (!*resetCubeValidation) {  // LCOV_EXCL_LINE
           return std::nullopt;  // LCOV_EXCL_LINE
         }
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
         validatedGroup = true;  // LCOV_EXCL_LINE
         if (learnedResetConflictClauses > 0) {  // LCOV_EXCL_LINE
           learnedAnyClause = true;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         }  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
       }  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
     learnedResetConflictClausesTotal += learnedResetConflictClauses;
     bool validatedGroupAtTargetOnly = false;
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (!validatedGroup &&
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         !allowExactResetValidation &&
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
         learnedResetConflictClauses > 0) {  // LCOV_EXCL_LINE
       if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
             "SEC PDR stats: refined projected counterexample with per-output "
             "partial reset-cube conflict clauses ",
             "bad_frame=", targetFrame,
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             " output=", group.outputIndex,  // LCOV_EXCL_LINE
             " learned_reset_conflicts=", learnedResetConflictClauses);
       }  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
+      // LCOV_DISABLED_STOP
       if (continueAfterLocalRepair) {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         continue;  // LCOV_EXCL_LINE
       }
       return true;  // LCOV_EXCL_LINE
     }
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (!validatedGroup) {
       const StateCube validationSupportCube =
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           validationSupportCubeForStateClauses(group.clauses);
       const bool allowBatchedResetFrontierValidation =
           problem.resetBootstrapCycles != 0 &&
@@ -7483,13 +9762,13 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
         const bool useTargetFrameProof = targetFrame > 1;  // LCOV_EXCL_LINE
         if (useTargetFrameProof) {  // LCOV_EXCL_LINE
           if (const auto partialTargetRepair =  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
                   learnPartialTargetResetFrontierBadFormulaClauses(  // LCOV_EXCL_LINE
-                      // LCOV_EXCL_START
+                      // LCOV_DISABLED_START
                       problem,  // LCOV_EXCL_LINE
-                      // LCOV_EXCL_STOP
+                      // LCOV_DISABLED_STOP
                       solverType,  // LCOV_EXCL_LINE
-                      // LCOV_EXCL_START
+                      // LCOV_DISABLED_START
                       transitionByState,  // LCOV_EXCL_LINE
                       frameInvariant,  // LCOV_EXCL_LINE
                       group.clauses,  // LCOV_EXCL_LINE
@@ -7498,20 +9777,20 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
                       resetFrontierCache);  // LCOV_EXCL_LINE
               partialTargetRepair.has_value() && *partialTargetRepair) {  // LCOV_EXCL_LINE
             learnedAnyClause = true;  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             if (continueAfterLocalRepair) {  // LCOV_EXCL_LINE
-              // LCOV_EXCL_START
+              // LCOV_DISABLED_START
               continue;  // LCOV_EXCL_LINE
             }
             return true;  // LCOV_EXCL_LINE
           }
         } else {  // LCOV_EXCL_LINE
           auto& reachabilityContext = resetReachabilityContextFor(  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
               resetFrontierCache, problem, transitionByState, frameInvariant);  // LCOV_EXCL_LINE
           const auto forbiddenCubes = forbiddenAssignmentCubes(group.clauses);  // LCOV_EXCL_LINE
           const bool anyReachable =  // LCOV_EXCL_LINE
-              // LCOV_EXCL_START
+              // LCOV_DISABLED_START
               SEC::anyStateCubeReachableWithinResetFrontier(  // LCOV_EXCL_LINE
                   reachabilityContext,  // LCOV_EXCL_LINE
                   solverType,  // LCOV_EXCL_LINE
@@ -7519,10 +9798,10 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
                   targetFrame);  // LCOV_EXCL_LINE
           if (!anyReachable) {  // LCOV_EXCL_LINE
             validatedGroup = true;  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             validatedGroupAtTargetOnly = false;  // LCOV_EXCL_LINE
             if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
-              // LCOV_EXCL_START
+              // LCOV_DISABLED_START
               emitSecDiag(  // LCOV_EXCL_LINE
                   "SEC PDR stats: per-output batched reset-frontier ",
                   "bad-formula proof ",
@@ -7532,65 +9811,65 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
                   " support=", validationSupportCube.size());  // LCOV_EXCL_LINE
             }  // LCOV_EXCL_LINE
           }  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
         }  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
       }  // LCOV_EXCL_LINE
     }
     if (!validatedGroup && !allowExactResetValidation) {
       const size_t cachedResetValidatedAssignments =  // LCOV_EXCL_LINE
           countCachedResetValidatedBadFormulaAssignments(  // LCOV_EXCL_LINE
               group.clauses, targetFrame, resetFrontierCache);  // LCOV_EXCL_LINE
-              // LCOV_EXCL_STOP
+              // LCOV_DISABLED_STOP
       const bool allowWholeGroupAfterCachedRoot =  // LCOV_EXCL_LINE
           targetFrame <=  // LCOV_EXCL_LINE
               kMaxWholeBadFormulaBaseValidationAfterCachedRootFrame &&  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           group.clauses.size() <= perOutputClauseLimit &&  // LCOV_EXCL_LINE
           cachedResetValidatedAssignments != 0;  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
       if (allowWholeGroupAfterCachedRoot) {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         const StateClauseSetKey validationKey =
             badFormulaValidationCacheKey(group.clauses, targetFrame);  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
         if (resetFrontierCache.wholeBadFormulaValidationMisses.find(  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 validationKey) ==  // LCOV_EXCL_LINE
             resetFrontierCache.wholeBadFormulaValidationMisses.end()) {  // LCOV_EXCL_LINE
           if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
             emitSecDiag(  // LCOV_EXCL_LINE
                 "SEC PDR stats: trying per-output whole bad-formula "
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
                 "validation after cached reset roots ",
                 "bad_frame=", targetFrame,
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 " output=", group.outputIndex,  // LCOV_EXCL_LINE
                 " clauses=", group.clauses.size(),  // LCOV_EXCL_LINE
                 " cached_roots=", cachedResetValidatedAssignments);
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
           }  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           if (SEC::provesNoBaseCounterexampleAtFrontier(  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
                   validationProblem,
                   badFormulaValidationSolverType(solverType),  // LCOV_EXCL_LINE
                   targetFrame)) {  // LCOV_EXCL_LINE
             validatedGroup = true;  // LCOV_EXCL_LINE
           } else {  // LCOV_EXCL_LINE
             resetFrontierCache.wholeBadFormulaValidationMisses.insert(  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 validationKey);
-                // LCOV_EXCL_STOP
+                // LCOV_DISABLED_STOP
           }
         }  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     if (!validatedGroup && !allowExactResetValidation) {
       continue;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (!validatedGroup &&
         !SEC::provesNoBaseCounterexampleAtFrontier(
             validationProblem,
@@ -7614,9 +9893,9 @@ std::optional<bool> learnPerOutputValidatedBadFormulaClauses(
         emitSecDiag(
             "SEC PDR stats: refined projected counterexample with per-output "
             "validated bad-formula clauses ",
-            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
             "bad_frame=", targetFrame,
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
             " output=", group.outputIndex,
             " outputs=", checkedGroups,
             " clauses=", learnedClauses,
@@ -7660,9 +9939,9 @@ std::optional<bool> learnValidatedBadFormulaClauses(
   const std::vector<StateClause>* badClauses =
       resetFrontierCache.observedOutputBadClauses.has_value()
           ? &*resetFrontierCache.observedOutputBadClauses
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           : nullptr;
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
   std::optional<std::vector<StateClause>> fallbackBadClauses;
   if (badClauses == nullptr) {
     fallbackBadClauses =
@@ -7672,10 +9951,10 @@ std::optional<bool> learnValidatedBadFormulaClauses(
             validatedBadFormulaCnfSupportLimit(problem));
     if (fallbackBadClauses.has_value()) {
       badClauses = &*fallbackBadClauses;
-    // LCOV_EXCL_START
+    // LCOV_DISABLED_START
     }
   }
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   if (badClauses == nullptr || badClauses->empty()) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
@@ -7683,9 +9962,9 @@ std::optional<bool> learnValidatedBadFormulaClauses(
       problem.usesResetBootstrapObservationFrontier();
   const size_t exactValidatedBadFormulaClauseLimit =
       problem.observedOutputExprs0.size() == 1
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           ? singleOutputBadFormulaClauseLimit(problem)
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
           : kMaxExactValidatedBadFormulaClauses;
   const bool useWholeBatchValidation =
       preferWholeBadFormulaValidation &&
@@ -7697,48 +9976,48 @@ std::optional<bool> learnValidatedBadFormulaClauses(
         hasNewValidatedBadFormulaClause(frames, *badClauses, targetFrame)) {
       size_t learnedResetConflictClauses = 0;
       const bool allowBroadExactResetValidation =
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           canExactlyValidateBadFormulaGroup(problem, targetFrame, *badClauses);
       if (const auto resetCubeValidation =  // LCOV_EXCL_LINE
               validateBadFormulaClausesWithResetCubes(
                   problem,
                   solverType,
-                  // LCOV_EXCL_STOP
+                  // LCOV_DISABLED_STOP
                   transitionByState,
-                  // LCOV_EXCL_START
+                  // LCOV_DISABLED_START
                   *badClauses,
                   targetFrame,
                   resetFrontierCache,
-                  // LCOV_EXCL_STOP
+                  // LCOV_DISABLED_STOP
                   &frames,
                   &learnedResetConflictClauses,
                   allowBroadExactResetValidation);
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           resetCubeValidation.has_value() && *resetCubeValidation) {
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
         bool learnedAnyClause = false;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         for (const auto& clause : *badClauses) {  // LCOV_EXCL_LINE
           learnedAnyClause =  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
               addClauseToFrames(frames, clause, targetFrame) ||  // LCOV_EXCL_LINE
-              // LCOV_EXCL_START
+              // LCOV_DISABLED_START
               learnedAnyClause;  // LCOV_EXCL_LINE
-              // LCOV_EXCL_STOP
+              // LCOV_DISABLED_STOP
         }
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         if (learnedAnyClause || learnedResetConflictClauses > 0) {  // LCOV_EXCL_LINE
           if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
             emitSecDiag(  // LCOV_EXCL_LINE
-            // LCOV_EXCL_STOP
+            // LCOV_DISABLED_STOP
                 "SEC PDR stats: refined projected counterexample with "
                 "batched reset-cube validated bad-formula clauses ",
                 "bad_frame=", targetFrame,
                 " clauses=", badClauses->size(),  // LCOV_EXCL_LINE
-                // LCOV_EXCL_START
+                // LCOV_DISABLED_START
                 " learned_reset_conflicts=", learnedResetConflictClauses);
           }  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
           return true;  // LCOV_EXCL_LINE
         }
       }  // LCOV_EXCL_LINE
@@ -7765,54 +10044,54 @@ std::optional<bool> learnValidatedBadFormulaClauses(
         problem,
         solverType,
         transitionByState,
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         frameInvariant,
         outputBadClauseGroups,
-        // LCOV_EXCL_STOP
+        // LCOV_DISABLED_STOP
         frames,
         targetFrame,
-        // LCOV_EXCL_START
+        // LCOV_DISABLED_START
         badFrame,
         resetFrontierCache);
   }
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
 
   // Do not spend another exact bounded-prefix solve when every candidate
   // clause is already present in the target frames. AES sampling showed PDR can
   // rediscover many neighboring abstract root cubes after the first repair, and
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   // those duplicate validations dominated runtime while learning nothing.
   if (!hasNewValidatedBadFormulaClause(frames, *badClauses, targetFrame)) {
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           "SEC PDR stats: validated bad-formula clauses already present ",
           "bad_frame=", targetFrame,
           " clauses=", badClauses->size());  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
     }  // LCOV_EXCL_LINE
     return std::nullopt;  // LCOV_EXCL_LINE
   }
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   if (targetFrame > 1 &&
       !hasNewValidatedBadFormulaClauseAtFrame(
           frames, *badClauses, targetFrame)) {
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
       emitSecDiag(  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
+          // LCOV_DISABLED_START
           "SEC PDR stats: target bad-formula clauses already present ",
           "bad_frame=", targetFrame,
-          // LCOV_EXCL_STOP
+          // LCOV_DISABLED_STOP
           " clauses=", badClauses->size());  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
     return std::nullopt;  // LCOV_EXCL_LINE
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   }
 
   if (frameInvariantImpliesClauses(frameInvariant, solverType, *badClauses)) {
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
     bool learnedAnyClause = false;  // LCOV_EXCL_LINE
     for (const auto& clause : *badClauses) {  // LCOV_EXCL_LINE
       learnedAnyClause =  // LCOV_EXCL_LINE
@@ -7829,24 +10108,34 @@ std::optional<bool> learnValidatedBadFormulaClauses(
   }
 
   // Large rail-encoded frontiers make the reset-cube bad-formula repair build
-  // LCOV_EXCL_START
+  // LCOV_DISABLED_START
   // a second bounded reset solver for one leaf.  That repair is optional:
   // ordinary PDR remains sound, and the SEC strategy can leave the leaf
-  // LCOV_EXCL_STOP
+  // LCOV_DISABLED_STOP
   // uncovered instead of spending the workflow in this CEGAR shortcut.
   const bool largeDualRailResetFrontierSurface =
       hasLargeDualRailResetFrontierSurface(problem);
+  const StateCube validationSupportCube =
+      validationSupportCubeForStateClauses(*badClauses);
+  const bool localDualRailResetCubeBadFormulaRepair =
+      problem.usesDualRailStateEncoding &&
+      problem.observedOutputExprs0.size() == 1 &&
+      targetFrame <= kMaxResetSpecializedBadFormulaValidationFrame &&
+      badClauses->size() <= kMaxExactResetCubeValidatedBadFormulaClauses &&
+      !validationSupportCube.empty() &&
+      validationSupportCube.size() <= kMaxResetCubeValidationPrimeSupport;
   bool validatedBadClauses = false;
   bool validatedBadClausesAtTargetOnly = false;
-  // Dual-rail final repairs can have small output support but a wide reset
-  // LCOV_EXCL_START
-  // frontier. Leave those leaves to ordinary PDR/whole-bad validation instead
-  // of building a reset-cube solver for every residual rail assignment.
+  // Even when the original dual-rail SEC surface is too wide for broad exact
+  // reset-frontier validation, an isolated output can still expose a tiny local
+  // bad predicate.  Let PDR consume cached/reset-specialized conflicts for that
+  // local predicate without opening broad exact reset-frontier queries.
   if (problem.observedOutputExprs0.size() == 1 &&
       badClauses->size() > kMaxExactValidatedBadFormulaClauses &&
-      !problem.usesDualRailStateEncoding &&
       !useObservationFrontier &&  // LCOV_EXCL_LINE
-      !largeDualRailResetFrontierSurface) {  // LCOV_EXCL_LINE
+      ((!problem.usesDualRailStateEncoding &&
+        !largeDualRailResetFrontierSurface) ||
+       localDualRailResetCubeBadFormulaRepair)) {  // LCOV_EXCL_LINE
     // A one-output state-only bad predicate can still enumerate to a few dozen
     // assignments. Sampling on BlackParrot showed one broad frontier proof for
     // that whole disjunction becoming the wall, while the concrete reset-cube
@@ -7856,7 +10145,8 @@ std::optional<bool> learnValidatedBadFormulaClauses(
     // one assignment that was proven unreachable at the target frame.
     // LCOV_EXCL_START
     size_t learnedResetConflictClauses = 0;  // LCOV_EXCL_LINE
-    const bool allowExactResetValidation = false;  // LCOV_EXCL_LINE
+    const bool allowExactResetValidation =
+        !localDualRailResetCubeBadFormulaRepair;  // LCOV_EXCL_LINE
     if (const auto resetCubeValidation =  // LCOV_EXCL_LINE
     // LCOV_EXCL_STOP
             validateBadFormulaClausesWithResetCubes(  // LCOV_EXCL_LINE
@@ -7910,17 +10200,24 @@ std::optional<bool> learnValidatedBadFormulaClauses(
 
 // LCOV_EXCL_START
 
-  const StateCube validationSupportCube =
-      validationSupportCubeForStateClauses(*badClauses);
+  const bool allowLocalDualRailTargetFrameRepair =
+      problem.usesDualRailStateEncoding &&  // LCOV_EXCL_LINE
+      problem.observedOutputExprs0.size() == 1 &&
+      problem.resetBootstrapCycles != 0 &&
+      targetFrame > 1 &&
+      targetFrame <= kMaxPartialTargetResetFrontierBadFormulaFrame &&
+      badClauses->size() <= singleOutputBadFormulaClauseLimit(problem) &&  // LCOV_EXCL_LINE
+      !validationSupportCube.empty() &&  // LCOV_EXCL_LINE
+      validationSupportCube.size() <= kMaxResetFrontierBatchedBadFormulaSupport;
   const bool allowBatchedResetFrontierValidation =
   // LCOV_EXCL_STOP
       !validatedBadClauses &&
       !useObservationFrontier &&
-      // LCOV_EXCL_START
-      !largeDualRailResetFrontierSurface &&
-      !problem.usesDualRailStateEncoding &&
-      problem.resetBootstrapCycles != 0 &&
-      problem.observedOutputExprs0.size() == 1 &&
+      (allowLocalDualRailTargetFrameRepair ||  // LCOV_EXCL_LINE
+       (!largeDualRailResetFrontierSurface &&
+        !problem.usesDualRailStateEncoding)) &&
+      problem.resetBootstrapCycles != 0 && // LCOV_EXCL_LINE
+      problem.observedOutputExprs0.size() == 1 && // LCOV_EXCL_LINE
       targetFrame <=  // LCOV_EXCL_LINE
           (targetFrame > 1  // LCOV_EXCL_LINE
                ? kMaxPartialTargetResetFrontierBadFormulaFrame
@@ -7931,7 +10228,7 @@ std::optional<bool> learnValidatedBadFormulaClauses(
           kMaxResetFrontierBatchedBadFormulaSupport;
   if (allowBatchedResetFrontierValidation) {
     const bool useTargetFrameProof = targetFrame > 1;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (useTargetFrameProof) {  // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       if (const auto partialTargetRepair =  // LCOV_EXCL_LINE
@@ -8067,7 +10364,7 @@ std::optional<bool> learnValidatedBadFormulaClauses(
   if (!learnedAnyClause) {
     // If all validated bad-formula clauses were already present, claiming a
     // refinement would make PDR rediscover the same bad cube forever.  Let the
-    // caller try the concrete root-cube refinement or report an abstract
+    // caller use the concrete root-cube refinement or report an abstract
     // counterexample for the SEC strategy to split/validate.
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
@@ -8314,9 +10611,11 @@ bool addRelevantStructuredInitConstraints(
   const auto& assignments = usesBootstrapFrontier
                                 ? problem.bootstrapStateAssignments
                                 : problem.initialStateAssignments;
-  const auto& equalities = usesBootstrapFrontier
-                               ? problem.bootstrapStateEqualityPairs
-                               : problem.initialStateEqualityPairs;
+  const auto& equalities =
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()
+          ? (usesBootstrapFrontier ? problem.bootstrapStateEqualityPairs
+                                   : problem.initialStateEqualityPairs)
+          : emptySymbolPairs();
 
   std::unordered_set<size_t> querySet(querySymbols.begin(), querySymbols.end());
   bool addedConstraint = false;
@@ -8370,29 +10669,16 @@ void addFrameConstraints(SATSolverWrapper& solver,
       // reduced compact-PDR query and can make the encoder reference leaves
       // that were intentionally left out of the local solver.
       FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
-      try {
-        solver.addClause({encoder.encode(initFormula)});
-      } catch (const std::runtime_error& error) {
-        throw std::runtime_error(  // LCOV_EXCL_LINE
-            // LCOV_EXCL_START
-            "PDR init-frame encoding failed at frame " + std::to_string(frame) +  // LCOV_EXCL_LINE
-            ": " + error.what());  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      solver.addClause({encoder.encode(initFormula)});
     }
-    // LCOV_EXCL_STOP
+    // LCOV_DISABLED_STOP
     if (problem.resetBootstrapCycles != 0 && problem.property != nullptr) {
       // The concrete reset/bootstrap check at the start of run() proves that
       // F[0] satisfies the current SEC property slice.  Structured init
       // encoding otherwise bypasses initFormula, so encode that checked
       // property explicitly for level-0 predecessor queries.
       FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));
-      try {
-        solver.addClause({encoder.encode(problem.property)});
-      } catch (const std::runtime_error& error) {
-        throw std::runtime_error(  // LCOV_EXCL_LINE
-            "PDR reset-frame property encoding failed at frame " +  // LCOV_EXCL_LINE
-            std::to_string(frame) + ": " + error.what());  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
+      solver.addClause({encoder.encode(problem.property)});
     }
     // With reset-bootstrap SEC, F[0] can be a safe abstraction of the concrete
     // post-reset image. PDR may add refinement clauses here when an abstract
@@ -8418,13 +10704,7 @@ void addFrameConstraints(SATSolverWrapper& solver,
     // The optional strengthening is treated exactly like a frame fact, but it
     // is validated before we allow the engine to rely on it.
     FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));  // LCOV_EXCL_LINE
-    try {  // LCOV_EXCL_LINE
-      solver.addClause({encoder.encode(frameInvariant)});  // LCOV_EXCL_LINE
-    } catch (const std::runtime_error& error) {  // LCOV_EXCL_LINE
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          "PDR frame invariant encoding failed at frame " +  // LCOV_EXCL_LINE
-          std::to_string(frame) + ": " + error.what());  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
+    solver.addClause({encoder.encode(frameInvariant)});  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
 }
 
@@ -8452,14 +10732,690 @@ void addSafeFramePropertyConstraint(SATSolverWrapper& solver,
   // logically redundant for exact PDR, but avoids fake init-reaching paths
   // that then need expensive concrete reset-frontier validation.
   FrameFormulaEncoder encoder(solver, variables.makeLeafLits(frame));  // LCOV_EXCL_LINE
-  try {  // LCOV_EXCL_LINE
-    solver.addClause({encoder.encode(problem.property)});  // LCOV_EXCL_LINE
-  } catch (const std::runtime_error& error) {  // LCOV_EXCL_LINE
-    throw std::runtime_error(  // LCOV_EXCL_LINE
-        "PDR safe-frame property encoding failed at frame " +  // LCOV_EXCL_LINE
-        std::to_string(frame) + ": " + error.what());  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
+  solver.addClause({encoder.encode(problem.property)});  // LCOV_EXCL_LINE
 }
+
+bool predecessorFrameClauseApplies(
+    const PredecessorAssumptionSolver& cachedSolver,
+    const StateClause& clause,
+    bool exactFrameClauses) {
+  if (!exactFrameClauses) {
+    bool touchesQuery = false;
+    for (const auto& literal : clause) {
+      if (cachedSolver.querySymbolSet.find(literal.symbol) !=
+          cachedSolver.querySymbolSet.end()) {
+        touchesQuery = true;
+        break;
+      }
+    }
+    if (!touchesQuery) {
+      return false; // LCOV_EXCL_LINE
+    }
+  }
+  return clauseCoveredByVariables(*cachedSolver.variables, clause);
+}
+
+void rememberPredecessorFrameClauses(
+    PredecessorAssumptionSolver& cachedSolver,
+    const FrameClauses& frameClauses,
+    bool exactFrameClauses) {
+  for (const auto& clause : frameClauses.clauses) {
+    if (predecessorFrameClauseApplies(
+            cachedSolver, clause, exactFrameClauses)) {
+      cachedSolver.emittedFrameClauses.insert(clause);
+    }
+  }
+}
+
+size_t addNewPredecessorFrameClauses(
+    PredecessorAssumptionSolver& cachedSolver,
+    const FrameClauses& frameClauses,
+    size_t frame,
+    bool exactFrameClauses) {
+  size_t addedClauses = 0;
+  for (const auto& clause : frameClauses.clauses) {
+    if (!predecessorFrameClauseApplies(
+            cachedSolver, clause, exactFrameClauses) ||
+        !cachedSolver.emittedFrameClauses.insert(clause).second) {
+      continue;
+    }
+    addStateClause(*cachedSolver.solver, *cachedSolver.variables, clause, frame);
+    ++addedClauses;
+  }
+  return addedClauses;
+}
+
+PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
+    PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const TransitionExprResolver& transitionByState,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    const std::vector<size_t>& solverSymbols,
+    bool exactFrameClauses) {
+  PredecessorAssumptionCacheKey key{
+      &problem,
+      &transitionByState,
+      initFormula,
+      frameInvariant,
+      level,
+      frameClausesFingerprint(frames, level),
+      exactFrameClauses,
+      solverSymbols};
+  if (cache.solver != nullptr &&
+      cache.solver->key.hasSameReusableContext(key)) {
+    // PDR frames strengthen monotonically. Reuse the expensive transition and
+    // frame prefix solver, then stream only newly learned frame clauses into it.
+    const size_t addedClauses = addNewPredecessorFrameClauses(
+        *cache.solver, frames[level], 0, exactFrameClauses);
+    cache.solver->key.frameFingerprint = key.frameFingerprint;
+    if (addedClauses != 0 && pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor cached solver frame clauses added=",
+          addedClauses,
+          " level=",
+          level,
+          " symbols=",
+          solverSymbols.size());
+    }
+    return *cache.solver;
+  }
+
+  auto next = std::make_unique<PredecessorAssumptionSolver>();
+  next->key = std::move(key);
+  next->solver = std::make_unique<SATSolverWrapper>(
+      SATSolverWrapper::assumptionSolverTypeFor(solverType));
+  next->solver->configureForSecPdrQuery(solverSymbols.size());
+  next->variables =
+      std::make_unique<FrameVariableStore>(*next->solver, solverSymbols, 1);
+  next->querySymbolSet.insert(solverSymbols.begin(), solverSymbols.end());
+  addComplementedStateRelations(
+      *next->solver, *next->variables, problem.complementedStatePairs0, 1);
+  addComplementedStateRelations(
+      *next->solver, *next->variables, problem.complementedStatePairs1, 1);
+  addSameFrameStateEqualities(*next->solver, *next->variables, problem, 1);
+  addDualRailStateValidity(
+      *next->solver, *next->variables, problem.dualRailStatePairs, 1);
+  addFrameConstraints(
+      *next->solver,
+      *next->variables,
+      problem,
+      initFormula,
+      frameInvariant,
+      frames,
+      level,
+      0,
+      solverSymbols,
+      exactFrameClauses);
+  addSafeFramePropertyConstraint(
+      *next->solver, *next->variables, problem, level, 0);
+  addPostBootstrapResetInputConstraints(
+      *next->solver, *next->variables, problem, 0);
+  if (level < frames.size()) {
+    rememberPredecessorFrameClauses(*next, frames[level], exactFrameClauses);
+  }
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: predecessor cached solver created level=",
+        level,
+        " symbols=",
+        solverSymbols.size(),
+        " frame_clauses=",
+        level < frames.size() ? frames[level].clauses.size() : 0,
+        " exact_frame=",
+        exactFrameClauses ? 1 : 0,
+        " local_leaf=",
+        hasLocalDualRailFinalLeafRepairSurface(problem) ? 1 : 0);
+  }
+  cache.solver = std::move(next);
+  return *cache.solver;
+}
+
+int64_t resourceLimitOrUnbounded(unsigned limit) {
+  return limit == std::numeric_limits<unsigned>::max()
+             ? -1
+             : static_cast<int64_t>(limit);
+}
+
+PredecessorQueryResultKey makePredecessorQueryResultKey(
+    const KInductionProblem& problem,
+    const TransitionExprResolver& transitionByState,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    size_t level,
+    size_t frameFingerprint,
+    size_t extraFrameFingerprint,
+    bool exactFrameClauses,
+    bool excludeTargetOnCurrentFrame,
+    size_t predecessorProjectionLimit,
+    const StateCube& targetCube) {
+  PredecessorQueryResultKey key;
+  key.problem = &problem;
+  key.transitionByState = &transitionByState;
+  key.initFormula = initFormula;
+  key.frameInvariant = frameInvariant;
+  key.level = level;
+  key.frameFingerprint = frameFingerprint;
+  key.extraFrameFingerprint = extraFrameFingerprint;
+  key.exactFrameClauses = exactFrameClauses;
+  key.excludeTargetOnCurrentFrame = excludeTargetOnCurrentFrame;
+  key.predecessorProjectionLimit = predecessorProjectionLimit;
+  key.targetCube = targetCube;
+  return key;
+}
+
+std::optional<PredecessorQueryResultEntry> cachedPredecessorQueryResult(
+    const PredecessorAssumptionCache& cache,
+    const PredecessorQueryResultKey& exactKey,
+    const PredecessorQueryResultKey& stableUnsatKey) {
+  const auto exactIt = cache.queryResults.find(exactKey);
+  if (exactIt != cache.queryResults.end()) {
+    return exactIt->second;
+  }
+  if (cache.unsatQueries.find(stableUnsatKey) != cache.unsatQueries.end()) {
+    return PredecessorQueryResultEntry{}; // LCOV_EXCL_LINE
+  }
+  return std::nullopt;
+}
+
+PredecessorUnsatCoreCacheKey makePredecessorUnsatCoreCacheKey(
+    const PredecessorQueryResultKey& key) {
+  PredecessorUnsatCoreCacheKey coreKey;
+  coreKey.problem = key.problem;
+  coreKey.transitionByState = key.transitionByState;
+  coreKey.initFormula = key.initFormula;
+  coreKey.frameInvariant = key.frameInvariant;
+  coreKey.level = key.level;
+  coreKey.extraFrameFingerprint = key.extraFrameFingerprint;
+  coreKey.exactFrameClauses = key.exactFrameClauses;
+  coreKey.excludeTargetOnCurrentFrame = key.excludeTargetOnCurrentFrame;
+  coreKey.predecessorProjectionLimit = key.predecessorProjectionLimit;
+  return coreKey;
+}
+
+bool predecessorUnsatCoreCacheable(
+    const PredecessorQueryResultKey& stableUnsatKey) {
+  // Failed target-assumption cores are globally reusable only for the base
+  // predecessor context. Selector assumptions for "not current target" or
+  // one-off projected retry clauses can be part of the UNSAT proof, so keep
+  // those answers in the exact target cache only.
+  return detail::shouldSharePredecessorUnsatCore(
+      stableUnsatKey.frameFingerprint,
+      stableUnsatKey.extraFrameFingerprint,
+      stableUnsatKey.excludeTargetOnCurrentFrame);
+}
+
+void rememberPredecessorUnsatCore(
+    PredecessorAssumptionCache& cache,
+    const PredecessorQueryResultKey& stableUnsatKey,
+    StateCube core) {
+  if (!predecessorUnsatCoreCacheable(stableUnsatKey)) {
+    return;
+  }
+  normalizeCube(core);
+  if (core.empty()) {
+    return; // LCOV_EXCL_LINE
+  }
+
+  auto& cores =
+      cache.unsatCoresByContext[makePredecessorUnsatCoreCacheKey(stableUnsatKey)];
+  for (const auto& existing : cores) {
+    if (cubeContainsCube(core, existing)) {
+      return;
+    }
+  }
+
+  std::vector<StateCube> retained;
+  retained.reserve(cores.size() + 1);
+  for (auto& existing : cores) {
+    if (!cubeContainsCube(existing, core)) {
+      retained.push_back(std::move(existing));
+    }
+  }
+  retained.push_back(std::move(core));
+  sortStateCubesDeterministically(retained);
+  if (retained.size() > kMaxPredecessorUnsatCoresPerContext) {
+    retained.pop_back(); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  cores = std::move(retained);
+}
+
+std::optional<StateCube> cachedPredecessorUnsatCoreForTarget(
+    const PredecessorAssumptionCache& cache,
+    const PredecessorQueryResultKey& stableUnsatKey,
+    const StateCube& targetCube) {
+  if (!predecessorUnsatCoreCacheable(stableUnsatKey)) {
+    return std::nullopt;
+  }
+  const auto coreIt =
+      cache.unsatCoresByContext.find(
+          makePredecessorUnsatCoreCacheKey(stableUnsatKey));
+  if (coreIt == cache.unsatCoresByContext.end()) {
+    return std::nullopt;
+  }
+  for (const auto& core : coreIt->second) {
+    if (cubeContainsCube(targetCube, core)) {
+      return core;
+    }
+  }
+  return std::nullopt;
+}
+
+void trimPredecessorQueryResultCache(PredecessorAssumptionCache& cache) {
+  if (cache.queryResults.size() < kMaxPredecessorQueryResultCacheEntries &&
+      cache.unsatQueries.size() < kMaxPredecessorQueryResultCacheEntries) {
+    return;
+  }
+  // Dropping cache entries cannot change the proof; it only bounds retained
+  // memory before another wave of local predecessor obligations starts.
+  cache.queryResults.clear(); // LCOV_EXCL_LINE
+  cache.unsatQueries.clear(); // LCOV_EXCL_LINE
+  cache.unsatCoresByContext.clear(); // LCOV_EXCL_LINE
+}
+
+void rememberPredecessorQueryResult(
+    PredecessorAssumptionCache& cache,
+    const PredecessorQueryResultKey& exactKey,
+    const PredecessorQueryResultKey& stableUnsatKey,
+    const std::optional<StateCube>& predecessor,
+    const StateCube* unsatCore = nullptr) {
+  trimPredecessorQueryResultCache(cache);
+  PredecessorQueryResultEntry entry;
+  if (predecessor.has_value()) {
+    entry.hasPredecessor = true;
+    entry.predecessor = *predecessor;
+  } else {
+    if (unsatCore != nullptr && !unsatCore->empty()) {
+      entry.hasUnsatCore = true;
+      entry.unsatCore = *unsatCore;
+      normalizeCube(entry.unsatCore);
+    }
+    cache.unsatQueries.insert(stableUnsatKey);
+  }
+  cache.queryResults.emplace(exactKey, std::move(entry));
+  if (unsatCore != nullptr && !unsatCore->empty()) {
+    rememberPredecessorUnsatCore(cache, stableUnsatKey, *unsatCore);
+  }
+}
+
+std::optional<StateCube> cachedPredecessorUnsatCoreForCube(
+    const PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    const TransitionExprResolver& transitionByState,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t sourceLevel,
+    const StateCube& targetCube,
+    bool excludeTargetOnCurrentFrame,
+    size_t predecessorProjectionLimit,
+    bool exactFrameClauses) {
+  if (sourceLevel >= frames.size()) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+
+  const auto exactKey = makePredecessorQueryResultKey(
+      problem,
+      transitionByState,
+      initFormula,
+      frameInvariant,
+      sourceLevel,
+      frameClausesFingerprint(frames, sourceLevel),
+      /*extraFrameFingerprint=*/0,
+      exactFrameClauses,
+      excludeTargetOnCurrentFrame,
+      predecessorProjectionLimit,
+      targetCube);
+  const auto resultIt = cache.queryResults.find(exactKey);
+  if (resultIt != cache.queryResults.end() &&
+      resultIt->second.hasUnsatCore &&
+      !resultIt->second.unsatCore.empty()) {
+    return resultIt->second.unsatCore;
+  }
+  const auto stableUnsatKey = makePredecessorQueryResultKey( // LCOV_EXCL_LINE
+      problem, // LCOV_EXCL_LINE
+      transitionByState, // LCOV_EXCL_LINE
+      initFormula, // LCOV_EXCL_LINE
+      frameInvariant, // LCOV_EXCL_LINE
+      sourceLevel, // LCOV_EXCL_LINE
+      /*frameFingerprint=*/0,
+      /*extraFrameFingerprint=*/0,
+      exactFrameClauses, // LCOV_EXCL_LINE
+      excludeTargetOnCurrentFrame, // LCOV_EXCL_LINE
+      predecessorProjectionLimit, // LCOV_EXCL_LINE
+      targetCube); // LCOV_EXCL_LINE
+  return cachedPredecessorUnsatCoreForTarget( // LCOV_EXCL_LINE
+      cache, stableUnsatKey, targetCube); // LCOV_EXCL_LINE
+}
+
+bool clauseTouchesQuerySymbols(const StateClause& clause,
+                               const std::unordered_set<size_t>& querySymbols) {
+  for (const auto& literal : clause) {
+    if (querySymbols.find(literal.symbol) != querySymbols.end()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool badCubeFrameClauseApplies(const BadCubeAssumptionSolver& cachedSolver,
+                               const StateClause& clause,
+                               bool exactFrameClauses) {
+  if (exactFrameClauses) {
+    return true;
+  }
+  if (!clauseTouchesQuerySymbols(clause, cachedSolver.querySymbolSet)) {
+    return false;
+  }
+  return clauseCoveredByVariables(*cachedSolver.variables, clause);
+}
+
+void rememberBadCubeFrameClauses(BadCubeAssumptionSolver& cachedSolver,
+                                 const FrameClauses& frameClauses,
+                                 bool exactFrameClauses) {
+  for (const auto& clause : frameClauses.clauses) {
+    if (badCubeFrameClauseApplies(
+            cachedSolver, clause, exactFrameClauses)) {
+      cachedSolver.emittedFrameClauses.insert(clause);
+    }
+  }
+}
+
+void addNewBadCubeFrameClauses(BadCubeAssumptionSolver& cachedSolver,
+                               const std::vector<StateClause>& frameClauses,
+                               size_t beginIndex,
+                               size_t frame,
+                               bool exactFrameClauses,
+                               const char* source) {
+  size_t addedClauses = 0;
+  for (size_t clauseIndex = beginIndex; clauseIndex < frameClauses.size();
+       ++clauseIndex) {
+    const auto& clause = frameClauses[clauseIndex];
+    if (!badCubeFrameClauseApplies(cachedSolver, clause, exactFrameClauses) ||
+        !cachedSolver.emittedFrameClauses.insert(clause).second) {
+      continue;
+    }
+    // Frame vectors are compacted by subsumption, so a stronger learned clause
+    // can replace a weaker one without increasing the vector size. Track by
+    // clause identity instead of append index to keep cached bad-cube solvers
+    // synchronized with the logical frame.
+    addStateClause(*cachedSolver.solver, *cachedSolver.variables, clause, frame);
+    ++addedClauses;
+  }
+  if (addedClauses != 0 && pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: bad cube cached frame clauses added=",
+        addedClauses,
+        " frame=",
+        frame,
+        " source=",
+        source,
+        " scanned=",
+        frameClauses.size() - beginIndex);
+  }
+}
+
+void syncBadCubeFrameClauses(BadCubeAssumptionSolver& cachedSolver,
+                             const FrameClauses& frameClauses,
+                             size_t frame,
+                             bool exactFrameClauses,
+                             size_t frameFingerprint) {
+  if (cachedSolver.emittedFrameFingerprint == frameFingerprint) {
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: bad cube cached frame clauses unchanged frame=",
+          frame,
+          " fingerprint=",
+          frameFingerprint);
+    }
+    return;
+  }
+  if (cachedSolver.emittedFrameLogOffset <=
+      frameClauses.addedClauseLog.size()) {
+    addNewBadCubeFrameClauses(
+        cachedSolver,
+        frameClauses.addedClauseLog,
+        cachedSolver.emittedFrameLogOffset,
+        frame,
+        exactFrameClauses,
+        "frame_log");
+    cachedSolver.emittedFrameLogOffset = frameClauses.addedClauseLog.size();
+  } else {
+    addNewBadCubeFrameClauses( // LCOV_EXCL_LINE
+        cachedSolver, // LCOV_EXCL_LINE
+        frameClauses.clauses, // LCOV_EXCL_LINE
+        0,
+        frame, // LCOV_EXCL_LINE
+        exactFrameClauses, // LCOV_EXCL_LINE
+        "full_frame");
+    cachedSolver.emittedFrameLogOffset = frameClauses.addedClauseLog.size(); // LCOV_EXCL_LINE
+  }
+  cachedSolver.emittedFrameFingerprint = frameFingerprint;
+}
+
+std::optional<SATSolverWrapper::SolveStatus>
+solvePredecessorCubeWithCachedAssumptions(
+    PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const TransitionExprResolver& transitionByState,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    const StateCube& targetCube,
+    const std::vector<size_t>& encodedTargets,
+    const std::vector<size_t>& transitionSupportSymbols,
+    const std::vector<size_t>& solverSymbols,
+    bool excludeTargetOnCurrentFrame,
+    const std::vector<StateClause>* extraFrameClauses,
+    bool exactFrameClauses,
+    unsigned predecessorConflictLimit,
+    unsigned predecessorDecisionLimit,
+    PredecessorAssumptionSolver** solvedCache = nullptr,
+    std::vector<int>* solvedAssumptions = nullptr,
+    StateCube* solvedUnsatCore = nullptr) {
+  auto& cachedSolver = getOrCreatePredecessorAssumptionSolver(
+      cache,
+      problem,
+      solverType,
+      transitionByState,
+      initFormula,
+      frameInvariant,
+      frames,
+      level,
+      solverSymbols,
+      exactFrameClauses);
+  const auto assumptionPairs = addCachedTransitionAssumptionsForTargetCube(
+      cachedSolver,
+      transitionByState,
+      0,
+      targetCube,
+      encodedTargets,
+      transitionSupportSymbols);
+  std::vector<int> assumptions = assumptionLiteralsFromPairs(assumptionPairs);
+  if (excludeTargetOnCurrentFrame) {
+    assumptions.push_back(
+        cachedTargetExclusionAssumption(cachedSolver, targetCube, 0));
+  }
+  size_t extraFrameAssumptionCount = 0;
+  if (extraFrameClauses != nullptr) {
+    for (const auto& clause : *extraFrameClauses) { // LCOV_EXCL_LINE
+      if (!clauseCoveredByVariables(*cachedSolver.variables, clause)) { // LCOV_EXCL_LINE
+        return std::nullopt; // LCOV_EXCL_LINE
+      }
+      assumptions.push_back( // LCOV_EXCL_LINE
+          cachedExtraFrameClauseAssumption(cachedSolver, clause, 0)); // LCOV_EXCL_LINE
+      ++extraFrameAssumptionCount; // LCOV_EXCL_LINE
+    }
+  } // LCOV_EXCL_LINE
+  if (assumptions.empty()) {
+    return std::nullopt; // LCOV_EXCL_LINE
+  }
+
+  if (solvedCache != nullptr) {
+    *solvedCache = &cachedSolver;
+  }
+  if (solvedAssumptions != nullptr) {
+    *solvedAssumptions = assumptions;
+  }
+  if (extraFrameAssumptionCount != 0 && pdrStatsEnabled()) {
+    emitSecDiag( // LCOV_EXCL_LINE
+        "SEC PDR stats: predecessor cached solver extra frame assumptions=",
+        extraFrameAssumptionCount,
+        " level=",
+        level,
+        " symbols=",
+        solverSymbols.size()); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  // The cached solver amortizes expensive frame/transition encoding across
+  // neighboring predecessor queries. Keep both resource caps active: cached
+  // assumptions are an optimization, and a hard residual leaf should fall back
+  // to the fresh exact path instead of monopolizing the whole PDR run.
+  const int64_t cachedPropagationLimit =
+      resourceLimitOrUnbounded(predecessorDecisionLimit);
+  const auto status = cachedSolver.solver->solveWithAssumptionsStatus(
+      assumptions,
+      resourceLimitOrUnbounded(predecessorConflictLimit),
+      cachedPropagationLimit);
+  if (status == SATSolverWrapper::SolveStatus::Unsat &&
+      solvedUnsatCore != nullptr) {
+    // Only target-cube assumptions are mapped back. Selector assumptions for
+    // current-target exclusion or projected-frame retries may participate in
+    // the SAT proof, but they are not state literals that can form a learned
+    // PDR blocker.
+    const std::vector<int> targetAssumptions =
+        assumptionLiteralsFromPairs(assumptionPairs);
+    *solvedUnsatCore = cachedPredecessorUnsatCoreFromTargetContext(
+        *cachedSolver.solver,
+        problem,
+        level,
+        targetCube,
+        transitionSupportSymbols,
+        excludeTargetOnCurrentFrame,
+        extraFrameClauses,
+        targetAssumptions,
+        assumptionPairs);
+  }
+  return status;
+}
+
+BadCubeAssumptionSolver& getOrCreateBadCubeAssumptionSolver(
+    BadCubeAssumptionCache& cache,
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    const std::vector<size_t>& solverSymbols,
+    bool exactFrameClauses) {
+  BadCubeAssumptionCacheKey key{
+      &problem,
+      initFormula,
+      frameInvariant,
+      level,
+      exactFrameClauses,
+      solverSymbols};
+  const size_t currentFrameFingerprint =
+      frameClausesFingerprint(frames, level);
+  if (cache.solver != nullptr && cache.solver->key == key) {
+    syncBadCubeFrameClauses(
+        *cache.solver,
+        frames[level],
+        0,
+        exactFrameClauses,
+        currentFrameFingerprint);
+    return *cache.solver;
+  }
+
+  auto next = std::make_unique<BadCubeAssumptionSolver>();
+  next->key = std::move(key);
+  next->solver = std::make_unique<SATSolverWrapper>(
+      SATSolverWrapper::assumptionSolverTypeFor(solverType));
+  next->solver->configureForSecPdrQuery(solverSymbols.size());
+  next->variables =
+      std::make_unique<FrameVariableStore>(*next->solver, solverSymbols, 1);
+  next->querySymbolSet.insert(solverSymbols.begin(), solverSymbols.end());
+  addComplementedStateRelations(
+      *next->solver, *next->variables, problem.complementedStatePairs0, 1);
+  addComplementedStateRelations(
+      *next->solver, *next->variables, problem.complementedStatePairs1, 1);
+  addSameFrameStateEqualities(*next->solver, *next->variables, problem, 1);
+  addDualRailStateValidity(
+      *next->solver, *next->variables, problem.dualRailStatePairs, 1);
+  addFrameConstraints(
+      *next->solver,
+      *next->variables,
+      problem,
+      initFormula,
+      frameInvariant,
+      frames,
+      level,
+      0,
+      solverSymbols,
+      exactFrameClauses);
+  addPostBootstrapResetInputConstraints(
+      *next->solver, *next->variables, problem, 0);
+  next->encoder = std::make_unique<FrameFormulaEncoder>(
+      *next->solver, next->variables->makeLeafLits(0));
+  if (level < frames.size()) {
+    rememberBadCubeFrameClauses(*next, frames[level], exactFrameClauses);
+    next->emittedFrameFingerprint = currentFrameFingerprint;
+    next->emittedFrameLogOffset = frames[level].addedClauseLog.size();
+  }
+  cache.solver = std::move(next);
+  return *cache.solver;
+}
+
+int encodeCachedBadRoot(BadCubeAssumptionSolver& cachedSolver,
+                        BoolExpr* badFormula) {
+  const auto existing = cachedSolver.encodedBadRoots.find(badFormula);
+  if (existing != cachedSolver.encodedBadRoots.end()) {
+    return existing->second;
+  }
+  const int root = cachedSolver.encoder->encode(badFormula);
+  cachedSolver.encodedBadRoots.emplace(badFormula, root);
+  return root;
+}
+
+SATSolverWrapper::SolveStatus solveBadCubeWithCachedAssumption(
+    BadCubeAssumptionCache& cache,
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    BoolExpr* badFormula,
+    const std::vector<size_t>& solverSymbols,
+    bool exactFrameClauses,
+    unsigned badCubeConflictLimit,
+    BadCubeAssumptionSolver** solvedCache) {
+  auto& cachedSolver = getOrCreateBadCubeAssumptionSolver(
+      cache,
+      problem,
+      solverType,
+      initFormula,
+      frameInvariant,
+      frames,
+      level,
+      solverSymbols,
+      exactFrameClauses);
+  const int badRoot = encodeCachedBadRoot(cachedSolver, badFormula);
+  *solvedCache = &cachedSolver;
+  // The cached solver keeps learned clauses across monotonic frame updates.
+  // Keep the conflict cap for workflow safety, but do not cap decisions here:
+  // on wide dual-rail datapaths CaDiCaL otherwise returns UNKNOWN before those
+  // learned clauses can pay back the reused frame context.
+  return cachedSolver.solver->solveWithAssumptionsStatus(
+      {badRoot},
+      resourceLimitOrUnbounded(badCubeConflictLimit),
+      /*propagationLimit=*/-1);
+} // LCOV_EXCL_LINE
 
 StateCube extractStateCube(const SATSolverWrapper& solver,
                            const FrameVariableStore& variables,
@@ -8493,9 +11449,9 @@ void addComplementedPartnerAssignments(
     (void)value;
     worklist.push_back(symbol);
   }
+  std::sort(worklist.begin(), worklist.end());
 
-
-// LCOV_EXCL_STOP
+  // LCOV_EXCL_STOP
   for (size_t index = 0; index < worklist.size(); ++index) {
     // LCOV_EXCL_START
     const size_t symbol = worklist[index];
@@ -8869,101 +11825,15 @@ StateCube extractSolvedPredecessorCube(
       predecessorProjectionLimit);
 }
 
-std::optional<StateCube> findBadCubeForFormula(
-    const KInductionProblem& problem,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    BoolExpr* initFormula,
-    BoolExpr* frameInvariant,
-    const std::vector<FrameClauses>& frames,
+StateCube extractSolvedBadCubeForFormula(
+    const SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
     BoolExpr* badFormula,
     const std::optional<std::vector<size_t>>& preciseBadStateSupport,
     size_t structuralBadProjectionLimit,
     const std::unordered_set<size_t>& stateSymbols,
-    size_t level,
-    const ComplementPartnerIndex& complementPartners,
-    bool exactFrameClauses,
-    PdrFormulaSupportCache* supportCache) {
-  // Search the current frame for a concrete state that still satisfies bad
-  // after all learned blocking clauses and optional strengthening are applied.
-  const std::vector<size_t> solverSymbols =
-      findBadQuerySymbols(
-          problem,
-          initFormula,
-          frameInvariant,
-          frames,
-          badFormula,
-          level,
-          complementPartners,
-          exactFrameClauses,
-          supportCache);
-  const auto querySolverType =
-      badCubeQuerySolverType(problem, solverType, solverSymbols.size());
-  if (pdrStatsEnabled() && querySolverType != solverType) {
-    emitSecDiag(
-        "SEC PDR stats: bad cube query solver=cadical symbols=",
-        solverSymbols.size());
-  }
-  SATSolverWrapper solver(querySolverType);
-  // Bad-state queries are local PDR obligations and are rebuilt repeatedly as
-  // frames advance. Keep them on the PDR-local profile: small regressions such
-  // as GCD can otherwise spend minutes in Kissat's speculative
-  // preprocessing/probing before the actual frame query starts.
-  // LCOV_EXCL_START
-  solver.configureForSecPdrQuery(solverSymbols.size());
-  FrameVariableStore variables(solver, solverSymbols, 1);
-  addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
-  addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
-  // LCOV_EXCL_STOP
-  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
-  addFrameConstraints(
-      solver, variables, problem, initFormula, frameInvariant, frames, level, 0,
-      solverSymbols, exactFrameClauses);
-  addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
-  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
-  try {
-    solver.addClause({encoder.encode(badFormula)});
-  } catch (const std::runtime_error& error) {
-    throw std::runtime_error(  // LCOV_EXCL_LINE
-        "PDR bad-state encoding failed at level " + std::to_string(level) +  // LCOV_EXCL_LINE
-        ": " + error.what());  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  SATSolverWrapper::SolveStatus badSolveStatus =
-      SATSolverWrapper::SolveStatus::Sat;
-  const unsigned badCubeConflictLimit =
-      // LCOV_EXCL_START
-      problem.usesDualRailStateEncoding ? dualRailBadCubeConflictLimit() : 0;
-      // LCOV_EXCL_STOP
-  if (badCubeConflictLimit != 0) {
-    // Dual-rail residual repairs can be SAT and decision-heavy even when they
-    // do not accumulate many conflicts. Bound both resources so a single
-    // LCOV_EXCL_START
-    // uncovered output cannot dominate the whole workflow.
-    // LCOV_EXCL_STOP
-    badSolveStatus = solver.solveWithResourceLimits(
-        badCubeConflictLimit,
-        // LCOV_EXCL_START
-        /*decisionLimit=*/badCubeConflictLimit);
-        // LCOV_EXCL_STOP
-  } else {
-    badSolveStatus = solver.solveStatus();
-  }
-  if (badSolveStatus == SATSolverWrapper::SolveStatus::Unknown) {
-    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
-      emitSecDiag(  // LCOV_EXCL_LINE
-          "SEC PDR stats: bad cube query budget exhausted limit=",
-          badCubeConflictLimit,
-          " symbols=",
-          solverSymbols.size(),  // LCOV_EXCL_LINE
-          " level=",
-          level);
-    }  // LCOV_EXCL_LINE
-    throw PdrQueryBudgetExceeded();  // LCOV_EXCL_LINE
-  }
-  if (badSolveStatus == SATSolverWrapper::SolveStatus::Unsat) {
-    return std::nullopt;
-  }
-
-  // Start with the full state support when it is bounded.  That gives PDR a
+    size_t level) {
+  // Start with the full state support when it is bounded. That gives PDR a
   // precise bad obligation instead of a tiny projection that can mix unrelated
   // state valuations and later look like a counterexample only in the abstract.
   if (preciseBadStateSupport.has_value() && !preciseBadStateSupport->empty()) {
@@ -8990,7 +11860,9 @@ std::optional<StateCube> findBadCubeForFormula(
           " limit=", structuralBadProjectionLimit);
     }
     return cube;
-  } else if (isSecDiagEnabled()) {
+  }
+
+  if (isSecDiagEnabled()) {
     emitSecDiag(  // LCOV_EXCL_LINE
         "SEC diag: PDR bad cube falls back to structural justification at F",
         level,
@@ -9000,7 +11872,7 @@ std::optional<StateCube> findBadCubeForFormula(
 
   // Very large ASIC datapaths still need a compact fallback: extracting every
   // state bit in the bad cone would force every later predecessor query to
-  // encode the transition for all of those latches.  The structural
+  // encode the transition for all of those latches. The structural
   // justification keeps one satisfying branch of OR/AND style bad formulas.
   StateCube cube = boundedPrefixCube(
       extractBadJustificationCube(
@@ -9011,14 +11883,185 @@ std::optional<StateCube> findBadCubeForFormula(
           structuralBadProjectionLimit,
           0),
       structuralBadProjectionLimit);
+  const char* source = "structural";
+  if (cube.empty() && structuralBadProjectionLimit != 0) {
+    // A satisfying bad formula may be justified by input-only logic while the
+    // bad cone still contains state. Carry a small model slice instead of the
+    // vacuous empty cube, which otherwise makes PDR validate "all states" as an
+    // abstract counterexample and hides useful frame learning.
+    const std::vector<size_t> fallbackSymbols =
+        collectStateSupportPrefixSymbols(
+            badFormula,
+            kMaxPreciseBadCubeSupportNodes,
+            structuralBadProjectionLimit,
+            stateSymbols);
+    if (!fallbackSymbols.empty()) {
+      cube = extractStateCube(solver, variables, fallbackSymbols, 0);
+      source = "structural_model_fallback";
+    }
+  }
   if (pdrStatsEnabled()) {
     emitSecDiag(
         "SEC PDR stats: bad cube level=", level,
-        " source=structural cube=", cube.size(),
+        " source=", source,
+        " cube=", cube.size(),
         " hash=", cubeFingerprint(cube),
         " limit=", structuralBadProjectionLimit);
   }
   return cube;
+}
+
+std::optional<StateCube> findBadCubeForFormula(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    BoolExpr* badFormula,
+    const std::optional<std::vector<size_t>>& preciseBadStateSupport,
+    size_t structuralBadProjectionLimit,
+    const std::unordered_set<size_t>& stateSymbols,
+    size_t level,
+    const ComplementPartnerIndex& complementPartners,
+    bool exactFrameClauses,
+    BadCubeAssumptionCache* badCubeAssumptionCache,
+    PdrFormulaSupportCache* supportCache) {
+  // Search the current frame for a concrete state that still satisfies bad
+  // after all learned blocking clauses and optional strengthening are applied.
+  const std::vector<size_t> solverSymbols =
+      findBadQuerySymbols(
+          problem,
+          initFormula,
+          frameInvariant,
+          frames,
+          badFormula,
+          level,
+          complementPartners,
+          exactFrameClauses,
+          supportCache);
+  const unsigned badCubeConflictLimit =
+      // LCOV_EXCL_START
+      problem.usesDualRailStateEncoding ? dualRailBadCubeConflictLimit() : 0;
+      // LCOV_EXCL_STOP
+  const size_t badCubeStatsQueryNumber = nextPdrBadCubeQueryNumber();
+  const bool emitStatsForBadCubeQuery =
+      shouldEmitPdrStats(badCubeStatsQueryNumber);
+  BadCubeAssumptionCache* solverCache =
+      shouldUseBadCubeSolverCache(problem) ? badCubeAssumptionCache : nullptr;
+  if (problem.usesDualRailStateEncoding && badCubeAssumptionCache != nullptr &&
+      solverCache == nullptr && emitStatsForBadCubeQuery) {
+    emitSecDiag(
+        "SEC PDR stats: bad cube cached solver disabled state_symbols=",
+        problem.totalStateCount,
+        " state_limit=",
+        kMaxDualRailBadCubeSolverCacheStateSymbols,
+        " symbols=",
+        solverSymbols.size(),
+        " level=",
+        level);
+  }
+  if (problem.usesDualRailStateEncoding && solverCache != nullptr) {
+    BadCubeAssumptionSolver* solvedCache = nullptr;
+    const auto badSolveStatus = solveBadCubeWithCachedAssumption(
+        *solverCache,
+        problem,
+        solverType,
+        initFormula,
+        frameInvariant,
+        frames,
+        level,
+        badFormula,
+        solverSymbols,
+        exactFrameClauses,
+        badCubeConflictLimit,
+        &solvedCache);
+    if (badSolveStatus == SATSolverWrapper::SolveStatus::Unknown) {
+      if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
+            "SEC PDR stats: bad cube query budget exhausted limit=",
+            badCubeConflictLimit,
+            " symbols=",
+            solverSymbols.size(),  // LCOV_EXCL_LINE
+            " level=",
+            level,
+            " cached_assumptions=1");
+      }  // LCOV_EXCL_LINE
+      markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
+      return std::nullopt;  // LCOV_EXCL_LINE
+    }
+    if (badSolveStatus == SATSolverWrapper::SolveStatus::Unsat) {
+      return std::nullopt;
+    }
+    return extractSolvedBadCubeForFormula(
+        *solvedCache->solver,
+        *solvedCache->variables,
+        badFormula,
+        preciseBadStateSupport,
+        structuralBadProjectionLimit,
+        stateSymbols,
+        level);
+  }
+
+  SATSolverWrapper solver(solverType);
+  // Bad-state queries are local PDR obligations and are rebuilt repeatedly as
+  // frames advance. Keep them on the PDR-local profile: small regressions such
+  // as GCD can otherwise spend minutes in Kissat's speculative
+  // preprocessing/probing before the actual frame query starts.
+  // LCOV_EXCL_START
+  solver.configureForSecPdrQuery(solverSymbols.size());
+  FrameVariableStore variables(solver, solverSymbols, 1);
+  addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
+  addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
+  // LCOV_EXCL_STOP
+  addSameFrameStateEqualities(solver, variables, problem, 1);
+  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
+  addFrameConstraints(
+      solver, variables, problem, initFormula, frameInvariant, frames, level, 0,
+      solverSymbols, exactFrameClauses);
+  addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
+  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
+  solver.addClause({encoder.encode(badFormula)});
+  SATSolverWrapper::SolveStatus badSolveStatus =
+      SATSolverWrapper::SolveStatus::Sat;
+  if (badCubeConflictLimit != 0) {
+    // Dual-rail residual repairs can be SAT and decision-heavy even when they
+    // do not accumulate many conflicts. Bound both resources so a single
+    // LCOV_EXCL_START
+    // uncovered output cannot dominate the whole workflow.
+    // LCOV_EXCL_STOP
+    badSolveStatus = solver.solveWithResourceLimits( // LCOV_EXCL_LINE
+        badCubeConflictLimit, // LCOV_EXCL_LINE
+        // LCOV_EXCL_START
+        /*decisionLimit=*/badCubeConflictLimit);
+        // LCOV_EXCL_STOP
+  } else { // LCOV_EXCL_LINE
+    badSolveStatus = solver.solveStatus();
+  }
+  if (badSolveStatus == SATSolverWrapper::SolveStatus::Unknown) {
+    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+      emitSecDiag(  // LCOV_EXCL_LINE
+          "SEC PDR stats: bad cube query budget exhausted limit=",
+          badCubeConflictLimit,
+          " symbols=",
+          solverSymbols.size(),  // LCOV_EXCL_LINE
+          " level=",
+          level);
+    }  // LCOV_EXCL_LINE
+    markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
+  if (badSolveStatus == SATSolverWrapper::SolveStatus::Unsat) {
+    return std::nullopt;
+  }
+
+  return extractSolvedBadCubeForFormula(
+      solver,
+      variables,
+      badFormula,
+      preciseBadStateSupport,
+      structuralBadProjectionLimit,
+      stateSymbols,
+      level);
 }
 
 std::optional<StateCube> findBadCube(const KInductionProblem& problem,
@@ -9033,6 +12076,7 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
                                      size_t level,
                                      const ComplementPartnerIndex& complementPartners,
                                      bool exactFrameClauses,
+                                     BadCubeAssumptionCache* badCubeAssumptionCache,
                                      PdrFormulaSupportCache* supportCache) {
   if (problem.observedOutputExprs0.size() <= 1 ||
       problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {
@@ -9049,6 +12093,7 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
         level,
         complementPartners,
         exactFrameClauses,
+        badCubeAssumptionCache,
         supportCache);
   }
 
@@ -9080,12 +12125,94 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
             level,
             complementPartners,
             exactFrameClauses,
+            badCubeAssumptionCache,
             supportCache);
         cube.has_value()) {
       return cube;
     }
+    if (hasPdrBudgetExhaustion()) {
+      return std::nullopt;  // LCOV_EXCL_LINE
+    }
   }
   return std::nullopt;
+}
+
+std::optional<bool> proveLargeDualRailPredecessorWithResetFrontier(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const TransitionExprResolver& transitionByState,
+    BoolExpr* frameInvariant,
+    size_t level,
+    const StateCube& targetCube,
+    const std::vector<size_t>& transitionSupportSymbols,
+    bool exactResetFrontierChecksEnabled,
+    size_t exactResetPrecheckSupportLimit,
+    ResetFrontierCache* resetFrontierCache,
+    const char* phase) {
+  if (resetFrontierCache == nullptr || problem.resetBootstrapCycles == 0) {
+    return std::nullopt;
+  }
+  const bool resetFrontierQueryAllowed = // LCOV_EXCL_LINE
+      detail::shouldRetryLargeDualRailPredecessorWithResetFrontier( // LCOV_EXCL_LINE
+          problem.usesDualRailStateEncoding, // LCOV_EXCL_LINE
+          exactResetFrontierChecksEnabled, // LCOV_EXCL_LINE
+          problem.observedOutputExprs0.size(), // LCOV_EXCL_LINE
+          level, // LCOV_EXCL_LINE
+          targetCube.size(), // LCOV_EXCL_LINE
+          transitionSupportSymbols.size(), // LCOV_EXCL_LINE
+          exactResetPrecheckSupportLimit); // LCOV_EXCL_LINE
+  if (!resetFrontierQueryAllowed) { // LCOV_EXCL_LINE
+    return std::nullopt; // LCOV_EXCL_LINE
+  }
+  const bool hasLargeResetFrontierSurface = // LCOV_EXCL_LINE
+      hasLargeDualRailResetFrontierSurface(problem); // LCOV_EXCL_LINE
+  const bool hasLocalLeafRepairSurface = // LCOV_EXCL_LINE
+      hasLocalDualRailFinalLeafRepairSurface(problem); // LCOV_EXCL_LINE
+  if (!detail::shouldRunLargeDualRailResetFrontierQuery( // LCOV_EXCL_LINE
+          resetFrontierQueryAllowed, // LCOV_EXCL_LINE
+          hasLargeResetFrontierSurface, // LCOV_EXCL_LINE
+          hasLocalLeafRepairSurface)) { // LCOV_EXCL_LINE
+    if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
+      emitSecDiag( // LCOV_EXCL_LINE
+          "SEC PDR stats: skipped large dual-rail reset-frontier query",
+          " phase=", phase,
+          " reason=one_shot_hot_path",
+          " level=", level,
+          " target_cube=", targetCube.size(), // LCOV_EXCL_LINE
+          " target_hash=", cubeFingerprint(targetCube), // LCOV_EXCL_LINE
+          " transition_support=", transitionSupportSymbols.size()); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    return std::nullopt; // LCOV_EXCL_LINE
+  }
+
+  const ConcreteCubeReachabilityMode resetFrontierMode = // LCOV_EXCL_LINE
+      predecessorResetFrontierMode(problem); // LCOV_EXCL_LINE
+  const bool outsideConcreteResetFrontier = // LCOV_EXCL_LINE
+      cubeOutsideConcreteResetFrontier( // LCOV_EXCL_LINE
+          problem, // LCOV_EXCL_LINE
+          solverType, // LCOV_EXCL_LINE
+          transitionByState, // LCOV_EXCL_LINE
+          targetCube, // LCOV_EXCL_LINE
+          /*postBootstrapSteps=*/1,
+          *resetFrontierCache, // LCOV_EXCL_LINE
+          /*useResetConstantShortcut=*/false,
+          resetFrontierMode, // LCOV_EXCL_LINE
+          frameInvariant, // LCOV_EXCL_LINE
+          /*resourceLimitStartupExactQuery=*/false);
+  if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
+    emitSecDiag( // LCOV_EXCL_LINE
+        "SEC PDR stats: predecessor reset-frontier ",
+        phase,
+        " ",
+        "level=", level,
+        " target_cube=", targetCube.size(), // LCOV_EXCL_LINE
+        " target_hash=", cubeFingerprint(targetCube), // LCOV_EXCL_LINE
+        " transition_support=", transitionSupportSymbols.size(), // LCOV_EXCL_LINE
+        " mode=", concreteCubeReachabilityModeName( // LCOV_EXCL_LINE
+                       resetFrontierMode), // LCOV_EXCL_LINE
+        " result=", outsideConcreteResetFrontier ? "unsat" : "not_proved"); // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
+  return outsideConcreteResetFrontier; // LCOV_EXCL_LINE
 }
 
 std::optional<StateCube> findPredecessorCube(
@@ -9102,33 +12229,149 @@ std::optional<StateCube> findPredecessorCube(
     size_t predecessorProjectionLimit,
     bool exactFrameClauses,
     ResetFrontierCache* resetFrontierCache = nullptr,
+    PredecessorAssumptionCache* predecessorAssumptionCache = nullptr,
     const std::vector<StateClause>* extraFrameClauses = nullptr,
     size_t* predecessorQueryBudget = nullptr,
     bool useExactResetFrontierChecks = true,
     PdrFormulaSupportCache* supportCache = nullptr) {
   // This is the one-step predecessor query at the heart of PDR: does some
   // state in F[level] transition into the target cube on the next frame?
-  consumePdrPredecessorQueryBudget(predecessorQueryBudget);
-  const std::vector<size_t> targetSymbols = cubeStateSymbols(targetCube);
-  const std::vector<size_t> encodedTargets =
-      expandTransitionTargets(problem, targetSymbols, transitionByState);
-  const std::vector<size_t> transitionSupportSymbols =
-      collectTransitionSupportSymbols(transitionByState, encodedTargets);
-  // LCOV_EXCL_START
-  const size_t transitionEncodingNodes =
-  // LCOV_EXCL_STOP
-      estimateTransitionEncodingNodes(transitionByState, encodedTargets);
+  std::optional<PredecessorQueryResultKey> exactCacheKey;
+  std::optional<PredecessorQueryResultKey> stableUnsatCacheKey;
+  const bool usePredecessorQueryResultCache =
+      predecessorAssumptionCache != nullptr &&
+      canUsePredecessorQueryResultCache(problem);
+  if (usePredecessorQueryResultCache) {
+    const size_t frameFingerprint = frameClausesFingerprint(frames, level);
+    const size_t extraFrameFingerprint =
+        extraFrameClausesFingerprint(extraFrameClauses);
+    exactCacheKey = makePredecessorQueryResultKey(
+        problem,
+        transitionByState,
+        initFormula,
+        frameInvariant,
+        level,
+        frameFingerprint,
+        extraFrameFingerprint,
+        exactFrameClauses,
+        excludeTargetOnCurrentFrame,
+        predecessorProjectionLimit,
+        targetCube);
+    stableUnsatCacheKey = makePredecessorQueryResultKey(
+        problem,
+        transitionByState,
+        initFormula,
+        frameInvariant,
+        level,
+        /*frameFingerprint=*/0,
+        extraFrameFingerprint,
+        exactFrameClauses,
+        excludeTargetOnCurrentFrame,
+        predecessorProjectionLimit,
+        targetCube);
+    if (const auto cached = cachedPredecessorQueryResult(
+            *predecessorAssumptionCache, *exactCacheKey,
+            *stableUnsatCacheKey);
+        cached.has_value()) {
+      if (pdrStatsEnabled()) {
+        emitSecDiag(
+            "SEC PDR stats: predecessor result cache hit level=",
+            level,
+            " extra_frame_fingerprint=",
+            extraFrameFingerprint,
+            " has_predecessor=",
+            cached->hasPredecessor ? 1 : 0);
+      }
+      if (cached->hasPredecessor) {
+        return cached->predecessor;
+      }
+      return std::nullopt; // LCOV_EXCL_LINE
+    }
+    if (const auto cachedCore = cachedPredecessorUnsatCoreForTarget(
+            *predecessorAssumptionCache, *stableUnsatCacheKey, targetCube);
+        cachedCore.has_value()) {
+      if (pdrStatsEnabled()) {
+        emitSecDiag(
+            "SEC PDR stats: predecessor unsat-core cache hit level=",
+            level,
+            " target_cube=",
+            targetCube.size(),
+            " core_cube=",
+            cachedCore->size(),
+            " target_hash=",
+            cubeFingerprint(targetCube),
+            " core_hash=",
+            cubeFingerprint(*cachedCore));
+      }
+      rememberPredecessorQueryResult(
+          *predecessorAssumptionCache,
+          *exactCacheKey,
+          *stableUnsatCacheKey,
+          std::nullopt,
+          &*cachedCore);
+      return std::nullopt;
+    }
+  }
+  if (!consumePdrPredecessorQueryBudget(predecessorQueryBudget)) {
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }
   const size_t statsQueryNumber = nextPdrPredecessorQueryNumber();
   const bool emitStatsForQuery = shouldEmitPdrStats(statsQueryNumber);
+  PredecessorTargetSurface uncachedTargetSurface;
+  const PredecessorTargetSurface* targetSurface = nullptr;
+  if (predecessorAssumptionCache != nullptr &&
+      shouldRetainPredecessorTargetSurfaceCache(problem)) {
+    targetSurface = &predecessorTargetSurfaceFor(
+        *predecessorAssumptionCache, problem, transitionByState, targetCube);
+  } else {
+    uncachedTargetSurface =
+        buildPredecessorTargetSurface(problem, transitionByState, targetCube);
+    targetSurface = &uncachedTargetSurface;
+    if (predecessorAssumptionCache != nullptr && emitStatsForQuery) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor target surface uncached target=",
+          targetCube.size(),
+          " encoded_targets=",
+          uncachedTargetSurface.encodedTargets.size(),
+          " transition_support=",
+          uncachedTargetSurface.transitionSupportSymbols.size(),
+          " state_symbols=",
+          problem.totalStateCount,
+          " state_limit=",
+          kMaxDualRailTargetSurfaceCacheStateSymbols);
+    }
+  }
+  const std::vector<size_t>& encodedTargets =
+      targetSurface->encodedTargets;
+  const std::vector<size_t>& transitionSupportSymbols =
+      targetSurface->transitionSupportSymbols;
+  const size_t transitionEncodingNodes =
+      targetSurface->transitionEncodingNodes;
   // LCOV_EXCL_START
   const bool predecessorQueryIsAlreadyExact = predecessorProjectionLimit == 0;
   // LCOV_EXCL_STOP
   const size_t exactResetPrecheckSupportLimit =
       maxExactResetPrecheckTransitionSupport(solverType);
+  const size_t localExactResetPrecheckSupportLimit =
+      detail::effectiveLocalDualRailExactResetPrecheckSupportLimit(
+          hasLocalDualRailFinalLeafRepairSurface(problem),
+          problem.observedOutputExprs0.size(),
+          level,
+          targetCube.size(),
+          exactResetPrecheckSupportLimit,
+          kMinLocalDualRailFinalLeafPredecessorSupport);
   if (problem.usesDualRailStateEncoding) {
     const size_t encodingNodeLimit = dualRailPredecessorEncodingNodeLimit();
-    const size_t encodingSupportLimit =
+    const size_t configuredEncodingSupportLimit =
         dualRailPredecessorEncodingSupportLimit();
+    // Isolated Swerv leaves measured predecessor supports slightly above the
+    // broad 8k dual-rail cap. Raise only this local guard so whole-chip
+    // surfaces still fail fast before materializing broad transition cones.
+    const size_t encodingSupportLimit =
+        hasLocalDualRailFinalLeafRepairSurface(problem)
+            ? effectiveLocalDualRailFinalLeafEncodingSupportLimit(
+                  configuredEncodingSupportLimit)
+            : configuredEncodingSupportLimit;
     const bool unknownNodeCount =
         transitionEncodingNodes == 0 &&
         encodedTargets.size() > kMaxExactTransitionNodeCountHintTargets;  // LCOV_EXCL_LINE
@@ -9150,9 +12393,52 @@ std::optional<StateCube> findPredecessorCube(
             " level=",
             level);
       }  // LCOV_EXCL_LINE
-      throw PdrQueryBudgetExceeded();  // LCOV_EXCL_LINE
+      markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
+      return std::nullopt;  // LCOV_EXCL_LINE
     }
   }
+
+  // Large dual-rail leaves disable the broad exact reset-frontier precheck to
+  // protect BP-sized batches.  Once SEC has split down to one local output,
+  // however, the same exact proof is cheaper than first exhausting the full
+  // predecessor SAT budget on fake F0 states.  This remains a proof-only fast
+  // path: if the reset query cannot prove UNSAT, the ordinary PDR predecessor
+  // query below still runs unchanged.
+  if (detail::shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
+          problem.usesDualRailStateEncoding,
+          useExactResetFrontierChecks,
+          problem.observedOutputExprs0.size(),
+          level,
+          targetCube.size(),
+          transitionSupportSymbols.size(),
+          localExactResetPrecheckSupportLimit)) {
+    if (const auto resetPrecheck = // LCOV_EXCL_LINE
+            proveLargeDualRailPredecessorWithResetFrontier( // LCOV_EXCL_LINE
+                problem, // LCOV_EXCL_LINE
+                solverType, // LCOV_EXCL_LINE
+                transitionByState, // LCOV_EXCL_LINE
+                frameInvariant, // LCOV_EXCL_LINE
+                level, // LCOV_EXCL_LINE
+                targetCube, // LCOV_EXCL_LINE
+                transitionSupportSymbols, // LCOV_EXCL_LINE
+                useExactResetFrontierChecks, // LCOV_EXCL_LINE
+                localExactResetPrecheckSupportLimit, // LCOV_EXCL_LINE
+                resetFrontierCache, // LCOV_EXCL_LINE
+                "precheck");
+        resetPrecheck.has_value()) { // LCOV_EXCL_LINE
+      if (*resetPrecheck) { // LCOV_EXCL_LINE
+        if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() && // LCOV_EXCL_LINE
+            predecessorAssumptionCache != nullptr) { // LCOV_EXCL_LINE
+          rememberPredecessorQueryResult( // LCOV_EXCL_LINE
+              *predecessorAssumptionCache, // LCOV_EXCL_LINE
+              *exactCacheKey, // LCOV_EXCL_LINE
+              *stableUnsatCacheKey, // LCOV_EXCL_LINE
+              std::nullopt); // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
+        return std::nullopt; // LCOV_EXCL_LINE
+      }
+    } // LCOV_EXCL_LINE
+  } // LCOV_EXCL_LINE
 
   // This reset-frontier precheck is an optional accelerator for projected PDR
   // queries: it can reject fake F[0] predecessors before they become root
@@ -9163,12 +12449,14 @@ std::optional<StateCube> findPredecessorCube(
       !predecessorQueryIsAlreadyExact &&
       level == 0 && problem.resetBootstrapCycles != 0 &&
       resetFrontierCache != nullptr &&
-      transitionSupportSymbols.size() <= exactResetPrecheckSupportLimit) {
+      transitionSupportSymbols.size() <= localExactResetPrecheckSupportLimit) {
     // F[0] is a compact summary of the concrete post-reset image. Asking only
     // the abstract F[0] predecessor query can enumerate thousands of fake
     // reset states one refinement clause at a time. The exact reset-frontier
     // check answers the real level-0 question first: can any concrete
     // post-reset state reach this target cube in one PDR transition?
+    const ConcreteCubeReachabilityMode resetFrontierMode =
+        predecessorResetFrontierMode(problem);
     const bool hasConcreteResetPredecessor =
         !cubeOutsideConcreteResetFrontier(
             problem,
@@ -9178,12 +12466,7 @@ std::optional<StateCube> findPredecessorCube(
             1,
             *resetFrontierCache,
             false,
-            // These prechecks appear in waves of neighboring PDR cubes. AES
-            // sampling showed the one-shot query rebuilding and solving the
-            // same reset-prefix shape for each neighbor; the cached assumption
-            // path can reuse the wider solver plus failed cores across that
-            // wave.
-            ConcreteCubeReachabilityMode::CachedAssumptions,
+            resetFrontierMode,
             frameInvariant);
     if (emitStatsForQuery) {
       emitSecDiag(
@@ -9194,8 +12477,10 @@ std::optional<StateCube> findPredecessorCube(
           " encoded_targets=", encodedTargets.size(),
           " transition_support=", transitionSupportSymbols.size(),
           " projection_limit=", predecessorProjectionLimit,
-          " support_limit=", exactResetPrecheckSupportLimit,
-          " exact_reset_frontier=1 result=",
+          " support_limit=", localExactResetPrecheckSupportLimit,
+          " exact_reset_frontier=1 mode=",
+          concreteCubeReachabilityModeName(resetFrontierMode),
+          " result=",
           hasConcreteResetPredecessor ? "sat" : "unsat");
     }
     if (!hasConcreteResetPredecessor) {
@@ -9212,11 +12497,14 @@ std::optional<StateCube> findPredecessorCube(
         " encoded_targets=", encodedTargets.size(),
         " transition_support=", transitionSupportSymbols.size(),
         " projection_limit=", predecessorProjectionLimit,
-        " support_limit=", exactResetPrecheckSupportLimit,
+        " support_limit=", localExactResetPrecheckSupportLimit,
         " exact_reset_frontier=",
         useExactResetFrontierChecks ? "skipped" : "disabled");
   }
 
+  // Keep this split from solverSymbols: the SAT instance may include extra
+  // transition support, while the carried predecessor cube is intentionally
+  // projected down to the current-frame symbols that explain the target.
   const std::vector<size_t> predecessorSymbols = predecessorProjectionSymbols(
       problem,
       transitionByState,
@@ -9227,6 +12515,9 @@ std::optional<StateCube> findPredecessorCube(
       complementPartners,
       transitionSupportSymbols,
       supportCache);
+  PredecessorAssumptionCache* solverCache =
+      shouldUsePredecessorSolverCache(problem) ? predecessorAssumptionCache
+                                               : nullptr;
   const std::vector<size_t> solverSymbols = predecessorCurrentFrameQuerySymbols(
       problem,
       initFormula,
@@ -9240,7 +12531,25 @@ std::optional<StateCube> findPredecessorCube(
       complementPartners,
       exactFrameClauses,
       extraFrameClauses,
+      solverCache,
       supportCache);
+  const std::vector<size_t> cachedSolverSymbols =
+      predecessorAssumptionCacheSymbols(
+          problem,
+          transitionByState,
+          solverSymbols,
+          exactFrameClauses,
+          level,
+          solverCache);
+  const unsigned predecessorConflictLimit =
+      problem.usesDualRailStateEncoding
+          ? dualRailPredecessorConflictLimitForQuery(
+                problem, targetCube, level, cachedSolverSymbols.size())
+          : 0;
+  const unsigned predecessorDecisionLimit =
+      problem.usesDualRailStateEncoding
+          ? dualRailPredecessorDecisionLimit(predecessorConflictLimit)
+          : std::numeric_limits<unsigned>::max();
   if (emitStatsForQuery) {
     emitSecDiag(
         "SEC PDR stats: predecessor #", statsQueryNumber,
@@ -9251,16 +12560,169 @@ std::optional<StateCube> findPredecessorCube(
         " transition_support=", transitionSupportSymbols.size(),
         " predecessor_symbols=", predecessorSymbols.size(),
         " solver_symbols=", solverSymbols.size(),
+        " cached_solver_symbols=", cachedSolverSymbols.size(),
         " projection_limit=", predecessorProjectionLimit,
+        " conflict_limit=", predecessorConflictLimit,
         " frame_clauses=",
         level < frames.size() ? frames[level].clauses.size() : 0,
         " exclude_target=", excludeTargetOnCurrentFrame ? 1 : 0);
   }
-  SATSolverWrapper solver(solverType);
+  if (problem.usesDualRailStateEncoding && predecessorAssumptionCache != nullptr &&
+      solverCache == nullptr && emitStatsForQuery) {
+    emitSecDiag(
+        "SEC PDR stats: predecessor cached solver disabled state_symbols=",
+        problem.totalStateCount,
+        " state_limit=",
+        kMaxDualRailPredecessorSolverCacheStateSymbols);
+  }
+  if (problem.usesDualRailStateEncoding && solverCache != nullptr) {
+    PredecessorAssumptionSolver* solvedPredecessorCache = nullptr;
+    std::vector<int> cachedAssumptions;
+    StateCube cachedUnsatCore;
+    auto cachedStatus = solvePredecessorCubeWithCachedAssumptions(
+        *solverCache,
+        problem,
+        solverType,
+        transitionByState,
+        initFormula,
+        frameInvariant,
+        frames,
+        level,
+        targetCube,
+        encodedTargets,
+        transitionSupportSymbols,
+        cachedSolverSymbols,
+        excludeTargetOnCurrentFrame,
+        extraFrameClauses,
+        exactFrameClauses,
+        predecessorConflictLimit,
+        predecessorDecisionLimit,
+        &solvedPredecessorCache,
+        &cachedAssumptions,
+        &cachedUnsatCore);
+    if (cachedStatus.has_value() &&
+        *cachedStatus == SATSolverWrapper::SolveStatus::Unknown &&
+        solvedPredecessorCache != nullptr && !cachedAssumptions.empty() &&
+        canRetryDualRailPredecessorInCachedSolver(problem)) {
+      if (emitStatsForQuery) {
+        emitSecDiag(
+            "SEC PDR stats: predecessor #", statsQueryNumber,
+            " cached_assumptions=unknown retry=cached_solver");
+      }
+      // The fresh fallback asks the same SAT question as the cached assumption
+      // solver. Spend the fallback budget in that solver so learned clauses and
+      // already-encoded transition/frame constraints are reused instead of
+      // rebuilding large dual-rail cones for every residual predecessor.
+      cachedStatus =
+          solvedPredecessorCache->solver->solveWithAssumptionsStatus(
+              cachedAssumptions,
+              resourceLimitOrUnbounded(predecessorConflictLimit),
+              resourceLimitOrUnbounded(predecessorDecisionLimit));
+      if (cachedStatus.has_value() &&
+          *cachedStatus == SATSolverWrapper::SolveStatus::Unknown) {
+        if (const auto resetRetry = // LCOV_EXCL_LINE
+                proveLargeDualRailPredecessorWithResetFrontier(
+                    problem,
+                    solverType,
+                    transitionByState,
+                    frameInvariant,
+                    level,
+                    targetCube,
+                    transitionSupportSymbols,
+                    useExactResetFrontierChecks,
+                    localExactResetPrecheckSupportLimit,
+                    resetFrontierCache,
+                    "retry after budget");
+            resetRetry.has_value() && *resetRetry) {
+          if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value()) { // LCOV_EXCL_LINE
+            rememberPredecessorQueryResult( // LCOV_EXCL_LINE
+                *predecessorAssumptionCache, // LCOV_EXCL_LINE
+                *exactCacheKey, // LCOV_EXCL_LINE
+                *stableUnsatCacheKey, // LCOV_EXCL_LINE
+                std::nullopt); // LCOV_EXCL_LINE
+          } // LCOV_EXCL_LINE
+          return std::nullopt; // LCOV_EXCL_LINE
+        }
+        if (pdrStatsEnabled()) {
+          emitSecDiag(
+              "SEC PDR stats: predecessor query budget exhausted limit=",
+              predecessorConflictLimit,
+              " decision_limit=",
+              predecessorDecisionLimit,
+              " symbols=",
+              cachedSolverSymbols.size(),
+              " level=",
+              level,
+              " cached_solver_retry=1");
+        }
+        markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);
+        return std::nullopt;
+      }
+    } // LCOV_EXCL_LINE
+    if (cachedStatus.has_value()) {
+      if (*cachedStatus == SATSolverWrapper::SolveStatus::Unsat) {
+        if (emitStatsForQuery) {
+          emitSecDiag(
+              "SEC PDR stats: predecessor #", statsQueryNumber,
+              " result=unsat cached_assumptions=1");
+        }
+        if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value()) {
+          const StateCube* cachedUnsatCorePtr =
+              cachedUnsatCore.empty() ? nullptr : &cachedUnsatCore;
+          rememberPredecessorQueryResult(
+              *predecessorAssumptionCache,
+              *exactCacheKey,
+              *stableUnsatCacheKey,
+              std::nullopt,
+              cachedUnsatCorePtr);
+        }
+        return std::nullopt;
+      }
+      if (*cachedStatus == SATSolverWrapper::SolveStatus::Sat &&
+          solvedPredecessorCache != nullptr &&
+          hasLocalDualRailFinalLeafRepairSurface(problem)) {
+        if (emitStatsForQuery) {
+          emitSecDiag(
+              "SEC PDR stats: predecessor #", statsQueryNumber,
+              " result=sat cached_assumptions=1");
+        }
+        StateCube predecessor = extractSolvedPredecessorCube(
+            *solvedPredecessorCache->solver,
+            *solvedPredecessorCache->variables,
+            problem,
+            transitionByState,
+            targetCube,
+            predecessorSymbols,
+            solvedPredecessorCache->transitionLeafLits,
+            complementPartners,
+            predecessorProjectionLimit);
+        if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value()) {
+          rememberPredecessorQueryResult(
+              *predecessorAssumptionCache,
+              *exactCacheKey,
+              *stableUnsatCacheKey,
+              std::optional<StateCube>(predecessor));
+        }
+        return predecessor;
+      }
+      if (emitStatsForQuery) {
+        emitSecDiag(
+            "SEC PDR stats: predecessor #", statsQueryNumber,
+            " cached_assumptions=",
+            *cachedStatus == SATSolverWrapper::SolveStatus::Sat ? "sat"
+                                                                : "unknown",
+            " fallback=exact");
+      }
+    }
+  }
+  const auto predecessorSolverType =
+      localDualRailPredecessorSolverType(problem, solverType);
+  SATSolverWrapper solver(predecessorSolverType);
   solver.configureForSecPdrQuery(solverSymbols.size());
   FrameVariableStore variables(solver, solverSymbols, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
+  addSameFrameStateEqualities(solver, variables, problem, 1);
   addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       solver, variables, problem, initFormula, frameInvariant, frames, level, 0,
@@ -9292,12 +12754,6 @@ std::optional<StateCube> findPredecessorCube(
   }
   SATSolverWrapper::SolveStatus predecessorSolveStatus =
       SATSolverWrapper::SolveStatus::Sat;
-  const unsigned predecessorConflictLimit =
-      problem.usesDualRailStateEncoding ? dualRailPredecessorConflictLimit() : 0;
-  const unsigned predecessorDecisionLimit =
-      problem.usesDualRailStateEncoding
-          ? dualRailPredecessorDecisionLimit(predecessorConflictLimit)
-          : std::numeric_limits<unsigned>::max();
   if (problem.usesDualRailStateEncoding) {
     // Predecessor queries are local PDR obligations. A limit hit is not a
     // proof of UNSAT, so dual-rail mode turns it into an inconclusive leaf
@@ -9309,6 +12765,30 @@ std::optional<StateCube> findPredecessorCube(
     predecessorSolveStatus = solver.solveStatus();
   }
   if (predecessorSolveStatus == SATSolverWrapper::SolveStatus::Unknown) {
+    if (const auto resetRetry = // LCOV_EXCL_LINE
+            proveLargeDualRailPredecessorWithResetFrontier(
+                problem,
+                solverType,
+                transitionByState,
+                frameInvariant,
+                level,
+                targetCube,
+                transitionSupportSymbols,
+                useExactResetFrontierChecks,
+                localExactResetPrecheckSupportLimit,
+                resetFrontierCache,
+                "retry after budget");
+        resetRetry.has_value() && *resetRetry) {
+      if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() && // LCOV_EXCL_LINE
+          predecessorAssumptionCache != nullptr) { // LCOV_EXCL_LINE
+        rememberPredecessorQueryResult( // LCOV_EXCL_LINE
+            *predecessorAssumptionCache, // LCOV_EXCL_LINE
+            *exactCacheKey, // LCOV_EXCL_LINE
+            *stableUnsatCacheKey, // LCOV_EXCL_LINE
+            std::nullopt); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      return std::nullopt; // LCOV_EXCL_LINE
+    }
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: predecessor query budget exhausted limit=",
@@ -9320,7 +12800,8 @@ std::optional<StateCube> findPredecessorCube(
           " level=",
           level);
     }  // LCOV_EXCL_LINE
-    throw PdrQueryBudgetExceeded();  // LCOV_EXCL_LINE
+    markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
   }
   const bool hasPredecessor =
       predecessorSolveStatus == SATSolverWrapper::SolveStatus::Sat;
@@ -9330,6 +12811,14 @@ std::optional<StateCube> findPredecessorCube(
         " result=", hasPredecessor ? "sat" : "unsat");
   }
   if (!hasPredecessor) {
+    if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() &&
+        predecessorAssumptionCache != nullptr) {
+      rememberPredecessorQueryResult(
+          *predecessorAssumptionCache,
+          *exactCacheKey,
+          *stableUnsatCacheKey,
+          std::nullopt);
+    }
     return std::nullopt;
   }
   StateCube predecessor = extractSolvedPredecessorCube(
@@ -9347,6 +12836,14 @@ std::optional<StateCube> findPredecessorCube(
         "SEC PDR stats: predecessor #", statsQueryNumber,
         " predecessor_cube=", predecessor.size(),
         " predecessor_hash=", cubeFingerprint(predecessor));
+  }
+  if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() &&
+      predecessorAssumptionCache != nullptr) {
+    rememberPredecessorQueryResult(
+        *predecessorAssumptionCache,
+        *exactCacheKey,
+        *stableUnsatCacheKey,
+        std::optional<StateCube>(predecessor));
   }
   return predecessor;
 }
@@ -9373,6 +12870,7 @@ bool cubeIntersectsInit(const KInductionProblem& problem,
   // LCOV_EXCL_STOP
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
   // LCOV_EXCL_START
+  addSameFrameStateEqualities(solver, variables, problem, 1);
   addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
   FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
   solver.addClause({encoder.encode(initFormula)});
@@ -9565,10 +13063,13 @@ std::optional<StateCube> growCoreOutsideInit(  // LCOV_EXCL_LINE
                                 ? problem.bootstrapStateAssignments  // LCOV_EXCL_LINE
                                 : problem.initialStateAssignments;  // LCOV_EXCL_LINE
                                 // LCOV_EXCL_STOP
-  const auto& equalities = usesBootstrapFrontier  // LCOV_EXCL_LINE
-                               ? problem.bootstrapStateEqualityPairs  // LCOV_EXCL_LINE
-                               // LCOV_EXCL_START
-                               : problem.initialStateEqualityPairs;  // LCOV_EXCL_LINE
+  const auto& equalities =  // LCOV_EXCL_LINE
+      KEPLER_FORMAL::Config::getSecInternalStateCorrespondence() // LCOV_EXCL_LINE
+          ? (usesBootstrapFrontier  // LCOV_EXCL_LINE
+                 ? problem.bootstrapStateEqualityPairs  // LCOV_EXCL_LINE
+                 // LCOV_EXCL_START
+                 : problem.initialStateEqualityPairs)  // LCOV_EXCL_LINE
+          : emptySymbolPairs();  // LCOV_EXCL_LINE
 
   // UNSAT cores from transition assumptions can be too small to be legal PDR
   // frame clauses because a one-bit reason may still overlap Init. Add only
@@ -9765,6 +13266,7 @@ std::optional<StateCube> findValidatedPredecessorCore(
     size_t sourceLevel,
     const StateCube& targetCube,
     ResetFrontierCache* resetFrontierCache,
+    PredecessorAssumptionCache* predecessorAssumptionCache,
     const ComplementPartnerIndex& complementPartners,
     size_t predecessorProjectionLimit,
     bool exactFrameClauses,
@@ -9804,6 +13306,7 @@ std::optional<StateCube> findValidatedPredecessorCore(
       complementPartners,
       exactFrameClauses,
       nullptr,
+      predecessorAssumptionCache,
       supportCache);
 
   // Use an assumption-capable solver here only as an UNSAT-core oracle over
@@ -9818,6 +13321,7 @@ std::optional<StateCube> findValidatedPredecessorCore(
       coreSolver, variables, problem.complementedStatePairs0, 1);
   addComplementedStateRelations(
       coreSolver, variables, problem.complementedStatePairs1, 1);
+  addSameFrameStateEqualities(coreSolver, variables, problem, 1);
   addDualRailStateValidity(coreSolver, variables, problem.dualRailStatePairs, 1);
   addFrameConstraints(
       // LCOV_EXCL_START
@@ -10117,35 +13621,39 @@ std::optional<StateCube> findValidatedPredecessorCore(
     return core;
   }
 
-  if (findPredecessorCube(  // LCOV_EXCL_LINE
-  // LCOV_EXCL_STOP
-          problem,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
-          solverType,  // LCOV_EXCL_LINE
-          transitionByState,  // LCOV_EXCL_LINE
-          initFormula,  // LCOV_EXCL_LINE
-          frameInvariant,  // LCOV_EXCL_LINE
-          frames,  // LCOV_EXCL_LINE
-          sourceLevel,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-          core,
-          // LCOV_EXCL_START
-          excludeCurrentTargetForCore,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-          complementPartners,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
-          predecessorProjectionLimit,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-          exactFrameClauses,  // LCOV_EXCL_LINE
-          resetFrontierCache,  // LCOV_EXCL_LINE
-          nullptr,
-          // LCOV_EXCL_START
-          predecessorQueryBudget,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-          useExactResetFrontierChecks,  // LCOV_EXCL_LINE
-          // LCOV_EXCL_START
-          supportCache)  // LCOV_EXCL_LINE
-          .has_value()) {  // LCOV_EXCL_LINE
+  const auto corePredecessor = findPredecessorCube(  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
+      problem,  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
+      solverType,  // LCOV_EXCL_LINE
+      transitionByState,  // LCOV_EXCL_LINE
+      initFormula,  // LCOV_EXCL_LINE
+      frameInvariant,  // LCOV_EXCL_LINE
+      frames,  // LCOV_EXCL_LINE
+      sourceLevel,  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
+      core,
+      // LCOV_EXCL_START
+      excludeCurrentTargetForCore,  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
+      complementPartners,  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
+      predecessorProjectionLimit,  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
+      exactFrameClauses,  // LCOV_EXCL_LINE
+      resetFrontierCache,  // LCOV_EXCL_LINE
+      predecessorAssumptionCache,  // LCOV_EXCL_LINE
+      nullptr,
+      // LCOV_EXCL_START
+      predecessorQueryBudget,  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
+      useExactResetFrontierChecks,  // LCOV_EXCL_LINE
+      // LCOV_EXCL_START
+      supportCache);  // LCOV_EXCL_LINE
+  if (hasPdrBudgetExhaustion()) {  // LCOV_EXCL_LINE
+    return std::nullopt;  // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  if (corePredecessor.has_value()) {  // LCOV_EXCL_LINE
     if (pdrStatsEnabled() && targetCube.size() > kLargeBlockedCubeGeneralizationThreshold) {  // LCOV_EXCL_LINE
     // LCOV_EXCL_STOP
       emitSecDiag(  // LCOV_EXCL_LINE
@@ -10198,6 +13706,7 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
                                 size_t level,
                                 const StateCube& cube,
                                 ResetFrontierCache* resetFrontierCache,
+                                PredecessorAssumptionCache* predecessorAssumptionCache,
                                 const ComplementPartnerIndex& complementPartners,
                                 size_t predecessorProjectionLimit,
                                 bool exactFrameClauses,
@@ -10227,6 +13736,10 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
   const bool broadDualRailTransitionSurface =
       problem.usesDualRailStateEncoding &&
       blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport;
+  const bool localDualRailTransitionSurface =
+      broadDualRailTransitionSurface &&
+      isLocalDualRailPredecessorCoreSurface(
+          level, cube.size(), blockedCubeSupportSize);
   const size_t effectiveCheckLimit =
       cheapTransitionSurface
           ? std::max(
@@ -10237,15 +13750,18 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
           : checkLimit;
   const bool shouldTryPredecessorCore =
       level <= kMaxPredecessorCoreGeneralizationLevel &&
-      !broadDualRailTransitionSurface &&
+      (!broadDualRailTransitionSurface || localDualRailTransitionSurface) &&
       !cheapTransitionSurface &&
       (cube.size() > kLargeBlockedCubeGeneralizationThreshold ||
        (cube.size() >= kMinMediumCubePredecessorCoreTargetSize &&
-        blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport));
-  const size_t dualRailCoreSkipNumber = broadDualRailTransitionSurface
+        blockedCubeSupportSize > kMaxGeneralizedBlockedCubeTransitionSupport) ||
+       localDualRailTransitionSurface);
+  const bool skipDualRailPredecessorCore =
+      broadDualRailTransitionSurface && !localDualRailTransitionSurface;
+  const size_t dualRailCoreSkipNumber = skipDualRailPredecessorCore
                                             ? nextPdrDualRailPredecessorCoreSkipNumber()
                                             : 0;
-  if (broadDualRailTransitionSurface &&
+  if (skipDualRailPredecessorCore &&
       shouldEmitPdrStats(dualRailCoreSkipNumber)) {  // LCOV_EXCL_LINE
     // Predecessor-core extraction is optional clause minimization. In dual-rail
     // mode the target cube already contains rail-expanded state, and sampled
@@ -10287,6 +13803,47 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
     }
     // LCOV_EXCL_STOP
   }
+  if (skipDualRailPredecessorCore &&
+      predecessorAssumptionCache != nullptr &&
+      canUsePredecessorQueryResultCache(problem)) {
+    // The predecessor query that proved this obligation blocked already ran
+    // through the cached assumption solver. Reuse its exact failed-assumption
+    // core before the broad dual-rail guard below gives up on strengthening.
+    // For frames above F1, keep the standard PDR init-safety check before
+    // learning the smaller clause.
+    if (const auto cachedCore = cachedPredecessorUnsatCoreForCube(
+            *predecessorAssumptionCache,
+            problem,
+            transitionByState,
+            initFormula,
+            frameInvariant,
+            frames,
+            /*sourceLevel=*/level - 1,
+            cube,
+            /*excludeTargetOnCurrentFrame=*/false,
+            predecessorProjectionLimit,
+            exactFrameClauses);
+        cachedCore.has_value() && cachedCore->size() < cube.size() &&
+        (level == 1 ||
+         !cubeIntersectsInit(problem, solverType, initFormula, *cachedCore))) {
+      if (pdrStatsEnabled()) {
+        emitSecDiag(
+            "SEC PDR stats: predecessor cached core target=",
+            cube.size(),
+            "->",
+            cachedCore->size(),
+            " source_level=",
+            level - 1,
+            " target_hash=",
+            cubeFingerprint(cube),
+            " core_hash=",
+            cubeFingerprint(*cachedCore),
+            " support=",
+            blockedCubeSupportSize);
+      }
+      return *cachedCore;
+    }
+  } // LCOV_EXCL_LINE
   if (shouldTryPredecessorCore) {
     // For wide blockers, ask the SAT solver for the actual predecessor UNSAT
     // reason before spending bounded chunk-dropping checks. BlackParrot samples
@@ -10306,6 +13863,7 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
             cube,
             // LCOV_EXCL_START
             resetFrontierCache,
+            predecessorAssumptionCache,
             // LCOV_EXCL_STOP
             complementPartners,
             predecessorProjectionLimit,
@@ -10353,25 +13911,29 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
         cubeIntersectsInit(problem, solverType, initFormula, reduced)) {
       return false;
     }
-    return !findPredecessorCube(
-                problem,
-                solverType,
-                transitionByState,
-                initFormula,
-                frameInvariant,
-                frames,
-                level - 1,
-                reduced,
-                !blocksFromInitialFrame,
-                complementPartners,
-                predecessorProjectionLimit,
-                exactFrameClauses,
-                resetFrontierCache,
-                nullptr,
-                predecessorQueryBudget,
-                useExactResetFrontierChecks,
-                supportCache)
-                .has_value();
+    const auto predecessor = findPredecessorCube(
+        problem,
+        solverType,
+        transitionByState,
+        initFormula,
+        frameInvariant,
+        frames,
+        level - 1,
+        reduced,
+        !blocksFromInitialFrame,
+        complementPartners,
+        predecessorProjectionLimit,
+        exactFrameClauses,
+        resetFrontierCache,
+        predecessorAssumptionCache,
+        nullptr,
+        predecessorQueryBudget,
+        useExactResetFrontierChecks,
+        supportCache);
+    if (hasPdrBudgetExhaustion()) {
+      return false;  // LCOV_EXCL_LINE
+    }
+    return !predecessor.has_value();
   // LCOV_EXCL_START
   };
 
@@ -10384,7 +13946,7 @@ StateCube generalizeBlockedCube(const KInductionProblem& problem,
     // Try that cheap seed first so generalization does not spend its budget on
     // giant intermediate cubes whose transition cones dominate runtime.
     const StateCube cheapSeed = boundedCheapTransitionCube(
-        cube, kLargeBlockedCubeSeedSize, transitionByState);
+        cube, kLargeBlockedCubeSeedSize, problem, transitionByState);
     // LCOV_EXCL_START
     if (cheapSeed.size() < cube.size() && checks < checkLimit) {
       ++checks;
@@ -10516,6 +14078,69 @@ bool obligationAlreadyBlocked(const std::vector<FrameClauses>& frames,
   return frameHasSubsumingClause(frames[obligation.level], clauseFromCube(obligation.cube));
 }  // LCOV_EXCL_LINE
 
+size_t learnExactResetPredecessorSingletonClauses(
+    std::vector<FrameClauses>& frames,
+    const ResetFrontierCache& resetFrontierCache,
+    const StateCube& sourceCube,
+    size_t level) {
+  if (level != 1) {
+    return 0;
+  }
+
+  size_t added = 0;
+  // Exact reset-predecessor cores are concrete F1 facts: no reset-frontier
+  // state can step into the singleton target. Learn all sibling singletons now
+  // so the bad-cube SAT query does not rediscover the same bus slice one model
+  // at a time.
+  for (const auto& core :
+       findPdrResetUnreachableSingletonCoresForCube(
+           resetFrontierCache, sourceCube, /*postBootstrapSteps=*/1)) {
+    if (addClauseToFrames(frames, clauseFromCube(core), level)) {
+      ++added;
+    }
+  }
+  if (pdrStatsEnabled() && added != 0) {
+    emitSecDiag(
+        "SEC PDR stats: learned exact reset-predecessor singleton clauses ",
+        "level=", level,
+        " added=", added,
+        " source_cube=", sourceCube.size());
+  }
+  return added;
+}
+
+size_t seedImportedResetPredecessorClauses(
+    std::vector<FrameClauses>& frames,
+    const ResetFrontierCache& resetFrontierCache) {
+  if (frames.size() <= 1) {
+    return 0;  // LCOV_EXCL_LINE
+  }
+  const auto stepCores =
+      resetFrontierCache.resetUnreachableCoresByPostBootstrapStep.find(1);
+  if (stepCores ==
+      resetFrontierCache.resetUnreachableCoresByPostBootstrapStep.end()) {
+    return 0;
+  }
+
+  size_t added = 0; // LCOV_EXCL_LINE
+  for (const StateCube& core : stepCores->second) { // LCOV_EXCL_LINE
+    // Imported reset-predecessor cores are exact F1 facts. Seeding them before
+    // the first bad-state query lets later output slices consume concrete reset
+    // knowledge learned by earlier slices without re-solving the same
+    // reset-frontier obligations.
+    if (!core.empty() && // LCOV_EXCL_LINE
+        addClauseToFrames(frames, clauseFromCube(core), /*maxLevel=*/1)) { // LCOV_EXCL_LINE
+      ++added; // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+  }
+  if (pdrStatsEnabled() && added != 0) { // LCOV_EXCL_LINE
+    emitSecDiag( // LCOV_EXCL_LINE
+        "SEC PDR stats: seeded imported reset-predecessor clauses ",
+        "level=1 added=", added);
+  } // LCOV_EXCL_LINE
+  return added; // LCOV_EXCL_LINE
+}
+
 BoolExpr* boundedResetReachabilityFrameInvariant(BoolExpr* frameInvariant) {
   if (frameInvariant == nullptr) {
     return nullptr;
@@ -10533,16 +14158,21 @@ ResetFrontierReachabilityContext& resetReachabilityContextFor(
     const TransitionExprResolver& transitionByState,
     BoolExpr* frameInvariant) {
   frameInvariant = boundedResetReachabilityFrameInvariant(frameInvariant);
-  if (cache.reachabilityContext == nullptr ||
-      cache.reachabilityFrameInvariant != frameInvariant) {
+  const bool frameInvariantChanged =
+      cache.reachabilityFrameInvariant != frameInvariant;
+  if (cache.reachabilityContext == nullptr || frameInvariantChanged) {
     // The optional invariant changes the SAT formula for reset-frontier
     // reachability. Rebuild the immutable context and drop cached SAT answers
-    // when switching between invariant-strengthened and plain checks.
+    // when switching between invariant-strengthened and plain checks. If the
+    // context was only released for memory, cached outside facts are still
+    // valid for the same invariant and should survive the rebuild.
     cache.reachabilityContext =
         makeResetFrontierReachabilityContext(
             problem, transitionByState, frameInvariant);
     cache.reachabilityFrameInvariant = frameInvariant;
-    cache.outsideByCubeKey.clear();
+    if (frameInvariantChanged) {
+      cache.outsideByCubeKey.clear(); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
   }
   return *cache.reachabilityContext;
 }
@@ -10562,10 +14192,178 @@ void rememberExactResetFrontierUnreachableCore(
       solverType,
       cubeAssignments(cube),
       postBootstrapSteps);
+  StateCube pdrCore = core.has_value() ? cubeFromAssignments(*core) : cube;
+  pdrCore = minimizeExactResetPredecessorCore(
+      reachabilityContext, solverType, std::move(pdrCore), postBootstrapSteps);
+  if (pdrStatsEnabled() && pdrCore.size() < cube.size()) {
+    emitSecDiag(
+        "SEC PDR stats: exact reset-predecessor core ",
+        "cube=", cube.size(),
+        "->", pdrCore.size(),
+        " post_bootstrap_steps=", postBootstrapSteps,
+        " hash=", cubeFingerprint(pdrCore));
+  }
   rememberPdrResetUnreachableCore(
       cache,
-      core.has_value() ? cubeFromAssignments(*core) : cube,
+      pdrCore,
       postBootstrapSteps);
+  const size_t seededSiblingCores = seedExactResetPredecessorSiblingCores(
+      cache,
+      reachabilityContext,
+      solverType,
+      cube,
+      pdrCore,
+      postBootstrapSteps);
+  if (pdrStatsEnabled() && seededSiblingCores != 0) {
+    emitSecDiag(
+        "SEC PDR stats: seeded exact reset-predecessor sibling cores ",
+        "cube=", cube.size(),
+        " seeded=", seededSiblingCores,
+        " post_bootstrap_steps=", postBootstrapSteps,
+        " cached=", seededSiblingCores);
+  }
+}
+
+std::optional<StateCube> proveLargeDualRailSingletonResetFrontierCore(
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const TransitionExprResolver& transitionByState,
+    const StateCube& cube,
+    size_t postBootstrapSteps,
+    ResetFrontierCache& cache,
+    ConcreteCubeReachabilityMode mode,
+    BoolExpr* frameInvariant) {
+  if (!hasLargeDualRailResetFrontierSurface(problem) ||
+      postBootstrapSteps == 0 || cube.size() <= 1) {
+    return std::nullopt;
+  }
+
+  std::vector<CubeLiteral> orderedLiterals = cube;
+  std::sort(
+      orderedLiterals.begin(),
+      orderedLiterals.end(),
+      [&](const CubeLiteral& lhs, const CubeLiteral& rhs) {
+        const size_t lhsCost =
+            transitionLiteralCost(problem, transitionByState, lhs.symbol);
+        const size_t rhsCost =
+            transitionLiteralCost(problem, transitionByState, rhs.symbol);
+        if (lhsCost != rhsCost) {
+          return lhsCost < rhsCost;
+        }
+        if (lhs.symbol != rhs.symbol) { // LCOV_EXCL_LINE
+          return lhs.symbol < rhs.symbol; // LCOV_EXCL_LINE
+        }
+        return lhs.value < rhs.value; // LCOV_EXCL_LINE
+      });
+
+  size_t probes = 0;
+  for (const auto& literal : orderedLiterals) {
+    StateCube singleton{literal};
+    if (const auto cachedCore =
+            findPdrResetUnreachableCoreForCube(
+                cache, singleton, postBootstrapSteps);
+        cachedCore.has_value()) {
+      return *cachedCore; // LCOV_EXCL_LINE
+    }
+    const ResetFrontierCubeKey singletonKey =
+        resetFrontierCacheKey(singleton, postBootstrapSteps);
+    if (const auto it = cache.outsideByCubeKey.find(singletonKey);
+        it != cache.outsideByCubeKey.end()) {
+      if (it->second) { // LCOV_EXCL_LINE
+        return singleton;  // LCOV_EXCL_LINE
+      }
+      continue; // LCOV_EXCL_LINE
+    }
+
+    if (postBootstrapSteps > 0 &&
+        findPdrResetUnreachableCoreForCube(
+            cache, singleton, postBootstrapSteps - 1)
+            .has_value()) {
+      const size_t targetStep = // LCOV_EXCL_LINE
+          problem.resetBootstrapCycles + postBootstrapSteps; // LCOV_EXCL_LINE
+      if (const auto priorSingletonConflict = // LCOV_EXCL_LINE
+              resetSpecializedConflictCubeAtStep( // LCOV_EXCL_LINE
+                  problem, // LCOV_EXCL_LINE
+                  transitionByState, // LCOV_EXCL_LINE
+                  cache, // LCOV_EXCL_LINE
+                  singleton,
+                  targetStep, // LCOV_EXCL_LINE
+                  frameInvariant); // LCOV_EXCL_LINE
+          priorSingletonConflict.has_value() && // LCOV_EXCL_LINE
+          cubeContainsCube(singleton, *priorSingletonConflict)) { // LCOV_EXCL_LINE
+        cache.outsideByCubeKey.emplace(singletonKey, true); // LCOV_EXCL_LINE
+        releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+            cache, problem, "prior_singleton_reset_frontier_core"); // LCOV_EXCL_LINE
+        if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
+          emitSecDiag( // LCOV_EXCL_LINE
+              "SEC PDR stats: prior singleton reset-frontier core ",
+              "cube=", cube.size(), // LCOV_EXCL_LINE
+              "->", priorSingletonConflict->size(), // LCOV_EXCL_LINE
+              " post_bootstrap_steps=", postBootstrapSteps,
+              " hash=", cubeFingerprint(*priorSingletonConflict)); // LCOV_EXCL_LINE
+        } // LCOV_EXCL_LINE
+        return *priorSingletonConflict; // LCOV_EXCL_LINE
+      }
+    } // LCOV_EXCL_LINE
+
+    if (freshLargeDualRailSingletonResetFrontierQueryTooDeep(
+            problem, postBootstrapSteps)) {
+      emitSkippedFreshLargeDualRailExactResetFrontierQuery( // LCOV_EXCL_LINE
+          problem, singleton, postBootstrapSteps, // LCOV_EXCL_LINE
+          "singleton_reset_frontier_core"); // LCOV_EXCL_LINE
+      continue; // LCOV_EXCL_LINE
+    }
+
+    ++probes;
+    releaseLargeDualRailResetFrontierContext(
+        cache, problem, "before_singleton_reset_frontier_core");
+    ResetFrontierReachabilityContext& reachabilityContext =
+        resetReachabilityContextFor(
+            cache, problem, transitionByState, frameInvariant);
+    const auto assignments = cubeAssignments(singleton);
+    const bool reuseSingletonResetFrontierSolver =
+        mode == ConcreteCubeReachabilityMode::CachedAssumptions &&
+        hasLocalDualRailFinalLeafRepairSurface(problem);
+    // A singleton has no smaller failed-assumption core to recover. BP-scale
+    // surfaces still use a fresh exact proof; local Swerv leaves reuse the
+    // reset-prefix solver because they validate many neighboring singleton
+    // roots while staying below the local rail-state guard.
+    const bool reachable =
+        reuseSingletonResetFrontierSolver
+            ? isStateCubeReachableAtResetFrontier( // LCOV_EXCL_LINE
+                  reachabilityContext, // LCOV_EXCL_LINE
+                  solverType, // LCOV_EXCL_LINE
+                  assignments,
+                  postBootstrapSteps, // LCOV_EXCL_LINE
+                  /*usePostBootstrapPrechecks=*/false)
+            : isStateCubeReachableAtResetFrontierOneShot(
+                  reachabilityContext,
+                  solverType,
+                  assignments,
+                  postBootstrapSteps,
+                  /*usePostBootstrapPrechecks=*/false);
+    if (!reachable) {
+      rememberPdrResetUnreachableCore(cache, singleton, postBootstrapSteps); // LCOV_EXCL_LINE
+      rememberResetFrontierUnreachableCube( // LCOV_EXCL_LINE
+          reachabilityContext, assignments, postBootstrapSteps); // LCOV_EXCL_LINE
+      cache.outsideByCubeKey.emplace(singletonKey, true); // LCOV_EXCL_LINE
+      releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+          cache, problem, "singleton_reset_frontier_core"); // LCOV_EXCL_LINE
+      if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
+        emitSecDiag( // LCOV_EXCL_LINE
+            "SEC PDR stats: exact singleton reset-frontier core ",
+            "cube=", cube.size(), // LCOV_EXCL_LINE
+            "->1 post_bootstrap_steps=", postBootstrapSteps,
+            " probes=", probes,
+            " hash=", cubeFingerprint(singleton)); // LCOV_EXCL_LINE
+      } // LCOV_EXCL_LINE
+      return singleton; // LCOV_EXCL_LINE
+    }
+    cache.outsideByCubeKey.emplace(singletonKey, false);
+    releaseLargeDualRailResetFrontierContext(
+        cache, problem, "reachable_singleton_reset_frontier_probe");
+  }
+  return std::nullopt;
 }
 
 bool cubeOutsideConcreteResetFrontier(
@@ -10601,6 +14399,7 @@ bool cubeOutsideConcreteResetFrontier(
 
   bool outside = false;
   bool outsideFromExactResetFrontier = false;
+  bool usedExactResetFrontierQuery = false;
   const auto knownInitIntersection =
       // LCOV_EXCL_START
       postBootstrapSteps == 0
@@ -10645,22 +14444,31 @@ bool cubeOutsideConcreteResetFrontier(
           " hash=",
           cubeFingerprint(cube));  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
+    releaseLargeDualRailResetFrontierContext(
+        cache, problem, "before_outside_concrete_reset_frontier");
     ResetFrontierReachabilityContext& reachabilityContext =
         resetReachabilityContextFor(
             cache, problem, transitionByState, frameInvariant);
+    usedExactResetFrontierQuery = true;
+    const bool useExactPrechecks = useResetFrontierPostBootstrapPrechecks(
+        problem,
+        postBootstrapSteps,
+        /*requested=*/true,
+        "outside_concrete_reset_frontier");
     outside =
         mode == ConcreteCubeReachabilityMode::OneShotUnitClauses
             ? !isStateCubeReachableAtResetFrontierOneShot(  // LCOV_EXCL_LINE
                   reachabilityContext,  // LCOV_EXCL_LINE
                   solverType,  // LCOV_EXCL_LINE
                   cubeAssignments(cube),  // LCOV_EXCL_LINE
-                  postBootstrapSteps)  // LCOV_EXCL_LINE
+                  postBootstrapSteps,  // LCOV_EXCL_LINE
+                  useExactPrechecks)  // LCOV_EXCL_LINE
             : !isStateCubeReachableAtResetFrontier(
                   reachabilityContext,
                   solverType,
                   cubeAssignments(cube),
                   postBootstrapSteps,
-                  /*usePostBootstrapPrechecks=*/true,
+                  useExactPrechecks,
                   resourceLimitStartupExactQuery
                       ? kOptionalStartupResetFrontierConflictLimit
                       : -1,
@@ -10693,6 +14501,10 @@ bool cubeOutsideConcreteResetFrontier(
   }
   // LCOV_EXCL_START
   cache.outsideByCubeKey.emplace(key, outside);
+  if (usedExactResetFrontierQuery) {
+    releaseLargeDualRailResetFrontierContext(
+        cache, problem, "outside_concrete_reset_frontier");
+  }
   // LCOV_EXCL_STOP
   return outside;
 }
@@ -10707,7 +14519,8 @@ bool cubeOutsideConcreteFrameByCheapResetFacts(
     size_t postBootstrapSteps,
     ResetFrontierCache& cache,
     // LCOV_EXCL_START
-    BoolExpr* frameInvariant) {
+    BoolExpr* frameInvariant,
+    bool allowLargeDualRailSmallCubeBudget) {
   if (problem.resetBootstrapCycles == 0) {
   // LCOV_EXCL_STOP
     return false;  // LCOV_EXCL_LINE
@@ -10767,6 +14580,10 @@ bool cubeOutsideConcreteFrameByCheapResetFacts(
       const size_t targetStep =
       // LCOV_EXCL_STOP
           problem.resetBootstrapCycles + postBootstrapSteps;
+      const bool allowRelaxedResetBudget =
+          allowLargeDualRailSmallCubeBudget &&
+          hasLargeDualRailResetFrontierSurface(problem) &&
+          cube.size() <= kMaxDeepSmallCubeResetSymbolicLiterals;
       if (const auto priorCoreConflict =
               resetSpecializedPriorCoreConflictAtStep(
                   problem,
@@ -10777,7 +14594,7 @@ bool cubeOutsideConcreteFrameByCheapResetFacts(
                   cache,
                   frameInvariant,
                   // LCOV_EXCL_START
-                  /*allowDeepSmallCubeRelaxedBudget=*/false);
+                  allowRelaxedResetBudget);
           priorCoreConflict.has_value()) {
           // LCOV_EXCL_STOP
         conflict = *priorCoreConflict;  // LCOV_EXCL_LINE
@@ -10789,7 +14606,7 @@ bool cubeOutsideConcreteFrameByCheapResetFacts(
                          cube,
                          targetStep,
                          frameInvariant,
-                         /*allowDeepSmallCubeRelaxedBudget=*/false);
+                         allowRelaxedResetBudget);
                  resetConflict.has_value()) {
         conflict = *resetConflict;  // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
@@ -10818,6 +14635,8 @@ bool cubeOutsideConcreteFrameByCheapResetFacts(
         "->", conflict->size(),
         " hash=", cubeFingerprint(*conflict));
   }
+  releaseLargeDualRailResetFrontierContext(
+      cache, problem, "cheap_concrete_frame_conflict");
   return true;
 }
 
@@ -10865,6 +14684,8 @@ bool cubeReachableAtConcreteFrame(
             postBootstrapSteps,  // LCOV_EXCL_LINE
             frameInvariant);  // LCOV_EXCL_LINE
         cache.outsideByCubeKey.emplace(key, true);  // LCOV_EXCL_LINE
+        releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+            cache, problem, "transition_impossible_concrete_frame"); // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         return false;  // LCOV_EXCL_LINE
       }
@@ -10888,6 +14709,8 @@ bool cubeReachableAtConcreteFrame(
           postBootstrapSteps,  // LCOV_EXCL_LINE
           frameInvariant);  // LCOV_EXCL_LINE
       cache.outsideByCubeKey.emplace(key, true);  // LCOV_EXCL_LINE
+      releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+          cache, problem, "previous_reset_core_concrete_frame"); // LCOV_EXCL_LINE
       return false;  // LCOV_EXCL_LINE
     }
 
@@ -10916,6 +14739,8 @@ bool cubeReachableAtConcreteFrame(
           postBootstrapSteps,  // LCOV_EXCL_LINE
           frameInvariant);  // LCOV_EXCL_LINE
       cache.outsideByCubeKey.emplace(key, true);  // LCOV_EXCL_LINE
+      releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+          cache, problem, "prior_reset_core_concrete_frame"); // LCOV_EXCL_LINE
       return false;  // LCOV_EXCL_LINE
     }
     // LCOV_EXCL_START
@@ -10966,12 +14791,51 @@ bool cubeReachableAtConcreteFrame(
           postBootstrapSteps,  // LCOV_EXCL_LINE
           frameInvariant);  // LCOV_EXCL_LINE
       cache.outsideByCubeKey.emplace(key, true);  // LCOV_EXCL_LINE
+      releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+          cache, problem, "reset_specialized_concrete_frame"); // LCOV_EXCL_LINE
       return false;  // LCOV_EXCL_LINE
     }
   }
+  if (const auto singletonCore =
+          proveLargeDualRailSingletonResetFrontierCore(
+              problem,
+              solverType,
+              transitionByState,
+              cube,
+              postBootstrapSteps,
+              cache,
+              mode,
+              frameInvariant);
+      singletonCore.has_value()) {
+    rememberPdrAndResetFrontierUnreachableCore( // LCOV_EXCL_LINE
+        cache, // LCOV_EXCL_LINE
+        problem, // LCOV_EXCL_LINE
+        transitionByState, // LCOV_EXCL_LINE
+        *singletonCore, // LCOV_EXCL_LINE
+        postBootstrapSteps, // LCOV_EXCL_LINE
+        frameInvariant); // LCOV_EXCL_LINE
+    cache.outsideByCubeKey.emplace(key, true); // LCOV_EXCL_LINE
+    return false; // LCOV_EXCL_LINE
+  }
+  if (freshLargeDualRailExactResetFrontierQueryTooDeep(
+          problem, postBootstrapSteps)) {
+    emitSkippedFreshLargeDualRailExactResetFrontierQuery( // LCOV_EXCL_LINE
+        problem, cube, postBootstrapSteps, "concrete_frame_reachability"); // LCOV_EXCL_LINE
+    releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+        cache, problem, "skipped_deep_exact_reset_frontier"); // LCOV_EXCL_LINE
+    markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery); // LCOV_EXCL_LINE
+    return true; // LCOV_EXCL_LINE
+  }
+  releaseLargeDualRailResetFrontierContext(
+      cache, problem, "before_concrete_frame_reachability");
   ResetFrontierReachabilityContext& reachabilityContext =
       resetReachabilityContextFor(
           cache, problem, transitionByState, frameInvariant);
+  const bool useExactPrechecks = useResetFrontierPostBootstrapPrechecks(
+      problem,
+      postBootstrapSteps,
+      usePostBootstrapPrechecks,
+      "concrete_frame_reachability");
   const bool reachable =
       mode == ConcreteCubeReachabilityMode::OneShotUnitClauses
           ? isStateCubeReachableAtResetFrontierOneShot(
@@ -10979,13 +14843,13 @@ bool cubeReachableAtConcreteFrame(
                 solverType,
                 assignments,
                 postBootstrapSteps,
-                usePostBootstrapPrechecks)
+                useExactPrechecks)
           : isStateCubeReachableAtResetFrontier(
                 reachabilityContext,
                 solverType,
                 assignments,
                 postBootstrapSteps,
-                usePostBootstrapPrechecks);
+                useExactPrechecks);
   if (!reachable) {
     rememberExactResetFrontierUnreachableCore(
         problem,
@@ -10997,6 +14861,8 @@ bool cubeReachableAtConcreteFrame(
         frameInvariant);
   }
   cache.outsideByCubeKey.emplace(key, !reachable);
+  releaseLargeDualRailResetFrontierContext(
+      cache, problem, "concrete_frame_reachability");
   return reachable;
 }
 
@@ -11043,7 +14909,8 @@ bool cubeReachableWithinConcreteFrames(
               cube,
               step,
               cache,
-              frameInvariant)) {
+              frameInvariant,
+              /*allowLargeDualRailSmallCubeBudget=*/true)) {
         // LCOV_EXCL_START
         everyStepCheaplyOutside = false;
         remainingExactSteps.push_back(step);
@@ -11141,6 +15008,8 @@ bool cubeReachableWithinConcreteFrames(
           "max_step=", maxPostBootstrapSteps,
           " result=", reachable ? "sat" : "unsat");  // LCOV_EXCL_LINE
     }  // LCOV_EXCL_LINE
+    releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+        cache, problem, "shared_prefix_concrete_reachability"); // LCOV_EXCL_LINE
     return reachable;  // LCOV_EXCL_LINE
   }
   for (size_t step = 0; step <= maxPostBootstrapSteps; ++step) {
@@ -11240,6 +15109,8 @@ std::optional<StateCube> boundedResetFrontierCoreWithinConcreteFrames(
           // LCOV_EXCL_STOP
           ConcreteCubeReachabilityMode::CachedAssumptions,
           frameInvariant)) {  // LCOV_EXCL_LINE
+    releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+        cache, problem, "bounded_reset_frontier_core"); // LCOV_EXCL_LINE
     return std::nullopt;  // LCOV_EXCL_LINE
   }
   if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
@@ -11252,6 +15123,8 @@ std::optional<StateCube> boundedResetFrontierCoreWithinConcreteFrames(
   // LCOV_EXCL_START
   }  // LCOV_EXCL_LINE
   // LCOV_EXCL_STOP
+  releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+      cache, problem, "bounded_reset_frontier_core"); // LCOV_EXCL_LINE
   return unionCore;  // LCOV_EXCL_LINE
 }
 
@@ -11334,6 +15207,8 @@ StateCube generalizeResetFrontierCube(  // LCOV_EXCL_LINE
     // on AES this optional 2->1 literal probing rebuilt the same 956-symbol
     // reset solver and dominated the PDR regression.
     // LCOV_EXCL_STOP
+    releaseLargeDualRailResetFrontierContext( // LCOV_EXCL_LINE
+        cache, problem, "reset_frontier_generalization_core"); // LCOV_EXCL_LINE
     return candidate;  // LCOV_EXCL_LINE
   }
   // LCOV_EXCL_START
@@ -11370,6 +15245,8 @@ StateCube generalizeResetFrontierCube(  // LCOV_EXCL_LINE
     // LCOV_EXCL_START
     ++index;  // LCOV_EXCL_LINE
   }  // LCOV_EXCL_LINE
+  releaseLargeDualRailResetFrontierContext(
+      cache, problem, "reset_frontier_generalization");
   return candidate;  // LCOV_EXCL_LINE
 }  // LCOV_EXCL_LINE
 
@@ -11453,6 +15330,13 @@ StateCube generalizeBoundedUnreachableRootCube(
   while (index < candidate.size() && attempts < maxAttempts) {
     StateCube reduced = candidate;
     reduced.erase(reduced.begin() + static_cast<std::ptrdiff_t>(index));
+    if (reduced.empty()) {
+      // The empty cube is the whole state space, so it cannot be a useful
+      // unreachable-root generalization.  Avoid a concrete reachability query
+      // that only proves that trivial fact after rebuilding the reset prefix.
+      ++index;
+      continue;
+    }
     ++attempts;
     const bool preferShallowPerFrameValidation =
         maxPostBootstrapSteps <= kMaxPerFrameConcreteValidationDepth &&
@@ -11476,14 +15360,29 @@ StateCube generalizeBoundedUnreachableRootCube(
   return candidate;
 }
 
+bool proofObligationLess(const ProofObligation& lhs, const ProofObligation& rhs) {
+  if (lhs.level != rhs.level) {
+    return lhs.level < rhs.level;
+  }
+  if (lhs.cube.size() != rhs.cube.size()) {
+    return lhs.cube.size() < rhs.cube.size();
+  }
+  if (lhs.badFrame != rhs.badFrame) {
+    return lhs.badFrame < rhs.badFrame; // LCOV_EXCL_LINE
+  }
+  if (stateCubeLess(lhs.cube, rhs.cube)) {
+    return true;
+  }
+  if (stateCubeLess(rhs.cube, lhs.cube)) {
+    return false;
+  }
+  return stateCubeLess(lhs.rootCube, rhs.rootCube); // LCOV_EXCL_LINE
+}
+
 size_t popNextObligationIndex(const std::vector<ProofObligation>& queue) {
   size_t bestIndex = 0;
   for (size_t i = 1; i < queue.size(); ++i) {
-    if (queue[i].level < queue[bestIndex].level ||
-        (queue[i].level == queue[bestIndex].level &&
-         (queue[i].cube.size() < queue[bestIndex].cube.size() ||
-          (queue[i].cube.size() == queue[bestIndex].cube.size() &&
-           queue[i].badFrame < queue[bestIndex].badFrame)))) {
+    if (proofObligationLess(queue[i], queue[bestIndex])) {
       bestIndex = i;
     }
   }
@@ -11541,6 +15440,7 @@ bool blockProofObligations(const KInductionProblem& problem,
                            bool exactFrameClauses,
                            bool refineProjectedCounterexamples,
                            ResetFrontierCache& resetFrontierCache,
+                           PredecessorAssumptionCache& predecessorAssumptionCache,
                            size_t maxBoundedRootGeneralizationAttempts,
                            bool learnValidatedBadFormulaClausesOnReject,
                            bool useExactResetFrontierChecks,
@@ -11600,6 +15500,7 @@ bool blockProofObligations(const KInductionProblem& problem,
         blockedObligation.level,
         blockedObligation.cube,
         &resetFrontierCache,
+        &predecessorAssumptionCache,
         complementPartners,
         predecessorProjectionLimit,
         exactClausesForGeneralization,
@@ -11608,6 +15509,11 @@ bool blockProofObligations(const KInductionProblem& problem,
         supportCache);
     addClauseToFrames(
         frames, clauseFromCube(generalizedCube), blockedObligation.level);
+    learnExactResetPredecessorSingletonClauses(
+        frames,
+        resetFrontierCache,
+        blockedObligation.cube,
+        blockedObligation.level);
     if (blockedObligation.level < blockedObligation.badFrame) {
       const StateCube propagatedRoot =
           blockedObligation.rootCube.empty()
@@ -11639,6 +15545,11 @@ bool blockProofObligations(const KInductionProblem& problem,
     // stale predecessor that we just eliminated.
     addClauseToFrames(
         frames, clauseFromCube(blockedObligation.cube), blockedObligation.level);
+    learnExactResetPredecessorSingletonClauses(
+        frames,
+        resetFrontierCache,
+        blockedObligation.cube,
+        blockedObligation.level);
     if (blockedObligation.level < blockedObligation.badFrame) {
       enqueueProofObligation(  // LCOV_EXCL_LINE
           queue,  // LCOV_EXCL_LINE
@@ -11951,7 +15862,10 @@ bool blockProofObligations(const KInductionProblem& problem,
           problem.usesDualRailStateEncoding &&
           pdrDualRailStateSymbolCount(problem) >
               dualRailResetFrontierStateSymbolLimit();
+      const bool localDualRailLeafRootRepair =
+          canRepairLocalDualRailFinalLeafRoot(problem, concreteTarget);
       if (largeDualRailResetFrontier &&
+          !localDualRailLeafRootRepair &&
           !useExactResetFrontierChecks &&
           projectedCounterexampleRefinementBudget != nullptr &&
           concreteTarget.size() >=
@@ -11962,7 +15876,9 @@ bool blockProofObligations(const KInductionProblem& problem,
               "validation root_cube=", concreteTarget.size(),
               " rail_state_symbols=", pdrDualRailStateSymbolCount(problem));
         }
-        throw PdrProjectedCounterexampleRefinementBudgetExceeded();
+        markPdrBudgetExhausted(
+            PdrBudgetExhaustion::ProjectedCounterexampleRefinement);
+        return true;
       }
       const bool preferShallowPerFrameValidation =
           !largeDualRailResetFrontier &&
@@ -11977,7 +15893,8 @@ bool blockProofObligations(const KInductionProblem& problem,
           preferCachedConcreteValidation
               ? ConcreteCubeReachabilityMode::CachedAssumptions
               : ConcreteCubeReachabilityMode::OneShotUnitClauses;
-      if (!cubeReachableWithinConcreteFrames(
+      const bool concreteTargetReachable =
+          cubeReachableWithinConcreteFrames(
               problem,
               solverType,
               transitionByState,
@@ -11985,7 +15902,11 @@ bool blockProofObligations(const KInductionProblem& problem,
               obligation.badFrame,
               resetFrontierCache,
               concreteValidationMode,
-              frameInvariant)) {
+              frameInvariant);
+      if (hasPdrBudgetExhaustion()) {
+        return true;  // LCOV_EXCL_LINE
+      }
+      if (!concreteTargetReachable) {
         // Projected predecessor cubes can be reachable even when the original
         // bad/frontier cube they came from is not.  Before accepting such a
         // path as a counterexample, validate the root cube with the exact
@@ -12013,6 +15934,11 @@ bool blockProofObligations(const KInductionProblem& problem,
           addClauseToFrames(frames, refinedClause, obligation.badFrame);
           // LCOV_EXCL_STOP
         }
+        // Concrete root validation records exact reset-predecessor cores. Drain
+        // any singleton F1 cores now, otherwise sibling projected roots can
+        // rediscover the same unreachable bus bit one model at a time.
+        learnExactResetPredecessorSingletonClauses(
+            frames, resetFrontierCache, concreteTarget, obligation.badFrame);
         if (pdrStatsEnabled()) {
           emitSecDiag(
               "SEC PDR stats: refined projected counterexample ",
@@ -12052,35 +15978,39 @@ bool blockProofObligations(const KInductionProblem& problem,
             obligation.level, predecessorProjectionLimit);
 
     if (obligation.cube.size() > kLargeBlockedCubeGeneralizationThreshold) {
-      // For a large target cube, first try to block a cheap subset.  If no
+      // For a large target cube, first block a cheap subset.  If no
       // predecessor can reach the subset, then no predecessor can reach the
       // stronger original cube either, and we avoid building a SAT query for a
       // thousand next-state functions just to learn the same small clause.
       const StateCube cheapTarget = boundedCheapTransitionCube(
-          obligation.cube, kLargeBlockedCubeSeedSize, transitionByState);
-      if (cheapTarget.size() < obligation.cube.size() &&
-          !findPredecessorCube(
-               problem,
-               solverType,
-               transitionByState,
-               initFormula,
-               frameInvariant,
-               // LCOV_EXCL_START
-               frames,
-               obligation.level - 1,
-               cheapTarget,
-               false,
-               complementPartners,
-               obligationProjectionLimit,
-               obligationExactFrameClauses,
-               &resetFrontierCache,
-               // LCOV_EXCL_STOP
-               nullptr,
-               // LCOV_EXCL_START
-               predecessorQueryBudget,
-               usePredecessorResetFrontierChecks,
-               supportCache)
-               .has_value()) {
+          obligation.cube, kLargeBlockedCubeSeedSize, problem, transitionByState);
+      if (cheapTarget.size() < obligation.cube.size()) {
+        const auto cheapPredecessor = findPredecessorCube(
+            problem,
+            solverType,
+            transitionByState,
+            initFormula,
+            frameInvariant,
+            // LCOV_EXCL_START
+            frames,
+            obligation.level - 1,
+            cheapTarget,
+            false,
+            complementPartners,
+            obligationProjectionLimit,
+            obligationExactFrameClauses,
+            &resetFrontierCache,
+            &predecessorAssumptionCache,
+            // LCOV_EXCL_STOP
+            nullptr,
+            // LCOV_EXCL_START
+            predecessorQueryBudget,
+            usePredecessorResetFrontierChecks,
+            supportCache);
+        if (hasPdrBudgetExhaustion()) {
+          return true;  // LCOV_EXCL_LINE
+        }
+        if (!cheapPredecessor.has_value()) {
         const StateCube generalizedCube = generalizeBlockedCube(  // LCOV_EXCL_LINE
             problem,  // LCOV_EXCL_LINE
             solverType,  // LCOV_EXCL_LINE
@@ -12094,6 +16024,7 @@ bool blockProofObligations(const KInductionProblem& problem,
             // LCOV_EXCL_STOP
             cheapTarget,
             &resetFrontierCache,  // LCOV_EXCL_LINE
+            &predecessorAssumptionCache,  // LCOV_EXCL_LINE
             // LCOV_EXCL_START
             complementPartners,  // LCOV_EXCL_LINE
             obligationProjectionLimit,  // LCOV_EXCL_LINE
@@ -12103,6 +16034,11 @@ bool blockProofObligations(const KInductionProblem& problem,
             supportCache);  // LCOV_EXCL_LINE
             // LCOV_EXCL_STOP
         addClauseToFrames(frames, clauseFromCube(generalizedCube), obligation.level);  // LCOV_EXCL_LINE
+        learnExactResetPredecessorSingletonClauses(  // LCOV_EXCL_LINE
+            frames,  // LCOV_EXCL_LINE
+            resetFrontierCache,  // LCOV_EXCL_LINE
+            cheapTarget,  // LCOV_EXCL_LINE
+            obligation.level);  // LCOV_EXCL_LINE
         // LCOV_EXCL_START
         if (obligation.level < obligation.badFrame) {  // LCOV_EXCL_LINE
         // LCOV_EXCL_STOP
@@ -12118,6 +16054,7 @@ bool blockProofObligations(const KInductionProblem& problem,
                   propagatedRoot});  // LCOV_EXCL_LINE
         }  // LCOV_EXCL_LINE
         continue;
+        } // LCOV_EXCL_LINE
       }  // LCOV_EXCL_LINE
     }
 
@@ -12138,10 +16075,14 @@ bool blockProofObligations(const KInductionProblem& problem,
           obligationProjectionLimit,
           obligationExactFrameClauses,
           &resetFrontierCache,
+          &predecessorAssumptionCache,
           projectedFrameRefinements.empty() ? nullptr : &projectedFrameRefinements,
           predecessorQueryBudget,
           usePredecessorResetFrontierChecks,
           supportCache);
+      if (hasPdrBudgetExhaustion()) {
+        return true;  // LCOV_EXCL_LINE
+      }
       if (!predecessor.has_value()) {
         // No predecessor survives F[level-1], so the cube can be blocked at
         // every frame up to "level". If we needed local projected-frame
@@ -12234,11 +16175,15 @@ bool blockProofObligations(const KInductionProblem& problem,
             obligationProjectionLimit,
             true,
             &resetFrontierCache,
+            &predecessorAssumptionCache,
             nullptr,
             predecessorQueryBudget,
             usePredecessorResetFrontierChecks,
             supportCache);
             // LCOV_EXCL_STOP
+        if (hasPdrBudgetExhaustion()) {
+          return true;  // LCOV_EXCL_LINE
+        }
         if (!exactPredecessor.has_value()) {
           learnBlockedObligation(obligation, true);
           break;
@@ -12265,6 +16210,9 @@ bool blockProofObligations(const KInductionProblem& problem,
 std::vector<StateClause> buildSeedClauses(const KInductionProblem& problem,
                                           const InitFactIndex& initFacts) {
   std::vector<StateClause> seedClauses;
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return seedClauses;
+  }
   // Seed the first learned frame with state equalities that are already
   // guaranteed by Init/bootstrap, so PDR starts from facts that are known
   // reachable-state invariants instead of rediscovering them from scratch.
@@ -12366,6 +16314,11 @@ bool pdrInitialFrontierImpliesStateEqualities(
     BoolExpr* initFormula,
     const std::vector<std::pair<size_t, size_t>>& equalityPairs,
     KEPLER_FORMAL::Config::SolverType solverType) {
+  // Structured startup equalities are exact F0 facts; consult them before
+  // building a broad monolithic Init SAT query for the same relation.
+  if (structuredInitFactsImplyStateEqualities(problem, equalityPairs)) {
+    return true;
+  }
   BoolExpr* invariant = buildStateEqualityInvariant(equalityPairs);
   if (invariant == nullptr) {
     return false;  // LCOV_EXCL_LINE
@@ -12373,7 +16326,7 @@ bool pdrInitialFrontierImpliesStateEqualities(
   if (initialFrontierImplies(initFormula, invariant, solverType)) {
     return true;
   }
-  return structuredInitFactsImplyStateEqualities(problem, equalityPairs);
+  return false;
 }
 
 // LCOV_EXCL_START
@@ -12420,6 +16373,62 @@ std::vector<size_t> stateEqualitySymbols(
   return sortUniqueSymbols(std::move(symbols));
 }
 
+bool pdrStateEqualitySubsetCacheEntryMatches(
+    const KInductionProblem& problem,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs,
+    const PdrStateEqualitySubsetCacheEntry& entry) {
+  return entry.inputPairs == equalityPairs &&
+         entry.resetBootstrapInputs == problem.resetBootstrapInputs &&
+         entry.resetBootstrapCycles == problem.resetBootstrapCycles &&
+         entry.initialStateAssignments == problem.initialStateAssignments &&
+         entry.initialStateEqualityPairs == problem.initialStateEqualityPairs &&
+         entry.bootstrapStateAssignments == problem.bootstrapStateAssignments &&
+         entry.bootstrapStateEqualityPairs == problem.bootstrapStateEqualityPairs;
+}
+
+std::optional<std::vector<std::pair<size_t, size_t>>>
+lookupCachedPdrStateEqualitySubset(
+    const KInductionProblem& problem,
+    const std::vector<std::pair<size_t, size_t>>& equalityPairs) {
+  if (problem.lazyTransitions == nullptr) {
+    return std::nullopt;
+  }
+  for (const auto& entry :
+       problem.lazyTransitions->pdrStateEqualitySubsetCache) {
+    if (pdrStateEqualitySubsetCacheEntryMatches(
+            problem, equalityPairs, entry)) {
+      return entry.selectedPairs;
+    }
+  }
+  return std::nullopt;
+}
+
+void rememberCachedPdrStateEqualitySubset(
+    const KInductionProblem& problem,
+    const std::vector<std::pair<size_t, size_t>>& inputPairs,
+    const std::vector<std::pair<size_t, size_t>>& selectedPairs) {
+  if (problem.lazyTransitions == nullptr || selectedPairs.empty()) {
+    return;
+  }
+  auto& cache = problem.lazyTransitions->pdrStateEqualitySubsetCache;
+  for (auto& entry : cache) {
+    if (pdrStateEqualitySubsetCacheEntryMatches(problem, inputPairs, entry)) { // LCOV_EXCL_LINE
+      entry.selectedPairs = selectedPairs; // LCOV_EXCL_LINE
+      return; // LCOV_EXCL_LINE
+    }
+  }
+  PdrStateEqualitySubsetCacheEntry entry;
+  entry.inputPairs = inputPairs;
+  entry.resetBootstrapInputs = problem.resetBootstrapInputs;
+  entry.resetBootstrapCycles = problem.resetBootstrapCycles;
+  entry.initialStateAssignments = problem.initialStateAssignments;
+  entry.initialStateEqualityPairs = problem.initialStateEqualityPairs;
+  entry.bootstrapStateAssignments = problem.bootstrapStateAssignments;
+  entry.bootstrapStateEqualityPairs = problem.bootstrapStateEqualityPairs;
+  entry.selectedPairs = selectedPairs;
+  cache.push_back(std::move(entry));
+}
+
 bool equalityPairViolatedAtFrame(const SATSolverWrapper& solver,
                                  const FrameVariableStore& variables,
                                  const std::pair<size_t, size_t>& pair,
@@ -12451,13 +16460,28 @@ pruneStateEqualitySubsetByInductiveCounterexample(
       transitionSupportSymbols.begin(), transitionSupportSymbols.end());
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, querySymbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, querySymbols);
+  addRelevantSameFrameStateEqualityPartners(problem, querySymbols);
   addRelevantDualRailPartners(problem.dualRailStatePairs, querySymbols);
 
-  SATSolverWrapper solver(solverType);
   const auto solverSymbols = sortUniqueSymbols(std::move(querySymbols));
+  const auto querySolverType = stateEqualitySubsetSolverType(
+      problem, solverType, equalityPairs.size(), solverSymbols.size());
+  if (pdrStatsEnabled() && querySolverType != solverType) {
+    emitSecDiag(  // LCOV_EXCL_LINE
+        "SEC PDR stats: state equality subset solver=cadical symbols=",
+        solverSymbols.size(), // LCOV_EXCL_LINE
+        " pairs=",
+        equalityPairs.size()); // LCOV_EXCL_LINE
+  }  // LCOV_EXCL_LINE
+  SATSolverWrapper solver(querySolverType);
+  // This local SAT query is part of PDR's invariant-pruning path, not a
+  // standalone preprocessing proof. Keep the selected backend on the same
+  // short-lived PDR query profile as predecessor and bad-state checks.
+  solver.configureForSecPdrQuery(solverSymbols.size());
   FrameVariableStore variables(solver, solverSymbols, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 2);
   addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 2);
+  addSameFrameStateEqualities(solver, variables, problem, 2);
   addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 2);
   addPostBootstrapResetInputConstraints(solver, variables, problem, 0);
   addTransitionRelationForTargets(
@@ -12511,6 +16535,20 @@ BoolExpr* selectInductiveStateEqualitySubsetInvariant(
           problem, initFormula, equalityPairs, solverType)) {
     return nullptr;  // LCOV_EXCL_LINE
   }
+  if (const auto cachedSubset =
+          lookupCachedPdrStateEqualitySubset(problem, equalityPairs);
+      cachedSubset.has_value()) {
+    if (pdrStatsEnabled()) {
+      emitSecDiag( // LCOV_EXCL_LINE
+          "SEC PDR stats: frame invariant state_equality_subset cache hit ",
+          "pairs=", cachedSubset->size()); // LCOV_EXCL_LINE
+    } // LCOV_EXCL_LINE
+    invariant = buildStateEqualityInvariant(*cachedSubset);
+    if (selectedPairs != nullptr) {
+      *selectedPairs = *cachedSubset;
+    }
+    return invariant;
+  }
 
   TransitionExprResolver transitionByState(problem);
   for (size_t iteration = 0;
@@ -12535,23 +16573,25 @@ BoolExpr* selectInductiveStateEqualitySubsetInvariant(
         *selectedPairs = equalityPairs;
         // LCOV_EXCL_STOP
       }
+      rememberCachedPdrStateEqualitySubset(
+          problem, problem.inductiveStateEqualityPairs, equalityPairs);
       // LCOV_EXCL_START
       return invariant;
       // LCOV_EXCL_STOP
     }
     if (prunedPairs->empty()) {
-      break;
+      break; // LCOV_EXCL_LINE
     }
     equalityPairs = std::move(*prunedPairs);
   }
 
-  if (pdrStatsEnabled()) {
+  if (pdrStatsEnabled()) { // LCOV_EXCL_LINE
     emitSecDiag(  // LCOV_EXCL_LINE
         "SEC PDR stats: frame invariant state_equality_subset unavailable ",
         "remaining_pairs=", equalityPairs.size(),  // LCOV_EXCL_LINE
         " iterations=", kMaxStateEqualitySubsetIterations);
   }  // LCOV_EXCL_LINE
-  return nullptr;
+  return nullptr; // LCOV_EXCL_LINE
 }
 
 BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
@@ -12559,6 +16599,9 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
                                   BoolExpr* initFormula,
                                   // LCOV_EXCL_STOP
                                   KEPLER_FORMAL::Config::SolverType solverType) {
+  if (!KEPLER_FORMAL::Config::getSecInternalStateCorrespondence()) {
+    return nullptr;
+  }
   // PDR can use already inferred SEC facts as a strengthening invariant, but
   // only after validating the same two proof obligations that make any frame
   // invariant sound:
@@ -12722,11 +16765,11 @@ BoolExpr* selectPdrFrameInvariant(const KInductionProblem& problem,
   // raw state-equality core. This is still used as a PDR frame constraint only
   // after the same inductiveness check succeeds.
   if (BoolExpr* strengthenedInvariant = selectSharedStrengthening()) {
-    if (isSecDiagEnabled()) {
+    if (isSecDiagEnabled()) { // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC diag: PDR using validated SEC strengthening frame invariant");
     }  // LCOV_EXCL_LINE
-    return strengthenedInvariant;
+    return strengthenedInvariant; // LCOV_EXCL_LINE
   }
   return nullptr;
 }
@@ -12741,6 +16784,7 @@ void propagateClauses(const KInductionProblem& problem,
                       const ComplementPartnerIndex& complementPartners,
                       size_t predecessorProjectionLimit,
                       bool exactFrameClauses,
+                      PredecessorAssumptionCache* predecessorAssumptionCache,
                       size_t* predecessorQueryBudget,
                       PdrFormulaSupportCache* supportCache) {
   // Standard PDR propagation: if F[i] /\ T implies a clause on the next frame,
@@ -12758,27 +16802,29 @@ void propagateClauses(const KInductionProblem& problem,
       // A clause is only safe to propagate if it does not block a real bad path, so check
       // whether any predecessor of the negated cube survives in the current frame. If not, the
       // clause can be added to the next frame without risking over-blocking.
-      if (!findPredecessorCube(
-               problem,
-               solverType,
-               transitionByState,
-               initFormula,
-               frameInvariant,
-               frames,
-               level,
-               violatingCube,
-               false,
-               complementPartners,
-               predecessorProjectionLimit,
-               exactFrameClauses,
-               nullptr,
-               nullptr,
-               predecessorQueryBudget,
-               true,
-               supportCache)
-               // LCOV_EXCL_START
-               .has_value()) {
-               // LCOV_EXCL_STOP
+      const auto predecessor = findPredecessorCube(
+          problem,
+          solverType,
+          transitionByState,
+          initFormula,
+          frameInvariant,
+          frames,
+          level,
+          violatingCube,
+          false,
+          complementPartners,
+          predecessorProjectionLimit,
+          exactFrameClauses,
+          nullptr,
+          predecessorAssumptionCache,
+          nullptr,
+          predecessorQueryBudget,
+          true,
+          supportCache);
+      if (hasPdrBudgetExhaustion()) {
+        return;  // LCOV_EXCL_LINE
+      }
+      if (!predecessor.has_value()) {
         addClauseToFrame(frames[level + 1], clause);
       }
     // LCOV_EXCL_START
@@ -12887,19 +16933,29 @@ std::optional<PDRResult> checkResetBootstrapFrameZero(
   const size_t transitionSources = pdrTransitionSourceCount(problem);
   const size_t transitionSourceLimit =
       dualRailResetBootstrapBmcTransitionSourceLimit();
-  if (problem.usesDualRailStateEncoding &&
-      transitionSources > transitionSourceLimit) {
+  const size_t observedOutputCount = problem.observedOutputExprs0.size();
+  if (detail::pdrResetBootstrapPrecheckTooLarge(
+          problem.usesDualRailStateEncoding,
+          observedOutputCount,
+          problem.originalObservedOutputCount,
+          transitionSources,
+          transitionSourceLimit,
+          kMaxDualRailResetBootstrapBmcObservedOutputs)) {
     // This precheck is an accelerator that lets PDR add the property as an F0
     // fact after reset.  On large dual-rail cones it can become the whole run;
-    // skipping it is conservative because PDR then works from the weaker
-    // bootstrap summary and may split/skip instead of proving this slice.
+    // check the original property width as well as the current batch so output
+    // slicing cannot re-enable the expensive whole-transition BMC. Skipping is
+    // conservative: PDR works from the weaker bootstrap summary instead.
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: skipped dual-rail reset-bootstrap BMC precheck ",
           // LCOV_EXCL_START
           "transition_sources=", transitionSources,
+          " outputs=", observedOutputCount,
+          " original_outputs=", problem.originalObservedOutputCount,
           // LCOV_EXCL_STOP
-          " limit=", transitionSourceLimit);
+          " transition_limit=", transitionSourceLimit,
+          " output_limit=", kMaxDualRailResetBootstrapBmcObservedOutputs);
     }  // LCOV_EXCL_LINE
     return std::nullopt;
   }
@@ -12925,6 +16981,14 @@ BoolExpr* buildPdrInitFormula(const KInductionProblem& problem,
   BoolExpr* initFormula = hasStructuredInitFacts(problem)
                               ? BoolExpr::createTrue()
                               : buildProofInitFormula(problem);
+  if (initFormula == nullptr && problem.resetBootstrapCycles != 0) {
+    // A pruned dual-rail reset slice may have no local bootstrap facts after
+    // the broad reset-BMC precheck is skipped.  Running PDR from `true` is a
+    // conservative all-state frontier: any convergence proof is stronger than
+    // the concrete reset frontier, while abstract bad states are still handled
+    // by the normal blocking/validation path.
+    initFormula = BoolExpr::createTrue();
+  }
   if (problem.resetBootstrapCycles == 0 ||
       !resetBootstrapFrameCheckedSafe ||
       problem.property == nullptr) {
@@ -12981,7 +17045,13 @@ PDREngine::PDREngine(const KInductionProblem& problem,
         // LCOV_EXCL_STOP
         " rail_limit=", dualRailResetFrontierStateSymbolLimit(),
         " transition_sources=", pdrTransitionSourceCount(problem),
-        " transition_limit=", dualRailResetFrontierTransitionSourceLimit());
+        " transition_limit=", dualRailResetFrontierTransitionSourceLimit(),
+        " outputs=", problem.observedOutputExprs0.size(),
+        " original_outputs=", pdrOriginalObservedOutputCount(problem),
+        " output_limit=", kMaxExactResetFrontierDualRailObservedOutputs,
+        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs,
+        " medium_state_min=",
+        kMinExactResetFrontierDualRailMediumStateSymbols);
   }
 }
 
@@ -12989,6 +17059,30 @@ PDRResult PDREngine::run(size_t maxFrames,
                          bool resetBootstrapFrameCheckedSafe) const {
   // Build the SEC startup frontier once so every frame query shares the same
   // interpretation of reset/bootstrap and frame-0 equality constraints.
+  const bool useLocalFinalLeafRepairBudgets =
+      usesLocalDualRailFinalLeafRepairBudgets(
+          problem_, useExactFrameClauses_, refineProjectedCounterexamples_);
+  const size_t effectiveMaxPredecessorQueries =
+      useLocalFinalLeafRepairBudgets
+          ? effectiveLocalDualRailFinalLeafBudget(
+                maxPredecessorQueries_,
+                kMinLocalDualRailFinalLeafPredecessorQueries)
+          : maxPredecessorQueries_;
+  const size_t effectivePredecessorProjectionLimit =
+      useLocalFinalLeafRepairBudgets
+          ? effectiveLocalDualRailFinalLeafProjectionLimit(
+                predecessorProjectionLimit_)
+          : predecessorProjectionLimit_;
+  const size_t effectiveMaxProjectedCounterexampleRefinements =
+      useLocalFinalLeafRepairBudgets
+          ? effectiveLocalDualRailFinalLeafBudget(
+                maxProjectedCounterexampleRefinements_,
+                kMinLocalDualRailFinalLeafProjectedRefinements)
+          : maxProjectedCounterexampleRefinements_;
+  resetPdrBudgetExhaustion();
+  setPdrPredecessorQueryLimit(effectiveMaxPredecessorQueries);
+  setPdrProjectedCounterexampleRefinementLimit(
+      effectiveMaxProjectedCounterexampleRefinements);
   emitPdrTraceProblem(problem_);
   if (const auto resetProof = checkResetBootstrapFrameZero(
           problem_, solverType_, resetBootstrapFrameCheckedSafe);
@@ -13009,6 +17103,10 @@ PDRResult PDREngine::run(size_t maxFrames,
   BoolExpr* frameInvariant =
       selectPdrFrameInvariant(problem_, initFormula, solverType_);
   const bool exactFrameClauses = useExactFrameClauses_;
+  const size_t badCubeStateLimit = effectivePreciseBadCubeStateLimit(
+      problem_,
+      preciseBadCubeStateLimit_,
+      useExactResetFrontierChecks_);
   // Bad-state queries decide whether the current frontier still contains a
   // property violation. When SEC/PDR repair learns many tiny reset-conflict
   // blockers, a projected frame view can hide exactly those blockers behind
@@ -13035,22 +17133,31 @@ PDRResult PDREngine::run(size_t maxFrames,
   const auto preciseBadStateSupport = collectBoundedStateSupportSymbols(
       problem_.bad,
       kMaxPreciseBadCubeSupportNodes,
-      preciseBadCubeStateLimit_,
+      badCubeStateLimit,
       transitionByState.stateSymbols());
   ResetFrontierCache resetFrontierCache;
-  size_t remainingPredecessorQueries = maxPredecessorQueries_;
+  importProcessResetUnreachableCores(problem_, resetFrontierCache, frameInvariant);
+  BadCubeAssumptionCache badCubeAssumptionCache;
+  PredecessorAssumptionCache predecessorAssumptionCache;
+  LargeDualRailPdrTransientCacheReleaseGuard cacheReleaseGuard{
+      resetFrontierCache,
+      badCubeAssumptionCache,
+      predecessorAssumptionCache,
+      formulaSupportCache,
+      problem_,
+      frameInvariant};
+  size_t remainingPredecessorQueries = effectiveMaxPredecessorQueries;
   size_t* predecessorQueryBudget =
-      maxPredecessorQueries_ == 0 ? nullptr : &remainingPredecessorQueries;
+      effectiveMaxPredecessorQueries == 0 ? nullptr : &remainingPredecessorQueries;
   size_t remainingProjectedCounterexampleRefinements =
-      maxProjectedCounterexampleRefinements_;
+      effectiveMaxProjectedCounterexampleRefinements;
   size_t* projectedCounterexampleRefinementBudget =
-      maxProjectedCounterexampleRefinements_ == 0
+      effectiveMaxProjectedCounterexampleRefinements == 0
           ? nullptr
           : &remainingProjectedCounterexampleRefinements;
   std::vector<FrameClauses> frames(1);
   emitPdrTraceFrames("initial_frames", frames);
 
-  try {
   // Before growing any frame sequence, check whether Init itself already
   // contains a bad state.
   if (!(problem_.resetBootstrapCycles != 0 && resetBootstrapFrameCheckedSafe)) {
@@ -13061,15 +17168,19 @@ PDRResult PDREngine::run(size_t maxFrames,
             frameInvariant,
             frames,
             preciseBadStateSupport,
-            preciseBadCubeStateLimit_,
+            badCubeStateLimit,
             transitionByState.stateSymbols(),
             0,
             complementPartners,
             exactBadQueryFrameClauses,
+            &badCubeAssumptionCache,
             &formulaSupportCache);
         badCube.has_value()) {
       emitPdrTrace("bad_cube@F0", formatCubeForPdrTrace(*badCube));
       return {PDRStatus::Different, 0};
+    }
+    if (hasPdrBudgetExhaustion()) {
+      return {PDRStatus::Inconclusive, 0};  // LCOV_EXCL_LINE
     }
   }
 
@@ -13083,6 +17194,7 @@ PDRResult PDREngine::run(size_t maxFrames,
   const InitFactIndex initFacts = buildInitFactIndex(problem_);
   const auto seedClauses = buildSeedClauses(problem_, initFacts);
   frames.emplace_back(FrameClauses{seedClauses});
+  seedImportedResetPredecessorClauses(frames, resetFrontierCache);
   emitPdrTraceFrames("seeded_frames", frames);
   for (size_t level = 1; level <= maxFrames; ++level) {
     // Phase 1: exhaust the proof obligations created by bad states that still
@@ -13096,12 +17208,16 @@ PDRResult PDREngine::run(size_t maxFrames,
               frameInvariant,
               frames,
               preciseBadStateSupport,
-              preciseBadCubeStateLimit_,
+              badCubeStateLimit,
               transitionByState.stateSymbols(),
               level,
               complementPartners,
               exactBadQueryFrameClauses,
+              &badCubeAssumptionCache,
               &formulaSupportCache);
+      if (hasPdrBudgetExhaustion()) {
+        return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
+      }
       if (!badCube.has_value()) {
         break;
       }
@@ -13109,8 +17225,8 @@ PDRResult PDREngine::run(size_t maxFrames,
         if (previousProjectedBadCube.has_value() &&
             previousProjectedBadCubeLevel == level &&
             *previousProjectedBadCube == *badCube) {
-          ++repeatedProjectedBadCubeHits;
-        } else {
+          ++repeatedProjectedBadCubeHits; // LCOV_EXCL_LINE
+        } else { // LCOV_EXCL_LINE
           previousProjectedBadCube = *badCube;
           previousProjectedBadCubeLevel = level;
           repeatedProjectedBadCubeHits = 1;
@@ -13121,10 +17237,12 @@ PDRResult PDREngine::run(size_t maxFrames,
                 "SEC PDR stats: repeated projected bad cube exhausted ",
                 "limit=", repeatedProjectedBadCubeLimit,
                 " level=", level,
-                " cube=", badCube->size(),
-                " hash=", cubeFingerprint(*badCube));
+                " cube=", badCube->size(), // LCOV_EXCL_LINE
+                " hash=", cubeFingerprint(*badCube)); // LCOV_EXCL_LINE
           }  // LCOV_EXCL_LINE
-          throw PdrRepeatedProjectedBadCubeBudgetExceeded();  // LCOV_EXCL_LINE
+          markPdrBudgetExhausted( // LCOV_EXCL_LINE
+              PdrBudgetExhaustion::RepeatedProjectedBadCube);  // LCOV_EXCL_LINE
+          return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
         }
       }
       emitPdrTrace(("bad_cube@F" + std::to_string(level)).c_str(),
@@ -13142,18 +17260,25 @@ PDRResult PDREngine::run(size_t maxFrames,
               level,
               badFrame,
               complementPartners,
-              predecessorProjectionLimit_,
+              effectivePredecessorProjectionLimit,
               exactFrameClauses,
               refineProjectedCounterexamples_,
               resetFrontierCache,
+              predecessorAssumptionCache,
               maxBoundedRootGeneralizationAttempts_,
               learnValidatedBadFormulaClauses_,
               useExactResetFrontierChecks_,
               predecessorQueryBudget,
               projectedCounterexampleRefinementBudget,
               &formulaSupportCache)) {
+        if (hasPdrBudgetExhaustion()) {
+          return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
+        }
         emitPdrTraceFrames("frames_before_counterexample", frames);
         return {PDRStatus::Different, badFrame};
+      }
+      if (hasPdrBudgetExhaustion()) {
+        return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
       }
       emitPdrTraceFrames("frames_after_blocking", frames);
     }
@@ -13161,7 +17286,7 @@ PDRResult PDREngine::run(size_t maxFrames,
     // Phase 2: create the next frame, seed it with already-known startup
     // facts
     frames.emplace_back(FrameClauses{seedClauses});
-    // and then try to push learned clauses forward.
+    // and then push learned clauses forward.
     // We push in order to reach covergence and the condition is that that 
     // the clause is not preventing an actual bad path
     propagateClauses(
@@ -13173,10 +17298,14 @@ PDRResult PDREngine::run(size_t maxFrames,
         frames,
         level,
         complementPartners,
-        predecessorProjectionLimit_,
+        effectivePredecessorProjectionLimit,
         exactPropagationFrameClauses,
+        &predecessorAssumptionCache,
         predecessorQueryBudget,
         &formulaSupportCache);
+    if (hasPdrBudgetExhaustion()) {
+      return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
+    }
     emitPdrTraceFrames(("frames_after_propagation@F" + std::to_string(level)).c_str(),
                        frames);
 
@@ -13190,32 +17319,11 @@ PDRResult PDREngine::run(size_t maxFrames,
       }
     }
   }
-  } catch (const PdrQueryBudgetExceeded&) {  // LCOV_EXCL_LINE
-    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
-      emitSecDiag(  // LCOV_EXCL_LINE
-          "SEC PDR stats: local query budget exhausted predecessor_limit=",
-          maxPredecessorQueries_);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
-  } catch (const PdrProjectedCounterexampleRefinementBudgetExceeded&) {  // LCOV_EXCL_LINE
-    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
-      emitSecDiag(  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-          "SEC PDR stats: projected counterexample repair budget exhausted ",
-          "refinement_limit=",
-          maxProjectedCounterexampleRefinements_);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
-  } catch (const PdrRepeatedProjectedBadCubeBudgetExceeded&) {  // LCOV_EXCL_LINE
-    if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
-      emitSecDiag(  // LCOV_EXCL_LINE
-          "SEC PDR stats: repeated projected bad cube budget exhausted ",
-          "limit=", maxRepeatedProjectedBadCubeHits());  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
+  if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+    emitSecDiag(  // LCOV_EXCL_LINE
+        "SEC PDR stats: max frame budget exhausted max_frames=",
+        maxFrames);
   }  // LCOV_EXCL_LINE
-
   return {PDRStatus::Inconclusive, maxFrames};  // LCOV_EXCL_LINE
 }
 

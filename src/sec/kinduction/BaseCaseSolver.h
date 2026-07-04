@@ -70,6 +70,30 @@ findBaseCounterexampleAtFrontier(
     KEPLER_FORMAL::Config::SolverType solverType,
     size_t k);
 
+struct ImcBaseCounterexampleCache;
+using KInductionBaseCounterexampleCache = ImcBaseCounterexampleCache;
+
+// KI/IMC-only newest-frontier query cache.  PDR keeps using the ordinary exact
+// validation entry points above; this cache stores immutable COI indexes only
+// for engines that sweep the same output slice across increasing depths.
+std::shared_ptr<ImcBaseCounterexampleCache> makeImcBaseCounterexampleCache(
+    const KInductionProblem& problem);
+
+std::optional<KInductionResult::CounterexampleWitness>
+findImcBaseCounterexampleAtFrontier(
+    const ImcBaseCounterexampleCache& cache,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k);
+
+std::shared_ptr<KInductionBaseCounterexampleCache>
+makeKInductionBaseCounterexampleCache(const KInductionProblem& problem);
+
+std::optional<KInductionResult::CounterexampleWitness>
+findKInductionBaseCounterexampleAtFrontier(
+    const KInductionBaseCounterexampleCache& cache,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    size_t k);
+
 // Counterexample-search variant of the newest-frontier base query.  It keeps
 // the same exact bounded-prefix semantics and witness reconstruction, but uses
 // the fast SAT-validation solver profile instead of the UNSAT/proof-oriented

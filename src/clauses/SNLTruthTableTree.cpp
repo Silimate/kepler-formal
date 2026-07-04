@@ -685,6 +685,24 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
       newNodeSp->parentIds.emplace_back(parentId);
       parentSp->childrenIds[leaf.childPos] = newNodeSp->nodeID;
       if (newNodeSp->childrenIds.size() == 0) {
+        if (newNodeSp->getTruthTable().size() == 0) {
+          // Reusing a zero-input table means this frontier leaf collapsed to a
+          // constant already present in the tree.  Remove the old external leaf
+          // edge so LogicCloud's frontier count stays tied to real inputs.
+          auto oldChildSp = nodeFromId(oldChildId).get();
+          if (!oldChildSp) {
+            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
+            throw std::logic_error("concat: null old child");
+            // LCOV_DISABLED_STOP
+            // LCOV_EXCL_STOP
+          }
+          oldChildSp->parentIds.erase(
+              std::remove(oldChildSp->parentIds.begin(), oldChildSp->parentIds.end(),
+                          parentId),
+              oldChildSp->parentIds.end());
+          return *newNodeSp;
+        }
         // LCOV_EXCL_START
         // LCOV_DISABLED_START
         throw std::logic_error("concat: existing node has no children");
@@ -703,6 +721,26 @@ const SNLTruthTableTree::Node& SNLTruthTableTree::concatBody(
   uint32_t newNodeId = allocateNode(newNodeSp);
 
   // Connecting children, skipped if node already existed
+  if (newNodeSp->type == Node::Type::Table && arity == 0) {
+    // A zero-input table is a real constant.  Replacing a border leaf with it
+    // must remove that leaf from the external frontier instead of preserving
+    // the old input as a fake child.
+    auto oldChildSp = nodeFromId(oldChildId).get();
+    if (!oldChildSp) {
+      // LCOV_EXCL_START
+      // LCOV_DISABLED_START
+      throw std::logic_error("concat: null old child");
+      // LCOV_DISABLED_STOP
+      // LCOV_EXCL_STOP
+    }
+    oldChildSp->parentIds.erase(
+        std::remove(oldChildSp->parentIds.begin(), oldChildSp->parentIds.end(),
+                    parentId),
+        oldChildSp->parentIds.end());
+    parentSp->childrenIds[leaf.childPos] = newNodeId;
+    newNodeSp->parentIds.emplace_back(parentId);
+    return *newNodeSp;
+  }
 
   newNodeSp->childrenIds.emplace_back(oldChildId);
   auto oldChildSp = nodeFromId(oldChildId).get();
@@ -1383,7 +1421,7 @@ void SNLTruthTableTree::finalize() {
       uint32_t cid = sp->childrenIds[j];
       Node* target = nullptr;
 
-      // try match by exact nodeID
+      // Prefer matching by exact nodeID.
       auto it = mapById.find(cid);
       if (it != mapById.end()) {
         target = it->second;
@@ -1492,9 +1530,9 @@ void SNLTruthTableTree::finalize() {
   }
 
   // Recompute rootId_: if existing rootId_ was resolvable, remap it; otherwise
-  // try to keep slot 0
+  // Prefer keeping slot 0.
   if (rootId_ != kInvalidId) {
-    // try to remap previous rootId_ by matching to new canonical id via
+    // Remap previous rootId_ by matching to new canonical id via
     // mapById/mapByNodeID/slot heuristic
     uint32_t newRoot = kInvalidId;
     auto itRoot = mapById.find(rootId_);

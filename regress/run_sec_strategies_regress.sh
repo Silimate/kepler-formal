@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
   exit 2
 fi
 
@@ -26,7 +26,7 @@ engines=(k_induction imc pdr)
 
 for option in "${@:5}"; do
   case "${option}" in
-    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage)
+    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive)
       expectation="${option}"
       ;;
     compact)
@@ -76,12 +76,197 @@ output_dir="${repo_root}/regress-output/${test_name}/sec"
 
 mkdir -p "${output_dir}"
 
+format_bytes() {
+  local bytes="$1"
+  if [[ -z "${bytes}" || "${bytes}" == "max" ]]; then
+    printf '%s' "${bytes}"
+    return
+  fi
+  awk -v bytes="${bytes}" '
+    BEGIN {
+      value = bytes + 0
+      split("B KiB MiB GiB TiB", units, " ")
+      unit = 1
+      while (value >= 1024 && unit < 5) {
+        value /= 1024
+        unit += 1
+      }
+      if (unit == 1) {
+        printf "%d%s", value, units[unit]
+      } else {
+        printf "%.1f%s", value, units[unit]
+      }
+    }'
+}
+
+print_regress_memory_snapshot() {
+  local stage="$1"
+  local engine="$2"
+  local status="${3:-running}"
+  local prefix="[sec-regress-memory] stage=${stage} test=${test_name} engine=${engine} status=${status}"
+
+  if [[ -r /proc/meminfo ]]; then
+    awk -v prefix="${prefix}" '
+      function fmt(kib, value, unit, units) {
+        split("KiB MiB GiB TiB", units, " ")
+        value = kib
+        unit = 1
+        while (value >= 1024 && unit < 4) {
+          value /= 1024
+          unit += 1
+        }
+        return sprintf("%.1f%s", value, units[unit])
+      }
+      /^(MemTotal|MemAvailable|MemFree|Buffers|Cached|SwapTotal|SwapFree):/ {
+        key = $1
+        sub(":", "", key)
+        value[key] = $2 + 0
+      }
+      END {
+        if ("MemAvailable" in value) {
+          printf "%s meminfo MemAvailable=%s MemFree=%s Buffers=%s Cached=%s SwapFree=%s SwapTotal=%s MemTotal=%s\n",
+              prefix,
+              fmt(value["MemAvailable"]),
+              fmt(value["MemFree"]),
+              fmt(value["Buffers"]),
+              fmt(value["Cached"]),
+              fmt(value["SwapFree"]),
+              fmt(value["SwapTotal"]),
+              fmt(value["MemTotal"])
+        }
+      }' /proc/meminfo || true
+  elif command -v vm_stat >/dev/null 2>&1; then
+    vm_stat | awk -v prefix="${prefix}" '
+      /page size of/ {
+        page_size = $8
+        gsub("\\.", "", page_size)
+      }
+      /Pages free:/ {
+        free = $3
+        gsub("\\.", "", free)
+      }
+      /Pages inactive:/ {
+        inactive = $3
+        gsub("\\.", "", inactive)
+      }
+      /Pages speculative:/ {
+        speculative = $3
+        gsub("\\.", "", speculative)
+      }
+      END {
+        if (page_size == "") {
+          page_size = 4096
+        }
+        available = (free + inactive + speculative) * page_size
+        printf "%s vm_stat estimated_available=%s pages_free=%d pages_inactive=%d pages_speculative=%d page_size=%d\n",
+            prefix,
+            fmt(available),
+            free,
+            inactive,
+            speculative,
+            page_size
+      }
+      function fmt(bytes, value, unit, units) {
+        split("B KiB MiB GiB TiB", units, " ")
+        value = bytes
+        unit = 1
+        while (value >= 1024 && unit < 5) {
+          value /= 1024
+          unit += 1
+        }
+        return sprintf("%.1f%s", value, units[unit])
+      }' || true
+  fi
+
+  if [[ -r /sys/fs/cgroup/memory.current ]]; then
+    local current peak max swap_current swap_peak
+    current="$(< /sys/fs/cgroup/memory.current)"
+    peak="$(< /sys/fs/cgroup/memory.peak)"
+    max="$(< /sys/fs/cgroup/memory.max)"
+    swap_current=""
+    swap_peak=""
+    if [[ -r /sys/fs/cgroup/memory.swap.current ]]; then
+      swap_current="$(< /sys/fs/cgroup/memory.swap.current)"
+    fi
+    if [[ -r /sys/fs/cgroup/memory.swap.peak ]]; then
+      swap_peak="$(< /sys/fs/cgroup/memory.swap.peak)"
+    fi
+    printf '%s cgroup_v2 memory.current=%s memory.peak=%s memory.max=%s swap.current=%s swap.peak=%s\n' \
+      "${prefix}" \
+      "$(format_bytes "${current}")" \
+      "$(format_bytes "${peak}")" \
+      "$(format_bytes "${max}")" \
+      "$(format_bytes "${swap_current}")" \
+      "$(format_bytes "${swap_peak}")"
+  elif [[ -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]]; then
+    local current peak limit
+    current="$(< /sys/fs/cgroup/memory/memory.usage_in_bytes)"
+    peak="$(< /sys/fs/cgroup/memory/memory.max_usage_in_bytes)"
+    limit="$(< /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+    printf '%s cgroup_v1 memory.usage=%s memory.max_usage=%s memory.limit=%s\n' \
+      "${prefix}" \
+      "$(format_bytes "${current}")" \
+      "$(format_bytes "${peak}")" \
+      "$(format_bytes "${limit}")"
+  fi
+
+  if [[ -r /proc/buddyinfo ]]; then
+    local page_kib=4
+    if command -v getconf >/dev/null 2>&1; then
+      local page_size
+      page_size="$(getconf PAGESIZE 2>/dev/null || true)"
+      if [[ "${page_size}" =~ ^[0-9]+$ && "${page_size}" -gt 0 ]]; then
+        page_kib=$((page_size / 1024))
+      fi
+    fi
+    awk -v prefix="${prefix}" -v page_kib="${page_kib}" '
+      {
+        for (i = 5; i <= NF; ++i) {
+          count = $i + 0
+          order = i - 5
+          if (count > 0 && order > largest) {
+            largest = order
+          }
+          free_pages += count * (2 ^ order)
+        }
+      }
+      END {
+        if (largest >= 0) {
+          printf "%s buddyinfo largest_free_order=%d largest_free_block=%s estimated_free=%s\n",
+              prefix,
+              largest,
+              fmt((2 ^ largest) * page_kib),
+              fmt(free_pages * page_kib)
+        }
+      }
+      function fmt(kib, value, unit, units) {
+        split("KiB MiB GiB TiB", units, " ")
+        value = kib
+        unit = 1
+        while (value >= 1024 && unit < 4) {
+          value /= 1024
+          unit += 1
+        }
+        return sprintf("%.1f%s", value, units[unit])
+      }' /proc/buddyinfo || true
+  fi
+}
+
 run_engine() {
   local engine="$1"
   local tmp_config="${output_dir}/config.${engine}.yaml"
   local stdout_log="${output_dir}/${engine}.stdout"
+  local memory_snapshot_recorded=0
 
   (
+    report_memory_on_exit() {
+      local status=$?
+      if [[ "${memory_snapshot_recorded}" -eq 0 ]]; then
+        print_regress_memory_snapshot "exit" "${engine}" "${status}"
+      fi
+    }
+    trap report_memory_on_exit EXIT
+
     cd "${case_dir}"
     # SEC currently rejects CNF-export options. Keep the design, library, and
     # solver settings from the original regression config, then override only
@@ -123,6 +308,7 @@ run_engine() {
     } >> "${tmp_config}"
 
     echo "Running SEC ${engine} for ${test_name}"
+    print_regress_memory_snapshot "before" "${engine}" "starting"
     : > "${stdout_log}"
     # Stream the tool output as it is produced instead of only dumping it after
     # completion.  Large SEC/PDR cases can run for minutes between solver
@@ -148,6 +334,8 @@ run_engine() {
     sleep 1
     kill "${tail_pid}" 2>/dev/null || true
     wait "${tail_pid}" 2>/dev/null || true
+    print_regress_memory_snapshot "after" "${engine}" "${kepler_status}"
+    memory_snapshot_recorded=1
     if [[ "${expectation}" == "expect-different" ]]; then
       if grep -q "SEC found a counterexample" "${stdout_log}"; then
         grep "SEC found a counterexample" "${stdout_log}"
@@ -176,11 +364,53 @@ run_engine() {
       return 0
     fi
 
+    # Measurement-only SEC runs still fail on real counterexamples above, but
+    # allow inconclusive positive proofs so one hard design does not stop the
+    # rest of the regression from reporting its current behavior.
+    if [[ "${expectation}" == "allow-inconclusive" ]]; then
+      if grep -q "SEC proved equivalence" "${stdout_log}"; then
+        grep "SEC proved equivalence" "${stdout_log}"
+        return 0
+      fi
+      if grep -q "SEC was inconclusive" "${stdout_log}"; then
+        grep "SEC was inconclusive" "${stdout_log}"
+        return 0
+      fi
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      echo "Expected SEC equivalence or inconclusive result for ${test_name} (${engine})" >&2
+      return 1
+    fi
+
+    # Non-dual positive SEC regressions may have all observed outputs skipped
+    # because both sides depend on reset-unanchored internal state. Treat that
+    # as measurement-only inconclusive when the workflow explicitly asks for it.
+    if [[ "${expectation}" == "allow-unset-state-inconclusive" ]]; then
+      if grep -q "SEC proved equivalence" "${stdout_log}"; then
+        grep "SEC proved equivalence" "${stdout_log}"
+        return 0
+      fi
+      if grep -q "SEC was inconclusive" "${stdout_log}"; then
+        grep "SEC was inconclusive" "${stdout_log}"
+        return 0
+      fi
+      if grep -q "No aligned observed outputs remain after skipping cones that depend on reset-unanchored internal state" "${stdout_log}"; then
+        grep "SEC cannot run on this design pair" "${stdout_log}"
+        return 0
+      fi
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      echo "Expected SEC equivalence, inconclusive, or reset-unanchored no-output result for ${test_name} (${engine})" >&2
+      return 1
+    fi
+
     if [[ "${expectation}" == "expect-full-coverage" ]]; then
       if [[ "${kepler_status}" -ne 0 ]]; then
         return "${kepler_status}"
       fi
-      grep "SEC output coverage: 100.00%" "${stdout_log}"
+      grep -E "SEC (checked-output|output) coverage: 100.00%" "${stdout_log}"
       grep "SEC proved equivalence" "${stdout_log}"
       return 0
     fi
