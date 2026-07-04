@@ -4,7 +4,7 @@
 
 ## Introduction
 
-Kepler-Formal is an equivalence checking tool for hardware designs. It
+Kepler-Formal is an equivalence checking tool for ASIC designs. It
 operates on Verilog, SystemVerilog, and the
 [Naja interchange format](https://github.com/najaeda/naja-if), and supports:
 
