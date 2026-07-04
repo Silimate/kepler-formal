@@ -82,8 +82,6 @@ def tie_target_input_to_logic0(top, target_input):
 
 def dump_legacy_edit_outputs():
     top = load_tinyrocket()
-    netlist.get_top().dump_verilog("tinyrocket_pre_edited.v")
-    netlist.dump_naja_if("tinyrocket.if")
 
     target_input = find_input_bit_term(top, TARGET_INPUT_NAME)
     tie_target_input_to_logic0(top, target_input)
