@@ -1245,6 +1245,43 @@ TEST_F(KeplerFormalCliTests, ConfigSv2vAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST_F(KeplerFormalCliTests, ConfigSv2vSystemVerilogDesign1UsesLoadedPrimitive) {
+  SimpleCliFixture fixture;
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_sv2v_prim");
+  fixture.design0Path = fixture.tmpDir / "design0.sv";
+  fixture.design1Path = fixture.tmpDir / "design1.v";
+  const auto libertyPath = repoRoot() / "example" / "NangateOpenCellLibrary_typical.lib";
+  ASSERT_TRUE(std::filesystem::exists(libertyPath));
+
+  {
+    std::ofstream design0(fixture.design0Path);
+    design0 << "module top(input logic a, output logic y);\n";
+    design0 << "  INV_X1 u_inv(.A(a), .ZN(y));\n";
+    design0 << "endmodule\n";
+  }
+  {
+    std::ofstream design1(fixture.design1Path);
+    design1 << "module top(input a, output y);\n";
+    design1 << "  INV_X1 u_inv(.A(a), .ZN(y));\n";
+    design1 << "endmodule\n";
+  }
+
+  const auto cfgPath = writeTempConfig(
+      "format: sv2v\n"
+      "verification: sec\n"
+      "sec_encoding: binary\n"
+      "max_k: 4\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "liberty_files:\n"
+      "  - " + libertyPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST_F(KeplerFormalCliTests, ConfigSv2vLecRejected) {
   SimpleCliFixture fixture;
   fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_sv2v_lec");

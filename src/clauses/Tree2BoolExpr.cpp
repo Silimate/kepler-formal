@@ -257,7 +257,6 @@ BoolExpr* buildTableSelectTruthTableExpr(const SNLTruthTable& tbl,
 }
 
 BoolExpr* buildGenericTruthTableExpr(const SNLTruthTable& tbl, uint32_t k) {
-  assert(tbl.isGeneric());
   assert(k > 0);
 
   BoolExpr* expr = getChildFETS(0);

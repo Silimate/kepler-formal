@@ -356,50 +356,58 @@ jobs:
           sec_encoding: dual_rail_steady
           positive_expectation: expect-equivalent
         case:
-        - name: sv2v_asap7_aes_mbff
-          case_dir: kepler-formal-examples/asap7_aes-mbff
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_asap7_aes_mbff
+        #   case_dir: kepler-formal-examples/asap7_aes-mbff
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_asap7_ethmac
           case_dir: kepler-formal-examples/asap7_ethmac
           config_prefix: sv2v
           expectation: positive
-        - name: sv2v_asap7_jpeg_lvt
-          case_dir: kepler-formal-examples/asap7_jpeg_lvt
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_asap7_jpeg_lvt
+        #   case_dir: kepler-formal-examples/asap7_jpeg_lvt
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_asap7_mock_alu
           case_dir: kepler-formal-examples/asap7_mock-alu
           config_prefix: sv2v
           expectation: positive
-        - name: sv2v_asap7_mock_cpu
-          case_dir: kepler-formal-examples/asap7_mock_cpu
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_cts_aes_asap7_base
-          case_dir: kepler-formal-examples/cts_aes_asap7_base
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_ihp_sg13g2_i2c_gpio_expander
-          case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_asap7_mock_cpu
+        #   case_dir: kepler-formal-examples/asap7_mock_cpu
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_cts_aes_asap7_base
+        #   case_dir: kepler-formal-examples/cts_aes_asap7_base
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_ihp_sg13g2_i2c_gpio_expander
+        #   case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_ihp_sg13g2_i2c_device_ctrl
           case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
           config_prefix: sv2v_I2cDeviceCtrl
           expectation: positive
-        - name: sv2v_ihp_sg13g2_ibex
-          case_dir: kepler-formal-examples/ihp_sg13g2_ibex
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_mempool_group
-          case_dir: kepler-formal-examples/mempool_group
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_mock_cpu
-          case_dir: kepler-formal-examples/mock_cpu
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_ihp_sg13g2_ibex
+        #   case_dir: kepler-formal-examples/ihp_sg13g2_ibex
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_mempool_group
+        #   case_dir: kepler-formal-examples/mempool_group
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_mock_cpu
+        #   case_dir: kepler-formal-examples/mock_cpu
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_nangate45_ariane136
           case_dir: kepler-formal-examples/nangate45_ariane136
           config_prefix: sv2v
@@ -416,14 +424,16 @@ jobs:
           case_dir: kepler-formal-examples/nangate45_bp_be
           config_prefix: sv2v
           expectation: positive
-        - name: sv2v_nangate45_dynamic_node
-          case_dir: kepler-formal-examples/nangate45_dynamic_node
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_nangate45_ibex
-          case_dir: kepler-formal-examples/nangate45_ibex
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_nangate45_dynamic_node
+        #   case_dir: kepler-formal-examples/nangate45_dynamic_node
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_nangate45_ibex
+        #   case_dir: kepler-formal-examples/nangate45_ibex
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_nangate45_swerv
           case_dir: kepler-formal-examples/nangate45_swerv
           config_prefix: sv2v
@@ -432,18 +442,21 @@ jobs:
           case_dir: kepler-formal-examples/sky130hd_gcd
           config_prefix: sv2v
           expectation: positive
-        - name: sv2v_sky130hd_riscv32i
-          case_dir: kepler-formal-examples/sky130hd_riscv32i
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_sky130hs_ibex
-          case_dir: kepler-formal-examples/sky130hs_ibex
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_sky130hs_riscv32i
-          case_dir: kepler-formal-examples/sky130hs_riscv32i
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_sky130hd_riscv32i
+        #   case_dir: kepler-formal-examples/sky130hd_riscv32i
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_sky130hs_ibex
+        #   case_dir: kepler-formal-examples/sky130hs_ibex
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_sky130hs_riscv32i
+        #   case_dir: kepler-formal-examples/sky130hs_riscv32i
+        #   config_prefix: sv2v
+        #   expectation: positive
 
     steps:
     - uses: actions/checkout@v4

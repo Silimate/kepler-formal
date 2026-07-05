@@ -4,6 +4,8 @@
 #include "SNLTruthTableTree.h"
 #include "SNLTruthTable.h"
 #include "SNLLogicCloud.h"
+#include "BoolExpr.h"
+#include "BoolExprCache.h"
 #include "DNL.h"
 #include "NLDB.h"
 #include "NLLibrary.h"
@@ -27,6 +29,11 @@ using namespace KEPLER_FORMAL;
 // alias the unified Node type
 using Node = SNLTruthTableTree::Node;
 
+BoolExpr* buildGenericTruthTableExpr(const SNLTruthTable& tbl, uint32_t k);
+void clearChildFETS();
+void reserveChildFETS(size_t n);
+void setChildFETS(size_t i, BoolExpr* expr);
+
 //------------------------------------------------------------------------------
 // Helpers
 //------------------------------------------------------------------------------
@@ -39,6 +46,14 @@ static SNLTruthTable makeMaskTable(uint32_t size, uint64_t mask) {
 // helper to evaluate a mask at index
 static bool maskEval(uint64_t mask, uint32_t idx) {
   return ((mask >> idx) & 1u) != 0;
+}
+
+static void setChildExpressions(const std::vector<BoolExpr*>& children) {
+  clearChildFETS();
+  reserveChildFETS(children.size());
+  for (size_t i = 0; i < children.size(); ++i) {
+    setChildFETS(i, children[i]);
+  }
 }
 
 static naja::DNL::DNLID findDNLTermIDByInstanceAndTerm(const char* instanceName,
@@ -776,6 +791,60 @@ TEST(SNLTruthTableTreeEval_Additions, EvaluatesNestedTableChild) {
   tree.allocateNode(parent);
 
   EXPECT_TRUE(parent->eval({}));
+}
+
+TEST(Tree2BoolExprGenericCoverageTest, TableSelectCollapsesMatchingBranches) {
+  auto* address = BoolExpr::Var(10);
+  auto* sharedData = BoolExpr::Var(20);
+  setChildExpressions({address, sharedData, sharedData});
+
+  const auto table =
+      SNLTruthTable::TableSelect(1, 2, SNLTruthTable::fullDependencies(3));
+  auto* expr = buildGenericTruthTableExpr(table, 3);
+
+  EXPECT_EQ(expr, sharedData);
+  clearChildFETS();
+  BoolExprCache::destroy();
+}
+
+TEST(Tree2BoolExprGenericCoverageTest, TableSelectPrunesWideOutOfRangePrefixes) {
+  std::vector<BoolExpr*> children;
+  children.reserve(65);
+  for (size_t i = 0; i < 64; ++i) {
+    children.push_back(BoolExpr::Var(100 + i));
+  }
+  auto* data0 = BoolExpr::Var(200);
+  children.push_back(data0);
+  setChildExpressions(children);
+
+  const auto table =
+      SNLTruthTable::TableSelect(64, 1, SNLTruthTable::fullDependencies(65));
+  auto* expr = buildGenericTruthTableExpr(table, 65);
+
+  EXPECT_NE(expr, nullptr);
+  EXPECT_NE(expr, BoolExpr::createFalse());
+  clearChildFETS();
+  BoolExprCache::destroy();
+}
+
+TEST(Tree2BoolExprGenericCoverageTest, TableSelectArityMismatchThrows) {
+  setChildExpressions({BoolExpr::Var(10), BoolExpr::Var(20)});
+
+  const auto table =
+      SNLTruthTable::TableSelect(1, 2, SNLTruthTable::fullDependencies(3));
+  EXPECT_THROW(buildGenericTruthTableExpr(table, 2), std::runtime_error);
+
+  clearChildFETS();
+  BoolExprCache::destroy();
+}
+
+TEST(Tree2BoolExprGenericCoverageTest, NoneGenericTypeThrows) {
+  setChildExpressions({BoolExpr::Var(10)});
+
+  EXPECT_THROW(buildGenericTruthTableExpr(SNLTruthTable(), 1), std::runtime_error);
+
+  clearChildFETS();
+  BoolExprCache::destroy();
 }
 
 TEST(SNLTruthTableTreeAddChild_Additions, AddChildIdRejectsInvalidId) {
