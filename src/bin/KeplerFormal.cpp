@@ -998,6 +998,8 @@ static std::vector<std::filesystem::path> buildSystemVerilogInputPaths(
   // LCOV_EXCL_STOP
 
   // LCOV_EXCL_START
+  // Generated SV2V primitive stubs may be parsed with RTL that has no enclosing
+  // timescale, so force a Slang command file when stubs are present.
   const bool addDefaultTimescale = primitiveLibraries != nullptr;
   if (designOptions.top || addDefaultTimescale) {
   // LCOV_EXCL_STOP

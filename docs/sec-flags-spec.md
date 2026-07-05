@@ -50,6 +50,18 @@ kepler-formal -sv \
   -k 32
 ```
 
+For RTL-vs-gate runs where design 1 is SystemVerilog and design 2 is Verilog,
+use `-sv2v`:
+
+```sh
+kepler-formal -sv2v \
+  --design1 rtl_pkg.sv rtl_top.sv \
+  --design2 gate_top.v \
+  -v sec \
+  --sec-engine pdr \
+  --sec-encoding dual_rail_steady
+```
+
 ## YAML Shape
 
 When `--config` or `-c` is present, YAML config mode takes precedence over the
@@ -214,9 +226,10 @@ SEC still depends on the normal front-end and library flags:
 | --- | --- |
 | `-verilog`, `format: verilog` | Verilog SEC input mode. |
 | `-sv`, `-systemverilog`, `format: systemverilog` | SystemVerilog SEC input mode. |
+| `-sv2v`, `format: sv2v` | Mixed SEC input mode: design 1 is SystemVerilog RTL and design 2 is Verilog gate-level netlist. |
 | `--design1`, `--design2`, `input_paths` | Source lists for the two compared designs. |
-| `--sv_design1_flist`, `--sv_design2_flist` | Per-design SystemVerilog file lists. |
-| `--sv_design1_top`, `--sv_design2_top` | Per-design SystemVerilog top names. |
+| `--sv_design1_flist`, `--sv_design2_flist` | Per-design SystemVerilog file lists. In `sv2v` mode, only `--sv_design1_flist` is accepted. |
+| `--sv_design1_top`, `--sv_design2_top` | Per-design SystemVerilog top names. In `sv2v` mode, only `--sv_design1_top` is accepted. |
 | `--liberty`, `--lib`, `liberty_files` | Liberty primitives, including structured memory information used during SEC extraction. |
 | `py_tech_files` | Python primitive loaders. Must be provided through YAML, not through `--liberty`. |
 | `solver: kissat|glucose` | SAT solver used by the selected SEC engine. |

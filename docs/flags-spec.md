@@ -14,6 +14,8 @@ that page describes the current implementation rather than a frozen contract.
 | --- | --- |
 | `-verilog` | Use Verilog Format. |
 | `-naja_if` | Use naja-if format. |
+| `-systemverilog`, `-sv` | Use SystemVerilog format for both designs. Requires SEC verification. |
+| `-sv2v` | Use mixed SystemVerilog-to-Verilog format for SEC RTL-vs-gate comparison: design 1 is parsed as SystemVerilog, design 2 is parsed as Verilog. |
 | `--help`, `-h` | Print usage and exit. |
 | `--config <file>`, `-c <file>` | Load a YAML config file. If present anywhere on the CLI, YAML parsing takes precedence over the rest of the arguments. |
 | `--design1 <file...>` | Explicit source list for design 1 in multi-file Verilog mode. |
@@ -27,7 +29,7 @@ that page describes the current implementation rather than a frozen contract.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `format` | string | Input format[verilog, naja_if]. If omitted, the implementation defaults to `verilog`. |
+| `format` | string | Input format: `verilog`, `v`, `naja_if`, `systemverilog`, `sv`, or `sv2v`. If omitted, the implementation defaults to `verilog`. |
 | `input_paths` | list | Required for normal runs. Accepts either `[design0, design1]` or `[[design0_file...], [design1_file...]]`. The nested form is for multi-file Verilog. |
 | `liberty_files` | list[string] | Liberty libraries loaded through `SNLLibertyConstructor`. |
 | `py_tech_files` | list[string] | Python primitive loaders loaded through `SNLPyLoader`. |
