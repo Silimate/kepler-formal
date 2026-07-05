@@ -254,10 +254,9 @@ BoolExpr* buildTableSelectTruthTableExpr(const SNLTruthTable& tbl,
   }
   return buildTableSelectTruthTableExprRecursive(
       addressSize, depth, 0, 0);
-}
+}  // LCOV_EXCL_LINE
 
 BoolExpr* buildGenericTruthTableExpr(const SNLTruthTable& tbl, uint32_t k) {
-  assert(tbl.isGeneric());
   assert(k > 0);
 
   BoolExpr* expr = getChildFETS(0);

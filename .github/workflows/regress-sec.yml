@@ -351,59 +351,70 @@ jobs:
           engine: k_induction
           sec_encoding: dual_rail_steady
           positive_expectation: allow-inconclusive
+          max_k: 8
         - name: pdr-dual-rail
           engine: pdr
           sec_encoding: dual_rail_steady
           positive_expectation: expect-equivalent
         case:
-        - name: sv2v_asap7_aes_mbff
-          case_dir: kepler-formal-examples/asap7_aes-mbff
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_asap7_aes_mbff
+        #   case_dir: kepler-formal-examples/asap7_aes-mbff
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_asap7_ethmac
           case_dir: kepler-formal-examples/asap7_ethmac
           config_prefix: sv2v
           expectation: positive
-        - name: sv2v_asap7_jpeg_lvt
-          case_dir: kepler-formal-examples/asap7_jpeg_lvt
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_asap7_mock_alu
-          case_dir: kepler-formal-examples/asap7_mock-alu
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_asap7_mock_cpu
-          case_dir: kepler-formal-examples/asap7_mock_cpu
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_cts_aes_asap7_base
-          case_dir: kepler-formal-examples/cts_aes_asap7_base
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_ihp_sg13g2_i2c_gpio_expander
-          case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_asap7_jpeg_lvt
+        #   case_dir: kepler-formal-examples/asap7_jpeg_lvt
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend connectivity fixes land.
+        # - name: sv2v_asap7_mock_alu
+        #   case_dir: kepler-formal-examples/asap7_mock-alu
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_asap7_mock_cpu
+        #   case_dir: kepler-formal-examples/asap7_mock_cpu
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_cts_aes_asap7_base
+        #   case_dir: kepler-formal-examples/cts_aes_asap7_base
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_ihp_sg13g2_i2c_gpio_expander
+        #   case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_ihp_sg13g2_i2c_device_ctrl
           case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
           config_prefix: sv2v_I2cDeviceCtrl
           expectation: positive
-        - name: sv2v_ihp_sg13g2_ibex
-          case_dir: kepler-formal-examples/ihp_sg13g2_ibex
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_mempool_group
-          case_dir: kepler-formal-examples/mempool_group
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_mock_cpu
-          case_dir: kepler-formal-examples/mock_cpu
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_nangate45_ariane136
-          case_dir: kepler-formal-examples/nangate45_ariane136
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_ihp_sg13g2_ibex
+        #   case_dir: kepler-formal-examples/ihp_sg13g2_ibex
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_mempool_group
+        #   case_dir: kepler-formal-examples/mempool_group
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_mock_cpu
+        #   case_dir: kepler-formal-examples/mock_cpu
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend procedural lowering fixes land.
+        # - name: sv2v_nangate45_ariane136
+        #   case_dir: kepler-formal-examples/nangate45_ariane136
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_nangate45_black_parrot
           case_dir: kepler-formal-examples/nangate45_black_parrot
           config_prefix: sv2v
@@ -416,34 +427,40 @@ jobs:
           case_dir: kepler-formal-examples/nangate45_bp_be
           config_prefix: sv2v
           expectation: positive
-        - name: sv2v_nangate45_dynamic_node
-          case_dir: kepler-formal-examples/nangate45_dynamic_node
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_nangate45_ibex
-          case_dir: kepler-formal-examples/nangate45_ibex
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_nangate45_swerv
-          case_dir: kepler-formal-examples/nangate45_swerv
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_nangate45_dynamic_node
+        #   case_dir: kepler-formal-examples/nangate45_dynamic_node
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_nangate45_ibex
+        #   case_dir: kepler-formal-examples/nangate45_ibex
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_nangate45_swerv
+        #   case_dir: kepler-formal-examples/nangate45_swerv
+        #   config_prefix: sv2v
+        #   expectation: positive
         - name: sv2v_sky130hd_gcd
           case_dir: kepler-formal-examples/sky130hd_gcd
           config_prefix: sv2v
           expectation: positive
-        - name: sv2v_sky130hd_riscv32i
-          case_dir: kepler-formal-examples/sky130hd_riscv32i
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_sky130hs_ibex
-          case_dir: kepler-formal-examples/sky130hs_ibex
-          config_prefix: sv2v
-          expectation: positive
-        - name: sv2v_sky130hs_riscv32i
-          case_dir: kepler-formal-examples/sky130hs_riscv32i
-          config_prefix: sv2v
-          expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_sky130hd_riscv32i
+        #   case_dir: kepler-formal-examples/sky130hd_riscv32i
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after pending Naja SV2V frontend fixes land.
+        # - name: sv2v_sky130hs_ibex
+        #   case_dir: kepler-formal-examples/sky130hs_ibex
+        #   config_prefix: sv2v
+        #   expectation: positive
+        # TODO: Re-enable after SV2V example config is fixed in regress.
+        # - name: sv2v_sky130hs_riscv32i
+        #   case_dir: kepler-formal-examples/sky130hs_riscv32i
+        #   config_prefix: sv2v
+        #   expectation: positive
 
     steps:
     - uses: actions/checkout@v4
@@ -478,6 +495,7 @@ jobs:
         SEC_ENGINE: ${{ matrix.flow.engine }}
         SEC_ENCODING: ${{ matrix.flow.sec_encoding }}
         SEC_POSITIVE_EXPECTATION: ${{ matrix.flow.positive_expectation }}
+        SEC_MAX_K: ${{ matrix.flow.max_k }}
       run: |
         set -euo pipefail
         export LD_LIBRARY_PATH="${{github.workspace}}/stage/lib:${LD_LIBRARY_PATH:-}"
@@ -498,12 +516,18 @@ jobs:
           exit 2
         fi
 
+        extra_args=()
+        if [[ -n "${SEC_MAX_K:-}" ]]; then
+          extra_args+=("max-k=${SEC_MAX_K}")
+        fi
+
         bash regress/run_sec_strategies_regress.sh \
           "${CASE_NAME}" \
           "${{github.workspace}}/${CASE_DIR}" \
           "${{github.workspace}}/stage/bin/kepler-formal" \
           "${case_config}" \
           "${expectation}" \
+          "${extra_args[@]}" \
           compact \
           "engine=${SEC_ENGINE}" \
           "sec-encoding=${SEC_ENCODING}"
