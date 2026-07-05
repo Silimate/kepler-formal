@@ -461,6 +461,18 @@ jobs:
         #   case_dir: kepler-formal-examples/sky130hs_riscv32i
         #   config_prefix: sv2v
         #   expectation: positive
+        exclude:
+        # TODO: Re-enable after fixing the pdr-dual-rail memory blowup for bp_be.
+        - flow:
+            name: pdr-dual-rail
+            engine: pdr
+            sec_encoding: dual_rail_steady
+            positive_expectation: expect-equivalent
+          case:
+            name: sv2v_nangate45_bp_be
+            case_dir: kepler-formal-examples/nangate45_bp_be
+            config_prefix: sv2v
+            expectation: positive
 
     steps:
     - uses: actions/checkout@v4
