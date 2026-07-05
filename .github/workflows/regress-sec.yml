@@ -1,0 +1,325 @@
+# GitHub Actions workflow to build kepler-formal once and fan out SEC regressions.
+name: regress-sec
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  SEC_RUNTIME_ARTIFACT: sec-regress-runtime
+
+jobs:
+  build-sec-regress:
+    name: build SEC runtime
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libgtest-dev cmake pkg-config libboost-dev libfl-dev \
+          capnproto libcapnp-dev ninja-build libtbb-dev libspdlog-dev \
+          libboost-iostreams-dev zlib1g-dev
+
+    - name: Checkout submodules
+      run: git submodule update --init --recursive
+
+    - name: Configure CMake
+      run: |
+        cmake -B ${{github.workspace}}/build-sec-regress \
+          -GNinja \
+          -DPYTHON_INTERFACE=OFF \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=20 \
+          -DCMAKE_CXX_FLAGS="-O3 -march=native -ffast-math -flto -DNDEBUG" \
+          -DCMAKE_CXX_FLAGS_RELEASE="-Ofast -march=native -ffast-math -flto -DNDEBUG" \
+          -DCMAKE_EXE_LINKER_FLAGS="-flto"
+
+    - name: Build
+      run: cmake --build ${{github.workspace}}/build-sec-regress --target kepler-formal --config Release
+
+    - name: Install kepler-formal runtime
+      run: |
+        cmake --install ${{github.workspace}}/build-sec-regress --prefix ${{github.workspace}}/stage
+        chmod +x ${{github.workspace}}/stage/bin/kepler-formal
+
+    - name: Upload SEC runtime
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.SEC_RUNTIME_ARTIFACT }}
+        path: ${{github.workspace}}/stage
+        retention-days: 2
+        if-no-files-found: error
+
+  run-sec-regress:
+    name: ${{ matrix.flow.name }} / ${{ matrix.case.name }}
+    runs-on: ubuntu-22.04
+    needs: build-sec-regress
+    strategy:
+      fail-fast: false
+      matrix:
+        flow:
+        - name: imc-binary
+          engine: imc
+          sec_encoding: binary
+          positive_expectation: allow-unset-state-inconclusive
+          full_coverage_expectation: allow-unset-state-inconclusive
+        - name: ki-binary
+          engine: k_induction
+          sec_encoding: binary
+          positive_expectation: allow-unset-state-inconclusive
+          full_coverage_expectation: allow-unset-state-inconclusive
+        - name: pdr-binary
+          engine: pdr
+          sec_encoding: binary
+          positive_expectation: allow-unset-state-inconclusive
+          full_coverage_expectation: allow-unset-state-inconclusive
+        - name: imc-dual-rail
+          engine: imc
+          sec_encoding: dual_rail_steady
+          positive_expectation: allow-inconclusive
+          full_coverage_expectation: allow-inconclusive
+        - name: ki-dual-rail
+          engine: k_induction
+          sec_encoding: dual_rail_steady
+          positive_expectation: allow-inconclusive
+          full_coverage_expectation: allow-inconclusive
+        - name: pdr-dual-rail
+          engine: pdr
+          sec_encoding: dual_rail_steady
+          positive_expectation: expect-equivalent
+          full_coverage_expectation: expect-full-coverage
+        case:
+        - name: cts_aes_asap7_base
+          source: regress
+          case_dir: kepler-formal-regress/cts_aes_asap7_base
+          config: objects/asap7/aes/base/4_rsz_lec_test.yml
+          expectation: positive
+        - name: sky130hd_gcd
+          source: regress
+          case_dir: kepler-formal-regress/sky130hd_gcd
+          config: objects/sky130hd/gcd/base/4_rsz_lec_test.yml
+          expectation: positive
+        - name: nangate45_black_parrot
+          source: regress
+          case_dir: kepler-formal-regress/nangate45_black_parrot
+          config: objects/nangate45/bp/base/4_rsz_lec_test.yml
+          expectation: positive
+        - name: ihp_sg13g2_i2c_gpio_expander
+          source: regress
+          case_dir: kepler-formal-regress/ihp-sg13g2_i2c-gpio-expander
+          config: objects/ihp-sg13g2/i2c-gpio-expander/base/4_rsz_lec_test.yml
+          expectation: positive
+        - name: nangate45_dynamic_node
+          source: examples
+          case_dir: kepler-formal-examples/nangate45_dynamic_node
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: asap7_jpeg_lvt
+          source: examples
+          case_dir: kepler-formal-examples/asap7_jpeg_lvt
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: sky130hs_ibex
+          source: examples
+          case_dir: kepler-formal-examples/sky130hs_ibex
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: sky130hd_riscv32i
+          source: examples
+          case_dir: kepler-formal-examples/sky130hd_riscv32i
+          config: 6_final_sec_test.yml
+          expectation: full_coverage
+        - name: sky130hs_riscv32i
+          source: examples
+          case_dir: kepler-formal-examples/sky130hs_riscv32i
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: nangate45_ibex
+          source: examples
+          case_dir: kepler-formal-examples/nangate45_ibex
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: nangate45_swerv
+          source: examples
+          case_dir: kepler-formal-examples/nangate45_swerv
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: nangate45_ariane136
+          source: examples
+          case_dir: kepler-formal-examples/nangate45_ariane136
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: asap7_ethmac
+          source: examples
+          case_dir: kepler-formal-examples/asap7_ethmac
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: asap7_mock_alu
+          source: examples
+          case_dir: kepler-formal-examples/asap7_mock-alu
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: asap7_mock_cpu
+          source: examples
+          case_dir: kepler-formal-examples/asap7_mock_cpu
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: nangate45_black_parrot_sec_final
+          source: examples
+          case_dir: kepler-formal-examples/nangate45_black_parrot_sec_final
+          config: 6_final_sec_test.yml
+          expectation: positive
+        - name: tinyrocket_naja_if
+          source: local
+          case_dir: .
+          config: regress/tinyrocket_naja_if/config.yaml
+          expectation: positive
+        - name: tinyrocket_verilog
+          source: local
+          case_dir: .
+          config: regress/tinyrocket_verilog/config.yaml
+          expectation: positive
+        - name: tinyrocket_self_sec
+          source: local
+          case_dir: example
+          config: test_config_verilog_tinyrocket_sec.yaml
+          expectation: positive
+        - name: tinyrocket_csrfile_sec
+          source: local
+          case_dir: example
+          config: test_config_verilog_tinyrocket_csrfile_sec.yaml
+          expectation: expect-different
+          generator: csrfile
+        - name: tinyrocket_naja_if_edited_sec_probe
+          source: local
+          case_dir: .
+          config: regress/tinyrocket_naja_if_edited_sec_probe/config.yaml
+          expectation: expect-different
+          generator: edit
+          max_k: 1
+        - name: tinyrocket_verilog_edited_sec_probe
+          source: local
+          case_dir: .
+          config: regress/tinyrocket_verilog_edited_sec_probe/config.yaml
+          expectation: expect-different
+          generator: edit
+          max_k: 1
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install runtime dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git python3 python3-pip capnproto libcapnp-dev libtbb-dev \
+          libboost-iostreams-dev zlib1g-dev
+
+    - name: Download SEC runtime
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.SEC_RUNTIME_ARTIFACT }}
+        path: ${{github.workspace}}/stage
+
+    - name: Restore executable bit
+      run: chmod +x ${{github.workspace}}/stage/bin/kepler-formal
+
+    - name: Clone regression inputs
+      working-directory: ${{github.workspace}}
+      env:
+        CASE_SOURCE: ${{ matrix.case.source }}
+      run: |
+        case "${CASE_SOURCE}" in
+          regress)
+            git clone --depth 1 https://github.com/keplertech/kepler-formal-regress
+            ;;
+          examples)
+            git clone --depth 1 https://github.com/keplertech/kepler-formal-examples
+            ;;
+          local)
+            ;;
+          *)
+            echo "Unknown SEC regression source: ${CASE_SOURCE}" >&2
+            exit 2
+            ;;
+        esac
+
+    - name: Generate local regression inputs
+      if: ${{ matrix.case.generator == 'csrfile' || matrix.case.generator == 'edit' }}
+      working-directory: ${{github.workspace}}/example
+      env:
+        CASE_GENERATOR: ${{ matrix.case.generator }}
+      run: |
+        pip install najaeda
+        case "${CASE_GENERATOR}" in
+          csrfile)
+            python extract_tinyrocket_csrfile_sec.py
+            ;;
+          edit)
+            python edit.py
+            ;;
+          *)
+            echo "Unknown SEC regression generator: ${CASE_GENERATOR}" >&2
+            exit 2
+            ;;
+        esac
+
+    - name: Run SEC regression
+      working-directory: ${{github.workspace}}
+      env:
+        CASE_NAME: ${{ matrix.case.name }}
+        CASE_DIR: ${{ matrix.case.case_dir }}
+        CASE_CONFIG: ${{ matrix.case.config }}
+        CASE_EXPECTATION: ${{ matrix.case.expectation }}
+        CASE_MAX_K: ${{ matrix.case.max_k }}
+        SEC_ENGINE: ${{ matrix.flow.engine }}
+        SEC_ENCODING: ${{ matrix.flow.sec_encoding }}
+        SEC_POSITIVE_EXPECTATION: ${{ matrix.flow.positive_expectation }}
+        SEC_FULL_COVERAGE_EXPECTATION: ${{ matrix.flow.full_coverage_expectation }}
+      run: |
+        set -euo pipefail
+        export LD_LIBRARY_PATH="${{github.workspace}}/stage/lib:${LD_LIBRARY_PATH:-}"
+
+        expectation="${CASE_EXPECTATION}"
+        case "${expectation}" in
+          positive)
+            expectation="${SEC_POSITIVE_EXPECTATION}"
+            ;;
+          full_coverage)
+            expectation="${SEC_FULL_COVERAGE_EXPECTATION}"
+            ;;
+        esac
+
+        args=(
+          "${CASE_NAME}"
+          "${{github.workspace}}/${CASE_DIR}"
+          "${{github.workspace}}/stage/bin/kepler-formal"
+          "${CASE_CONFIG}"
+          "${expectation}"
+          compact
+          "engine=${SEC_ENGINE}"
+          "sec-encoding=${SEC_ENCODING}"
+        )
+        if [[ -n "${CASE_MAX_K}" ]]; then
+          args+=("max-k=${CASE_MAX_K}")
+        fi
+
+        bash regress/run_sec_strategies_regress.sh "${args[@]}"
+
+    - name: Upload regression logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sec-regress-logs-${{ matrix.flow.name }}-${{ matrix.case.name }}
+        path: ${{github.workspace}}/regress-output/${{ matrix.case.name }}/sec
+        retention-days: 7
+        if-no-files-found: ignore
