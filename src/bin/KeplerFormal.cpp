@@ -57,9 +57,9 @@ static const char* kSkippedMultiClockDomainPOReport =
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
   // LCOV_EXCL_STOP
-      "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
+      "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv/-sv2v> "
       "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
-      "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
+      "<-naja_if/-verilog/-systemverilog/-sv/-sv2v> --design1 <file...> --design2 "
       "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
@@ -890,7 +890,7 @@ static KEPLER_FORMAL::MiterStrategy::CompactSnapshot captureCompactSnapshot(
 
 int KeplerFormalMain(int argc, char** argv) {
   using namespace std::chrono;
-  enum class FormatType { VERILOG, SYSTEMVERILOG, NAJA_IF };
+  enum class FormatType { VERILOG, SYSTEMVERILOG, SV2V, NAJA_IF };
   constexpr size_t kDefaultSecMaxK = 32;
   const auto cleanupNajaState = []() {
     naja::DNL::destroy();
@@ -977,6 +977,8 @@ int KeplerFormalMain(int argc, char** argv) {
           } else if (fmt == "systemverilog" || fmt == "sv") {
             // LCOV_EXCL_START
             inputFormatType = FormatType::SYSTEMVERILOG;
+          } else if (fmt == "sv2v") {
+            inputFormatType = FormatType::SV2V;
           } else {
             SPDLOG_CRITICAL("Unrecognized format in config: {}", fmt);
             return EXIT_FAILURE;
@@ -1328,6 +1330,12 @@ int KeplerFormalMain(int argc, char** argv) {
         break;
         // LCOV_EXCL_STOP
       }
+      if (arg == "-sv2v") {
+        inputFormatType = FormatType::SV2V;
+        ++parseStart;
+        formatFound = true;
+        break;
+      }
       // LCOV_EXCL_START
       SPDLOG_CRITICAL("Unrecognized option before input format type: {}", arg);
       return EXIT_FAILURE;
@@ -1562,6 +1570,9 @@ int KeplerFormalMain(int argc, char** argv) {
     inputFormatName = "SYSTEMVERILOG";
   }
   // LCOV_EXCL_STOP
+  if (inputFormatType == FormatType::SV2V) {
+    inputFormatName = "SV2V";
+  }
   SPDLOG_INFO("Input format: {}", inputFormatName);
   if (!runLogFilePath.empty()) {
     SPDLOG_INFO("Run log: {}", runLogFilePath);
@@ -1581,6 +1592,18 @@ int KeplerFormalMain(int argc, char** argv) {
       print_usage(argv[0]);
       return EXIT_FAILURE;
       // LCOV_EXCL_STOP
+    }
+  } else if (inputFormatType == FormatType::SV2V) {
+    if (!hasSystemVerilogSources(designInputs.design0, systemVerilogOptions.design0)) {
+      SPDLOG_CRITICAL(
+          "Need SystemVerilog input sources for design 1 (files and/or flist)");
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    if (designInputs.design1.empty()) {
+      SPDLOG_CRITICAL("Need Verilog input sources for design 2");
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
     }
   } else if (designInputs.design0.empty() || designInputs.design1.empty()) {
     // LCOV_EXCL_START
@@ -1642,12 +1665,21 @@ int KeplerFormalMain(int argc, char** argv) {
     }
   }
   if (inputFormatType != FormatType::SYSTEMVERILOG &&
+      inputFormatType != FormatType::SV2V &&
       (systemVerilogOptions.design0.flist || systemVerilogOptions.design0.top ||
        systemVerilogOptions.design1.flist || systemVerilogOptions.design1.top)) {
     // LCOV_EXCL_START
-    SPDLOG_CRITICAL("SystemVerilog design options are only valid with -systemverilog/-sv input");
+    SPDLOG_CRITICAL(
+        "SystemVerilog design options are only valid with -systemverilog/-sv/-sv2v input");
     return EXIT_FAILURE;
     // LCOV_EXCL_STOP
+  }
+  if (inputFormatType == FormatType::SV2V &&
+      (systemVerilogOptions.design1.flist || systemVerilogOptions.design1.top)) {
+    SPDLOG_CRITICAL(
+        "sv2v format only accepts SystemVerilog options for design 1; "
+        "design 2 is parsed as Verilog");
+    return EXIT_FAILURE;
   }
   std::string svValidationError;
   if (!validateSystemVerilogOptions(systemVerilogOptions, svValidationError)) {
@@ -1848,6 +1880,17 @@ int KeplerFormalMain(int argc, char** argv) {
       return true;
     };
 
+    const auto isHdlFormat = [&]() {
+      return inputFormatType == FormatType::VERILOG ||
+             inputFormatType == FormatType::SYSTEMVERILOG ||
+             inputFormatType == FormatType::SV2V;
+    };
+
+    const auto designUsesSystemVerilog = [&](int designIndex) {
+      return inputFormatType == FormatType::SYSTEMVERILOG ||
+             (inputFormatType == FormatType::SV2V && designIndex == 0);
+    };
+
     auto loadOneDesign = [&](const std::vector<std::string>& designPaths,
                              const SystemVerilogDesignOptions& designOptions,
                              int designIndex,
@@ -1865,21 +1908,19 @@ int KeplerFormalMain(int argc, char** argv) {
         }
       }
 
-      if (inputFormatType == FormatType::VERILOG ||
-          // LCOV_EXCL_START
-          inputFormatType == FormatType::SYSTEMVERILOG) {
-          // LCOV_EXCL_STOP
+      if (isHdlFormat()) {
         if (!db) {
           // LCOV_EXCL_START
           db = NLDB::create(NLUniverse::get());
         }
         // LCOV_EXCL_STOP
         db->setID(dbID);
+        const bool useSystemVerilog = designUsesSystemVerilog(designIndex);
         SPDLOG_INFO("Parsing {} file(s) for design {}",
-                    inputFormatType == FormatType::SYSTEMVERILOG ? "systemverilog" : "verilog",
+                    useSystemVerilog ? "systemverilog" : "verilog",
                     designIndex + 1);
         auto designLibrary = NLLibrary::create(db, NLName("DESIGN"));
-        if (inputFormatType == FormatType::SYSTEMVERILOG) {
+        if (useSystemVerilog) {
           // LCOV_EXCL_START
           SNLSVConstructor constructor(designLibrary);
           std::vector<std::filesystem::path> temporaryFiles;
@@ -2094,7 +2135,8 @@ int KeplerFormalMain(int argc, char** argv) {
             0,
             2,
             "design 1");
-        if (sameCompactSecDesignSpec(
+        if (inputFormatType != FormatType::SV2V &&
+            sameCompactSecDesignSpec(
                 inputFormatType == FormatType::SYSTEMVERILOG,
                 designInputs,
                 systemVerilogOptions)) {
@@ -2154,18 +2196,18 @@ int KeplerFormalMain(int argc, char** argv) {
     // LCOV_EXCL_STOP
 
     // LCOV_EXCL_START
-    if (inputFormatType == FormatType::VERILOG ||
-        inputFormatType == FormatType::SYSTEMVERILOG) {
+    if (isHdlFormat()) {
       if (!db0) {
         db0 = NLDB::create(NLUniverse::get());
       }
       const auto design0Paths = toPathVector(designInputs.design0);
+      const bool design0UsesSystemVerilog = designUsesSystemVerilog(0);
       SPDLOG_INFO("Parsing {} file(s) for design 1",
       // LCOV_EXCL_STOP
-                  inputFormatType == FormatType::SYSTEMVERILOG ? "systemverilog" : "verilog");
+                  design0UsesSystemVerilog ? "systemverilog" : "verilog");
       // LCOV_EXCL_START
       auto designLibrary = NLLibrary::create(db0, NLName("DESIGN"));
-      if (inputFormatType == FormatType::SYSTEMVERILOG) {
+      if (design0UsesSystemVerilog) {
         SNLSVConstructor constructor(designLibrary);
         std::vector<std::filesystem::path> temporaryFiles;
         const auto svInputPaths = buildSystemVerilogInputPaths(
@@ -2263,18 +2305,18 @@ int KeplerFormalMain(int argc, char** argv) {
     // LCOV_EXCL_STOP
 
     // LCOV_EXCL_START
-    if (inputFormatType == FormatType::VERILOG ||
-        inputFormatType == FormatType::SYSTEMVERILOG) {
+    if (isHdlFormat()) {
       if (!db1) {
         db1 = NLDB::create(NLUniverse::get());
       }
       const auto design1Paths = toPathVector(designInputs.design1);
+      const bool design1UsesSystemVerilog = designUsesSystemVerilog(1);
       SPDLOG_INFO("Parsing {} file(s) for design 2",
       // LCOV_EXCL_STOP
-                  inputFormatType == FormatType::SYSTEMVERILOG ? "systemverilog" : "verilog");
+                  design1UsesSystemVerilog ? "systemverilog" : "verilog");
       // LCOV_EXCL_START
       auto designLibrary = NLLibrary::create(db1, NLName("DESIGN"));
-      if (inputFormatType == FormatType::SYSTEMVERILOG) {
+      if (design1UsesSystemVerilog) {
         SNLSVConstructor constructor(designLibrary);
         std::vector<std::filesystem::path> temporaryFiles;
         const auto svInputPaths = buildSystemVerilogInputPaths(

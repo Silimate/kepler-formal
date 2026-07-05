@@ -1194,6 +1194,90 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST_F(KeplerFormalCliTests, ConfigSv2vAccepted) {
+  SimpleCliFixture fixture;
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_sv2v");
+  fixture.design0Path = fixture.tmpDir / "design0.sv";
+  fixture.design1Path = fixture.tmpDir / "design1.v";
+  {
+    std::ofstream design0(fixture.design0Path);
+    design0 << "module top(input logic a, output logic y);\n";
+    design0 << "  assign y = a;\n";
+    design0 << "endmodule\n";
+  }
+  {
+    std::ofstream design1(fixture.design1Path);
+    design1 << "module top(input a, output y);\n";
+    design1 << "  assign y = a;\n";
+    design1 << "endmodule\n";
+  }
+  const auto cfgPath = writeTempConfig(
+      "format: sv2v\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, ConfigSv2vRejectsSecondSystemVerilogOptions) {
+  SimpleCliFixture fixture;
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_sv2v_reject_design2_sv");
+  fixture.design0Path = fixture.tmpDir / "design0.sv";
+  fixture.design1Path = fixture.tmpDir / "design1.v";
+  {
+    std::ofstream design0(fixture.design0Path);
+    design0 << "module top(input logic a, output logic y);\n";
+    design0 << "  assign y = a;\n";
+    design0 << "endmodule\n";
+  }
+  {
+    std::ofstream design1(fixture.design1Path);
+    design1 << "module top(input a, output y);\n";
+    design1 << "  assign y = a;\n";
+    design1 << "endmodule\n";
+  }
+  const auto cfgPath = writeTempConfig(
+      "format: sv2v\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "sv_design2_top: top\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_NE(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, CliSv2vAccepted) {
+  SimpleCliFixture fixture;
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_sv2v_arg");
+  fixture.design0Path = fixture.tmpDir / "design0.sv";
+  fixture.design1Path = fixture.tmpDir / "design1.v";
+  {
+    std::ofstream design0(fixture.design0Path);
+    design0 << "module top(input logic a, output logic y);\n";
+    design0 << "  assign y = a;\n";
+    design0 << "endmodule\n";
+  }
+  {
+    std::ofstream design1(fixture.design1Path);
+    design1 << "module top(input a, output y);\n";
+    design1 << "  assign y = a;\n";
+    design1 << "endmodule\n";
+  }
+  const int rc = runWithArgs({
+      "kepler-formal",
+      "-sv2v",
+      fixture.design0Path.string(),
+      fixture.design1Path.string(),
+  });
+  EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST_F(KeplerFormalCliTests, CliSvAliasAccepted) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",
