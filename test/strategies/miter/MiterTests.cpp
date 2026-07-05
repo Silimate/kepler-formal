@@ -28,6 +28,7 @@
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
 #include "SNLDesignModeling.h"
+#include "SNLBusNet.h"
 #include "SNLBusTerm.h"
 #include "SNLScalarNet.h"
 #include "SNLScalarTerm.h"
@@ -318,6 +319,50 @@ void expectGenericGateMiterEquivalent(const char* gateName,
   EXPECT_TRUE(miterS.run());
 }
 
+void expectTableSelectMiterEquivalent() {
+  NLUniverse* univ = NLUniverse::create();
+  NLDB* db = NLDB::create(univ);
+  NLLibrary* library =
+      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("nangate45"));
+
+  NLDB0::TableSelectSignature signature;
+  signature.width = 1;
+  signature.depth = 3;
+  signature.abits = 2;
+  auto* tableSelect = NLDB0::getOrCreateTableSelect(signature);
+  ASSERT_NE(tableSelect, nullptr);
+
+  auto buildTop = [&](const char* topName) {
+    auto* top =
+        SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(topName));
+    auto* data =
+        SNLBusTerm::create(top, SNLTerm::Direction::Input, 2, 0, NLName("data"));
+    auto* addr =
+        SNLBusTerm::create(top, SNLTerm::Direction::Input, 1, 0, NLName("addr"));
+    auto* y =
+        SNLBusTerm::create(top, SNLTerm::Direction::Output, 0, 0, NLName("y"));
+
+    auto* dataNet = SNLBusNet::create(top, 2, 0, NLName("data_net"));
+    auto* addrNet = SNLBusNet::create(top, 1, 0, NLName("addr_net"));
+    auto* yNet = SNLBusNet::create(top, 0, 0, NLName("y_net"));
+    data->setNet(dataNet);
+    addr->setNet(addrNet);
+    y->setNet(yNet);
+
+    auto* inst = SNLInstance::create(top, tableSelect, NLName("select0"));
+    inst->setTermNet(NLDB0::getTableSelectData(tableSelect), dataNet);
+    inst->setTermNet(NLDB0::getTableSelectAddress(tableSelect), addrNet);
+    inst->setTermNet(NLDB0::getTableSelectOutput(tableSelect), yNet);
+    return top;
+  };
+
+  auto* top0 = buildTop("top0");
+  auto* top1 = buildTop("top1");
+  KEPLER_FORMAL::MiterStrategy miterS(top0, top1);
+  miterS.init();
+  EXPECT_TRUE(miterS.run());
+}
+
 }  // namespace
 
 class MiterTests : public ::testing::Test {
@@ -593,6 +638,10 @@ TEST_F(MiterTests, TestGenericNorTruthTable) {
 
 TEST_F(MiterTests, TestGenericXnorTruthTable) {
   expectGenericGateMiterEquivalent("XNOR_GENERIC", SNLTruthTable::GenericType::XNOR);
+}
+
+TEST_F(MiterTests, TestGenericTableSelectTruthTable) {
+  expectTableSelectMiterEquivalent();
 }
 
 TEST_F(MiterTests, BuildPrimaryOutputClausesConstantTrueOutput) {

@@ -212,8 +212,51 @@ void setChildFETS(size_t i, BoolExpr* expr) {
   childLocal.first[i] = expr;
 }
 
+BoolExpr* buildTableSelectTruthTableExprRecursive(
+    uint32_t addressSize,
+    uint32_t depth,
+    uint32_t addressIndex,
+    uint64_t prefix) {
+  const uint32_t remaining = addressSize - addressIndex;
+  if (remaining < 63) {
+    if ((prefix << remaining) >= depth) {
+      return BoolExpr::createFalse();
+    }
+  } else if (prefix != 0) {
+    return BoolExpr::createFalse();
+  }
+
+  if (addressIndex == addressSize) {
+    assert(prefix < depth);
+    return getChildFETS(addressSize + static_cast<uint32_t>(prefix));
+  }
+
+  BoolExpr* low = buildTableSelectTruthTableExprRecursive(
+      addressSize, depth, addressIndex + 1, prefix << 1);
+  BoolExpr* high = buildTableSelectTruthTableExprRecursive(
+      addressSize, depth, addressIndex + 1, (prefix << 1) | 1);
+  if (low == high) {
+    return low;
+  }
+
+  BoolExpr* addressBit = getChildFETS(addressIndex);
+  return BoolExpr::Or(
+      BoolExpr::And(BoolExpr::Not(addressBit), low),
+      BoolExpr::And(addressBit, high));
+}
+
+BoolExpr* buildTableSelectTruthTableExpr(const SNLTruthTable& tbl,
+                                         uint32_t k) {
+  const uint32_t addressSize = tbl.getTableSelectAddressSize();
+  const uint32_t depth = tbl.getTableSelectDepth();
+  if (k != addressSize + depth) {
+    throw std::runtime_error("TABLE_SELECT truth table arity mismatch");
+  }
+  return buildTableSelectTruthTableExprRecursive(
+      addressSize, depth, 0, 0);
+}  // LCOV_EXCL_LINE
+
 BoolExpr* buildGenericTruthTableExpr(const SNLTruthTable& tbl, uint32_t k) {
-  assert(tbl.isGeneric());
   assert(k > 0);
 
   BoolExpr* expr = getChildFETS(0);
@@ -245,6 +288,8 @@ BoolExpr* buildGenericTruthTableExpr(const SNLTruthTable& tbl, uint32_t k) {
         expr = BoolExpr::Not(expr);
       }
       return expr;
+    case SNLTruthTable::GenericType::TABLE_SELECT:
+      return buildTableSelectTruthTableExpr(tbl, k);
     case SNLTruthTable::GenericType::NONE:
       // LCOV_EXCL_START
       // LCOV_DISABLED_START

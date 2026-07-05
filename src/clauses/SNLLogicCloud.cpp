@@ -6,6 +6,7 @@
 #include <cassert>
 #include <sstream>
 #include "NajaProperty.h"
+#include "NLBitDependencies.h"
 #include "SNLDesignModeling.h"
 #include "SNLBitNet.h"
 #include "NLDB0.h"
@@ -60,6 +61,7 @@ struct ModelInputLayoutKeyHash {
 
 struct ModelInputLayout {
   bool isMux2 = false;
+  bool isTableSelect = false;
   bool isAssign = false;
   size_t bitTermCount = 0;
   std::vector<size_t> nonOutputTermFlatIDs;
@@ -237,6 +239,7 @@ const ModelInputLayout& getModelInputLayout(const DNLFull& dnl,
   ModelInputLayout layout;
   if (model != nullptr) {
     layout.isMux2 = NLDB0::isMux2(model);
+    layout.isTableSelect = NLDB0::isTableSelect(model);
     layout.isAssign = NLDB0::isAssign(model);
     layout.nonOutputTermFlatIDs.reserve(model->getBitTerms().size());
     for (const auto* term : model->getBitTerms()) {
@@ -811,6 +814,13 @@ size_t SNLLogicCloud::getRelevantInstanceInputCount(
     naja::DNL::DNLID driver) const {
   const auto& inst = dnl_.getDNLTerminalFromID(driver).getDNLInstance();
   const auto& layout = getModelInputLayout(dnl_, inst.getSNLModel());
+  if (layout.isTableSelect) {
+    const auto* model = inst.getSNLModel();
+    const auto& tt = getTruthTableCached(
+        model, dnl_.getDNLTerminalFromID(driver).getSnlBitTerm()->getOrderID());
+    return naja::NL::NLBitDependencies::countBitsForVector(
+        tt.getDependencies());
+  }
   return layout.isMux2 ? size_t{3} : layout.nonOutputTermFlatIDs.size();
 }
 
@@ -821,6 +831,17 @@ void SNLLogicCloud::appendRelevantInstanceInputs(
   const auto& inst = driverTerm.getDNLInstance();
   const auto* model = inst.getSNLModel();
   const auto& layout = getModelInputLayout(dnl_, model);
+  if (layout.isTableSelect) {
+    const auto& tt = getTruthTableCached(
+        model, driverTerm.getSnlBitTerm()->getOrderID());
+    const auto deps = naja::NL::NLBitDependencies::decodeBits(
+        tt.getDependencies());
+    for (size_t flatTermID : deps) {
+      relevantTerms.emplace_back(resolveInstanceInputTerm(
+          inst, flatTermID, driver, "table select dependency"));
+    }
+    return;
+  }
   if (!layout.isMux2) {
     for (size_t flatTermID : layout.nonOutputTermFlatIDs) {
       relevantTerms.emplace_back(resolveInstanceInputTerm(

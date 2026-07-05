@@ -103,7 +103,8 @@ The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/
 
 ```bash
 # Single file per design
-build/src/bin/kepler-formal <-verilog/-naja_if> [options] <design1> <design2> [<library-file>...]
+build/src/bin/kepler-formal <-verilog/-naja_if/-systemverilog/-sv/-sv2v> [options] \
+  <design1> <design2> [<library-file>...]
 
 # Multi-file Verilog
 build/src/bin/kepler-formal -verilog [options] --design1 <file...> --design2 <file...> \
@@ -120,7 +121,10 @@ build/src/bin/kepler-formal -sv -v sec \
 | --- | --- |
 | `--help`, `-h` | Print usage. |
 | `--config <file>`, `-c <file>` | Load a YAML config. If present, the YAML file takes precedence over the rest of the CLI. |
-| `--verification <mode>`, `-v <mode>` | Select `lec` or `sec`. Defaults to `lec`. |
+| `-verilog` | Parse both designs as Verilog. |
+| `-naja_if` | Parse both designs as Naja IF. |
+| `-systemverilog`, `-sv` | Parse both designs as SystemVerilog. Requires SEC. |
+| `-sv2v` | Parse design 1 as SystemVerilog and design 2 as Verilog for SEC RTL-vs-gate comparison. |
 | `--design1 <file...>` | Explicit source list for design 1 in multi-file Verilog mode. |
 | `--design2 <file...>` | Explicit source list for design 2 in multi-file Verilog mode. |
 | `-sv`, `-systemverilog` | Use SystemVerilog input mode. |
@@ -136,8 +140,7 @@ build/src/bin/kepler-formal --config <file.yaml>
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `format` | string | `verilog`, `v`, `systemverilog`, `sv`, or `naja_if`. Defaults to `verilog` if omitted. |
-| `verification` | string | `lec` or `sec`. Defaults to `lec` if omitted. |
+| `format` | string | `verilog`, `v`, `naja_if`, `systemverilog`, `sv`, or `sv2v`. Defaults to `verilog` if omitted. |
 | `input_paths` | list | Required. Either `[design0, design1]` or `[[design0_file...], [design1_file...]]`. The nested form is for multi-file Verilog. |
 | `liberty_files` | list[string] | Liberty libraries loaded through `SNLLibertyConstructor`. |
 | `py_tech_files` | list[string] | Python primitive loaders loaded through `SNLPyLoader`. |

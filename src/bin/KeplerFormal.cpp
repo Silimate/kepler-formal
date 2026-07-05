@@ -31,6 +31,9 @@
 #include "SNLSVConstructor.h"
 #include "SNLVRLConstructor.h"
 #include "SNLVRLDumper.h"
+#include "SNLBusTerm.h"
+#include "SNLInstance.h"
+#include "SNLTerm.h"
 #include "SNLUtils.h"
 #include "ScopeExtraction.h"
 #include "Config.h"
@@ -57,9 +60,9 @@ static const char* kSkippedMultiClockDomainPOReport =
 static void print_usage(const char* prog) {
   SPDLOG_INFO(
   // LCOV_EXCL_STOP
-      "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv> "
+      "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv/-sv2v> "
       "[-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
-      "<-naja_if/-verilog/-systemverilog/-sv> --design1 <file...> --design2 "
+      "<-naja_if/-verilog/-systemverilog/-sv/-sv2v> --design1 <file...> --design2 "
       "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <legacy|k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
@@ -784,15 +787,197 @@ static bool hasSystemVerilogSources(const std::vector<std::string>& designInputs
   // LCOV_EXCL_STOP
 }
 
+static bool isSimpleVerilogIdentifier(const std::string& name) {
+  if (name.empty()) {
+    return false;  // LCOV_EXCL_LINE
+  }
+  const auto isIdentifierChar = [](unsigned char c) {
+    return std::isalnum(c) || c == '_' || c == '$';
+  };
+  const unsigned char first = static_cast<unsigned char>(name.front());
+  if ((!std::isalpha(first) && first != '_') || first == '$') {
+    return false;
+  }
+  return std::all_of(name.begin(), name.end(), [&](char c) {
+    return isIdentifierChar(static_cast<unsigned char>(c));
+  });
+}
+
+static std::string dumpVerilogIdentifier(const std::string& name) {
+  if (isSimpleVerilogIdentifier(name)) {
+    return name;
+  }
+  return "\\" + name + " ";
+}
+
+static const char* getVerilogDirection(naja::NL::SNLTerm::Direction direction) {
+  switch (direction) {
+    case naja::NL::SNLTerm::Direction::Input:
+      return "input";
+    case naja::NL::SNLTerm::Direction::Output:
+      return "output";
+    case naja::NL::SNLTerm::Direction::InOut:
+    case naja::NL::SNLTerm::Direction::Undefined:
+      return "inout";
+  }
+  return "inout";  // LCOV_EXCL_LINE
+}
+
+static void appendPrimitiveStubModules(
+    naja::NL::NLLibrary* library,
+    std::ofstream& out,
+    std::unordered_set<std::string>& emittedNames,
+    size_t& emittedCount) {
+  if (library == nullptr) {
+    return;  // LCOV_EXCL_LINE
+  }
+
+  for (auto* design : library->getSNLDesigns()) {
+    if (design == nullptr || design->isUnnamed()) {
+      continue;
+    }
+    const std::string modelName = design->getName().getString();
+    if (modelName.empty() || !emittedNames.insert(modelName).second) {
+      continue;
+    }
+
+    std::vector<naja::NL::SNLTerm*> terms;
+    for (auto* term : design->getTerms()) {
+      if (term != nullptr && !term->isUnnamed()) {
+        terms.push_back(term);
+      }
+    }
+
+    out << "(* blackbox *) module " << dumpVerilogIdentifier(modelName) << "(";
+    for (size_t i = 0; i < terms.size(); ++i) {
+      if (i != 0) {
+        out << ", ";
+      }
+      out << dumpVerilogIdentifier(terms[i]->getName().getString());
+    }
+    out << ");\n";
+    for (auto* term : terms) {
+      out << "  " << getVerilogDirection(term->getDirection()) << " ";
+      if (auto* busTerm = dynamic_cast<naja::NL::SNLBusTerm*>(term)) {
+        out << "[" << busTerm->getMSB() << ":" << busTerm->getLSB() << "] ";
+      }
+      out << dumpVerilogIdentifier(term->getName().getString()) << ";\n";
+    }
+    out << "endmodule\n\n";
+    ++emittedCount;
+  }
+
+  for (auto* childLibrary : library->getLibraries()) {
+    appendPrimitiveStubModules(childLibrary, out, emittedNames, emittedCount);
+  }
+}
+
+static std::filesystem::path writeSystemVerilogPrimitiveStubs(
+    const std::vector<naja::NL::NLLibrary*>& primitiveLibraries,
+    std::vector<std::filesystem::path>& temporaryFiles) {
+  if (primitiveLibraries.empty()) {
+    return {};
+  }
+
+  const auto stubPath =
+      std::filesystem::temp_directory_path() /
+      std::filesystem::path(
+          "kepler_formal_sv2v_prims_" +
+          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+          ".sv");
+  std::ofstream stubs(stubPath, std::ios::out | std::ios::trunc);
+  if (!stubs) {
+    throw std::runtime_error(
+        "Failed to create temporary SystemVerilog primitive stub file: " +
+        stubPath.string());
+  }
+
+  std::unordered_set<std::string> emittedNames;
+  size_t emittedCount = 0;
+  for (auto* primitiveLibrary : primitiveLibraries) {
+    appendPrimitiveStubModules(primitiveLibrary, stubs, emittedNames, emittedCount);
+  }
+  stubs.close();
+
+  if (emittedCount == 0) {
+    std::error_code ec;
+    std::filesystem::remove(stubPath, ec);
+    return {};
+  }
+
+  temporaryFiles.push_back(stubPath);
+  return stubPath;
+}
+
+static naja::NL::SNLDesign* findPrimitiveDesignInLibrary(
+    naja::NL::NLLibrary* library,
+    const naja::NL::NLName& name) {
+  if (library == nullptr) {
+    return nullptr;  // LCOV_EXCL_LINE
+  }
+  if (auto* primitive = library->getSNLDesign(name)) {
+    return primitive;
+  }
+  for (auto* childLibrary : library->getLibraries()) {
+    if (auto* primitive = findPrimitiveDesignInLibrary(childLibrary, name)) {
+      return primitive;
+    }
+  }
+  return nullptr;
+}
+
+static naja::NL::SNLDesign* findPrimitiveDesign(
+    const std::vector<naja::NL::NLLibrary*>& primitiveLibraries,
+    const naja::NL::NLName& name) {
+  for (auto* primitiveLibrary : primitiveLibraries) {
+    if (auto* primitive = findPrimitiveDesignInLibrary(primitiveLibrary, name)) {
+      return primitive;
+    }
+  }
+  return nullptr;
+}
+
+static void reconnectGeneratedPrimitiveStubs(
+    naja::NL::NLLibrary* designLibrary,
+    const std::vector<naja::NL::NLLibrary*>& primitiveLibraries) {
+  if (designLibrary == nullptr || primitiveLibraries.empty()) {
+    return;
+  }
+
+  for (auto* design : designLibrary->getSNLDesigns()) {
+    if (design == nullptr || design->isPrimitive()) {
+      continue;  // LCOV_EXCL_LINE
+    }
+    for (auto* instance : design->getInstances()) {
+      auto* model = instance->getModel();
+      if (model == nullptr || model->isPrimitive() || model->isUnnamed()) {
+        continue;  // LCOV_EXCL_LINE
+      }
+      if (auto* primitive = findPrimitiveDesign(primitiveLibraries, model->getName())) {
+        instance->setModel(primitive);
+      }
+    }
+  }
+}
+
 // LCOV_EXCL_START
 static std::vector<std::filesystem::path> buildSystemVerilogInputPaths(
 // LCOV_EXCL_STOP
     const std::vector<std::string>& designInputs,
     const SystemVerilogDesignOptions& designOptions,
-    std::vector<std::filesystem::path>& temporaryFiles) {
+    std::vector<std::filesystem::path>& temporaryFiles,
+    const std::vector<naja::NL::NLLibrary*>* primitiveLibraries = nullptr) {
   // LCOV_EXCL_START
   std::vector<std::filesystem::path> svInputPaths = toPathVector(designInputs);
   // LCOV_EXCL_STOP
+
+  if (primitiveLibraries != nullptr) {
+    const auto primitiveStubsPath =
+        writeSystemVerilogPrimitiveStubs(*primitiveLibraries, temporaryFiles);
+    if (!primitiveStubsPath.empty()) {
+      svInputPaths.push_back(primitiveStubsPath);
+    }
+  }
 
   // LCOV_EXCL_START
   const auto quotePathForSlangCommandFile = [](const std::filesystem::path& path) {
@@ -813,7 +998,10 @@ static std::vector<std::filesystem::path> buildSystemVerilogInputPaths(
   // LCOV_EXCL_STOP
 
   // LCOV_EXCL_START
-  if (designOptions.top) {
+  // Generated SV2V primitive stubs may be parsed with RTL that has no enclosing
+  // timescale, so force a Slang command file when stubs are present.
+  const bool addDefaultTimescale = primitiveLibraries != nullptr;
+  if (designOptions.top || addDefaultTimescale) {
   // LCOV_EXCL_STOP
     const auto temporaryTopFlistPath =
         // LCOV_EXCL_START
@@ -832,7 +1020,12 @@ static std::vector<std::filesystem::path> buildSystemVerilogInputPaths(
           // LCOV_EXCL_STOP
     }
     // LCOV_EXCL_START
-    topFlist << "--top " << *designOptions.top << "\n";
+    if (addDefaultTimescale) {
+      topFlist << "--timescale 1ns/1ps\n";
+    }
+    if (designOptions.top) {
+      topFlist << "--top " << *designOptions.top << "\n";
+    }
     if (designOptions.flist) {
       topFlist << "-f "
                << quotePathForSlangCommandFile(std::filesystem::path(*designOptions.flist))
@@ -890,7 +1083,7 @@ static KEPLER_FORMAL::MiterStrategy::CompactSnapshot captureCompactSnapshot(
 
 int KeplerFormalMain(int argc, char** argv) {
   using namespace std::chrono;
-  enum class FormatType { VERILOG, SYSTEMVERILOG, NAJA_IF };
+  enum class FormatType { VERILOG, SYSTEMVERILOG, SV2V, NAJA_IF };
   constexpr size_t kDefaultSecMaxK = 32;
   const auto cleanupNajaState = []() {
     naja::DNL::destroy();
@@ -977,6 +1170,8 @@ int KeplerFormalMain(int argc, char** argv) {
           } else if (fmt == "systemverilog" || fmt == "sv") {
             // LCOV_EXCL_START
             inputFormatType = FormatType::SYSTEMVERILOG;
+          } else if (fmt == "sv2v") {
+            inputFormatType = FormatType::SV2V;
           } else {
             SPDLOG_CRITICAL("Unrecognized format in config: {}", fmt);
             return EXIT_FAILURE;
@@ -1328,6 +1523,12 @@ int KeplerFormalMain(int argc, char** argv) {
         break;
         // LCOV_EXCL_STOP
       }
+      if (arg == "-sv2v") {
+        inputFormatType = FormatType::SV2V;
+        ++parseStart;
+        formatFound = true;
+        break;
+      }
       // LCOV_EXCL_START
       SPDLOG_CRITICAL("Unrecognized option before input format type: {}", arg);
       return EXIT_FAILURE;
@@ -1562,6 +1763,9 @@ int KeplerFormalMain(int argc, char** argv) {
     inputFormatName = "SYSTEMVERILOG";
   }
   // LCOV_EXCL_STOP
+  if (inputFormatType == FormatType::SV2V) {
+    inputFormatName = "SV2V";
+  }
   SPDLOG_INFO("Input format: {}", inputFormatName);
   if (!runLogFilePath.empty()) {
     SPDLOG_INFO("Run log: {}", runLogFilePath);
@@ -1582,6 +1786,18 @@ int KeplerFormalMain(int argc, char** argv) {
       return EXIT_FAILURE;
       // LCOV_EXCL_STOP
     }
+  } else if (inputFormatType == FormatType::SV2V) {
+    if (!hasSystemVerilogSources(designInputs.design0, systemVerilogOptions.design0)) {
+      SPDLOG_CRITICAL(
+          "Need SystemVerilog input sources for design 1 (files and/or flist)");
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    if (designInputs.design1.empty()) {
+      SPDLOG_CRITICAL("Need Verilog input sources for design 2");
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
   } else if (designInputs.design0.empty() || designInputs.design1.empty()) {
     // LCOV_EXCL_START
     SPDLOG_CRITICAL("Need two input netlist paths (one per design)");
@@ -1595,6 +1811,13 @@ int KeplerFormalMain(int argc, char** argv) {
     SPDLOG_CRITICAL("SNL input only supports one file per design");
     return EXIT_FAILURE;
     // LCOV_EXCL_STOP
+  }
+  if ((inputFormatType == FormatType::SYSTEMVERILOG ||
+       inputFormatType == FormatType::SV2V) &&
+      verificationMode != VerificationMode::SEC) {
+    SPDLOG_CRITICAL(
+        "SystemVerilog input formats require SEC verification (-v sec or verification: sec)");
+    return EXIT_FAILURE;
   }
   if (verificationMode == VerificationMode::LEC && secMaxKExplicit) {
     // LCOV_EXCL_START
@@ -1642,12 +1865,21 @@ int KeplerFormalMain(int argc, char** argv) {
     }
   }
   if (inputFormatType != FormatType::SYSTEMVERILOG &&
+      inputFormatType != FormatType::SV2V &&
       (systemVerilogOptions.design0.flist || systemVerilogOptions.design0.top ||
        systemVerilogOptions.design1.flist || systemVerilogOptions.design1.top)) {
     // LCOV_EXCL_START
-    SPDLOG_CRITICAL("SystemVerilog design options are only valid with -systemverilog/-sv input");
+    SPDLOG_CRITICAL(
+        "SystemVerilog design options are only valid with -systemverilog/-sv/-sv2v input");
     return EXIT_FAILURE;
     // LCOV_EXCL_STOP
+  }
+  if (inputFormatType == FormatType::SV2V &&
+      (systemVerilogOptions.design1.flist || systemVerilogOptions.design1.top)) {
+    SPDLOG_CRITICAL(
+        "sv2v format only accepts SystemVerilog options for design 1; "
+        "design 2 is parsed as Verilog");
+    return EXIT_FAILURE;
   }
   std::string svValidationError;
   if (!validateSystemVerilogOptions(systemVerilogOptions, svValidationError)) {
@@ -1822,7 +2054,8 @@ int KeplerFormalMain(int argc, char** argv) {
     NLDB* db0 = nullptr;
     bool primitivesAreLoaded = false;
 
-    auto loadLibraries = [&](NLDB* db) -> bool {
+    auto loadLibraries = [&](NLDB* db,
+                             std::vector<NLLibrary*>* primitiveLibraries = nullptr) -> bool {
       if (libertyFiles.empty() && pythonFiles.empty()) {
         // LCOV_EXCL_START
         // LCOV_DISABLED_START
@@ -1832,6 +2065,9 @@ int KeplerFormalMain(int argc, char** argv) {
       }
       auto primitivesLibrary =
           NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
+      if (primitiveLibraries != nullptr) {
+        primitiveLibraries->push_back(primitivesLibrary);
+      }
       for (const auto& libraryFile : libertyFiles) {
         std::filesystem::path libraryPath(libraryFile);
         SPDLOG_INFO("Loading library file: {}", libraryFile);
@@ -1848,16 +2084,28 @@ int KeplerFormalMain(int argc, char** argv) {
       return true;
     };
 
+    const auto isHdlFormat = [&]() {
+      return inputFormatType == FormatType::VERILOG ||
+             inputFormatType == FormatType::SYSTEMVERILOG ||
+             inputFormatType == FormatType::SV2V;
+    };
+
+    const auto designUsesSystemVerilog = [&](int designIndex) {
+      return inputFormatType == FormatType::SYSTEMVERILOG ||
+             (inputFormatType == FormatType::SV2V && designIndex == 0);
+    };
+
     auto loadOneDesign = [&](const std::vector<std::string>& designPaths,
                              const SystemVerilogDesignOptions& designOptions,
                              int designIndex,
                              int dbID) -> NLDB* {
       NLDB* db = nullptr;
       bool primitivesLoadedForDesign = false;
+      std::vector<NLLibrary*> primitiveLibraries;
 
       if (!libertyFiles.empty() || !pythonFiles.empty()) {
         db = NLDB::create(NLUniverse::get());
-        primitivesLoadedForDesign = loadLibraries(db);
+        primitivesLoadedForDesign = loadLibraries(db, &primitiveLibraries);
         if (!primitivesLoadedForDesign) {
           // LCOV_EXCL_START
           throw std::runtime_error("Failed to load library files");
@@ -1865,46 +2113,52 @@ int KeplerFormalMain(int argc, char** argv) {
         }
       }
 
-      if (inputFormatType == FormatType::VERILOG ||
-          // LCOV_EXCL_START
-          inputFormatType == FormatType::SYSTEMVERILOG) {
-          // LCOV_EXCL_STOP
+      if (isHdlFormat()) {
         if (!db) {
           // LCOV_EXCL_START
           db = NLDB::create(NLUniverse::get());
         }
         // LCOV_EXCL_STOP
         db->setID(dbID);
+        const bool useSystemVerilog = designUsesSystemVerilog(designIndex);
         SPDLOG_INFO("Parsing {} file(s) for design {}",
-                    inputFormatType == FormatType::SYSTEMVERILOG ? "systemverilog" : "verilog",
+                    useSystemVerilog ? "systemverilog" : "verilog",
                     designIndex + 1);
         auto designLibrary = NLLibrary::create(db, NLName("DESIGN"));
-        if (inputFormatType == FormatType::SYSTEMVERILOG) {
+        if (useSystemVerilog) {
           // LCOV_EXCL_START
           SNLSVConstructor constructor(designLibrary);
           std::vector<std::filesystem::path> temporaryFiles;
           // LCOV_EXCL_STOP
-	          const auto svInputPaths =
-	              // LCOV_EXCL_START
-	              buildSystemVerilogInputPaths(designPaths, designOptions, temporaryFiles);
-	              // LCOV_EXCL_STOP
-	          try {
-	            // LCOV_EXCL_START
-	            constructor.construct(svInputPaths);
-	            // LCOV_EXCL_STOP
+          const auto* sv2vPrimitiveLibraries =
+              (inputFormatType == FormatType::SV2V && designIndex == 0)
+                  ? &primitiveLibraries
+                  : nullptr;
+          const auto svInputPaths =
               // LCOV_EXCL_START
-	          // LCOV_DISABLED_START
-	          } catch (...) {
-	            for (const auto& temporaryFile : temporaryFiles) {
-	              std::error_code ec;
-	              std::filesystem::remove(temporaryFile, ec);
-	              // LCOV_DISABLED_STOP
-	            }
-	            // LCOV_DISABLED_START
-	            throw;
-	          }
-	          // LCOV_DISABLED_STOP
+              buildSystemVerilogInputPaths(
+                  designPaths, designOptions, temporaryFiles, sv2vPrimitiveLibraries);
               // LCOV_EXCL_STOP
+          try {
+            // LCOV_EXCL_START
+            constructor.construct(svInputPaths);
+            if (sv2vPrimitiveLibraries != nullptr) {
+              reconnectGeneratedPrimitiveStubs(designLibrary, *sv2vPrimitiveLibraries);
+            }
+            // LCOV_EXCL_STOP
+            // LCOV_EXCL_START
+            // LCOV_DISABLED_START
+          } catch (...) {
+            for (const auto& temporaryFile : temporaryFiles) {
+              std::error_code ec;
+              std::filesystem::remove(temporaryFile, ec);
+              // LCOV_DISABLED_STOP
+            }
+            // LCOV_DISABLED_START
+            throw;
+          }
+          // LCOV_DISABLED_STOP
+          // LCOV_EXCL_STOP
           // LCOV_EXCL_START
           for (const auto& temporaryFile : temporaryFiles) {
             std::error_code ec;
@@ -2094,7 +2348,8 @@ int KeplerFormalMain(int argc, char** argv) {
             0,
             2,
             "design 1");
-        if (sameCompactSecDesignSpec(
+        if (inputFormatType != FormatType::SV2V &&
+            sameCompactSecDesignSpec(
                 inputFormatType == FormatType::SYSTEMVERILOG,
                 designInputs,
                 systemVerilogOptions)) {
@@ -2142,9 +2397,10 @@ int KeplerFormalMain(int argc, char** argv) {
     // LCOV_EXCL_STOP
 
     // LCOV_EXCL_START
+    std::vector<NLLibrary*> db0PrimitiveLibraries;
     if (!libertyFiles.empty() || !pythonFiles.empty()) {
       db0 = NLDB::create(NLUniverse::get());
-      primitivesAreLoaded = loadLibraries(db0);
+      primitivesAreLoaded = loadLibraries(db0, &db0PrimitiveLibraries);
       if (!primitivesAreLoaded) {
         return EXIT_FAILURE;  // LCOV_EXCL_LINE
         // LCOV_EXCL_STOP
@@ -2154,26 +2410,34 @@ int KeplerFormalMain(int argc, char** argv) {
     // LCOV_EXCL_STOP
 
     // LCOV_EXCL_START
-    if (inputFormatType == FormatType::VERILOG ||
-        inputFormatType == FormatType::SYSTEMVERILOG) {
+    if (isHdlFormat()) {
       if (!db0) {
         db0 = NLDB::create(NLUniverse::get());
       }
       const auto design0Paths = toPathVector(designInputs.design0);
+      const bool design0UsesSystemVerilog = designUsesSystemVerilog(0);
       SPDLOG_INFO("Parsing {} file(s) for design 1",
       // LCOV_EXCL_STOP
-                  inputFormatType == FormatType::SYSTEMVERILOG ? "systemverilog" : "verilog");
+                  design0UsesSystemVerilog ? "systemverilog" : "verilog");
       // LCOV_EXCL_START
       auto designLibrary = NLLibrary::create(db0, NLName("DESIGN"));
-      if (inputFormatType == FormatType::SYSTEMVERILOG) {
+      if (design0UsesSystemVerilog) {
         SNLSVConstructor constructor(designLibrary);
         std::vector<std::filesystem::path> temporaryFiles;
+        const auto* sv2vPrimitiveLibraries =
+            inputFormatType == FormatType::SV2V ? &db0PrimitiveLibraries : nullptr;
         const auto svInputPaths = buildSystemVerilogInputPaths(
-            designInputs.design0, systemVerilogOptions.design0, temporaryFiles);
+            designInputs.design0,
+            systemVerilogOptions.design0,
+            temporaryFiles,
+            sv2vPrimitiveLibraries);
             // LCOV_EXCL_STOP
         try {
           // LCOV_EXCL_START
           constructor.construct(svInputPaths);
+          if (sv2vPrimitiveLibraries != nullptr) {
+            reconnectGeneratedPrimitiveStubs(designLibrary, *sv2vPrimitiveLibraries);
+          }
         } catch (...) {
           for (const auto& temporaryFile : temporaryFiles) {
             std::error_code ec;
@@ -2263,18 +2527,18 @@ int KeplerFormalMain(int argc, char** argv) {
     // LCOV_EXCL_STOP
 
     // LCOV_EXCL_START
-    if (inputFormatType == FormatType::VERILOG ||
-        inputFormatType == FormatType::SYSTEMVERILOG) {
+    if (isHdlFormat()) {
       if (!db1) {
         db1 = NLDB::create(NLUniverse::get());
       }
       const auto design1Paths = toPathVector(designInputs.design1);
+      const bool design1UsesSystemVerilog = designUsesSystemVerilog(1);
       SPDLOG_INFO("Parsing {} file(s) for design 2",
       // LCOV_EXCL_STOP
-                  inputFormatType == FormatType::SYSTEMVERILOG ? "systemverilog" : "verilog");
+                  design1UsesSystemVerilog ? "systemverilog" : "verilog");
       // LCOV_EXCL_START
       auto designLibrary = NLLibrary::create(db1, NLName("DESIGN"));
-      if (inputFormatType == FormatType::SYSTEMVERILOG) {
+      if (design1UsesSystemVerilog) {
         SNLSVConstructor constructor(designLibrary);
         std::vector<std::filesystem::path> temporaryFiles;
         const auto svInputPaths = buildSystemVerilogInputPaths(
