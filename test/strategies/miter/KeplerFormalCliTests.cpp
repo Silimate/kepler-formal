@@ -1185,11 +1185,31 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogAccepted) {
       "endmodule\n");
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
+      "verification: sec\n"
+      "sec_encoding: binary\n"
+      "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, ConfigSystemVerilogLecRejected) {
+  const auto fixture = createEquivalentDesignFixture(
+      "sv",
+      "module top(input logic a, output logic y);\n"
+      "  assign y = a;\n"
+      "endmodule\n");
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_NE(rc, EXIT_SUCCESS);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -1213,11 +1233,42 @@ TEST_F(KeplerFormalCliTests, ConfigSv2vAccepted) {
   }
   const auto cfgPath = writeTempConfig(
       "format: sv2v\n"
+      "verification: sec\n"
+      "sec_encoding: binary\n"
+      "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n");
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, ConfigSv2vLecRejected) {
+  SimpleCliFixture fixture;
+  fixture.tmpDir = makeUniqueTempDir("kepler_formal_cli_sv2v_lec");
+  fixture.design0Path = fixture.tmpDir / "design0.sv";
+  fixture.design1Path = fixture.tmpDir / "design1.v";
+  {
+    std::ofstream design0(fixture.design0Path);
+    design0 << "module top(input logic a, output logic y);\n";
+    design0 << "  assign y = a;\n";
+    design0 << "endmodule\n";
+  }
+  {
+    std::ofstream design1(fixture.design1Path);
+    design1 << "module top(input a, output y);\n";
+    design1 << "  assign y = a;\n";
+    design1 << "endmodule\n";
+  }
+  const auto cfgPath = writeTempConfig(
+      "format: sv2v\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n");
+  int rc = runWithConfigFile(cfgPath);
+  EXPECT_NE(rc, EXIT_SUCCESS);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -1241,6 +1292,9 @@ TEST_F(KeplerFormalCliTests, ConfigSv2vRejectsSecondSystemVerilogOptions) {
   }
   const auto cfgPath = writeTempConfig(
       "format: sv2v\n"
+      "verification: sec\n"
+      "sec_encoding: binary\n"
+      "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n"
@@ -1273,6 +1327,8 @@ TEST_F(KeplerFormalCliTests, CliSv2vAccepted) {
       "-sv2v",
       fixture.design0Path.string(),
       fixture.design1Path.string(),
+      "-v",
+      "sec",
   });
   EXPECT_EQ(rc, EXIT_SUCCESS);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -1288,8 +1344,11 @@ TEST_F(KeplerFormalCliTests, CliSvAliasAccepted) {
   std::string argv1 = "-sv";
   std::string argv2 = fixture.design0Path.string();
   std::string argv3 = fixture.design1Path.string();
-  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data()};
-  int argc = 4;
+  std::string argv4 = "-v";
+  std::string argv5 = "sec";
+  char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
+                  argv4.data(), argv5.data()};
+  int argc = 6;
   int rc = KeplerFormalMain(argc, argv);
   EXPECT_EQ(rc, EXIT_SUCCESS);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -1299,6 +1358,9 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogFlistAndTopAccepted) {
   const auto fixture = createSystemVerilogFlistFixture();
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
+      "verification: sec\n"
+      "sec_encoding: binary\n"
+      "max_k: 4\n"
       "sv_design1_flist: " + fixture.design0FlistPath.string() + "\n"
       "sv_design2_flist: " + fixture.design1FlistPath.string() + "\n"
       "sv_design1_top: cva6\n"
@@ -1309,7 +1371,7 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogFlistAndTopAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
-TEST_F(KeplerFormalCliTests, ConfigCompactSystemVerilogFlistWithLibertyAndCnfAccepted) {
+TEST_F(KeplerFormalCliTests, ConfigCompactSystemVerilogLecCnfRejected) {
   const auto fixture = createSystemVerilogFlistFixture();
   const auto cnfPath = fixture.tmpDir / "compact_sv.cnf";
   const auto poCnfDir = fixture.tmpDir / "compact_sv_po_cnfs";
@@ -1328,10 +1390,9 @@ TEST_F(KeplerFormalCliTests, ConfigCompactSystemVerilogFlistWithLibertyAndCnfAcc
       "liberty_files:\n"
       "  - " + libertyPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
-  EXPECT_TRUE(std::filesystem::exists(cnfPath));
-  EXPECT_TRUE(std::filesystem::exists(poCnfDir / "top0" / "po_000000.cnf"));
-  EXPECT_TRUE(std::filesystem::exists(poCnfDir / "top1" / "po_000000.cnf"));
+  EXPECT_NE(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_FALSE(std::filesystem::exists(cnfPath));
+  EXPECT_FALSE(std::filesystem::exists(poCnfDir));
 
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -1382,9 +1443,12 @@ TEST_F(KeplerFormalCliTests, CliSystemVerilogFlistAndTopAccepted) {
   std::string argv7 = fixture.design1FlistPath.string();
   std::string argv8 = "--sv_design2_top";
   std::string argv9 = "cva6";
+  std::string argv10 = "-v";
+  std::string argv11 = "sec";
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(), argv4.data(),
-                  argv5.data(), argv6.data(), argv7.data(), argv8.data(), argv9.data()};
-  int argc = 10;
+                  argv5.data(), argv6.data(), argv7.data(), argv8.data(), argv9.data(),
+                  argv10.data(), argv11.data()};
+  int argc = 12;
   int rc = KeplerFormalMain(argc, argv);
   EXPECT_EQ(rc, EXIT_SUCCESS);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -3301,9 +3365,11 @@ TEST_F(KeplerFormalCliTests, CliSystemVerilogFlistWithoutTopAccepted) {
   std::string argv3 = fixture.design0FlistPath.string();
   std::string argv4 = "--sv_design2_flist";
   std::string argv5 = fixture.design1FlistPath.string();
+  std::string argv6 = "-v";
+  std::string argv7 = "sec";
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(), argv4.data(),
-                  argv5.data()};
-  int argc = 6;
+                  argv5.data(), argv6.data(), argv7.data()};
+  int argc = 8;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -3336,9 +3402,12 @@ TEST_F(KeplerFormalCliTests, CliSystemVerilogDirectPathsWithEscapedNamesAccepted
   std::string argv5 = "top";
   std::string argv6 = design0.string();
   std::string argv7 = design1.string();
+  std::string argv8 = "-v";
+  std::string argv9 = "sec";
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
-                  argv4.data(), argv5.data(), argv6.data(), argv7.data()};
-  int argc = 8;
+                  argv4.data(), argv5.data(), argv6.data(), argv7.data(),
+                  argv8.data(), argv9.data()};
+  int argc = 10;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
   std::filesystem::remove_all(tmpDir);
@@ -3371,9 +3440,12 @@ TEST_F(KeplerFormalCliTests, CliSystemVerilogTopCommandFileCreationFailureFails)
   std::string argv5 = "top";
   std::string argv6 = fixture.design0Path.string();
   std::string argv7 = fixture.design1Path.string();
+  std::string argv8 = "-v";
+  std::string argv9 = "sec";
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
-                  argv4.data(), argv5.data(), argv6.data(), argv7.data()};
-  int argc = 8;
+                  argv4.data(), argv5.data(), argv6.data(), argv7.data(),
+                  argv8.data(), argv9.data()};
+  int argc = 10;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_FAILURE);
 
@@ -3410,10 +3482,12 @@ TEST_F(KeplerFormalCliTests, CliCompactSystemVerilogTopCommandFileCreationFailur
   std::string argv6 = "--compact";
   std::string argv7 = fixture.design0Path.string();
   std::string argv8 = fixture.design1Path.string();
+  std::string argv9 = "-v";
+  std::string argv10 = "sec";
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
                   argv4.data(), argv5.data(), argv6.data(), argv7.data(),
-                  argv8.data()};
-  int argc = 9;
+                  argv8.data(), argv9.data(), argv10.data()};
+  int argc = 11;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_FAILURE);
 
@@ -3453,9 +3527,12 @@ TEST_F(KeplerFormalCliTests, CliSystemVerilogFirstDesignFailureCleansTemporaryCo
   std::string argv5 = "top";
   std::string argv6 = design0.string();
   std::string argv7 = design1.string();
+  std::string argv8 = "-v";
+  std::string argv9 = "sec";
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
-                  argv4.data(), argv5.data(), argv6.data(), argv7.data()};
-  int argc = 8;
+                  argv4.data(), argv5.data(), argv6.data(), argv7.data(),
+                  argv8.data(), argv9.data()};
+  int argc = 10;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_FAILURE);
   EXPECT_EQ(listTemporarySystemVerilogCommandFiles(), beforeTempFiles);
@@ -3494,9 +3571,12 @@ TEST_F(KeplerFormalCliTests, CliSystemVerilogSecondDesignFailureCleansTemporaryC
   std::string argv5 = "top";
   std::string argv6 = design0.string();
   std::string argv7 = design1.string();
+  std::string argv8 = "-v";
+  std::string argv9 = "sec";
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
-                  argv4.data(), argv5.data(), argv6.data(), argv7.data()};
-  int argc = 8;
+                  argv4.data(), argv5.data(), argv6.data(), argv7.data(),
+                  argv8.data(), argv9.data()};
+  int argc = 10;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_FAILURE);
   EXPECT_EQ(listTemporarySystemVerilogCommandFiles(), beforeTempFiles);

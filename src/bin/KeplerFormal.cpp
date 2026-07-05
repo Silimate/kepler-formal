@@ -1619,6 +1619,13 @@ int KeplerFormalMain(int argc, char** argv) {
     return EXIT_FAILURE;
     // LCOV_EXCL_STOP
   }
+  if ((inputFormatType == FormatType::SYSTEMVERILOG ||
+       inputFormatType == FormatType::SV2V) &&
+      verificationMode != VerificationMode::SEC) {
+    SPDLOG_CRITICAL(
+        "SystemVerilog input formats require SEC verification (-v sec or verification: sec)");
+    return EXIT_FAILURE;
+  }
   if (verificationMode == VerificationMode::LEC && secMaxKExplicit) {
     // LCOV_EXCL_START
     SPDLOG_CRITICAL("max_k/-k is only supported with SEC verification");
