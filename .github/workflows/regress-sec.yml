@@ -41,8 +41,8 @@ jobs:
           -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/stage \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_CXX_STANDARD=20 \
-          -DCMAKE_CXX_FLAGS="-O3 -march=native -ffast-math -flto -DNDEBUG" \
-          -DCMAKE_CXX_FLAGS_RELEASE="-Ofast -march=native -ffast-math -flto -DNDEBUG" \
+          -DCMAKE_CXX_FLAGS="-O3 -ffast-math -flto -DNDEBUG" \
+          -DCMAKE_CXX_FLAGS_RELEASE="-Ofast -ffast-math -flto -DNDEBUG" \
           -DCMAKE_EXE_LINKER_FLAGS="-flto"
 
     - name: Build and install kepler-formal runtime
@@ -319,6 +319,200 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: sec-regress-logs-${{ matrix.flow.name }}-${{ matrix.case.name }}
+        path: ${{github.workspace}}/regress-output/${{ matrix.case.name }}/sec
+        retention-days: 7
+        if-no-files-found: ignore
+
+  run-sv2v-sec-regress:
+    name: sv2v ${{ matrix.flow.name }} / ${{ matrix.case.name }}
+    runs-on: ubuntu-22.04
+    needs: build-sec-regress
+    strategy:
+      fail-fast: false
+      matrix:
+        flow:
+        - name: imc-binary
+          engine: imc
+          sec_encoding: binary
+          positive_expectation: allow-unset-state-inconclusive
+        - name: ki-binary
+          engine: k_induction
+          sec_encoding: binary
+          positive_expectation: allow-unset-state-inconclusive
+        - name: pdr-binary
+          engine: pdr
+          sec_encoding: binary
+          positive_expectation: allow-unset-state-inconclusive
+        - name: imc-dual-rail
+          engine: imc
+          sec_encoding: dual_rail_steady
+          positive_expectation: allow-inconclusive
+        - name: ki-dual-rail
+          engine: k_induction
+          sec_encoding: dual_rail_steady
+          positive_expectation: allow-inconclusive
+        - name: pdr-dual-rail
+          engine: pdr
+          sec_encoding: dual_rail_steady
+          positive_expectation: expect-equivalent
+        case:
+        - name: sv2v_asap7_aes_mbff
+          case_dir: kepler-formal-examples/asap7_aes-mbff
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_asap7_ethmac
+          case_dir: kepler-formal-examples/asap7_ethmac
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_asap7_jpeg_lvt
+          case_dir: kepler-formal-examples/asap7_jpeg_lvt
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_asap7_mock_alu
+          case_dir: kepler-formal-examples/asap7_mock-alu
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_asap7_mock_cpu
+          case_dir: kepler-formal-examples/asap7_mock_cpu
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_cts_aes_asap7_base
+          case_dir: kepler-formal-examples/cts_aes_asap7_base
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_ihp_sg13g2_i2c_gpio_expander
+          case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_ihp_sg13g2_i2c_device_ctrl
+          case_dir: kepler-formal-examples/ihp-sg13g2_i2c-gpio-expander
+          config_prefix: sv2v_I2cDeviceCtrl
+          expectation: positive
+        - name: sv2v_ihp_sg13g2_ibex
+          case_dir: kepler-formal-examples/ihp_sg13g2_ibex
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_mempool_group
+          case_dir: kepler-formal-examples/mempool_group
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_mock_cpu
+          case_dir: kepler-formal-examples/mock_cpu
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_nangate45_ariane136
+          case_dir: kepler-formal-examples/nangate45_ariane136
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_nangate45_black_parrot
+          case_dir: kepler-formal-examples/nangate45_black_parrot
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_nangate45_black_parrot_sec_final
+          case_dir: kepler-formal-examples/nangate45_black_parrot_sec_final
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_nangate45_bp_be
+          case_dir: kepler-formal-examples/nangate45_bp_be
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_nangate45_dynamic_node
+          case_dir: kepler-formal-examples/nangate45_dynamic_node
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_nangate45_ibex
+          case_dir: kepler-formal-examples/nangate45_ibex
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_nangate45_swerv
+          case_dir: kepler-formal-examples/nangate45_swerv
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_sky130hd_gcd
+          case_dir: kepler-formal-examples/sky130hd_gcd
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_sky130hd_riscv32i
+          case_dir: kepler-formal-examples/sky130hd_riscv32i
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_sky130hs_ibex
+          case_dir: kepler-formal-examples/sky130hs_ibex
+          config_prefix: sv2v
+          expectation: positive
+        - name: sv2v_sky130hs_riscv32i
+          case_dir: kepler-formal-examples/sky130hs_riscv32i
+          config_prefix: sv2v
+          expectation: positive
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install runtime dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git python3 python3-pip capnproto libcapnp-dev libtbb-dev \
+          libboost-iostreams-dev zlib1g-dev
+
+    - name: Download SEC runtime
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.SEC_RUNTIME_ARTIFACT }}
+        path: ${{github.workspace}}/stage
+
+    - name: Restore executable bit
+      run: chmod +x ${{github.workspace}}/stage/bin/kepler-formal
+
+    - name: Clone SV2V regression inputs
+      working-directory: ${{github.workspace}}
+      run: git clone --depth 1 https://github.com/keplertech/kepler-formal-examples
+
+    - name: Run SV2V SEC regression
+      working-directory: ${{github.workspace}}
+      env:
+        CASE_NAME: ${{ matrix.case.name }}
+        CASE_DIR: ${{ matrix.case.case_dir }}
+        CASE_CONFIG_PREFIX: ${{ matrix.case.config_prefix }}
+        CASE_EXPECTATION: ${{ matrix.case.expectation }}
+        SEC_ENGINE: ${{ matrix.flow.engine }}
+        SEC_ENCODING: ${{ matrix.flow.sec_encoding }}
+        SEC_POSITIVE_EXPECTATION: ${{ matrix.flow.positive_expectation }}
+      run: |
+        set -euo pipefail
+        export LD_LIBRARY_PATH="${{github.workspace}}/stage/lib:${LD_LIBRARY_PATH:-}"
+
+        expectation="${CASE_EXPECTATION}"
+        if [[ "${expectation}" == "positive" ]]; then
+          expectation="${SEC_POSITIVE_EXPECTATION}"
+        fi
+
+        if [[ "${SEC_ENGINE}" == "pdr" && "${SEC_ENCODING}" == "dual_rail_steady" ]]; then
+          case_config="${CASE_CONFIG_PREFIX}_sec_test.yml"
+        else
+          case_config="${CASE_CONFIG_PREFIX}_sec_${SEC_ENGINE}_${SEC_ENCODING}_test.yml"
+        fi
+
+        if [[ ! -f "${{github.workspace}}/${CASE_DIR}/${case_config}" ]]; then
+          echo "Missing SV2V SEC config: ${CASE_DIR}/${case_config}" >&2
+          exit 2
+        fi
+
+        bash regress/run_sec_strategies_regress.sh \
+          "${CASE_NAME}" \
+          "${{github.workspace}}/${CASE_DIR}" \
+          "${{github.workspace}}/stage/bin/kepler-formal" \
+          "${case_config}" \
+          "${expectation}" \
+          compact \
+          "engine=${SEC_ENGINE}" \
+          "sec-encoding=${SEC_ENCODING}"
+
+    - name: Upload SV2V regression logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sec-regress-logs-sv2v-${{ matrix.flow.name }}-${{ matrix.case.name }}
         path: ${{github.workspace}}/regress-output/${{ matrix.case.name }}/sec
         retention-days: 7
         if-no-files-found: ignore
