@@ -35,7 +35,7 @@ in [docs/sec-flags-spec.md](docs/sec-flags-spec.md).
 
 ## Requirements
 
-### For Verilog:
+### For Verilog/SystemVerilog:
 
 - Gate-level LEC expects no change of sequential boundaries and no change
   in names of hierarchical instances, sequential instances and top terminals.
