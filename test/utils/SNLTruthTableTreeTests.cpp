@@ -586,6 +586,30 @@ TEST(SNLTruthTableTreeApiTest,
   EXPECT_TRUE(loopTerms.empty());
 }
 
+TEST(SNLTruthTableTreeApiTest,
+     AncestorSearchRejectsReservedAndOutOfRangeParentEdges) {
+  SNLTruthTableTree tree(0, 0, Node::Type::P);
+  ASSERT_GT(tree.getBorderLeavesSize(), 0u);
+
+  auto target = makeManualTableNode(tree, 310);
+  tree.allocateNode(target);
+
+  auto root = tree.getRoot();
+  std::vector<naja::DNL::DNLID> loopTerms;
+
+  root->parentIds.clear();
+  root->parentIds.emplace_back(SNLTruthTableTree::kReservedId0);
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 310, loopTerms));
+  EXPECT_TRUE(loopTerms.empty());
+
+  root->parentIds.clear();
+  root->parentIds.emplace_back(
+      static_cast<uint32_t>(SNLTruthTableTree::kIdOffset +
+                            tree.getNumNodes()));
+  EXPECT_FALSE(tree.findAncestorLoopForBorderLeaf(0, 310, loopTerms));
+  EXPECT_TRUE(loopTerms.empty());
+}
+
 TEST(SNLTruthTableTreeApiTest, IsInitializedTraversesNestedTableChildren) {
   SNLTruthTableTree tree(0, 0, Node::Type::P);
 
