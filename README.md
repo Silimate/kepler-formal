@@ -37,11 +37,11 @@ in [docs/sec-flags-spec.md](docs/sec-flags-spec.md).
 
 ### For Verilog:
 
-- Gate-level LEC expects stable top-level correspondence and compatible
-  primitive/library modeling across the two designs.
+- Gate-level LEC expects no change of sequential boundaries and no change
+  in names of hierarchical instances, sequential instances and top terminals.
 - Gate-level SEC and RTL-level SEC compare sequential behavior through the
   extracted transition systems. Internal element names are not used as
-  cross-design equivalence assumptions.
+  cross-design equivalence assumptions but assume identical top terminals names.
 
 ### For Naja IF:
 
