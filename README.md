@@ -4,7 +4,14 @@
 
 ## Introduction
 
-Kepler-Formal is a logic equivalence checking tool that operates on Verilog and the [Naja interchange format](https://github.com/najaeda/naja-if). It supports combinational LEC and an active Sequential Equivalence Checking (SEC) flow for comparing sequential designs under the documented SEC restrictions.
+Kepler-Formal is an equivalence checking tool for ASIC designs. It
+operates on Verilog, SystemVerilog, and the
+[Naja interchange format](https://github.com/najaeda/naja-if), and supports:
+
+- Gate-level combinational Logic Equivalence Checking (LEC).
+- Gate-level Sequential Equivalence Checking (SEC).
+- RTL-level Sequential Equivalence Checking (SEC), including SystemVerilog
+  file-list flows with explicit tops.
 
 ### Acknowledgement
 
@@ -13,12 +20,28 @@ Kepler-Formal is a logic equivalence checking tool that operates on Verilog and 
 
 This project is supported and funded by NLNet through the [NGI0 Entrust](https://nlnet.nl/entrust) Fund.
 
-## Requirements 
+## Supported Flows
+
+| Flow | Typical inputs | Verification mode |
+| --- | --- | --- |
+| Gate-level LEC | Post-synthesis or implementation netlists plus Liberty libraries | `lec` |
+| Gate-level SEC | Sequential gate-level netlists plus Liberty libraries | `sec` |
+| RTL-level SEC | RTL Verilog/SystemVerilog sources or SystemVerilog flists | `sec` |
+
+LEC is the default verification mode. SEC is selected with
+`verification: sec` in YAML or `-v sec` / `--verification sec` on the command
+line. SEC-specific engines, encodings, and skipped-output reports are documented
+in [docs/sec-flags-spec.md](docs/sec-flags-spec.md).
+
+## Requirements
 
 ### For Verilog:
 
-- No change of sequential boundaries. 
-- No change in names of hierarchical instances, sequential instances and top terminals.
+- Gate-level LEC expects stable top-level correspondence and compatible
+  primitive/library modeling across the two designs.
+- Gate-level SEC and RTL-level SEC compare sequential behavior through the
+  extracted transition systems. Internal element names are not used as
+  cross-design equivalence assumptions.
 
 ### For Naja IF:
 
@@ -86,6 +109,12 @@ build/src/bin/kepler-formal <-verilog/-naja_if/-systemverilog/-sv/-sv2v> [option
 # Multi-file Verilog
 build/src/bin/kepler-formal -verilog [options] --design1 <file...> --design2 <file...> \
   [--liberty <library-file>...] [--compact] [--report-skipped-pos]
+
+# SystemVerilog SEC with flists
+build/src/bin/kepler-formal -sv -v sec \
+  --sv_design1_flist <file> --sv_design1_top <top> \
+  --sv_design2_flist <file> --sv_design2_top <top> \
+  [--liberty <library-file>...]
 ```
 
 | Flag | Meaning |
@@ -98,6 +127,7 @@ build/src/bin/kepler-formal -verilog [options] --design1 <file...> --design2 <fi
 | `-sv2v` | Parse design 1 as SystemVerilog and design 2 as Verilog for SEC RTL-vs-gate comparison. |
 | `--design1 <file...>` | Explicit source list for design 1 in multi-file Verilog mode. |
 | `--design2 <file...>` | Explicit source list for design 2 in multi-file Verilog mode. |
+| `-sv`, `-systemverilog` | Use SystemVerilog input mode. |
 | `--liberty <file...>`, `--lib <file...>` | Liberty library files. |
 | `--verilog_preprocessing` | Enable preprocessing for Verilog inputs. |
 
@@ -122,7 +152,7 @@ Yaml file example:
 
 ```yaml
 format: verilog
-verification: LEC           # Optional: LEC by default, or SEC
+verification: lec           # Optional: lec by default, or sec
 input_paths:
   - [design0_part1.v, design0_part2.v] # design 0
   - [design1_part1.v, design1_part2.v] # design 1

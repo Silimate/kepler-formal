@@ -1,7 +1,9 @@
 # tinyrocket_sec_config.yaml
 format: verilog
 verification: sec
-max_k: 1000
+sec_engine: k_induction
+sec_encoding: dual_rail_steady
+max_k: 32
 input_paths:
   - tinyrocket.v
   - tinyrocket.v

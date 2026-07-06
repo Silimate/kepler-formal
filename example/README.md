@@ -16,6 +16,10 @@
 
 # Through config file
 
+## LEC YAML example
 ../build/src/bin/kepler-formal --config test_config_verilog.yaml
+
+## SEC YAML example
+../build/src/bin/kepler-formal --config test_config_verilog_tinyrocket_sec.yaml
 
 ```

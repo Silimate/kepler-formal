@@ -5,14 +5,27 @@ surface accepted by `kepler-formal`.
 
 The stable top-level overview remains in [README.md](../README.md).
 The SEC-specific flag surface is documented separately in
-[sec-flags-spec.md](sec-flags-spec.md). SEC is still under construction, so
-that page describes the current implementation rather than a frozen contract.
+[sec-flags-spec.md](sec-flags-spec.md).
+
+## Verification modes
+
+`kepler-formal` supports full equivalence checking flows:
+
+| Mode | Typical use | Inputs |
+| --- | --- | --- |
+| `lec` | Gate-level combinational equivalence checking | Verilog or Naja IF netlists plus Liberty/Python primitive libraries as needed. |
+| `sec` | Gate-level sequential equivalence checking | Sequential Verilog/SystemVerilog netlists plus Liberty/Python primitive libraries as needed. |
+| `sec` | RTL-level sequential equivalence checking | RTL Verilog/SystemVerilog sources, including SystemVerilog flists with explicit tops. |
+
+LEC is the default. Select SEC with `-v sec`, `--verification sec`, or
+`verification: sec` in YAML.
 
 ## Binary flags
 
 | Flag | Meaning |
 | --- | --- |
 | `-verilog` | Use Verilog Format. |
+| `-systemverilog`, `-sv` | Use SystemVerilog format. |
 | `-naja_if` | Use naja-if format. |
 | `-systemverilog`, `-sv` | Use SystemVerilog format for both designs. Requires SEC verification. |
 | `-sv2v` | Use mixed SystemVerilog-to-Verilog format for SEC RTL-vs-gate comparison: design 1 is parsed as SystemVerilog, design 2 is parsed as Verilog. |
