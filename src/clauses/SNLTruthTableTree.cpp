@@ -513,18 +513,29 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
   const uint32_t targetId = termIt->second;
   const uint32_t startId = borderLeaves_[borderIndex].parentId;
 
-  thread_local std::vector<uint32_t> nodePath;
-  nodePath.clear();
+  auto getNode = [&](uint32_t id) -> const Node* {
+    if (id == kInvalidId || id < kIdOffset) {
+      return nullptr;
+    }
+    const size_t idx = static_cast<size_t>(id - kIdOffset);
+    if (idx >= nodes_.size()) {
+      return nullptr;
+    }
+    return nodes_[idx].get();
+  };
+
+  std::vector<uint32_t, tbb::tbb_allocator<uint32_t>> nodePath;
+  nodePath.reserve(16);
 
   auto appendLoopTerms = [&]() {
     for (auto it = nodePath.rbegin(); it != nodePath.rend(); ++it) {
-      const auto nodeSp = nodeFromId(*it);
-      if (!nodeSp || nodeSp->type == Node::Type::Input) {
+      const auto* node = getNode(*it);
+      if (node == nullptr || node->type == Node::Type::Input) {
         // LCOV_EXCL_START
         continue; // LCOV_EXCL_LINE
         // LCOV_EXCL_STOP
       }
-      loopTerms.push_back(nodeSp->data.termid);
+      loopTerms.push_back(node->data.termid);
     }
     loopTerms.push_back(termid);
   };
@@ -532,7 +543,6 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
   uint32_t nodeId = startId;
   while (true) {
     if (nodeId == kInvalidId) {
-      nodePath.clear();
       return false;
     }
     nodePath.push_back(nodeId);
@@ -540,9 +550,8 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
       appendLoopTerms();
       return true;
     }
-    auto* node = rawNodeFromId(nodeId);
+    const auto* node = getNode(nodeId);
     if (node == nullptr || node->parentIds.empty()) {
-      nodePath.clear();
       return false;
     }
     if (node->parentIds.size() != 1) {
@@ -555,49 +564,39 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
     uint32_t nodeId = kInvalidId;
     size_t nextParent = 0;
   };
-  thread_local std::vector<AncestorFrame> pendingAncestors;
-  pendingAncestors.clear();
+  std::vector<AncestorFrame, tbb::tbb_allocator<AncestorFrame>>
+      pendingAncestors;
+  pendingAncestors.reserve(16);
+  std::unordered_set<uint32_t> visitedAncestors;
+  visitedAncestors.reserve(16);
 
-  uint32_t epoch = ++ancestorSearchEpoch_;
-  // LCOV_EXCL_START
-  if (epoch == 0) {
-    // LCOV_DISABLED_START
-    for (const auto& node : nodes_) {
-      if (node) {
-        node->ancestorVisitEpoch = 0;
-      }
-      // LCOV_DISABLED_STOP
-    }
-    // LCOV_DISABLED_START
-    epoch = ++ancestorSearchEpoch_;
-  }
-  // LCOV_DISABLED_STOP
-  // LCOV_EXCL_STOP
-
-  auto* branchNode = rawNodeFromId(nodeId);
+  const auto* branchNode = getNode(nodeId);
   // LCOV_EXCL_START
   if (branchNode == nullptr) {
     // LCOV_DISABLED_START
-    nodePath.clear();
     return false;
     // LCOV_DISABLED_STOP
   }
   // LCOV_EXCL_STOP
-  branchNode->ancestorVisitEpoch = epoch;
+  visitedAncestors.insert(nodeId);
   pendingAncestors.push_back({nodeId, 0});
   while (!pendingAncestors.empty()) {
     auto& frame = pendingAncestors.back();
-    auto* node = rawNodeFromId(frame.nodeId);
+    const auto* node = getNode(frame.nodeId);
     if (node == nullptr) {
       // LCOV_EXCL_START
       pendingAncestors.pop_back(); // LCOV_EXCL_LINE
-      nodePath.pop_back(); // LCOV_EXCL_LINE
+      if (!nodePath.empty()) { // LCOV_EXCL_LINE
+        nodePath.pop_back(); // LCOV_EXCL_LINE
+      }
       continue; // LCOV_EXCL_LINE
       // LCOV_EXCL_STOP
     }
     if (frame.nextParent >= node->parentIds.size()) {
       pendingAncestors.pop_back();
-      nodePath.pop_back();
+      if (!nodePath.empty()) {
+        nodePath.pop_back();
+      }
       continue;
     }
 
@@ -610,16 +609,16 @@ bool SNLTruthTableTree::findAncestorLoopForBorderLeaf(
       appendLoopTerms();
       return true;
     }
-    auto* parent = rawNodeFromId(parentId);
-    if (parent == nullptr || parent->ancestorVisitEpoch == epoch) {
+    const auto* parent = getNode(parentId);
+    if (parent == nullptr ||
+        visitedAncestors.find(parentId) != visitedAncestors.end()) {
       nodePath.pop_back();
       continue;
     }
-    parent->ancestorVisitEpoch = epoch;
+    visitedAncestors.insert(parentId);
     pendingAncestors.push_back({parentId, 0});
   }
 
-  nodePath.clear();
   return false;
 }
 
