@@ -158,6 +158,10 @@ cmake -B build -DCMAKE_TOOLCHAIN_FILE=$PWD/deps/toolchain.cmake
 
 This exports capnproto, oneTBB, boost, zlib and FlexLexer.h into `deps/`
 (git- and bazel-ignored) with a generated `toolchain.cmake`, replacing the
-platform-specific apt/homebrew install step. The system-package CMake flow
-keeps working unchanged. Host tools still required: cmake, make, bison,
-flex, python3 (dev headers).
+platform-specific apt/homebrew install step. On Linux the hermetic
+compiler is exported too (`deps/llvm/`, with `toolchain.cmake` generated
+from the resolved Bazel cc_toolchain by `bazel/toolchain_cmake.bzl`), so
+the CMake flow compiles with the identical clang/libc++ as the Bazel flow
+and needs no host compiler at all. The system-package CMake flow keeps
+working unchanged. Host tools still required: cmake, make, bison, flex,
+python3 (dev headers).
