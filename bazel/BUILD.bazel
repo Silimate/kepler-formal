@@ -1,1 +1,3 @@
 # Package marker for bazel/ overlay directory
+
+exports_files(["export_deps.sh"])

@@ -50,6 +50,23 @@ The property of stable indices is employed to localize the scopes affected by ed
 
 ## Dependencies
 
+### Option A: hermetic, via Bazel (any Linux distro)
+
+Let Bazel provide pinned library dependencies (Boost, Cap'n Proto, TBB,
+zlib, FlexLexer.h) for the CMake build — no platform-specific library
+packages needed, only build tools:
+
+```bash
+sudo apt-get install g++ cmake pkg-config bison flex python3-dev
+bazelisk run //:deps
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=$PWD/deps/toolchain.cmake
+```
+
+The exported `deps/` tree is git-ignored and regenerated on each run; the
+library versions are identical to the ones the Bazel build uses.
+
+### Option B: system packages
+
 On Ubuntu:
 
 ```bash

@@ -13,7 +13,6 @@ cc_test(
         "TEST_DATA_PREFIX": "",
     },
     copts = NAJA_HEADER_COPTS,
-    linkopts = ["-ltbb", "-ltbbmalloc", "-lz", "-lcapnp", "-lkj"],
     deps = [
         "//src/clauses:kepler_clauses",
         "//src/config:kepler_config",

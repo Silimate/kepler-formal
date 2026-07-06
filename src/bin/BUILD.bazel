@@ -8,32 +8,14 @@ cc_binary(
         "KeplerFormalUtils.h",
     ],
     copts = NAJA_HEADER_COPTS,
+    # capnp/kj (static), TBB (shared, bundled in the release tarball) and
+    # zlib arrive transitively through @naja's cmake deps — no system -l
+    # flags. libstdc++/libgcc stay static for portable release binaries.
     linkopts = select({
-        "@platforms//os:macos": [
-            "-L/opt/homebrew/lib",
-            "-L/usr/local/lib",
-            "-lcapnp",
-            "-lkj",
-            "-ltbb",
-            "-ltbbmalloc",
-            "-lz",
-        ],
+        "@platforms//os:macos": [],
         "//conditions:default": [
-            # Statically link what we can for portable release binaries.
-            # Cap'n Proto and libstdc++/libgcc are linked statically.
-            # TBB has no static libs (by design) — bundled in release tarball.
-            # Naja .so files are also bundled (see release workflow).
             "-static-libstdc++",
             "-static-libgcc",
-            "-Wl,-Bstatic",
-            "-lcapnp",
-            "-lkj",
-            "-Wl,-Bdynamic",
-            "-ltbb",
-            "-ltbbmalloc",
-            "-lz",
-            "-lpthread",
-            "-ldl",
         ],
     }),
     visibility = ["//visibility:public"],

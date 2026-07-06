@@ -1,5 +1,59 @@
 # Root BUILD file for kepler-formal
 
+load("//bazel:collect_headers.bzl", "collect_headers")
+
+# Full cmake install prefixes (bin/ include/ lib/ lib/cmake/) of the
+# hermetic dependency builds, for //:deps export.
+filegroup(
+    name = "capnproto_install",
+    srcs = ["@capnproto"],
+    output_group = "gen_dir",
+)
+
+filegroup(
+    name = "onetbb_install",
+    srcs = ["@onetbb"],
+    output_group = "gen_dir",
+)
+
+# Export the hermetic dependency install trees into <workspace>/deps/ so the
+# plain CMake flow needs no system-installed libraries (opt-in):
+#
+#   bazelisk run //:deps
+#   cmake -B build -DCMAKE_TOOLCHAIN_FILE=$PWD/deps/toolchain.cmake
+sh_binary(
+    name = "deps",
+    srcs = ["//bazel:export_deps.sh"],
+    args = [
+        "$(rootpath :capnproto_install)",
+        "$(rootpath :onetbb_install)",
+        "$(rootpath @boost_headers//:version_hdr)",
+        "$(rootpath @flex_src//:flexlexer_hdr)",
+        "$(rootpaths @zlib//:z)",
+        "$(rootpaths :zlib_headers)",
+    ],
+    data = [
+        ":capnproto_install",
+        ":onetbb_install",
+        ":zlib_headers",
+        "@boost_headers//:headers",
+        "@boost_headers//:version_hdr",
+        "@flex_src//:flexlexer_hdr",
+        "@zlib//:z",
+    ],
+)
+
+# zlib's public headers are not visible as source targets in the BCR repo;
+# collect them from CcInfo instead.
+collect_headers(
+    name = "zlib_headers",
+    basenames = [
+        "zconf.h",
+        "zlib.h",
+    ],
+    deps = ["@zlib//:z"],
+)
+
 sh_binary(
     name = "release",
     srcs = ["tools/release.sh"],

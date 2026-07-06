@@ -1,0 +1,35 @@
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
+
+filegroup(
+    name = "all_srcs",
+    srcs = glob(["**"]),
+)
+
+# oneTBB built via cmake (not the BCR onetbb module) so that naja's
+# find_package(TBB) gets TBBConfig.cmake and — crucially — the naja shared
+# libraries and the kepler-formal binary share one libtbb.so.12 runtime
+# (TBB scheduler singletons; two runtimes in one process is a bug).
+# TBB is shared by design (no static libs); bundled in the release tarball.
+cmake(
+    name = "onetbb",
+    cache_entries = {
+        "CMAKE_BUILD_TYPE": "Release",
+        # Don't let -Werror break builds under newer compilers.
+        "TBB_STRICT": "OFF",
+        "TBB_TEST": "OFF",
+        "TBB_EXAMPLES": "OFF",
+    },
+    build_args = ["-j4"],
+    lib_source = ":all_srcs",
+    out_shared_libs = select({
+        "@platforms//os:macos": [
+            "libtbb.12.dylib",
+            "libtbbmalloc.2.dylib",
+        ],
+        "//conditions:default": [
+            "libtbb.so.12",
+            "libtbbmalloc.so.2",
+        ],
+    }),
+    visibility = ["//visibility:public"],
+)

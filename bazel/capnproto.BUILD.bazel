@@ -1,0 +1,38 @@
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
+
+filegroup(
+    name = "all_srcs",
+    srcs = glob(["**"]),
+)
+
+# Cap'n Proto built once via cmake so that naja's find_package(CapnProto)
+# gets a real CMake package (lib/cmake/CapnProto/*.cmake) plus the capnp
+# compiler binaries, and the final link gets the same libcapnp.a/libkj.a
+# through CcInfo — the schema-compiler and link-time versions can never skew.
+cmake(
+    name = "capnproto",
+    cache_entries = {
+        "BUILD_TESTING": "OFF",
+        "BUILD_SHARED_LIBS": "OFF",
+        "CMAKE_BUILD_TYPE": "Release",
+        # Static archives end up in a PIE binary and in naja test executables.
+        "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
+        "WITH_OPENSSL": "OFF",
+        "WITH_ZLIB": "OFF",
+        # rules_foreign_cc links executables with the C driver; supply the
+        # C++ runtime explicitly (same workaround as the naja build).
+        "CMAKE_EXE_LINKER_FLAGS": "-lstdc++ -lm",
+    },
+    build_args = ["-j4"],
+    lib_source = ":all_srcs",
+    out_binaries = [
+        "capnp",
+        "capnpc-c++",
+    ],
+    # Link order: capnp before kj.
+    out_static_libs = [
+        "libcapnp.a",
+        "libkj.a",
+    ],
+    visibility = ["//visibility:public"],
+)

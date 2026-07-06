@@ -6,7 +6,6 @@ host-installed Naja under /usr/local/include can otherwise win the short
 """
 
 NAJA_HEADER_COPTS = [
-    "-Iexternal/+deps+homebrew_tbb/include",
     "-iquoteexternal/+deps+naja/src/src/dnl",
     "-iquoteexternal/+deps+naja/src/src/nl/netlist/core",
     "-iquoteexternal/+deps+naja/src/src/nl/netlist/snl",
