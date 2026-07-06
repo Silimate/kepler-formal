@@ -13,7 +13,6 @@ cc_test(
     size = "large",
     timeout = "long",
     copts = NAJA_HEADER_COPTS,
-    linkopts = ["-ltbb", "-ltbbmalloc", "-lz", "-lcapnp", "-lkj"],
     deps = [
         "//src/config:kepler_config",
         "//src/sec:kepler_sec",

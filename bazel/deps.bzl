@@ -10,38 +10,6 @@ replace the corresponding http_archive with a bazel_dep in MODULE.bazel.
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-def _homebrew_tbb_repo_impl(repo_ctx):
-    """Expose Homebrew TBB headers to Bazel on macOS.
-
-    Linux builds keep using the compiler's system include/link paths.  On macOS,
-    Homebrew installs TBB outside Clang's default include search path, so a small
-    local repository is enough to make the headers visible without vendoring TBB.
-    """
-    for prefix in ["/opt/homebrew", "/usr/local"]:
-        if repo_ctx.path(prefix + "/include/tbb").exists:
-            repo_ctx.symlink(prefix + "/include", "include")
-            repo_ctx.file("BUILD.bazel", repo_ctx.read(repo_ctx.attr.build_file))
-            return
-
-    repo_ctx.file(
-        "BUILD.bazel",
-        """
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-
-cc_library(
-    name = "tbb",
-    visibility = ["//visibility:public"],
-)
-""",
-    )
-
-homebrew_tbb_repo = repository_rule(
-    implementation = _homebrew_tbb_repo_impl,
-    attrs = {
-        "build_file": attr.label(mandatory = True),
-    },
-)
-
 def _naja_repo_impl(repo_ctx):
     """Repository rule that assembles naja from multiple archives.
 
@@ -137,6 +105,16 @@ naja_repo = repository_rule(
 # Pinned dependency versions (commit SHAs from thirdparty/ submodules).
 # To update: change the commit, run `bazel fetch @cadical @glucose @kissat @naja`
 # to verify, then update the sha256 hashes.
+# Hermetic library dependencies (previously system packages).
+# capnproto and oneTBB are built with rules_foreign_cc cmake() so that
+# naja's config-mode find_package(CapnProto)/find_package(TBB) get real
+# CMake package trees (and the capnp compiler binary); boost and
+# FlexLexer.h are header-only.
+_CAPNPROTO_VERSION = "1.4.0"
+_ONETBB_VERSION = "2022.3.0"
+_BOOST_VERSION = "1_89_0"
+_FLEX_VERSION = "2.6.4"
+
 _CADICAL_COMMIT = "7b99c07f0bcab5824a5a3ce62c7066554017f641"
 _GLUCOSE_COMMIT = "7f887abba7cf13636a5ac2d28653668a20a91b25"
 _KISSAT_COMMIT = "8af8e56f174b778aef3aa45af9f739b2a5f492c2"
@@ -148,9 +126,36 @@ _SLANG_COMMIT = "aedd7bc0394e5621340be94ed58def33d74ac677"
 _GOOGLETEST_COMMIT = "52eb8108c5bdec04579160ae17225d66034bd723"
 
 def _deps_impl(_module_ctx):
-    homebrew_tbb_repo(
-        name = "homebrew_tbb",
-        build_file = Label("//bazel:homebrew_tbb.BUILD.bazel"),
+    http_archive(
+        name = "capnproto",
+        url = "https://capnproto.org/capnproto-c++-{}.tar.gz".format(_CAPNPROTO_VERSION),
+        sha256 = "fa02378ad522b318916b9ad928d1372fc9abd43dd1f4f0392e50450f5c87828f",
+        strip_prefix = "capnproto-c++-{}".format(_CAPNPROTO_VERSION),
+        build_file = Label("//bazel:capnproto.BUILD.bazel"),
+    )
+
+    http_archive(
+        name = "onetbb",
+        url = "https://github.com/uxlfoundation/oneTBB/archive/refs/tags/v{}.tar.gz".format(_ONETBB_VERSION),
+        sha256 = "01598a46c1162c27253a0de0236f520fd8ee8166e9ebb84a4243574f88e6e50a",
+        strip_prefix = "oneTBB-{}".format(_ONETBB_VERSION),
+        build_file = Label("//bazel:onetbb.BUILD.bazel"),
+    )
+
+    http_archive(
+        name = "boost_headers",
+        url = "https://archives.boost.io/release/{}/source/boost_{}.tar.gz".format(_BOOST_VERSION.replace("_", "."), _BOOST_VERSION),
+        sha256 = "9de758db755e8330a01d995b0a24d09798048400ac25c03fc5ea9be364b13c93",
+        strip_prefix = "boost_{}".format(_BOOST_VERSION),
+        build_file = Label("//bazel:boost.BUILD.bazel"),
+    )
+
+    http_archive(
+        name = "flex_src",
+        url = "https://github.com/westes/flex/releases/download/v{v}/flex-{v}.tar.gz".format(v = _FLEX_VERSION),
+        sha256 = "e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995",
+        strip_prefix = "flex-{}".format(_FLEX_VERSION),
+        build_file = Label("//bazel:flexlexer.BUILD.bazel"),
     )
 
     http_archive(

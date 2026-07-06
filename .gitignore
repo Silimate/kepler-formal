@@ -7,3 +7,6 @@ regress-output/
 bazel-*
 MODULE.bazel.lock
 .vscode/
+
+# bazel run //:deps output (hermetic CMake-flow dependencies)
+/deps/
