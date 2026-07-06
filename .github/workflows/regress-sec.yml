@@ -552,3 +552,100 @@ jobs:
         path: ${{github.workspace}}/regress-output/${{ matrix.case.name }}/sec
         retention-days: 7
         if-no-files-found: ignore
+
+  run-sv2v-sec-negative-regress:
+    name: sv2v negative ${{ matrix.flow.name }} / ${{ matrix.case.name }}
+    runs-on: ubuntu-22.04
+    needs: build-sec-regress
+    strategy:
+      fail-fast: false
+      matrix:
+        flow:
+        - name: ki-dual-rail
+          engine: k_induction
+          sec_encoding: dual_rail_steady
+          max_k: 8
+        case:
+        # Keep this list to cases documented as verified SEC failures in
+        # sv2v_sec_negative_examples.md.
+        - name: sv2v_asap7_ethmac_negative
+          case_dir: kepler-formal-examples/asap7_ethmac
+          config: sv2v_sec_k_induction_dual_rail_steady_test.yml
+          edit_script: edit_sv2v_sec_failure.py
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install runtime dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git python3 python3-pip capnproto libcapnp-dev libtbb-dev \
+          libboost-iostreams-dev zlib1g-dev
+
+    - name: Download SEC runtime
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.SEC_RUNTIME_ARTIFACT }}
+        path: ${{github.workspace}}/stage
+
+    - name: Restore executable bit
+      run: chmod +x ${{github.workspace}}/stage/bin/kepler-formal
+
+    - name: Clone SV2V regression inputs
+      working-directory: ${{github.workspace}}
+      run: git clone --depth 1 https://github.com/keplertech/kepler-formal-examples
+
+    - name: Run SV2V SEC negative regression
+      working-directory: ${{github.workspace}}
+      env:
+        CASE_NAME: ${{ matrix.case.name }}
+        CASE_DIR: ${{ matrix.case.case_dir }}
+        CASE_CONFIG: ${{ matrix.case.config }}
+        CASE_EDIT_SCRIPT: ${{ matrix.case.edit_script }}
+        SEC_ENGINE: ${{ matrix.flow.engine }}
+        SEC_ENCODING: ${{ matrix.flow.sec_encoding }}
+        SEC_MAX_K: ${{ matrix.flow.max_k }}
+      run: |
+        set -euo pipefail
+        export LD_LIBRARY_PATH="${{github.workspace}}/stage/lib:${LD_LIBRARY_PATH:-}"
+
+        pip install najaeda
+
+        cleanup_negative_edit() {
+          (
+            cd "${{github.workspace}}/${CASE_DIR}"
+            python3 "${CASE_EDIT_SCRIPT}" --revert
+          ) || true
+        }
+        trap cleanup_negative_edit EXIT
+
+        (
+          cd "${{github.workspace}}/${CASE_DIR}"
+          python3 "${CASE_EDIT_SCRIPT}"
+        )
+
+        extra_args=()
+        if [[ -n "${SEC_MAX_K:-}" ]]; then
+          extra_args+=("max-k=${SEC_MAX_K}")
+        fi
+
+        bash regress/run_sec_strategies_regress.sh \
+          "${CASE_NAME}" \
+          "${{github.workspace}}/${CASE_DIR}" \
+          "${{github.workspace}}/stage/bin/kepler-formal" \
+          "${CASE_CONFIG}" \
+          expect-different \
+          "${extra_args[@]}" \
+          compact \
+          "engine=${SEC_ENGINE}" \
+          "sec-encoding=${SEC_ENCODING}"
+
+    - name: Upload SV2V negative regression logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sec-regress-logs-sv2v-negative-${{ matrix.flow.name }}-${{ matrix.case.name }}
+        path: ${{github.workspace}}/regress-output/${{ matrix.case.name }}/sec
+        retention-days: 7
+        if-no-files-found: ignore
