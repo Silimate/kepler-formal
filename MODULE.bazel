@@ -19,6 +19,25 @@ bazel_dep(name = "spdlog", version = "1.17.0")
 # and naja's find_package(TBB) needs TBBConfig.cmake — both of which only
 # a real cmake install tree provides.
 
+# Hermetic zero-sysroot LLVM toolchain (hermetic-llvm): statically linked
+# clang 22, libc++ linked statically by default, glibc 2.28 floor. No host
+# compiler, headers or /usr/lib involved. Scoped to Linux for now; macOS
+# keeps the host Xcode toolchain.
+bazel_dep(name = "llvm", version = "0.8.11")
+
+llvm_toolchains = use_extension("@llvm//extensions:toolchain.bzl", "toolchain")
+llvm_toolchains.exec(
+    arch = "x86_64",
+    os = "linux",
+)
+llvm_toolchains.target(
+    arch = "x86_64",
+    os = "linux",
+)
+use_repo(llvm_toolchains, "llvm_toolchains")
+
+register_toolchains("@llvm_toolchains//:all")
+
 # Use preinstalled cmake/make/pkg-config instead of bootstrapping.
 # The bundled glib in rules_foreign_cc pkg-config bootstrap fails
 # with modern GCC 15 (C23 bool keyword collision in glib source).

@@ -52,18 +52,24 @@ The property of stable indices is employed to localize the scopes affected by ed
 
 ### Option A: hermetic, via Bazel (any Linux distro)
 
-Let Bazel provide pinned library dependencies (Boost, Cap'n Proto, TBB,
-zlib, FlexLexer.h) for the CMake build — no platform-specific library
-packages needed, only build tools:
+Let Bazel provide the compiler (hermetic clang/libc++) and pinned library
+dependencies (Boost, Cap'n Proto, TBB, zlib, FlexLexer.h) for the CMake
+build — no compiler or library packages needed, only build tools:
 
 ```bash
-sudo apt-get install g++ cmake pkg-config bison flex python3-dev
+sudo apt-get install cmake make pkg-config bison flex python3-dev
 bazelisk run //:deps
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=$PWD/deps/toolchain.cmake
 ```
 
-The exported `deps/` tree is git-ignored and regenerated on each run; the
-library versions are identical to the ones the Bazel build uses.
+The exported `deps/` tree (~450 MB, mostly the clang distribution) is
+git-ignored and regenerated on each run; the compiler and library versions
+are byte-identical to the ones the Bazel build uses.
+
+Note: cadical and kissat build in-source (`thirdparty/{cadical,kissat}`).
+When switching between the system toolchain and `deps/toolchain.cmake`,
+clean those build directories first (`git -C thirdparty/cadical clean -dfx`
+and likewise for kissat) so no objects from the other compiler linger.
 
 ### Option B: system packages
 

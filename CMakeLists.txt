@@ -79,7 +79,11 @@ ExternalProject_Add(kissat_external
     # `--ultimate`: it implies `--no-options`, which compiles out runtime
     # option storage and prevents SEC from selecting a SAT profile for its
     # cone-of-influence proof obligations.
-    CONFIGURE_COMMAND ./configure --compact --quiet --no-proofs
+    # Honor the configured compiler (e.g. a CMAKE_TOOLCHAIN_FILE such as
+    # deps/toolchain.cmake); kissat's configure defaults to host cc.
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env
+        "CC=${CMAKE_C_COMPILER}"
+        ./configure --compact --quiet --no-proofs
     BUILD_COMMAND make
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
@@ -106,7 +110,11 @@ add_dependencies(kissat kissat_external)
 
 ExternalProject_Add(cadical_external
     SOURCE_DIR ${CADICAL_ROOT}
+    # CC/CXX: honor the configured compiler (e.g. a CMAKE_TOOLCHAIN_FILE
+    # such as deps/toolchain.cmake); cadical's configure defaults to host g++.
     CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env
+        "CC=${CMAKE_C_COMPILER}"
+        "CXX=${CMAKE_CXX_COMPILER}"
         "CFLAGS=${CADICAL_KITTEN_SYMBOL_PREFIX_FLAGS}"
         "CXXFLAGS=${CADICAL_KITTEN_SYMBOL_PREFIX_FLAGS}"
         ./configure -q --no-tracing --no-contrib
