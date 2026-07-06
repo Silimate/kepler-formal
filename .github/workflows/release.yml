@@ -84,6 +84,16 @@ jobs:
         DIST="kepler-formal-${VERSION}-linux-x86_64"
         echo "=== ldd output ==="
         ldd "${DIST}/bin/kepler-formal"
+        echo "=== hermetic toolchain checks ==="
+        # libc++ is statically linked by the hermetic toolchain.
+        if ldd "${DIST}/bin/kepler-formal" | grep -E "libstdc\+\+|libc\+\+"; then
+          echo "unexpected dynamic C++ runtime dependency"; exit 1
+        fi
+        # glibc floor: hermetic toolchain targets 2.28 for portability.
+        MAX_GLIBC=$(objdump -T "${DIST}/bin/kepler-formal" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+        echo "max glibc symbol: ${MAX_GLIBC}"
+        printf '%s\n' "${MAX_GLIBC#GLIBC_}" 2.28 | sort -CV || { echo "glibc floor regressed above 2.28"; exit 1; }
+        readelf -p .comment "${DIST}/bin/kepler-formal" | grep clang
         echo "=== smoke test ==="
         "./${DIST}/kepler-formal" --help || true
 

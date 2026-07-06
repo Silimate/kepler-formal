@@ -134,7 +134,7 @@ host is build *tools*. Full inventory with per-item status:
 | zlib | src/bin, tests, naja cmake, glucose | **hermetic**: BCR `@zlib` everywhere |
 | Boost headers | naja cmake + kepler compiles (via naja headers) | **hermetic**: `@boost_headers` 1.89.0 |
 | FlexLexer.h (was libfl-dev) | naja-verilog scanner (previously leaked `-I/usr/include` via FindFLEX) | **hermetic**: `@flex_src//:flexlexer` + `FLEX_INCLUDE_DIR` cache entry |
-| Host C++ toolchain (GCC) | whole Bazel build | next: hermetic-llvm (BCR `llvm`, zero-sysroot clang/libc++), Linux first — see OpenROAD PR 10812 |
+| Host C++ toolchain | whole Bazel build | **hermetic** (Linux): hermetic-llvm (BCR `llvm`, zero-sysroot clang 22/libc++, glibc 2.28 floor) — see OpenROAD PR 10812. macOS still uses the host Xcode toolchain |
 | Python3 interpreter + dev headers | naja cmake `find_package(Python3 ... Development.Embed REQUIRED)` runs even with `BUILD_NAJA_PYTHON=OFF`; `libnaja_python.so` links system libpython | future: rules_python / python-build-standalone + `Python3_ROOT_DIR`, or an upstream naja option to skip the probe |
 | bison/flex executables | naja-verilog codegen (Homebrew paths hardcoded on macOS) | future: BCR `bison`/`flex`/`m4` modules fed via `BISON_EXECUTABLE`/`FLEX_EXECUTABLE` |
 | cmake/make/pkg-config binaries | rules_foreign_cc preinstalled toolchains | future: rules_foreign_cc built/prebuilt toolchains (built pkg-config currently trips over a glib C23 issue with GCC 15) |

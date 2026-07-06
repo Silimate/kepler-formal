@@ -10,14 +10,8 @@ cc_binary(
     copts = NAJA_HEADER_COPTS,
     # capnp/kj (static), TBB (shared, bundled in the release tarball) and
     # zlib arrive transitively through @naja's cmake deps — no system -l
-    # flags. libstdc++/libgcc stay static for portable release binaries.
-    linkopts = select({
-        "@platforms//os:macos": [],
-        "//conditions:default": [
-            "-static-libstdc++",
-            "-static-libgcc",
-        ],
-    }),
+    # flags. The hermetic toolchain links libc++ statically by default,
+    # which supersedes the former -static-libstdc++/-static-libgcc.
     visibility = ["//visibility:public"],
     deps = [
         "//src/config:kepler_config",

@@ -1,3 +1,37 @@
 # Package marker for bazel/ overlay directory
 
 exports_files(["export_deps.sh"])
+
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# The hermetic-llvm toolchain passes libc++/libc++abi/libunwind to linker
+# actions as Bazel link inputs; its -L "library search directories" contain
+# deliberate empty stubs so a stray -lc++ is a no-op. cmake builds under
+# rules_foreign_cc never see the real archives, so re-export them here and
+# let the cmake overlays link them by explicit $EXT_BUILD_DEPS path (see
+# bazel/naja.BUILD.bazel).
+cc_import(
+    name = "hermetic_libcxx",
+    static_library = "@llvm//runtimes/libcxx:libcxx.static",
+)
+
+cc_import(
+    name = "hermetic_libcxxabi",
+    static_library = "@llvm//runtimes/libcxx:libcxxabi.static",
+)
+
+cc_import(
+    name = "hermetic_libunwind",
+    static_library = "@llvm//runtimes/libunwind:libunwind.static",
+)
+
+cc_library(
+    name = "hermetic_cxx_runtime",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hermetic_libcxx",
+        ":hermetic_libcxxabi",
+        ":hermetic_libunwind",
+    ],
+)
