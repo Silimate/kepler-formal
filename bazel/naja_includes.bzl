@@ -6,6 +6,10 @@ host-installed Naja under /usr/local/include can otherwise win the short
 """
 
 NAJA_HEADER_COPTS = [
+    # Kepler and Naja's headers require C++20. The root module sets this via
+    # .bazelrc (--cxxopt=-std=c++20), but that does not reach a downstream
+    # consumer, so set it on the targets themselves.
+    "-std=c++20",
     "-iquoteexternal/+deps+naja/src/src/dnl",
     "-iquoteexternal/+deps+naja/src/src/nl/netlist/core",
     "-iquoteexternal/+deps+naja/src/src/nl/netlist/snl",

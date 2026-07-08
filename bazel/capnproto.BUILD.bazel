@@ -32,7 +32,7 @@ cmake(
         # See naja.BUILD.bazel: the hermetic toolchain's C++ runtime
         # archives are Bazel link inputs rules_foreign_cc doesn't capture,
         # and the -L'd search directories contain deliberate stubs.
-        "//conditions:default": CAPNPROTO_CMAKE_CACHE_ENTRIES | {
+        "@kepler-formal//bazel:hermetic_runtime": CAPNPROTO_CMAKE_CACHE_ENTRIES | {
             "CMAKE_CXX_STANDARD_LIBRARIES": " ".join([
                 "$${EXT_BUILD_DEPS}/lib/liblibcxx.static.a",
                 "$${EXT_BUILD_DEPS}/lib/liblibcxxabi.static.a",
@@ -40,11 +40,15 @@ cmake(
                 "-lm",
             ]),
         },
+        # Consumer toolchain (hermetic_cxx_runtime_enabled=False): use the
+        # consumer's own libc++; no hermetic archives.
+        "//conditions:default": CAPNPROTO_CMAKE_CACHE_ENTRIES,
     }),
     build_args = ["-j4"],
     deps = select({
         "@platforms//os:macos": [],
-        "//conditions:default": ["@kepler-formal//bazel:hermetic_cxx_runtime"],
+        "@kepler-formal//bazel:hermetic_runtime": ["@kepler-formal//bazel:hermetic_cxx_runtime"],
+        "//conditions:default": [],
     }),
     lib_source = ":all_srcs",
     out_binaries = [

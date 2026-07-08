@@ -25,7 +25,7 @@ cmake(
         # tbbmalloc's linker version script assigns symbols that are only
         # defined when ITT is enabled; GNU ld ignores that, ld.lld (the
         # hermetic toolchain's linker) errors without --undefined-version.
-        "//conditions:default": ONETBB_CMAKE_CACHE_ENTRIES | {
+        "@kepler-formal//bazel:hermetic_runtime": ONETBB_CMAKE_CACHE_ENTRIES | {
             "CMAKE_SHARED_LINKER_FLAGS": "-Wl,--undefined-version",
             # See naja.BUILD.bazel: link the hermetic C++ runtime into the
             # shared libraries so their libc++ symbols resolve at load time.
@@ -36,10 +36,17 @@ cmake(
                 "-lm",
             ]),
         },
+        # Consumer toolchain (hermetic_cxx_runtime_enabled=False): the consumer's
+        # own libc++ is used; do not inject the hermetic archives. Keep
+        # --undefined-version (ld.lld, incl. consumers using lld).
+        "//conditions:default": ONETBB_CMAKE_CACHE_ENTRIES | {
+            "CMAKE_SHARED_LINKER_FLAGS": "-Wl,--undefined-version",
+        },
     }),
     deps = select({
         "@platforms//os:macos": [],
-        "//conditions:default": ["@kepler-formal//bazel:hermetic_cxx_runtime"],
+        "@kepler-formal//bazel:hermetic_runtime": ["@kepler-formal//bazel:hermetic_cxx_runtime"],
+        "//conditions:default": [],
     }),
     build_args = ["-j4"],
     lib_source = ":all_srcs",

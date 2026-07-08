@@ -50,7 +50,9 @@ HERMETIC_LLVM_CXX_STANDARD_LIBRARIES = {
 
 HERMETIC_CXX_RUNTIME_DEPS = select({
     "@platforms//os:macos": [],
-    "//conditions:default": ["@kepler-formal//bazel:hermetic_cxx_runtime"],
+    "@kepler-formal//bazel:hermetic_runtime": ["@kepler-formal//bazel:hermetic_cxx_runtime"],
+    # Consumer toolchain (hermetic_cxx_runtime_enabled=False): its own libc++.
+    "//conditions:default": [],
 })
 
 NAJA_MACOS_CMAKE_CACHE_ENTRIES = dict(
@@ -111,8 +113,14 @@ cmake(
     build_args = ["-j2"],
     cache_entries = select({
         "@platforms//os:macos": NAJA_MACOS_CMAKE_CACHE_ENTRIES,
-        "//conditions:default": NAJA_CMAKE_CACHE_ENTRIES |
-                                HERMETIC_LLVM_CXX_STANDARD_LIBRARIES,
+        "@kepler-formal//bazel:hermetic_runtime": NAJA_CMAKE_CACHE_ENTRIES |
+                                                  HERMETIC_LLVM_CXX_STANDARD_LIBRARIES,
+        # Consumer toolchain (hermetic_cxx_runtime_enabled=False): use the
+        # consumer's own libc++; keep only the /usr/include fallback that lets
+        # naja find the host Python headers, drop the hermetic archives.
+        "//conditions:default": NAJA_CMAKE_CACHE_ENTRIES | {
+            "CMAKE_CXX_FLAGS": "-idirafter /usr/include",
+        },
     }),
     # Copy static libs that cmake builds but doesn't install
     # (naja_nl_dump has no install() command; naja_verilog's is guarded by PROJECT_IS_TOP_LEVEL)
