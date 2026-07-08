@@ -23,6 +23,17 @@ bazel_dep(name = "spdlog", version = "1.17.0")
 # clang 22, libc++ linked statically by default, glibc 2.28 floor. No host
 # compiler, headers or /usr/lib involved. Scoped to Linux for now; macOS
 # keeps the host Xcode toolchain.
+#
+# The toolchain is *registered* as a dev_dependency so it applies only when
+# kepler-formal is the root module (its own builds and CI). register_toolchains
+# from a dependency is global: a module that depends on kepler-formal would
+# otherwise inherit this toolchain and have its own C++ toolchain selection
+# silently replaced. The extension usage itself stays non-dev (its
+# extension_metadata reports non-dev root deps, which Bazel rejects if the only
+# usage is dev); the guard on register_toolchains is what keeps the toolchain
+# out of consumers. The llvm module stays a normal dependency because the binary
+# links its static libc++/libc++abi/libunwind archives (see
+# //bazel:hermetic_cxx_runtime).
 bazel_dep(name = "llvm", version = "0.8.11")
 
 llvm_toolchains = use_extension("@llvm//extensions:toolchain.bzl", "toolchain")
@@ -36,7 +47,10 @@ llvm_toolchains.target(
 )
 use_repo(llvm_toolchains, "llvm_toolchains")
 
-register_toolchains("@llvm_toolchains//:all")
+register_toolchains(
+    "@llvm_toolchains//:all",
+    dev_dependency = True,
+)
 
 # Use preinstalled cmake/make/pkg-config instead of bootstrapping.
 # The bundled glib in rules_foreign_cc pkg-config bootstrap fails
