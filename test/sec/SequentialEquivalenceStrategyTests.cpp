@@ -30,6 +30,7 @@
 #include "SNLDesignModeling.h"
 #include "SNLLibertyConstructor.h"
 #include "SNLSVConstructor.h"
+#include "SNLVRLConstructor.h"
 #include "SNLPath.h"
 #include "SNLBusNet.h"
 #include "SNLBusNetBit.h"
@@ -1879,6 +1880,11 @@ struct WideFrameZeroMismatchModels {
   SequentialDesignModel model1;
 };
 
+struct WideDelayedMismatchModels {
+  SequentialDesignModel model0;
+  SequentialDesignModel model1;
+};
+
 WideFrameZeroMismatchModels makeWideFrameZeroMismatchModelsForTest(
     size_t outputCount,
     size_t dummyStateCount) {
@@ -1939,6 +1945,62 @@ WideFrameZeroMismatchModels makeWideFrameZeroMismatchModelsForTest(
   models.model1.displayNameByKey.emplace(probe, "wide_frame_zero_probe[0]");
   models.model1.observedOutputExprByKey.emplace(
       probe, BoolExpr::Not(BoolExpr::Var(2)));
+  return models;
+}
+
+WideDelayedMismatchModels makeWideDelayedMismatchModelsForTest(
+    size_t outputCount) {
+  const SignalKey trigger = makeSignalKey("wideDelayedTrigger");
+  WideDelayedMismatchModels models;
+  models.model0.environmentInputs = {trigger};
+  models.model1.environmentInputs = {trigger};
+  models.model0.inputVarByKey.emplace(trigger, 2);
+  models.model1.inputVarByKey.emplace(trigger, 2);
+  models.model0.displayNameByKey.emplace(trigger, "wide_delayed_trigger[0]");
+  models.model1.displayNameByKey.emplace(trigger, "wide_delayed_trigger[0]");
+
+  size_t nextLocalVar = 3;
+  for (size_t i = 0; i < outputCount; ++i) {
+    const SignalKey output =
+        makeSignalKey("wideDelayedOut" + std::to_string(i));
+    const SignalKey state0 =
+        makeSignalKey("wideDelayedState0_" + std::to_string(i));
+    const SignalKey state1 =
+        makeSignalKey("wideDelayedState1_" + std::to_string(i));
+    const std::string outputName =
+        i + 1 == outputCount
+            ? "wide_delayed_probe[0]"
+            : "wide_delayed_stable[" + std::to_string(i) + "]";
+    const size_t state0Var = nextLocalVar++;
+    const size_t state1Var = nextLocalVar++;
+
+    addStateBitForTest(
+        models.model0,
+        state0,
+        state0Var,
+        "wide_delayed_left_q[" + std::to_string(i) + "]",
+        i + 1 == outputCount ? BoolExpr::createFalse()
+                             : BoolExpr::Var(state0Var));
+    addStateBitForTest(
+        models.model1,
+        state1,
+        state1Var,
+        "wide_delayed_right_q[" + std::to_string(i) + "]",
+        i + 1 == outputCount ? BoolExpr::Var(2)
+                             : BoolExpr::Var(state1Var));
+    models.model0.initialStateValueByKey.emplace(state0, false);
+    models.model1.initialStateValueByKey.emplace(state1, false);
+
+    models.model0.allObservedOutputs.push_back(output);
+    models.model0.observedOutputs.push_back(output);
+    models.model0.displayNameByKey.emplace(output, outputName);
+    models.model0.observedOutputExprByKey.emplace(output, BoolExpr::Var(state0Var));
+
+    models.model1.allObservedOutputs.push_back(output);
+    models.model1.observedOutputs.push_back(output);
+    models.model1.displayNameByKey.emplace(output, outputName);
+    models.model1.observedOutputExprByKey.emplace(output, BoolExpr::Var(state1Var));
+  }
   return models;
 }
 
@@ -4581,6 +4643,13 @@ SNLDesign* createConstantLowModel(NLLibrary* library) {
   SNLDesignModeling::setTruthTable(
       model, SNLTruthTable(0, 0, SNLTruthTable::fullDependencies(0)));
   return model;
+}
+
+void loadLibertyForSecTests(
+    NLLibrary* library,
+    const std::filesystem::path& path) {
+  SNLLibertyConstructor constructor(library);
+  constructor.construct(path);
 }
 
 SNLDesign* createClockGateLatchDffTop(
@@ -14366,6 +14435,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsKInductionDualRailFindsWideDelayedCounterexampleBeforeResidualProof) {
+  constexpr size_t kObservedOutputs = 17;
+  const auto models = makeWideDelayedMismatchModelsForTest(kObservedOutputs);
+  const ScopedEnvVar batchLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_BATCH_DECISION_LIMIT", "0");
+  const ScopedEnvVar leafLimit(
+      "KEPLER_SEC_KI_DUAL_RAIL_LEAF_DECISION_LIMIT", "0");
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+
+  // Current Naja can expose many more residual top outputs than older
+  // extraction did.  The concrete base side of KI must still be split across
+  // that wider residual surface so a delayed public output edit is not hidden
+  // behind resource-limited induction leaves.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_EQ(result.coveredOutputs, kObservedOutputs);
+  EXPECT_EQ(result.totalOutputs, kObservedOutputs);
+  EXPECT_NE(
+      result.reason.find("wide_delayed_probe[0]"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsImcDualRailFindsWideFrameZeroCounterexampleBeforeCraigBatching) {
   constexpr size_t kObservedOutputs = 133;
   constexpr size_t kDummyStatesPerDesign = 4100;
@@ -21160,6 +21260,117 @@ TEST_F(SequentialEquivalenceStrategyTests,
       {{extracted.inputVarByKey.at(inKey), false},
        {extracted.inputVarByKey.at(rstKey), true},
        {extracted.inputVarByKey.at(setKey), true}}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       SequentialDesignModelExtractAnchorsRealEthmacWishboneErrorReset) {
+  const auto ethmacDir =
+      std::filesystem::path("/private/tmp/asap7_ethmac_current_diag");
+  const auto flist = ethmacDir / "rtl" / "sv2v_design1.f";
+  if (!std::filesystem::exists(flist)) {
+    GTEST_SKIP() << "ASAP7 ethmac regression fixture is not available";
+  }
+
+  NLUniverse::create();
+  auto* db = NLDB::create(NLUniverse::get());
+  auto* library =
+      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
+
+  // The full regression enters Naja through this file-list path, not through a
+  // direct single-source helper.  Keep the test on that path so frontend
+  // lowering changes cannot hide the wb_err_o reset anchor again.
+  SNLSVConstructor::Paths paths;
+  paths.emplace_back("-D SYNTHESIS");
+  const std::vector<std::filesystem::path> designSources = {
+      "rtl/designs/src/ethmac/eth_clockgen.v",
+      "rtl/designs/src/ethmac/eth_cop.v",
+      "rtl/designs/src/ethmac/eth_crc.v",
+      "rtl/designs/src/ethmac/eth_fifo.v",
+      "rtl/designs/src/ethmac/eth_maccontrol.v",
+      "rtl/designs/src/ethmac/eth_macstatus.v",
+      "rtl/designs/src/ethmac/eth_miim.v",
+      "rtl/designs/src/ethmac/eth_outputcontrol.v",
+      "rtl/designs/src/ethmac/eth_random.v",
+      "rtl/designs/src/ethmac/eth_receivecontrol.v",
+      "rtl/designs/src/ethmac/eth_register.v",
+      "rtl/designs/src/ethmac/eth_registers.v",
+      "rtl/designs/src/ethmac/eth_rxaddrcheck.v",
+      "rtl/designs/src/ethmac/eth_rxcounters.v",
+      "rtl/designs/src/ethmac/eth_rxethmac.v",
+      "rtl/designs/src/ethmac/eth_rxstatem.v",
+      "rtl/designs/src/ethmac/eth_shiftreg.v",
+      "rtl/designs/src/ethmac/eth_spram_256x32.v",
+      "rtl/designs/src/ethmac/eth_top.v",
+      "rtl/designs/src/ethmac/eth_transmitcontrol.v",
+      "rtl/designs/src/ethmac/eth_txcounters.v",
+      "rtl/designs/src/ethmac/eth_txethmac.v",
+      "rtl/designs/src/ethmac/eth_txstatem.v",
+      "rtl/designs/src/ethmac/eth_wishbone.v",
+      "rtl/designs/src/ethmac/ethmac.v",
+      "rtl/designs/src/ethmac/ethmac_defines.v",
+      "rtl/designs/src/ethmac/timescale.v",
+  };
+  for (const auto& source : designSources) {
+    paths.emplace_back((ethmacDir / source).string());
+  }
+  paths.emplace_back("--top");
+  paths.emplace_back("ethmac");
+  auto* top = loadSystemVerilogTopFromPaths(library, "ethmac", paths);
+
+  const auto extracted = SequentialDesignModel::extract(top);
+
+  const auto stateKey = findKeyByDisplayName(extracted, "174.Q[0]");
+  ASSERT_NE(extracted.initialStateValueByKey.find(stateKey),
+            extracted.initialStateValueByKey.end());
+  EXPECT_FALSE(extracted.initialStateValueByKey.at(stateKey));
+
+  auto* mappedDb = NLDB::create(NLUniverse::get());
+  auto* primitives =
+      NLLibrary::create(
+          mappedDb, NLLibrary::Type::Primitives, NLName("mapped_prims"));
+  auto* mappedLibrary =
+      NLLibrary::create(
+          mappedDb, NLLibrary::Type::Standard, NLName("mapped_designs"));
+  for (const auto& liberty : {
+           "asap7sc7p5t_AO_RVT_FF_nldm_211120.lib.gz",
+           "asap7sc7p5t_INVBUF_RVT_FF_nldm_220122.lib.gz",
+           "asap7sc7p5t_OA_RVT_FF_nldm_211120.lib.gz",
+           "asap7sc7p5t_SIMPLE_RVT_FF_nldm_211120.lib.gz",
+           "asap7sc7p5t_SEQ_RVT_FF_nldm_220123.lib",
+       }) {
+    loadLibertyForSecTests(primitives, ethmacDir / liberty);
+  }
+
+  // The mapped SEC input is structural Verilog with Liberty-backed cells.  Use
+  // the same constructor as the CLI so this fixture tests the real regression
+  // path instead of the SystemVerilog frontend.
+  SNLVRLConstructor verilogConstructor(mappedLibrary);
+  verilogConstructor.construct(ethmacDir / "1_synth_lec.v");
+  auto* mappedTop = mappedLibrary->getSNLDesign(NLName("ethmac"));
+  ASSERT_NE(mappedTop, nullptr);
+  const auto mappedExtracted = SequentialDesignModel::extract(mappedTop);
+
+  const auto mappedStateKey = findKeyByDisplayName(
+      mappedExtracted, "temp_wb_err_o_reg$_DFF_PP0_.QN[0]");
+  ASSERT_NE(mappedExtracted.initialStateValueByKey.find(mappedStateKey),
+            mappedExtracted.initialStateValueByKey.end());
+  EXPECT_TRUE(mappedExtracted.initialStateValueByKey.at(mappedStateKey));
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::KInduction,
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(extracted, mappedExtracted, 2);
+
+  // This is the real ASAP7 ethmac negative comparison.  Older Naja exposed a
+  // small residual surface and KI found the delayed wb_err_o mismatch.  Current
+  // Naja exposes more residual outputs, so the strict KI base search must still
+  // reach this public output instead of reporting partial equivalence.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 2u);
+  EXPECT_NE(result.reason.find("wb_err_o[0]"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
