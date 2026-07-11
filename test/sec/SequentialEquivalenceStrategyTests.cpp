@@ -2511,12 +2511,18 @@ std::string makeOneHotPdrFullFlowImplSource(const std::string& moduleName,
   for (size_t index = 0; index < stateCount; ++index) {
     source << "  reg s" << index << ";\n";
   }
+  // Keep the parsed full-flow PDR fixture in one clocked process.  Newer
+  // SystemVerilog frontend lowering can split independent procedural blocks in
+  // a way that makes this tiny synthetic chain frontend-shape dependent, while
+  // the intended SEC/PDR behavior is only the one-hot temporal chain below.
+  source << "  always @(posedge clk) begin\n";
+  source << "    if (reset) begin\n";
   for (size_t index = 0; index < stateCount; ++index) {
-    source << "  always @(posedge clk) begin\n";
-    source << "    if (reset) begin\n";
     source << "      s" << index << " <= "
            << (index == 0 ? "1'b1" : "1'b0") << ";\n";
-    source << "    end else begin\n";
+  }
+  source << "    end else begin\n";
+  for (size_t index = 0; index < stateCount; ++index) {
     source << "      s" << index << " <= ";
     if (index == 0) {
       source << (reachableBad ? "1'b0" : "s0");
@@ -2526,9 +2532,9 @@ std::string makeOneHotPdrFullFlowImplSource(const std::string& moduleName,
       source << "1'b0";
     }
     source << ";\n";
-    source << "    end\n";
-    source << "  end\n";
   }
+  source << "    end\n";
+  source << "  end\n";
   source << "  assign out = s" << depth << ";\n";
   source << "endmodule\n";
   return source.str();
