@@ -1736,8 +1736,7 @@ findSmallDualRailResidualConcreteCounterexample(
     const KInductionProblem& problem,
     const std::vector<size_t>& outputIndices,
     KEPLER_FORMAL::Config::SolverType solverType,
-    size_t maxK,
-    bool scanAllOutputs) {
+    size_t maxK) {
   if (!problem.usesDualRailStateEncoding || outputIndices.empty()) {
     return std::nullopt;  // LCOV_EXCL_LINE
   }
@@ -1749,15 +1748,10 @@ findSmallDualRailResidualConcreteCounterexample(
     return witness;
   }
 
-  if (!scanAllOutputs &&
-      outputIndices.size() > kMaxDualRailResidualConcretePrecheckOutputs) {
+  if (outputIndices.size() > kMaxDualRailResidualConcretePrecheckOutputs) {
     return std::nullopt;
   }
 
-  // This is still the concrete base-case half of strict k-induction.  Current
-  // Naja can expose a much wider residual surface than older extraction did, so
-  // KI scans that surface one public output at a time instead of dropping the
-  // base search and hiding a delayed top-output edit behind UNKNOWN leaves.
   for (const size_t outputIndex : outputIndices) {
     const KInductionProblem singleOutputProblem =
         makeOutputSubsetProblem(problem, {outputIndex});
@@ -2032,11 +2026,7 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
   proofState.skipReasons = presetSkipReasons;
 
   if (auto witness = findSmallDualRailResidualConcreteCounterexample(
-          problem,
-          residualOutputIndices,
-          solverType,
-          maxK,
-          engine == DualRailResidualEngine::KInduction);
+          problem, residualOutputIndices, solverType, maxK);
       witness.has_value()) {
     recordDualRailResidualCounterexample(
         std::move(*witness),

@@ -15,7 +15,6 @@ target_link_libraries(secStrategyTests
     naja_nl
     naja_snl_liberty
     naja_snl_systemverilog
-    naja_snl_verilog
 )
 
 if (TARGET GTest::gmock_main)
