@@ -2733,7 +2733,7 @@ RemappedSecExpressions remapSecExpressions(
   } else {
     logSecDiagLine(
         secDiagEnabled,
-        "SEC diag: deferred next-state formula remapping for k-induction");
+        "SEC diag: deferred next-state formula remapping");
   }
   return remapped;
 }
