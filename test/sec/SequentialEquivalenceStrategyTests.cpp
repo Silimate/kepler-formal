@@ -1587,7 +1587,7 @@ class SequentialEquivalenceStrategyTests : public ::testing::Test {
 SequentialEquivalenceStrategy makeBinarySecStrategy(
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
-    SecEngine engine = SecEngine::Legacy) {
+    SecEngine engine = SecEngine::Pdr) {
   return SequentialEquivalenceStrategy(
       top0,
       top1,
@@ -1597,7 +1597,7 @@ SequentialEquivalenceStrategy makeBinarySecStrategy(
 }
 
 SequentialEquivalenceStrategy makeBinaryExtractedSecStrategy(
-    SecEngine engine = SecEngine::Legacy) {
+    SecEngine engine = SecEngine::Pdr) {
   return makeBinarySecStrategy(nullptr, nullptr, engine);
 }
 
@@ -5340,9 +5340,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.run(3);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  // Strict SEC proves the reset-initialized pipeline by unrolling through the
-  // visible output stage instead of assuming matching internal flops.
-  EXPECT_EQ(result.bound, 3u);
+  // PDR can close the invariant before the visible output stage.
+  EXPECT_LE(result.bound, 3u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -5492,12 +5491,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 =
       createBootstrapPipelineTopWithStages(library, "top1", invModel, andModel, 12);
 
-  auto strategy = makeBinarySecStrategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
   const auto result = strategy.run(3);
 
   // The removed startup fast path used internal cross-design state facts.
-  // With strict top-output KI/PDR/IMC inputs only, this 12-stage pipe needs a
-  // deeper caller horizon than k=3.
+  // With strict top-output k-induction inputs only, this 12-stage pipe needs
+  // a deeper caller horizon than k=3.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.bound, 3u);
 }
@@ -14775,11 +14774,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto model0 = makeCombinationalExtractedModel(BoolExpr::Var(2));
   const auto model1 = makeCombinationalExtractedModel(BoolExpr::Var(2));
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  const std::array<std::pair<SecEngine, const char*>, 4> expected = {{
+  const std::array<std::pair<SecEngine, const char*>, 3> expected = {{
       {SecEngine::Pdr, "pdr engine"},
       {SecEngine::Imc, "imc engine"},
       {SecEngine::KInduction, "classic k-induction engine"},
-      {SecEngine::Legacy, "legacy engine"},
   }};
 
   for (const auto& [engine, label] : expected) {
@@ -21362,7 +21360,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
   auto* top1 = createResetInitializedPipelineTop(library, "top1", true);
 
-  auto strategy = makeBinarySecStrategy(top0, top1);
+  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
   const auto result = strategy.run(2);
 
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
@@ -21719,10 +21717,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("SEC diag: extract(top0) collect begin"),
       std::string::npos);
   EXPECT_NE(
-      stderrOutput.find("SEC diag: remapped next-state formulas"),
+      stderrOutput.find("SEC diag: deferred next-state formula remapping"),
       std::string::npos);
   EXPECT_NE(
-      stderrOutput.find("SEC diag: entering legacy engine"),
+      stderrOutput.find("SEC diag: entering pdr engine"),
       std::string::npos);
   EXPECT_NE(stdoutOutput.find("SEC diag: aligned_inputs="), std::string::npos);
   EXPECT_NE(stdoutOutput.find("SEC summary: property_is_true="), std::string::npos);

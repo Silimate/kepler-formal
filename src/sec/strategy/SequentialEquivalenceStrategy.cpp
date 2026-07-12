@@ -2733,7 +2733,7 @@ RemappedSecExpressions remapSecExpressions(
   } else {
     logSecDiagLine(
         secDiagEnabled,
-        "SEC diag: deferred next-state formula remapping for k-induction");
+        "SEC diag: deferred next-state formula remapping");
   }
   return remapped;
 }
@@ -3274,9 +3274,8 @@ const char* describeSecEngine(SecEngine secEngine) {
       return "imc engine";
     case SecEngine::KInduction:
       return "classic k-induction engine";
-    case SecEngine::Legacy:
     default:
-      return "legacy engine";
+      return "pdr engine";  // LCOV_EXCL_LINE
   }
 }
 
@@ -4611,58 +4610,6 @@ SequentialEquivalenceResult runImcSecEngine(
   }
 }
 
-SequentialEquivalenceResult runLegacySecEngine(
-    KInductionProblem problem,
-    size_t maxK,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    naja::NL::SNLDesign* top0,
-    naja::NL::SNLDesign* top1,
-    const OutputCoverageSelection& outputCoverage,
-    const std::vector<std::string>& abstractedSequentialBoundaries,
-    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
-  ExactInterpolantSynthesizer interpolantSynthesizer(problem, solverType);
-  if (auto interpolant =
-          interpolantSynthesizer.deriveOneStepReachableStateInvariant();
-      interpolant.has_value()) {
-    problem.inductionProperty = BoolExpr::simplify(
-        BoolExpr::And(problem.inductionProperty, *interpolant));
-    problem.inductionBad =
-        BoolExpr::simplify(BoolExpr::Not(problem.inductionProperty));
-  }
-
-  KInductionEngine engine(problem, solverType);
-  const auto result = engine.run(maxK);
-  switch (result.status) {
-    case KInductionStatus::Equivalent:
-      return makeSecResult(
-          SequentialEquivalenceStatus::Equivalent,
-          result.bound,
-          "",
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    case KInductionStatus::Different:
-      return makeSecResult(
-          SequentialEquivalenceStatus::Different,
-          result.bound,
-          formatCounterexampleWitness(result, model0, model1, top0, top1),
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-    case KInductionStatus::Inconclusive:
-    default:
-      return makeSecResult(
-          SequentialEquivalenceStatus::Inconclusive,
-          result.bound,
-          "Reached max_k without a proof or counterexample",
-          outputCoverage,
-          abstractedSequentialBoundaries,
-          extractedBoundaryReports);
-  }
-}
-
 SequentialEquivalenceResult runSelectedSecEngine(
     SecEngine secEngine,
     const KInductionProblem& proofProblem,
@@ -4712,9 +4659,11 @@ SequentialEquivalenceResult runSelectedSecEngine(
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
-    case SecEngine::Legacy:
     default:
-      return runLegacySecEngine(
+      // Defensive fallback for corrupted enum values; public parsing rejects
+      // unknown SEC engines before strategy construction.
+      // LCOV_EXCL_START
+      return runPdrSecEngine(
           proofProblem,
           maxK,
           solverType,
@@ -4725,6 +4674,7 @@ SequentialEquivalenceResult runSelectedSecEngine(
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
+      // LCOV_EXCL_STOP
   }
 }
 
