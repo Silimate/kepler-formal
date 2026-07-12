@@ -555,10 +555,6 @@ jobs:
 
   run-sv2v-sec-negative-regress:
     name: sv2v negative ${{ matrix.flow.name }} / ${{ matrix.case.name }}
-    # Temporarily disabled: sv2v negative ki-dual-rail /
-    # sv2v_asap7_ethmac_negative needs a replacement expectation with current
-    # Naja.  Keep the job body intact so it can be re-enabled directly.
-    if: false
     runs-on: ubuntu-22.04
     needs: build-sec-regress
     strategy:
@@ -601,6 +597,10 @@ jobs:
       run: git clone --depth 1 https://github.com/keplertech/kepler-formal-examples
 
     - name: Run SV2V SEC negative regression
+      # Temporarily disabled: sv2v negative ki-dual-rail /
+      # sv2v_asap7_ethmac_negative needs a replacement expectation with current
+      # Naja.  Keep the job body intact so other matrix entries still run.
+      if: ${{ !(matrix.flow.name == 'ki-dual-rail' && matrix.case.name == 'sv2v_asap7_ethmac_negative') }}
       working-directory: ${{github.workspace}}
       env:
         CASE_NAME: ${{ matrix.case.name }}
