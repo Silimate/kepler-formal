@@ -28,13 +28,6 @@ struct PDRResult {
 
 namespace detail {
 
-bool pdrResetBootstrapPrecheckTooLarge(bool usesDualRailStateEncoding,
-                                       size_t observedOutputCount,
-                                       size_t originalObservedOutputCount,
-                                       size_t transitionSources,
-                                       size_t transitionSourceLimit,
-                                       size_t outputLimit = 128);
-
 std::vector<size_t> makeDeterministicPdrWorklist(
     const std::unordered_set<size_t>& symbols);
 
@@ -105,14 +98,13 @@ inline bool widenSortedPdrSymbolSurface( // LCOV_EXCL_LINE
 } // LCOV_EXCL_LINE
 
 inline bool shouldUseStableLocalPredecessorCacheSurface(
-    bool hasLocalDualRailLeafRepairSurface,
-    bool exactFrameClauses,
+    bool hasLocalDualRailLeafSurface,
     size_t level) {
   // Stable local-leaf caches are a startup/frontier optimization. Higher PDR
   // levels already carry learned-frame context; keeping those queries on their
   // exact local surface avoids turning a small predecessor retry into a broad
   // SAT instance.
-  return hasLocalDualRailLeafRepairSurface && exactFrameClauses && level == 0;
+  return hasLocalDualRailLeafSurface && level == 0;
 }
 
 inline bool isBroadDualRailResidualOutputSurface(
@@ -122,7 +114,7 @@ inline bool isBroadDualRailResidualOutputSurface(
     size_t broadOutputLimit) {
   // A one-output residual leaf split from a broad public bus may use the local
   // memory/perf shortcuts. AES-sized leaves also have one output after
-  // splitting, but keep the reference PDR repair route.
+  // splitting, but keep the reference PDR route.
   return usesDualRailStateEncoding &&
          observedOutputCount == 1 && // LCOV_EXCL_LINE
          originalObservedOutputCount > broadOutputLimit; // LCOV_EXCL_LINE
@@ -163,117 +155,10 @@ inline bool shouldSharePredecessorUnsatCore( // LCOV_EXCL_LINE
     bool excludeTargetOnCurrentFrame) {
   // A predecessor core is reusable for stronger target cubes only in the base
   // PDR context.  Do not share proofs that may have depended on selector
-  // assumptions or one-off projected retry clauses.
+  // assumptions or one-off retry clauses.
   return frameFingerprint == 0 && // LCOV_EXCL_LINE
          extraFrameFingerprint == 0 && // LCOV_EXCL_LINE
          !excludeTargetOnCurrentFrame; // LCOV_EXCL_LINE
-}
-
-inline bool shouldRetryLargeDualRailPredecessorWithResetFrontier( // LCOV_EXCL_LINE
-    bool usesDualRailStateEncoding,
-    bool exactResetFrontierChecksEnabled,
-    size_t observedOutputCount,
-    size_t level,
-    size_t targetCubeSize,
-    size_t transitionSupportSize,
-    size_t exactResetPrecheckSupportLimit) {
-  constexpr size_t kMaxRetryTargetCubeLiterals = 32; // LCOV_EXCL_LINE
-  // This exact proof is a local repair for hard one-output dual-rail leaves.
-  // Keep the broad reset-frontier path off for batches and higher frames; the
-  // caller may use it either before the expensive predecessor SAT attempt or as
-  // a last-chance proof after a resource-limited SAT query returns unknown.
-  return usesDualRailStateEncoding && // LCOV_EXCL_LINE
-         !exactResetFrontierChecksEnabled && // LCOV_EXCL_LINE
-         observedOutputCount == 1 && // LCOV_EXCL_LINE
-         level == 0 && // LCOV_EXCL_LINE
-         targetCubeSize != 0 && // LCOV_EXCL_LINE
-         targetCubeSize <= kMaxRetryTargetCubeLiterals && // LCOV_EXCL_LINE
-         transitionSupportSize <= exactResetPrecheckSupportLimit; // LCOV_EXCL_LINE
-}
-
-inline bool shouldPrecheckLargeDualRailPredecessorWithResetFrontier(
-    bool usesDualRailStateEncoding,
-    bool exactResetFrontierChecksEnabled,
-    size_t observedOutputCount,
-    size_t level,
-    size_t targetCubeSize,
-    size_t transitionSupportSize,
-    size_t exactResetPrecheckSupportLimit) {
-  constexpr size_t kMinPrecheckTargetCubeLiterals = 28;
-  constexpr size_t kMinPrecheckTransitionSupport = 4000;
-  // Small local cubes are usually cheaper as ordinary predecessor SAT queries.
-  // Spend the exact reset-frontier query up front only on the residual cube
-  // shape that otherwise burns the restored predecessor budget first.
-  return targetCubeSize >= kMinPrecheckTargetCubeLiterals &&
-         transitionSupportSize >= kMinPrecheckTransitionSupport && // LCOV_EXCL_LINE
-         shouldRetryLargeDualRailPredecessorWithResetFrontier( // LCOV_EXCL_LINE
-             usesDualRailStateEncoding, // LCOV_EXCL_LINE
-             exactResetFrontierChecksEnabled, // LCOV_EXCL_LINE
-             observedOutputCount, // LCOV_EXCL_LINE
-             level, // LCOV_EXCL_LINE
-             targetCubeSize, // LCOV_EXCL_LINE
-             transitionSupportSize, // LCOV_EXCL_LINE
-             exactResetPrecheckSupportLimit); // LCOV_EXCL_LINE
-}
-
-inline bool shouldUseOneShotLargeDualRailResetFrontierPredecessor( // LCOV_EXCL_LINE
-    bool hasLargeDualRailResetFrontierSurface,
-    bool hasLocalDualRailLeafRepairSurface) {
-  // If an exact reset-frontier query runs on a huge non-local leaf, avoid
-  // pinning the reset-prefix SAT solver that can dominate top MEM there.
-  return hasLargeDualRailResetFrontierSurface && // LCOV_EXCL_LINE
-         !hasLocalDualRailLeafRepairSurface; // LCOV_EXCL_LINE
-}
-
-inline bool shouldRunLargeDualRailResetFrontierQuery( // LCOV_EXCL_LINE
-    bool resetFrontierQueryAllowed,
-    bool hasLargeDualRailResetFrontierSurface,
-    bool hasLocalDualRailLeafRepairSurface) {
-  // The exact reset-frontier query is an optional PDR accelerator used before
-  // or after the local predecessor query.  On huge non-local leaves, one-shot
-  // mode protects memory but rebuilding the reset transition dominates runtime;
-  // keep the exact query for cached/local repair and let ordinary PDR splitting
-  // handle the non-local hot path.
-  return resetFrontierQueryAllowed && // LCOV_EXCL_LINE
-         !shouldUseOneShotLargeDualRailResetFrontierPredecessor( // LCOV_EXCL_LINE
-             hasLargeDualRailResetFrontierSurface, // LCOV_EXCL_LINE
-             hasLocalDualRailLeafRepairSurface); // LCOV_EXCL_LINE
-}
-
-inline size_t effectiveLocalDualRailExactResetPrecheckSupportLimit(
-    bool hasLocalDualRailLeafRepairSurface,
-    size_t observedOutputCount,
-    size_t level,
-    size_t targetCubeSize,
-    size_t configuredSupportLimit,
-    size_t localSupportLimit) {
-  constexpr size_t kMinLocalPrecheckTargetCubeLiterals = 28;
-  constexpr size_t kMaxLocalPrecheckTargetCubeLiterals = 32;
-  if (configuredSupportLimit == 0) {
-    return 0; // LCOV_EXCL_LINE
-  }
-  // Local final dual-rail leaves may exceed the broad reset-precheck support
-  // cap by a small amount.  Let the exact reset proof run before building the
-  // ordinary wide predecessor SAT instance, but keep batches and non-F0 queries
-  // on the global cap.
-  if (!hasLocalDualRailLeafRepairSurface ||
-      observedOutputCount != 1 || // LCOV_EXCL_LINE
-      level != 0 || // LCOV_EXCL_LINE
-      targetCubeSize < kMinLocalPrecheckTargetCubeLiterals || // LCOV_EXCL_LINE
-      targetCubeSize > kMaxLocalPrecheckTargetCubeLiterals) { // LCOV_EXCL_LINE
-    return configuredSupportLimit;
-  }
-  return std::max(configuredSupportLimit, localSupportLimit); // LCOV_EXCL_LINE
-}
-
-inline bool shouldSeedExactResetPredecessorSiblingCores( // LCOV_EXCL_LINE
-    size_t cubeSize,
-    size_t knownCoreSize) {
-  constexpr size_t kMaxSiblingSeedCubeLiterals = 32; // LCOV_EXCL_LINE
-  // Seeding singleton siblings is a bounded reuse of an already-built exact
-  // reset-frontier context.  Keep it aligned with the PDR bad-cube cap so
-  // whole-chip rail surfaces cannot trigger an unbounded sweep.
-  return cubeSize <= kMaxSiblingSeedCubeLiterals && knownCoreSize == 1; // LCOV_EXCL_LINE
 }
 
 }  // namespace detail
@@ -287,7 +172,7 @@ class PDREngine {
             KEPLER_FORMAL::Config::SolverType solverType,
             size_t maxPredecessorQueries = 0);
 
-  PDRResult run(size_t maxFrames, bool resetBootstrapFrameCheckedSafe = false) const;
+  PDRResult run(size_t maxFrames) const;
 
  private:
   const KInductionProblem& problem_;

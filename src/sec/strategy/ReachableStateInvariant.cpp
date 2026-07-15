@@ -358,8 +358,7 @@ bool hasCompleteInitialState(const SequentialDesignModel& model0,
 
 ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    bool deriveResetBootstrapStrengthening) {
+    const SequentialDesignModel& model1) {
   ReachableStateInvariant invariant;
   const bool hasResetBootstrap = !collectResetAssignments(model0).empty() &&
                                  !collectResetAssignments(model1).empty();
@@ -367,7 +366,7 @@ ReachableStateInvariant buildReachableStateInvariant(
   invariant.bootstrapCycles = defaultResetBootstrapCycles(
       hasResetBootstrap, hasCompleteInitialState(model0, model1));
 
-  if (hasResetBootstrap && deriveResetBootstrapStrengthening) {
+  if (hasResetBootstrap) {
     invariant.bootstrapValues0 =
         deriveResetBootstrapStateValues(model0, invariant.bootstrapCycles);
     invariant.bootstrapValues1 =

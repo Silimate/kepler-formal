@@ -21,7 +21,6 @@ struct ReachableStateInvariant {
 
 ReachableStateInvariant buildReachableStateInvariant(
     const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    bool deriveResetBootstrapStrengthening = true);
+    const SequentialDesignModel& model1);
 
 }  // namespace KEPLER_FORMAL::SEC

@@ -37,7 +37,7 @@ jobs:
         cmake -B ${{github.workspace}}/build-sec-regress \
           -GNinja \
           -DPYTHON_INTERFACE=OFF \
-          -DENABLE_UNIT_TESTS=OFF \
+          -DENABLE_UNIT_TESTS=ON \
           -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/stage \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_CXX_STANDARD=20 \
@@ -45,7 +45,18 @@ jobs:
           -DCMAKE_CXX_FLAGS_RELEASE="-Ofast -ffast-math -flto -DNDEBUG" \
           -DCMAKE_EXE_LINKER_FLAGS="-flto"
 
-    - name: Build and install kepler-formal runtime
+    - name: Build kepler-formal and unit tests
+      run: cmake --build ${{github.workspace}}/build-sec-regress --config Release
+
+    - name: Run unit tests
+      run: |
+        ctest --test-dir ${{github.workspace}}/build-sec-regress \
+          --output-on-failure \
+          --no-tests=error \
+          -E ".*[p|P]ython.*" \
+          -C Release
+
+    - name: Install kepler-formal runtime
       run: |
         cmake --build ${{github.workspace}}/build-sec-regress --target install --config Release
         chmod +x ${{github.workspace}}/stage/bin/kepler-formal
