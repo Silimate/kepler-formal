@@ -122,6 +122,18 @@ Bazel build notes, dependency details, release flow, and the BCR publication roa
 
 The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/flags-spec.md). SEC-specific flags, engine behavior, encoding defaults, and skipped-output reports are documented in [docs/sec-flags-spec.md](docs/sec-flags-spec.md).
 
+### SEC Result Codes
+
+| Result | Exit code | Meaning |
+| --- | ---: | --- |
+| Proved | `0` | All checked outputs were proved equivalent. |
+| Counterexample found | `0` | A definitive mismatch was found; successful execution is distinct from equivalence. |
+| Inconclusive | `1` | SEC produced neither a proof nor a counterexample. |
+| Partially proved | `2` | Some outputs were proved; all remaining outputs are inconclusive. |
+
+Scripts must inspect the SEC result line as well as the exit code because both
+definitive outcomes, proof and counterexample, return `0`.
+
 ### Binary Flags
 
 ```bash

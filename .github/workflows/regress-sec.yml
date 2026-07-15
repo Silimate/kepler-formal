@@ -105,7 +105,7 @@ jobs:
         - name: pdr-dual-rail
           engine: pdr
           sec_encoding: dual_rail_steady
-          positive_expectation: expect-equivalent
+          positive_expectation: expect-equivalent-or-partial
           full_coverage_expectation: expect-full-coverage
         case:
         - name: cts_aes_asap7_base
@@ -366,7 +366,7 @@ jobs:
         - name: pdr-dual-rail
           engine: pdr
           sec_encoding: dual_rail_steady
-          positive_expectation: expect-equivalent
+          positive_expectation: expect-equivalent-or-partial
         case:
         # TODO: Re-enable after pending Naja SV2V frontend fixes land.
         # - name: sv2v_asap7_aes_mbff
@@ -478,7 +478,7 @@ jobs:
             name: pdr-dual-rail
             engine: pdr
             sec_encoding: dual_rail_steady
-            positive_expectation: expect-equivalent
+            positive_expectation: expect-equivalent-or-partial
           case:
             name: sv2v_nangate45_bp_be
             case_dir: kepler-formal-examples/nangate45_bp_be

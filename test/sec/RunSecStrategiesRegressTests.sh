@@ -20,7 +20,21 @@ exit 2
 EOF
 chmod +x "${tmp_dir}/fake-kepler-formal"
 
-for expectation in allow-inconclusive allow-unset-state-inconclusive; do
+cat > "${tmp_dir}/fake-equivalent-kepler-formal" <<'EOF'
+#!/usr/bin/env bash
+echo "No difference was found. SEC proved equivalence at k = 1."
+exit 0
+EOF
+chmod +x "${tmp_dir}/fake-equivalent-kepler-formal"
+
+cat > "${tmp_dir}/fake-inconclusive-kepler-formal" <<'EOF'
+#!/usr/bin/env bash
+echo "SEC was inconclusive up to max_k = 1: no proof or counterexample"
+exit 1
+EOF
+chmod +x "${tmp_dir}/fake-inconclusive-kepler-formal"
+
+for expectation in expect-equivalent-or-partial allow-inconclusive allow-unset-state-inconclusive; do
   bash "${tmp_dir}/repo/regress/run_sec_strategies_regress.sh" \
     "partial-${expectation}" \
     "${tmp_dir}/case" \
@@ -29,3 +43,35 @@ for expectation in allow-inconclusive allow-unset-state-inconclusive; do
     "${expectation}" \
     engine=pdr
 done
+
+bash "${tmp_dir}/repo/regress/run_sec_strategies_regress.sh" \
+  equivalent-positive \
+  "${tmp_dir}/case" \
+  "${tmp_dir}/fake-equivalent-kepler-formal" \
+  config.yaml \
+  expect-equivalent-or-partial \
+  engine=pdr
+
+if bash "${tmp_dir}/repo/regress/run_sec_strategies_regress.sh" \
+    inconclusive-positive \
+    "${tmp_dir}/case" \
+    "${tmp_dir}/fake-inconclusive-kepler-formal" \
+    config.yaml \
+    expect-equivalent-or-partial \
+    engine=pdr; then
+  echo "Positive equivalence unexpectedly accepted an inconclusive result" >&2
+  exit 1
+fi
+
+# Strict equivalence remains available for regressions that require a full
+# proof; it must continue to reject the distinct partial-proof exit code.
+if bash "${tmp_dir}/repo/regress/run_sec_strategies_regress.sh" \
+    partial-strict \
+    "${tmp_dir}/case" \
+    "${tmp_dir}/fake-kepler-formal" \
+    config.yaml \
+    expect-equivalent \
+    engine=pdr; then
+  echo "Strict equivalence unexpectedly accepted a partial proof" >&2
+  exit 1
+fi

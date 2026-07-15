@@ -762,6 +762,20 @@ SequentialNajaIfFixture createUncomputableSequentialNajaIfFixture() {
 
 class KeplerFormalCliTests : public ::testing::Test {
  protected:
+  static std::string logLineContaining(const std::string& contents,
+                                       const std::string& message) {
+    const size_t messagePosition = contents.find(message);
+    if (messagePosition == std::string::npos) {
+      return {};
+    }
+    const size_t lineStart = contents.rfind('\n', messagePosition);
+    const size_t lineEnd = contents.find('\n', messagePosition);
+    const size_t start = lineStart == std::string::npos ? 0 : lineStart + 1;
+    return contents.substr(
+        start,
+        lineEnd == std::string::npos ? std::string::npos : lineEnd - start);
+  }
+
   void TearDown() override {
     KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
     KEPLER_FORMAL::BoolExprCache::destroy();
@@ -2669,10 +2683,18 @@ TEST_F(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
   EXPECT_NE(contents.find("Verification: sec"), std::string::npos);
   EXPECT_NE(contents.find("Parsing systemverilog file(s) for design 1"),
             std::string::npos);
-  EXPECT_NE(
-      contents.find("SEC partially proved equivalence at k = 0: 1/2 outputs "
-                    "proved; remaining outputs are inconclusive."),
-      std::string::npos);
+  const auto resultLine = logLineContaining(
+      contents,
+      "SEC partially proved equivalence at k = 0: 1/2 outputs proved; "
+      "remaining outputs are inconclusive.");
+  ASSERT_FALSE(resultLine.empty());
+  EXPECT_NE(resultLine.find("[info]"), std::string::npos);
+  EXPECT_EQ(resultLine.find("[warning]"), std::string::npos);
+
+  const auto warningLine = logLineContaining(
+      contents, "SEC verification did not prove all observed outputs.");
+  ASSERT_FALSE(warningLine.empty());
+  EXPECT_NE(warningLine.find("[warning]"), std::string::npos);
 
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -3354,6 +3376,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
       "    q <= d;\n"
       "  end\n"
       "endmodule\n");
+  const auto logPath = fixture.tmpDir / "sec_inconclusive.log";
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
@@ -3361,9 +3384,24 @@ TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
       "max_k: 0\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
-      "  - " + fixture.design1Path.string() + "\n");
+      "  - " + fixture.design1Path.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
 
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+
+  const auto contents = readFileContents(logPath);
+  const auto resultLine =
+      logLineContaining(contents, "SEC was inconclusive");
+  ASSERT_FALSE(resultLine.empty());
+  EXPECT_NE(resultLine.find("[info]"), std::string::npos);
+  EXPECT_EQ(resultLine.find("[warning]"), std::string::npos);
+
+  const auto warningLine = logLineContaining(
+      contents,
+      "SEC verification did not produce a proof or counterexample.");
+  ASSERT_FALSE(warningLine.empty());
+  EXPECT_NE(warningLine.find("[warning]"), std::string::npos);
+
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }

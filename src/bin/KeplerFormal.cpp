@@ -2006,14 +2006,16 @@ int KeplerFormalMain(int argc, char** argv) {
                                              ? result.proofProgress->provenOutputs
                                              : result.coveredOutputs;
             const size_t totalOutputs = result.totalOutputs;
-            SPDLOG_WARN(
+            SPDLOG_INFO(
                 "SEC partially proved equivalence at k = {}: {}/{} outputs "
                 "proved; remaining outputs are inconclusive.",
                 result.bound,
                 provedOutputs,
                 totalOutputs);
+            SPDLOG_WARN(
+                "SEC verification did not prove all observed outputs.");
             if (!result.reason.empty()) {
-              SPDLOG_WARN("SEC partial-proof details: {}", result.reason);
+              SPDLOG_INFO("SEC partial-proof details: {}", result.reason);
             }
             return kSecPartiallyProvedExitCode;
           }
@@ -2032,16 +2034,18 @@ int KeplerFormalMain(int argc, char** argv) {
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Inconclusive:
             // LCOV_EXCL_START
             if (secInconclusiveStoppedBeforeMaxK(result.reason)) {
-              SPDLOG_CRITICAL(
+              SPDLOG_INFO(
                   "SEC was inconclusive before completing max_k = {}: {}",
                   secMaxK,
                   result.reason);
             } else {
-              SPDLOG_CRITICAL(
+              SPDLOG_INFO(
                   "SEC was inconclusive up to max_k = {}: {}",
                   secMaxK,
                   result.reason);
             }
+            SPDLOG_WARN(
+                "SEC verification did not produce a proof or counterexample.");
             return EXIT_FAILURE;
             // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
+  echo "Usage: $0 <test-name> <case-dir> <kepler-formal-bin> <config-path> [expect-equivalent|expect-equivalent-or-partial|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive] [max-k=<n>] [compact] [engine=<name>] [sec-encoding=<name>]" >&2
   exit 2
 fi
 
@@ -26,7 +26,7 @@ engines=(k_induction imc pdr)
 
 for option in "${@:5}"; do
   case "${option}" in
-    expect-equivalent|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive)
+    expect-equivalent|expect-equivalent-or-partial|expect-different|expect-unsupported|expect-full-coverage|allow-inconclusive|allow-unset-state-inconclusive)
       expectation="${option}"
       ;;
     compact)
@@ -365,8 +365,11 @@ run_engine() {
     fi
 
     # A partial proof is inconclusive for its remaining outputs and deliberately
-    # exits with status 2. Measurement modes accept that distinct CLI verdict.
-    if [[ "${expectation}" == "allow-inconclusive" ||
+    # exits with status 2. Positive regressions may explicitly accept that
+    # distinct verdict without accepting a fully inconclusive result.
+    if [[ "${kepler_status}" -eq 2 ]] &&
+       [[ "${expectation}" == "expect-equivalent-or-partial" ||
+          "${expectation}" == "allow-inconclusive" ||
           "${expectation}" == "allow-unset-state-inconclusive" ]] &&
         grep -q "SEC partially proved equivalence" "${stdout_log}"; then
       grep "SEC partially proved equivalence" "${stdout_log}"
@@ -428,7 +431,8 @@ run_engine() {
       return "${kepler_status}"
     fi
 
-    if [[ "${expectation}" == "expect-equivalent" ]]; then
+    if [[ "${expectation}" == "expect-equivalent" ||
+          "${expectation}" == "expect-equivalent-or-partial" ]]; then
       grep "SEC proved equivalence" "${stdout_log}"
     else
       grep -E "SEC proved equivalence|SEC found a counterexample" "${stdout_log}"
