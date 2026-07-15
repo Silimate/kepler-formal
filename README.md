@@ -4,7 +4,7 @@
 
 ## Introduction
 
-Kepler-Formal is an equivalence checking tool for ASIC designs. It
+Kepler-Formal is an equivalence checking tool for digital designs. It
 operates on Verilog, SystemVerilog, and the
 [Naja interchange format](https://github.com/najaeda/naja-if), and supports:
 
@@ -35,13 +35,13 @@ in [docs/sec-flags-spec.md](docs/sec-flags-spec.md).
 
 ## Requirements
 
-### For Verilog:
+### For Verilog/SystemVerilog:
 
-- Gate-level LEC expects stable top-level correspondence and compatible
-  primitive/library modeling across the two designs.
+- Gate-level LEC expects no change of sequential boundaries and no change
+  in names of hierarchical instances, sequential instances and top terminals.
 - Gate-level SEC and RTL-level SEC compare sequential behavior through the
   extracted transition systems. Internal element names are not used as
-  cross-design equivalence assumptions.
+  cross-design equivalence assumptions but assume identical top terminals names.
 
 ### For Naja IF:
 
@@ -49,6 +49,29 @@ The Kepler‑Formal Naja IF flow is intended to verify incremental modifications
 The property of stable indices is employed to localize the scopes affected by edits and helps the Naja IF flow to achieve superior performance relative to the Verilog flow when handling incremental modifications.
 
 ## Dependencies
+
+### Option A: hermetic, via Bazel (any Linux distro)
+
+Let Bazel provide the compiler (hermetic clang/libc++) and pinned library
+dependencies (Boost, Cap'n Proto, TBB, zlib, FlexLexer.h) for the CMake
+build — no compiler or library packages needed, only build tools:
+
+```bash
+sudo apt-get install cmake make pkg-config bison flex python3-dev
+bazelisk run //:deps
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=$PWD/deps/toolchain.cmake
+```
+
+The exported `deps/` tree (~450 MB, mostly the clang distribution) is
+git-ignored and regenerated on each run; the compiler and library versions
+are byte-identical to the ones the Bazel build uses.
+
+Note: cadical and kissat build in-source (`thirdparty/{cadical,kissat}`).
+When switching between the system toolchain and `deps/toolchain.cmake`,
+clean those build directories first (`git -C thirdparty/cadical clean -dfx`
+and likewise for kissat) so no objects from the other compiler linger.
+
+### Option B: system packages
 
 On Ubuntu:
 
