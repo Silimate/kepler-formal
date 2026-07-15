@@ -1920,6 +1920,12 @@ int KeplerFormalMain(int argc, char** argv) {
 
   auto emitSecResult =
       [&](const KEPLER_FORMAL::SEC::SequentialEquivalenceResult& result) {
+        // Naja creates its logger lazily and may replace spdlog's default
+        // logger while loading SystemVerilog. Restore the run logger before
+        // reporting the result so the requested SEC log remains complete.
+        if (auto mainLogger = spdlog::get("kepler_formal_main_logger")) {
+          spdlog::set_default_logger(mainLogger);
+        }
         if (result.totalOutputs != 0) {
           SPDLOG_INFO(
               "SEC checked-output coverage: {:.2f}% ({}/{} covered/existing outputs).",

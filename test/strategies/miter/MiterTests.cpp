@@ -2453,17 +2453,6 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
     std::filesystem::path outputPath("top.capnp");
     SNLCapnP::dump(db, outputPath);
   }
-  // Dump visual
-  {
-    std::string dotFileName("beforeEdit.dot");
-    std::string svgFileName("beforeEdit.svg");
-    SnlVisualiser snl(top);
-    snl.process();
-    snl.getNetlistGraph().dumpDotFile(dotFileName.c_str());
-    executeCommand(std::string(std::string("dot -Tsvg ") + dotFileName +
-                               std::string(" -o ") + svgFileName)
-                       .c_str());
-  }
   // clone the top design
   SNLDesign* topClone = top->clone(NLName("topClone"));
   // create an inverter instance in the clone
@@ -2476,18 +2465,6 @@ TEST_F(MiterTests, TestMiterAndWithChainedInverter) {
   SNLNet* net5 = SNLScalarNet::create(top, NLName("top_output_net_clone"));
   instInv->getInstTerm(invOut)->setNet(net5);
   topOut->setNet(net5);
-
-  // dump visual
-  {
-    std::string dotFileName("afterEdit.dot");
-    std::string svgFileName("afterEdit.svg");
-    SnlVisualiser snl(top);
-    snl.process();
-    snl.getNetlistGraph().dumpDotFile(dotFileName.c_str());
-    executeCommand(std::string(std::string("dot -Tsvg ") + dotFileName +
-                               std::string(" -o ") + svgFileName)
-                       .c_str());
-  }
 
   // test the miter strategy
   {

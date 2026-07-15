@@ -13,7 +13,14 @@ target_link_libraries(miterTests
     gmock gtest_main
 )
 
-GTEST_DISCOVER_TESTS(miterTests)
+# This suite exercises the installed-style CLI path as part of one miter test.
+# Give CTest the binary produced by this build tree instead of guessing a
+# hard-coded build directory name.
+add_dependencies(miterTests kepler-formal)
+GTEST_DISCOVER_TESTS(
+    miterTests
+    PROPERTIES ENVIRONMENT "KEPLER_BIN=$<TARGET_FILE:kepler-formal>"
+)
 
 add_executable(keplerFormalCliTests
     KeplerFormalCliTests.cpp
