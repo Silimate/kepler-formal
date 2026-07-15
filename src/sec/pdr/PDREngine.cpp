@@ -2074,7 +2074,7 @@ std::optional<std::vector<size_t>> collectBoundedStateSupportSymbols(
     if (node->getOp() == Op::VAR) {
       if (stateSymbolSet.find(node->getId()) != stateSymbolSet.end()) {
         stateSupport.insert(node->getId());
-        if (stateSupport.size() > maxStateSymbols) {
+        if (maxStateSymbols != 0 && stateSupport.size() > maxStateSymbols) {
           return std::nullopt;
         }
       }
@@ -12203,9 +12203,6 @@ std::optional<StateCube> findPredecessorCube(
       targetSurface->transitionSupportSymbols;
   const size_t transitionEncodingNodes =
       targetSurface->transitionEncodingNodes;
-  // LCOV_EXCL_START
-  const bool predecessorQueryIsAlreadyExact = predecessorProjectionLimit == 0;
-  // LCOV_EXCL_STOP
   const size_t exactResetPrecheckSupportLimit =
       maxExactResetPrecheckTransitionSupport(solverType);
   const size_t localExactResetPrecheckSupportLimit =
@@ -12296,13 +12293,11 @@ std::optional<StateCube> findPredecessorCube(
     } // LCOV_EXCL_LINE
   } // LCOV_EXCL_LINE
 
-  // This reset-frontier precheck is an optional accelerator for projected PDR
-  // queries: it can reject fake F[0] predecessors before they become root
-  // obligations. In unprojected mode the predecessor query itself is already
-  // the cheapest exact PDR step available, and AES sampling showed the extra
-  // reset-prefix SAT precheck becoming the wall before that query could run.
+  // The ordinary level-0 predecessor query is exact for the PDR frame it sees,
+  // but a reset/bootstrap frame may still be a summary of the concrete
+  // post-reset image. Check that concrete frontier before accepting an F0
+  // predecessor from the summarized frame.
   if (useExactResetFrontierChecks &&
-      !predecessorQueryIsAlreadyExact &&
       level == 0 && problem.resetBootstrapCycles != 0 &&
       resetFrontierCache != nullptr &&
       transitionSupportSymbols.size() <= localExactResetPrecheckSupportLimit) {
@@ -15433,10 +15428,10 @@ bool blockProofObligations(const KInductionProblem& problem,
       problem.observedOutputExprs0.size() == 1 &&
       expandedBadFormulaObligations;  // LCOV_EXCL_LINE
   const bool useRootResetFrontierChecks =
-      useExactResetFrontierChecks && predecessorProjectionLimit != 0 &&
+      useExactResetFrontierChecks &&
       !useObservationFrontier && !skipRootResetFrontierForBadFormulaRepair;
   const bool useCheapRootResetFrontierFacts =
-      refineProjectedCounterexamples && problem.resetBootstrapCycles != 0;
+      problem.resetBootstrapCycles != 0;
 
   const bool useSingleOutputValidatedBadFormulaRepair =
       learnValidatedBadFormulaClausesOnReject &&
@@ -16351,78 +16346,18 @@ BoolExpr* buildPdrInitFormula(const KInductionProblem& problem,
 
 PDREngine::PDREngine(const KInductionProblem& problem,
                      KEPLER_FORMAL::Config::SolverType solverType,
-                     size_t predecessorProjectionLimit,
-                     size_t preciseBadCubeStateLimit,
-                     bool useExactFrameClauses,
-                     size_t maxPredecessorQueries,
-                     bool refineProjectedCounterexamples,
-                     size_t maxBoundedRootGeneralizationAttempts,
-                     bool learnValidatedBadFormulaClauses,
-                     bool useExactResetFrontierChecks,
-                     size_t maxProjectedCounterexampleRefinements)
+                     size_t maxPredecessorQueries)
     : problem_(problem),
       solverType_(solverType),
-      predecessorProjectionLimit_(predecessorProjectionLimit),
-      useExactFrameClauses_(useExactFrameClauses ||
-                            predecessorProjectionLimit == 0),
-      preciseBadCubeStateLimit_(preciseBadCubeStateLimit),
-      maxPredecessorQueries_(maxPredecessorQueries),
-      refineProjectedCounterexamples_(refineProjectedCounterexamples),
-      maxBoundedRootGeneralizationAttempts_(
-          maxBoundedRootGeneralizationAttempts),
-      learnValidatedBadFormulaClauses_(learnValidatedBadFormulaClauses),
-      useExactResetFrontierChecks_(shouldUseExactResetFrontierChecks(
-          problem, useExactResetFrontierChecks)),
-      maxProjectedCounterexampleRefinements_(
-          maxProjectedCounterexampleRefinements) {
-  if (pdrStatsEnabled() && useExactResetFrontierChecks &&
-      !useExactResetFrontierChecks_) {
-    emitSecDiag(
-        "SEC PDR stats: exact reset-frontier checks disabled for large ",
-        "dual-rail problem rail_state_symbols=",
-        // LCOV_EXCL_START
-        pdrDualRailStateSymbolCount(problem),
-        // LCOV_EXCL_STOP
-        " rail_limit=", dualRailResetFrontierStateSymbolLimit(),
-        " transition_sources=", pdrTransitionSourceCount(problem),
-        " transition_limit=", dualRailResetFrontierTransitionSourceLimit(),
-        " outputs=", problem.observedOutputExprs0.size(),
-        " original_outputs=", pdrOriginalObservedOutputCount(problem),
-        " output_limit=", kMaxExactResetFrontierDualRailObservedOutputs,
-        " original_output_limit=", kMaxExactResetFrontierDualRailOriginalOutputs,
-        " medium_state_min=",
-        kMinExactResetFrontierDualRailMediumStateSymbols);
-  }
-}
+      maxPredecessorQueries_(maxPredecessorQueries) {}
 
 PDRResult PDREngine::run(size_t maxFrames,
                          bool resetBootstrapFrameCheckedSafe) const {
   // Build the SEC startup frontier once so every frame query shares the same
   // interpretation of reset/bootstrap and frame-0 equality constraints.
-  const bool useLocalFinalLeafRepairBudgets =
-      usesLocalDualRailFinalLeafRepairBudgets(
-          problem_, useExactFrameClauses_, refineProjectedCounterexamples_);
-  const size_t effectiveMaxPredecessorQueries =
-      useLocalFinalLeafRepairBudgets
-          ? effectiveLocalDualRailFinalLeafBudget(
-                maxPredecessorQueries_,
-                kMinLocalDualRailFinalLeafPredecessorQueries)
-          : maxPredecessorQueries_;
-  const size_t effectivePredecessorProjectionLimit =
-      useLocalFinalLeafRepairBudgets
-          ? effectiveLocalDualRailFinalLeafProjectionLimit(
-                predecessorProjectionLimit_)
-          : predecessorProjectionLimit_;
-  const size_t effectiveMaxProjectedCounterexampleRefinements =
-      useLocalFinalLeafRepairBudgets
-          ? effectiveLocalDualRailFinalLeafBudget(
-                maxProjectedCounterexampleRefinements_,
-                kMinLocalDualRailFinalLeafProjectedRefinements)
-          : maxProjectedCounterexampleRefinements_;
   resetPdrBudgetExhaustion();
-  setPdrPredecessorQueryLimit(effectiveMaxPredecessorQueries);
-  setPdrProjectedCounterexampleRefinementLimit(
-      effectiveMaxProjectedCounterexampleRefinements);
+  setPdrPredecessorQueryLimit(maxPredecessorQueries_);
+  setPdrProjectedCounterexampleRefinementLimit(0);
   emitPdrTraceProblem(problem_);
   if (const auto resetProof = checkResetBootstrapFrameZero(
           problem_, solverType_, resetBootstrapFrameCheckedSafe);
@@ -16441,27 +16376,13 @@ PDRResult PDREngine::run(size_t maxFrames,
   // invariant after checking init coverage and transition preservation.
   BoolExpr* frameInvariant =
       selectPdrFrameInvariant(problem_, initFormula, solverType_);
-  const bool exactFrameClauses = useExactFrameClauses_;
-  const size_t badCubeStateLimit = effectivePreciseBadCubeStateLimit(
-      problem_,
-      preciseBadCubeStateLimit_,
-      useExactResetFrontierChecks_);
-  // Bad-state queries decide whether the current frontier still contains a
-  // property violation. When SEC/PDR repair learns many tiny reset-conflict
-  // blockers, a projected frame view can hide exactly those blockers behind
-  // unrelated clauses and make PDR rediscover stale bad cubes. Keep only the
-  // bad query exact; predecessor queries below remain projected.
-  const bool exactBadQueryFrameClauses =
-      exactFrameClauses || learnValidatedBadFormulaClauses_;
-  const bool exactPropagationFrameClauses =
-      exactFrameClauses || learnValidatedBadFormulaClauses_;
-  const bool guardRepeatedProjectedBadCubes =
-      problem_.usesDualRailStateEncoding && !exactBadQueryFrameClauses;
-  const size_t repeatedProjectedBadCubeLimit =
-      maxRepeatedProjectedBadCubeHits();
-  std::optional<StateCube> previousProjectedBadCube;
-  size_t previousProjectedBadCubeLevel = 0;
-  size_t repeatedProjectedBadCubeHits = 0;
+  constexpr bool exactFrameClauses = true;
+  constexpr size_t predecessorProjectionLimit = 0;
+  constexpr size_t badCubeStateLimit = 0;
+  constexpr bool refineProjectedCounterexamples = false;
+  constexpr size_t maxBoundedRootGeneralizationAttempts = 0;
+  constexpr bool learnValidatedBadFormulaClauses = false;
+  constexpr bool useExactResetFrontierChecks = true;
 
   TransitionExprResolver transitionByState(problem_);
   ComplementPartnerIndex complementPartners(problem_);
@@ -16471,7 +16392,7 @@ PDRResult PDREngine::run(size_t maxFrames,
   // combined miter state set on every loop iteration.
   const auto preciseBadStateSupport = collectBoundedStateSupportSymbols(
       problem_.bad,
-      kMaxPreciseBadCubeSupportNodes,
+      std::numeric_limits<size_t>::max(),
       badCubeStateLimit,
       transitionByState.stateSymbols());
   ResetFrontierCache resetFrontierCache;
@@ -16485,15 +16406,9 @@ PDRResult PDREngine::run(size_t maxFrames,
       formulaSupportCache,
       problem_,
       frameInvariant};
-  size_t remainingPredecessorQueries = effectiveMaxPredecessorQueries;
+  size_t remainingPredecessorQueries = maxPredecessorQueries_;
   size_t* predecessorQueryBudget =
-      effectiveMaxPredecessorQueries == 0 ? nullptr : &remainingPredecessorQueries;
-  size_t remainingProjectedCounterexampleRefinements =
-      effectiveMaxProjectedCounterexampleRefinements;
-  size_t* projectedCounterexampleRefinementBudget =
-      effectiveMaxProjectedCounterexampleRefinements == 0
-          ? nullptr
-          : &remainingProjectedCounterexampleRefinements;
+      maxPredecessorQueries_ == 0 ? nullptr : &remainingPredecessorQueries;
   std::vector<FrameClauses> frames(1);
   emitPdrTraceFrames("initial_frames", frames);
 
@@ -16511,7 +16426,7 @@ PDRResult PDREngine::run(size_t maxFrames,
             transitionByState.stateSymbols(),
             0,
             complementPartners,
-            exactBadQueryFrameClauses,
+            exactFrameClauses,
             &badCubeAssumptionCache,
             &formulaSupportCache);
         badCube.has_value()) {
@@ -16551,7 +16466,7 @@ PDRResult PDREngine::run(size_t maxFrames,
               transitionByState.stateSymbols(),
               level,
               complementPartners,
-              exactBadQueryFrameClauses,
+              exactFrameClauses,
               &badCubeAssumptionCache,
               &formulaSupportCache);
       if (hasPdrBudgetExhaustion()) {
@@ -16559,30 +16474,6 @@ PDRResult PDREngine::run(size_t maxFrames,
       }
       if (!badCube.has_value()) {
         break;
-      }
-      if (guardRepeatedProjectedBadCubes) {
-        if (previousProjectedBadCube.has_value() &&
-            previousProjectedBadCubeLevel == level &&
-            *previousProjectedBadCube == *badCube) {
-          ++repeatedProjectedBadCubeHits; // LCOV_EXCL_LINE
-        } else { // LCOV_EXCL_LINE
-          previousProjectedBadCube = *badCube;
-          previousProjectedBadCubeLevel = level;
-          repeatedProjectedBadCubeHits = 1;
-        }
-        if (repeatedProjectedBadCubeHits > repeatedProjectedBadCubeLimit) {
-          if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
-            emitSecDiag(  // LCOV_EXCL_LINE
-                "SEC PDR stats: repeated projected bad cube exhausted ",
-                "limit=", repeatedProjectedBadCubeLimit,
-                " level=", level,
-                " cube=", badCube->size(), // LCOV_EXCL_LINE
-                " hash=", cubeFingerprint(*badCube)); // LCOV_EXCL_LINE
-          }  // LCOV_EXCL_LINE
-          markPdrBudgetExhausted( // LCOV_EXCL_LINE
-              PdrBudgetExhaustion::RepeatedProjectedBadCube);  // LCOV_EXCL_LINE
-          return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
-        }
       }
       emitPdrTrace(("bad_cube@F" + std::to_string(level)).c_str(),
                    formatCubeForPdrTrace(*badCube));
@@ -16599,16 +16490,16 @@ PDRResult PDREngine::run(size_t maxFrames,
               level,
               badFrame,
               complementPartners,
-              effectivePredecessorProjectionLimit,
+              predecessorProjectionLimit,
               exactFrameClauses,
-              refineProjectedCounterexamples_,
+              refineProjectedCounterexamples,
               resetFrontierCache,
               predecessorAssumptionCache,
-              maxBoundedRootGeneralizationAttempts_,
-              learnValidatedBadFormulaClauses_,
-              useExactResetFrontierChecks_,
+              maxBoundedRootGeneralizationAttempts,
+              learnValidatedBadFormulaClauses,
+              useExactResetFrontierChecks,
               predecessorQueryBudget,
-              projectedCounterexampleRefinementBudget,
+              nullptr,
               &formulaSupportCache)) {
         if (hasPdrBudgetExhaustion()) {
           return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
@@ -16637,8 +16528,8 @@ PDRResult PDREngine::run(size_t maxFrames,
         frames,
         level,
         complementPartners,
-        effectivePredecessorProjectionLimit,
-        exactPropagationFrameClauses,
+        predecessorProjectionLimit,
+        exactFrameClauses,
         &predecessorAssumptionCache,
         predecessorQueryBudget,
         &formulaSupportCache);

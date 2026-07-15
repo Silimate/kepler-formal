@@ -6787,9 +6787,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/kStateCount,
-      /*preciseBadCubeStateLimit=*/kStateCount);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -6839,10 +6837,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/kStateCount,
-      /*preciseBadCubeStateLimit=*/kStateCount,
-      /*useExactFrameClauses=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -6893,10 +6888,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/kStateCount,
-      /*preciseBadCubeStateLimit=*/kStateCount,
-      /*useExactFrameClauses=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -6960,10 +6952,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/kTargetStateCount + kSupportStateCount,
-      /*preciseBadCubeStateLimit=*/kTargetStateCount,
-      /*useExactFrameClauses=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -7023,10 +7012,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/kTargetStateCount + kSupportStateCount,
-      /*preciseBadCubeStateLimit=*/kTargetStateCount,
-      /*useExactFrameClauses=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -7090,10 +7076,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/kTargetStateCount + kSupportStateCount,
-      /*preciseBadCubeStateLimit=*/kTargetStateCount,
-      /*useExactFrameClauses=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -7215,14 +7198,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -7731,50 +7707,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       {{5, true}, {8, false}},
   };
   EXPECT_EQ(cubes, expected);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailFrameZeroValidationDefersHugeRailStateSurface) {
-  // RISC-V HS has a smaller 99-output surface.  Keep it on the existing exact
-  // validation path even if the rail-state surface is large, because the
-  // Ariane runtime fix must not weaken that previous coverage fix.
-  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/99,
-      /*railStateSymbolSurface=*/2000000));
-  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/133,
-      /*railStateSymbolSurface=*/2000000));
-  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/278,
-      /*railStateSymbolSurface=*/1000000));
-
-  // Ariane136 has only a mid-wide output bus, but compact dual-rail extraction
-  // expands the rail state into a million-scale surface.  That shape should
-  // enter PDR directly instead of spending minutes in the pre-PDR frame-0
-  // validation pass.
-  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/278,
-      /*railStateSymbolSurface=*/1000001));
-
-  // Dynamic-node has a mid-wide 331-output surface.  It should keep the exact
-  // validation path unless compact extraction also creates the huge rail-state
-  // shape seen in Ariane.
-  EXPECT_FALSE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/331,
-      /*railStateSymbolSurface=*/1000000));
-  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/331,
-      /*railStateSymbolSurface=*/1000001));
-
-  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/385,
-      /*railStateSymbolSurface=*/1));
-
-  // BlackParrot-style wide output surfaces were already deferred by the old
-  // output-count rule.  The new state-size rule should not change that behavior.
-  EXPECT_TRUE(detail::shouldDeferPdrDualRailFrameZeroValidation(
-      /*observedOutputSurface=*/598,
-      /*railStateSymbolSurface=*/1));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13288,233 +13220,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
 }
 
-KInductionProblem makeDualRailResetFrontierGuardProblemForTest(
-    size_t railPairs,
-    size_t transitionSources) {
-  KInductionProblem problem;
-  problem.usesDualRailStateEncoding = true;
-  problem.totalStateCount = railPairs;
-  problem.dualRailStatePairs.reserve(railPairs);
-  for (size_t index = 0; index < railPairs; ++index) {
-    problem.dualRailStatePairs.push_back(
-        DualRailSymbolPair{index * 2, index * 2 + 1});
-  }
-  problem.transitions0.reserve(transitionSources);
-  for (size_t index = 0; index < transitionSources; ++index) {
-    const size_t symbol = 100000 + index;
-    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
-  }
-  return problem;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierAllowsIbexSizedSurface) {
-  // Nangate45 Ibex needs exact reset-frontier repair at this rail/transition
-  // scale; otherwise dual-rail PDR reports abstract init-reaching roots.
-  KInductionProblem problem =
-      makeDualRailResetFrontierGuardProblemForTest(
-          /*railPairs=*/7748,
-          /*transitionSources=*/15496);
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(
-      stderrOutput.find(
-          "exact reset-frontier checks disabled for large dual-rail problem"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierAllowsRiscvSizedMediumOutputSurface) {
-  KInductionProblem problem =
-      makeDualRailResetFrontierGuardProblemForTest(
-          /*railPairs=*/2112,
-          /*transitionSources=*/4224);
-  while (problem.observedOutputExprs0.size() < 99) {
-    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
-    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
-  }
-  problem.originalObservedOutputCount = 99;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // sky130hs_riscv32i has a medium 99-output dual-rail bus surface.  Keeping it
-  // eligible for exact reset-frontier repair avoids exhausting ordinary PDR
-  // bad-cube budgets on its reset-unanchored datapath buses.
-  EXPECT_EQ(
-      stderrOutput.find(
-          "exact reset-frontier checks disabled for large dual-rail problem"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierAllowsDynamicNodeSizedMediumOutputSurface) {
-  KInductionProblem problem =
-      makeDualRailResetFrontierGuardProblemForTest(
-          /*railPairs=*/9028,
-          /*transitionSources=*/18056);
-  while (problem.observedOutputExprs0.size() < 331) {
-    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
-    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
-  }
-  problem.originalObservedOutputCount = 331;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // Nangate45 dynamic-node sits inside the same medium-wide reset-frontier
-  // envelope as RISC-V by output count, but has a much larger rail surface.
-  EXPECT_EQ(
-      stderrOutput.find(
-          "exact reset-frontier checks disabled for large dual-rail problem"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierBlocksAesSizedMediumOutputSurface) {
-  KInductionProblem problem =
-      makeDualRailResetFrontierGuardProblemForTest(
-          /*railPairs=*/1124,
-          /*transitionSources=*/2248);
-  while (problem.observedOutputExprs0.size() < 129) {
-    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
-    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
-  }
-  problem.originalObservedOutputCount = 129;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // AES-sized residual leaves are medium-width by original output count but
-  // too small by rail-state surface to justify exact reset-frontier context.
-  // Keep them on the lower-memory predecessor/reset-conflict path from the
-  // known-good 376a017 behavior.
-  EXPECT_NE(
-      stderrOutput.find(
-          "exact reset-frontier checks disabled for large dual-rail problem"),
-      std::string::npos);
-  EXPECT_NE(stderrOutput.find("medium_state_min=4096"), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierStillBlocksTooWideOutputSurface) {
-  KInductionProblem problem =
-      makeDualRailResetFrontierGuardProblemForTest(
-          /*railPairs=*/1124,
-          /*transitionSources=*/2248);
-  while (problem.observedOutputExprs0.size() < 385) {
-    problem.observedOutputExprs0.push_back(BoolExpr::Var(7));
-    problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
-  }
-  problem.originalObservedOutputCount = 385;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // The broad-output guard still prevents SoC-scale dual-rail runs from
-  // rebuilding exact reset-prefix solvers for every residual leaf.
-  EXPECT_NE(
-      stderrOutput.find(
-          "exact reset-frontier checks disabled for large dual-rail problem"),
-      std::string::npos);
-  EXPECT_NE(stderrOutput.find("original_outputs=385"), std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrDualRailExactResetFrontierGuardCountsRailSymbols) {
-  KInductionProblem problem =
-      makeDualRailResetFrontierGuardProblemForTest(
-          /*railPairs=*/10001,
-          /*transitionSources=*/0);
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // The PDR reset-frontier repair pays for both rails.  Guard on rail symbols
-  // so large dual-rail SEC runs do not re-enter the exact reset-prefix
-  // validation wall.
-  EXPECT_NE(
-      stderrOutput.find(
-          "exact reset-frontier checks disabled for large dual-rail problem"),
-      std::string::npos);
-  EXPECT_NE(stderrOutput.find("rail_state_symbols=20002"),
-            std::string::npos);
-}
-
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineUsesConservativeFrontierWhenResetBmcSkipsEmptyDualRailSlice) {
   KInductionProblem problem;
@@ -13532,15 +13237,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -14890,46 +14587,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineCanDeferExactResetFrontierChecksToCallerValidation) {
-  KInductionProblem problem;
-  problem.state0Symbols = {2, 3};
-  problem.inputSymbols = {4};
-  problem.allSymbols = {2, 3, 4};
-  problem.resetBootstrapCycles = 1;
-  problem.resetBootstrapInputs = {{4, false}};
-  problem.bootstrapStateAssignments = {{2, false}};
-  problem.transitions0.emplace_back(2, BoolExpr::And(BoolExpr::Var(4), BoolExpr::Var(3)));
-  problem.transitions0.emplace_back(3, BoolExpr::createFalse());
-  problem.bad = BoolExpr::Var(2);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-
-  ASSERT_FALSE(
-      findBaseCounterexample(
-          problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 1)
-          .has_value());
-
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/false,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
-  const auto result = engine.run(3);
-
-  // Projected SEC stages can return this abstract trace quickly because the
-  // top-level SEC strategy immediately validates every PDR difference with the
-  // exact bounded base-case query above before accepting it.
-  EXPECT_EQ(result.status, PDRStatus::Different);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDualRailLocalF0SkipsResetFrontierPrecheckForMediumCube) {
   KInductionProblem problem;
   constexpr size_t reset = 100;
@@ -14989,15 +14646,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   (void)result;
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
@@ -15013,7 +14662,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesCheapResetConstantFactsWhenExactResetChecksAreDisabled) {
+       PDREngineUsesCheapResetConstantFactsWithExactResetChecks) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
   problem.inputSymbols = {4};
@@ -15037,15 +14686,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15055,7 +14696,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesResetSpecializedRelationsBeforeExactRootResetFrontier) {
+       PDREngineUsesResetSpecializedRelationsWithExactRootResetFrontier) {
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -15072,10 +14713,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
           BoolExpr::Not(BoolExpr::Var(reset)),
           BoolExpr::And(BoolExpr::Not(BoolExpr::Var(y)), BoolExpr::Var(w))));
   // The reset transition creates y == w at the F[0] frontier, but neither bit
-  // is a reset constant.  This guards the sampled ASIC path where exact deeper
-  // reset checks are disabled, yet PDR should still learn the abstract F[0]
-  // predecessor is outside the concrete post-reset image before doing a wide
-  // root-cube validation query.
+  // is a reset constant. PDR should still learn that abstract F[0]
+  // predecessors outside the concrete post-reset image are unreachable.
   problem.transitions0.emplace_back(y, BoolExpr::Var(w));
   problem.transitions0.emplace_back(w, BoolExpr::Var(w));
   problem.bad = BoolExpr::Var(x);
@@ -15095,27 +14734,15 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("post_bootstrap_steps=1"), std::string::npos)
-      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesResetSpecializedExpressionSatBeforeExactRootResetFrontier) {
+       PDREngineUsesResetSpecializedExpressionSatWithExactRootResetFrontier) {
   KInductionProblem problem;
   constexpr size_t x = 2;
   constexpr size_t y = 3;
@@ -15163,15 +14790,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15183,8 +14802,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       stderrOutput.find("reset-specialized expression solver_profile=reset_expression"),
       std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("reset frontier cube coi"), std::string::npos)
       << stderrOutput;
 }
 
@@ -15237,15 +14854,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/32,
-      /*preciseBadCubeStateLimit=*/32,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15326,15 +14935,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/32,
-      /*preciseBadCubeStateLimit=*/32,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15428,15 +15029,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/32,
-      /*preciseBadCubeStateLimit=*/32,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15497,15 +15090,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/32,
-      /*preciseBadCubeStateLimit=*/32,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15634,15 +15219,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15678,15 +15255,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15715,15 +15284,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15754,15 +15315,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15793,15 +15346,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15847,15 +15392,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -15998,16 +15535,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true,
-      /*maxProjectedCounterexampleRefinements=*/2);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16071,15 +15599,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/4,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(5);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16112,15 +15632,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16198,15 +15710,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/32,
-      /*preciseBadCubeStateLimit=*/32,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16246,15 +15750,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/true,
-      /*useExactResetFrontierChecks=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16313,15 +15809,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16374,15 +15862,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/0,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16437,15 +15917,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/true,
-      /*useExactResetFrontierChecks=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16510,15 +15982,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -16555,15 +16019,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine cachedEngine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      PDREngine::kDefaultBoundedRootGeneralizationAttempts,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto cachedResult = cachedEngine.run(3);
   const std::string cachedStderrOutput =
       testing::internal::GetCapturedStderr();
@@ -17395,9 +16851,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/8,
-      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -17511,11 +16965,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       "KEPLER_SEC_PDR_PROJECTED_FRAME_CLAUSE_LIMIT", "1");
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
-      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/100);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
@@ -17581,11 +17031,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
             .has_value());
     PDREngine engine(
         problem,
-        KEPLER_FORMAL::Config::SolverType::KISSAT,
-        /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
-        /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
-        /*useExactFrameClauses=*/false,
-        /*maxPredecessorQueries=*/kDeterministicQueryBudget);
+        KEPLER_FORMAL::Config::SolverType::KISSAT);
     const auto result = engine.run(3);
 
     EXPECT_EQ(result.status, PDRStatus::Equivalent)
@@ -17618,9 +17064,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // against the exact learned frame before re-enqueueing it.
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      1,
-      1);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(4);
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
@@ -17672,11 +17116,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      1,
-      1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/50);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -17721,11 +17161,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
-      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -17773,11 +17209,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
-      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -17818,11 +17250,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/PDREngine::kDefaultPredecessorProjectionLimit,
-      /*preciseBadCubeStateLimit=*/PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -17864,9 +17292,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -17913,9 +17339,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // counterexample for the projected cube.
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
@@ -17952,12 +17376,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // immediately instead of doing the same bounded-prefix validation inside PDR.
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/1,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
 
   EXPECT_EQ(result.status, PDRStatus::Different);
@@ -18004,9 +17423,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/2);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18053,15 +17470,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/4,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18115,16 +17524,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/4,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false,
-      /*maxProjectedCounterexampleRefinements=*/1);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18172,13 +17572,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18235,15 +17629,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/false,
-      /*useExactResetFrontierChecks=*/false);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18295,14 +17681,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/1,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18355,14 +17734,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18551,10 +17923,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18604,10 +17973,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18668,10 +18034,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18769,10 +18132,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18841,10 +18201,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      PDREngine::kDefaultPredecessorProjectionLimit,
-      PDREngine::kDefaultPreciseBadCubeStateLimit,
-      /*useExactFrameClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   (void)engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -18961,14 +18318,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -19032,14 +18382,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -19127,14 +18470,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -19214,14 +18550,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/false,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -19293,14 +18622,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -19364,14 +18686,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -19429,14 +18744,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2, /*resetBootstrapFrameCheckedSafe=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
@@ -19484,14 +18792,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   testing::internal::CaptureStderr();
   PDREngine engine(
       problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      /*predecessorProjectionLimit=*/2,
-      /*preciseBadCubeStateLimit=*/2,
-      /*useExactFrameClauses=*/true,
-      /*maxPredecessorQueries=*/0,
-      /*refineProjectedCounterexamples=*/true,
-      /*maxBoundedRootGeneralizationAttempts=*/0,
-      /*learnValidatedBadFormulaClauses=*/true);
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2, /*resetBootstrapFrameCheckedSafe=*/true);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
