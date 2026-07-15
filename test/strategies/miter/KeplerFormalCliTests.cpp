@@ -2435,6 +2435,58 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecVerificationAccepted) {
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST_F(KeplerFormalCliTests,
+       ConfigSystemVerilogSecPdrDualRailExplainsResetlessStateMismatch) {
+  const auto fixture = createDesignFixture(
+      "sv",
+      "module T(input clk, input a, output y);\n"
+      "  reg r;\n"
+      "  always @(posedge clk) r <= a;\n"
+      "  assign y = r;\n"
+      "endmodule\n",
+      "module T(input clk, input a, output y);\n"
+      "  reg r;\n"
+      "  always @(posedge clk) r <= ~a;\n"
+      "  assign y = r;\n"
+      "endmodule\n");
+  const auto logPath = fixture.tmpDir / "sv_sec_resetless_dual_rail_pdr.log";
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: sec\n"
+      "sec_engine: pdr\n"
+      "sec_encoding: dual_rail_steady\n"
+      "max_k: 2\n"
+      "sv_design1_top: T\n"
+      "sv_design2_top: T\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto contents = readFileContents(logPath);
+  EXPECT_NE(contents.find("SEC engine: pdr"), std::string::npos);
+  EXPECT_NE(contents.find("SEC encoding: dual_rail_steady"), std::string::npos);
+
+  EXPECT_EQ(
+      contents.find("No difference was found. SEC proved equivalence"),
+      std::string::npos)
+      << contents;
+  const bool reportsConcreteDifference =
+      contents.find("SEC counterexample details:") != std::string::npos;
+  const bool explainsSteadyXAbstraction =
+      contents.find("steady-X") != std::string::npos ||
+      contents.find("X-steady") != std::string::npos ||
+      contents.find("X-dominated") != std::string::npos ||
+      contents.find("reset-unanchored") != std::string::npos;
+  EXPECT_TRUE(reportsConcreteDifference || explainsSteadyXAbstraction)
+      << contents;
+
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesModel) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",
