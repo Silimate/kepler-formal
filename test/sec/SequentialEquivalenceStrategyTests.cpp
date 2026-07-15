@@ -13163,7 +13163,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailDefersVeryWideEquivalentValidation) {
+       RunExtractedModelsPdrDualRailProvesVeryWideEquivalentSurface) {
   constexpr size_t kOutputCount = 385;
   SequentialDesignModel model0;
   SequentialDesignModel model1;
@@ -13208,13 +13208,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.runExtractedModels(model0, model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // A very wide dual-rail batch is already closed by PDR here.  Do not rebuild
-  // the broad concrete BMC validator after the proof, because that is the
-  // BlackParrot runtime wall this path is meant to avoid.
+  // A very wide dual-rail surface should be handled by exact PDR directly, with
+  // no separate validation/deferral layer in the result path.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, kOutputCount);
   EXPECT_EQ(result.totalOutputs, kOutputCount);
-  EXPECT_NE(
+  EXPECT_EQ(
       stderrOutput.find("deferred wide dual-rail equivalent validation outputs=385"),
       std::string::npos)
       << stderrOutput;
@@ -17021,7 +17020,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   const ScopedEnvVar clauseLimit(
       "KEPLER_SEC_PDR_PROJECTED_FRAME_CLAUSE_LIMIT", "1");
-  constexpr size_t kDeterministicQueryBudget = 19;
 
   for (const bool reverseSeeds : {false, true}) {
     KInductionProblem problem = makeProblem(reverseSeeds);
@@ -20174,7 +20172,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
   const auto inKey = findKeyByDisplayName(extracted, "in[0]");
   const auto clockKey = findKeyByDisplayName(extracted, "clk[0]");
-  const size_t stateVar = extracted.inputVarByKey.at(stateKey);
   const size_t inVar = extracted.inputVarByKey.at(inKey);
   const size_t clockVar = extracted.inputVarByKey.at(clockKey);
   auto* expr = extracted.nextStateExprByStateKey.at(stateKey);
