@@ -364,6 +364,15 @@ run_engine() {
       return 0
     fi
 
+    # A partial proof is inconclusive for its remaining outputs and deliberately
+    # exits with status 2. Measurement modes accept that distinct CLI verdict.
+    if [[ "${expectation}" == "allow-inconclusive" ||
+          "${expectation}" == "allow-unset-state-inconclusive" ]] &&
+        grep -q "SEC partially proved equivalence" "${stdout_log}"; then
+      grep "SEC partially proved equivalence" "${stdout_log}"
+      return 0
+    fi
+
     # Measurement-only SEC runs still fail on real counterexamples above, but
     # allow inconclusive positive proofs so one hard design does not stop the
     # rest of the regression from reporting its current behavior.

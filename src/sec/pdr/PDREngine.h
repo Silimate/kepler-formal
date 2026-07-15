@@ -7,7 +7,6 @@
 #include "kinduction/KInductionProblem.h"
 
 #include <algorithm>
-#include <functional>
 #include <iterator>
 #include <unordered_set>
 #include <utility>
@@ -40,31 +39,10 @@ bool pdrCubeAssignmentOrderLess(
     const std::vector<std::pair<size_t, bool>>& lhs,
     const std::vector<std::pair<size_t, bool>>& rhs);
 
-inline void mixPdrClauseFingerprintValue(size_t& seed, size_t value) { // LCOV_EXCL_LINE
-  seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2); // LCOV_EXCL_LINE
-} // LCOV_EXCL_LINE
-
-template <typename ClauseRange>
-size_t pdrOrderedClauseFingerprint(const ClauseRange& clauses) { // LCOV_EXCL_LINE
-  if (clauses.empty()) { // LCOV_EXCL_LINE
-    return 0; // LCOV_EXCL_LINE
-  }
-  // This is used for cache identity only. Keep order in the hash so two retry
-  // clause vectors with the same clauses in different order do not require
-  // normalization on the hot predecessor path.
-  size_t seed = std::hash<size_t>()(clauses.size()); // LCOV_EXCL_LINE
-  for (const auto& clause : clauses) { // LCOV_EXCL_LINE
-    size_t clauseSeed = 0x517cc1b727220a95ULL; // LCOV_EXCL_LINE
-    for (const auto& literal : clause) { // LCOV_EXCL_LINE
-      mixPdrClauseFingerprintValue( // LCOV_EXCL_LINE
-          clauseSeed, std::hash<size_t>()(literal.symbol)); // LCOV_EXCL_LINE
-      mixPdrClauseFingerprintValue( // LCOV_EXCL_LINE
-          clauseSeed, std::hash<bool>()(literal.positive)); // LCOV_EXCL_LINE
-    }
-    mixPdrClauseFingerprintValue(seed, clauseSeed); // LCOV_EXCL_LINE
-  }
-  return seed; // LCOV_EXCL_LINE
-} // LCOV_EXCL_LINE
+bool pdrProofObligationPriorityLess(size_t lhsLevel,
+                                    size_t lhsSequence,
+                                    size_t rhsLevel,
+                                    size_t rhsSequence);
 
 inline std::vector<size_t> mergeSortedPdrSymbolVectors( // LCOV_EXCL_LINE
     const std::vector<size_t>& lhs,
@@ -97,16 +75,6 @@ inline bool widenSortedPdrSymbolSurface( // LCOV_EXCL_LINE
   return true; // LCOV_EXCL_LINE
 } // LCOV_EXCL_LINE
 
-inline bool shouldUseStableLocalPredecessorCacheSurface(
-    bool hasLocalDualRailLeafSurface,
-    size_t level) {
-  // Stable local-leaf caches are a startup/frontier optimization. Higher PDR
-  // levels already carry learned-frame context; keeping those queries on their
-  // exact local surface avoids turning a small predecessor retry into a broad
-  // SAT instance.
-  return hasLocalDualRailLeafSurface && level == 0;
-}
-
 inline bool isBroadDualRailResidualOutputSurface(
     bool usesDualRailStateEncoding,
     size_t observedOutputCount,
@@ -133,7 +101,7 @@ inline bool shouldUseResidualDualRailPredecessorBudget( // LCOV_EXCL_LINE
   // Residual one-output dual-rail leaves are still local proof obligations even
   // when a rail-expanded output predicate reaches 28-32 literals. Keep broad
   // batches on the cheap limit, but let these local leaves spend the intended
-  // residual predecessor budget instead of splitting on the 10k retry cap. The
+  // residual predecessor budget instead of stopping at the 10k query cap. The
   // wider Swerv shape is startup-only; higher PDR levels can enumerate many
   // sibling cubes, so they keep the historical small residual guard.
   const bool originalSmallResidualShape = // LCOV_EXCL_LINE
@@ -151,13 +119,11 @@ inline bool shouldUseResidualDualRailPredecessorBudget( // LCOV_EXCL_LINE
 
 inline bool shouldSharePredecessorUnsatCore( // LCOV_EXCL_LINE
     size_t frameFingerprint,
-    size_t extraFrameFingerprint,
     bool excludeTargetOnCurrentFrame) {
   // A predecessor core is reusable for stronger target cubes only in the base
-  // PDR context.  Do not share proofs that may have depended on selector
-  // assumptions or one-off retry clauses.
+  // PDR context. Do not share proofs that depended on the Q2 cube-exclusion
+  // selector.
   return frameFingerprint == 0 && // LCOV_EXCL_LINE
-         extraFrameFingerprint == 0 && // LCOV_EXCL_LINE
          !excludeTargetOnCurrentFrame; // LCOV_EXCL_LINE
 }
 

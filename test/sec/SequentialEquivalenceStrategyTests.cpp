@@ -6717,9 +6717,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
     problem.allSymbols.push_back(symbol);
     init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
     bad = BoolExpr::And(bad, BoolExpr::Var(symbol));
-    // Only the last target bit is impossible. The other bits are constants that
-    // make the first bad cube wide, matching the ASIC case where the actual
-    // predecessor surface was tiny but the blocked cube had many literals.
+    // Only the last target bit is impossible. The other bits share the opposite
+    // SAT-root polarity, so this also checks that the failed-assumption core is
+    // mapped back to the exact target literal rather than its first alias.
     problem.transitions0.emplace_back(
         symbol,
         symbol == constantFalseSymbol ? BoolExpr::createFalse()
@@ -6744,11 +6744,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
       stderrOutput.find("(!x" + std::to_string(constantFalseSymbol) + ")\n"),
-      std::string::npos);
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesPredecessorCoresForExactWideBlockedCubes) {
+       PDREngineUsesIncrementalCoreForExactWideBlockedCube) {
   KInductionProblem problem;
   constexpr size_t kStateCount = 96;
   constexpr size_t firstStateSymbol = 2;
@@ -6778,9 +6779,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  // BlackParrot sampling showed wide stages learning many adjacent blockers.
-  // The predecessor-core path must prove unreachability against the complete
-  // frame before learning a blocker.
+  // Section V returns the failed target assumptions from the same incremental
+  // solveRelative query. Figure 7 should start from that core without a second
+  // SAT query or a separate validation solver.
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
@@ -6792,13 +6793,50 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
-      stderrOutput.find("predecessor core target=96->1 source_level=0"),
+      stderrOutput.find(
+          "generalized blocked cube level=1 size=96->1 checks=0"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesPredecessorCoresForMediumSupportWideBlockedCubes) {
+       PDREngineKeepsFailedAssumptionCoreOutsideExactInit) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3};
+  problem.allSymbols = {2, 3};
+  problem.transitions0.emplace_back(2, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(3, BoolExpr::createTrue());
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(2)),
+      BoolExpr::Not(BoolExpr::Var(3)));
+  problem.initialStateAssignments = {{2, false}, {3, false}};
+  problem.initializedStateCount = 2;
+  problem.totalStateCount = 2;
+  problem.bad = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(2)), BoolExpr::Var(3));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  // The failed core is !x2, which overlaps Init. The authors' reduction keeps
+  // an original target literal until the learned blocker is Init-disjoint.
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find(
+          "predecessor core kept outside init core=1->2 target=2"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesIncrementalCoreForWideCubeWithMediumSupport) {
   KInductionProblem problem;
   constexpr size_t kStateCount = 96;
   constexpr size_t kHeldStateCount = 16;
@@ -6828,10 +6866,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionProperty = problem.property;
   problem.inductionBad = problem.bad;
 
-  // The cheap 8-literal seed is reachable, while the full wide cube is blocked
-  // by a medium-sized transition surface. BlackParrot produced thousands of
-  // such 68/88-literal blockers, so wide cubes should try the predecessor-core
-  // oracle before bounded chunk dropping even when their support is not huge.
+  // Failed assumptions must be used directly regardless of transition-cone
+  // width; there is no support threshold in the paper's solveRelative flow.
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
@@ -6843,13 +6879,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
-      stderrOutput.find("predecessor core target=96->1 source_level=0"),
+      stderrOutput.find(
+          "generalized blocked cube level=1 size=96->1 checks=0"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesPredecessorCoresForMediumHighSupportBlockedCubes) {
+       PDREngineUsesIncrementalCoreForMediumCubeWithWideSupport) {
   KInductionProblem problem;
   constexpr size_t kTargetStateCount = 12;
   constexpr size_t kSupportStateCount = 40;
@@ -6877,11 +6914,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
     init = BoolExpr::And(init, BoolExpr::Not(BoolExpr::Var(symbol)));
     bad = BoolExpr::And(bad, BoolExpr::Var(symbol));
     problem.initialStateAssignments.push_back({symbol, false});
-    // The first four target bits keep the cheap seed reachable. The remaining
-    // target bits depend on a broad support cone that is false in the startup
-    // frontier, matching the measured AES 12-literal, 113-support level-zero
-    // blockers that were too small for the old medium predecessor-core gate
-    // but still expensive to learn one neighboring valuation at a time.
+    // The first four target bits remain reachable. The remaining target bits
+    // depend on a broad support cone that is false in the startup frontier,
+    // matching the measured AES 12-literal, 113-support level-zero blockers.
     problem.transitions0.emplace_back(
         symbol,
         index < 4
@@ -6907,13 +6942,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
-      stderrOutput.find("predecessor core target=52->1 source_level=0"),
+      stderrOutput.find(
+          "generalized blocked cube level=1 size=12->1 checks=0"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesPredecessorCoresForLocalBroadDualRailBlockedCubes) {
+       PDREngineUsesIncrementalCoreForDualRailBlockedCube) {
   KInductionProblem problem;
   constexpr size_t kTargetStateCount = 12;
   constexpr size_t kSupportStateCount = 40;
@@ -6967,17 +7003,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_NE(
-      stderrOutput.find("predecessor core target=52->1 source_level=0"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("skipped dual-rail predecessor core"),
+      stderrOutput.find(
+          "generalized blocked cube level=1 size=12->1 checks=0"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesCachedCoreForHugeBroadDualRailBlockedCubes) {
+       PDREngineUsesIncrementalCoreForBroadDualRailBlockedCube) {
   KInductionProblem problem;
   constexpr size_t kTargetStateCount = 12;
   constexpr size_t kSupportStateCount = 160;
@@ -7030,18 +7063,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  // The fresh predecessor-core oracle must still be skipped on this broad
-  // dual-rail surface, but the already-run cached predecessor query now gives
-  // us the failed-assumption core for free.
   EXPECT_NE(
-      stderrOutput.find("skipped dual-rail predecessor core"),
+      stderrOutput.find(
+          "generalized blocked cube level=1 size=12->1 checks=0"),
       std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("predecessor cached core target=172->1 source_level=0"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("predecessor core target="), std::string::npos)
       << stderrOutput;
 }
 
@@ -7078,7 +7103,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineUsesConcreteBadStateCubes) {
+       PDREngineTernarySimulationRemovesIrrelevantBadStateLiterals) {
   auto problem = buildDocumentedBooleanPdrCounterexampleProblem();
   problem.state0Symbols.push_back(5);
   problem.allSymbols.push_back(5);
@@ -7088,6 +7113,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
       5, BoolExpr::Xor(BoolExpr::Var(5), BoolExpr::Var(4)));
 
   const ScopedEnvVar secPdrTrace("KEPLER_SEC_PDR_TRACE", "1");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
@@ -7103,7 +7130,78 @@ TEST_F(SequentialEquivalenceStrategyTests,
                                         : nextTracePos - badCubePos);
   EXPECT_NE(badCubeTrace.find("x2="), std::string::npos);
   EXPECT_NE(badCubeTrace.find("x3="), std::string::npos);
-  EXPECT_NE(badCubeTrace.find("x5="), std::string::npos);
+  // Section III-B of the FMCAD'11 PDR paper probes each state bit with X.
+  // x5 cannot affect the bad XOR, so it must not survive in the obligation.
+  EXPECT_EQ(badCubeTrace.find("x5="), std::string::npos);
+  // Section V's on-demand encoding also avoids materializing x5 before the
+  // same ternary reduction; the exact bad predicate has two state inputs.
+  EXPECT_NE(
+      stderrOutput.find("state_symbols=2 model_cube=2"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineTernarySimulationShrinksPredecessorCubes) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3, 5};
+  problem.allSymbols = problem.state0Symbols;
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(2)),
+      BoolExpr::And(BoolExpr::Var(3), BoolExpr::Not(BoolExpr::Var(5))));
+  problem.initializedStateCount = 3;
+  problem.totalStateCount = 3;
+  problem.transitions0 = {
+      {2, BoolExpr::Var(3)},
+      {3, BoolExpr::Var(3)},
+      {5, BoolExpr::Var(5)},
+  };
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  ASSERT_EQ(result.status, PDRStatus::Different);
+  // Only x3 controls x2'. The current values of x2 and x5 must be removed by
+  // the paper's ternary predecessor simulation before the cube is queued.
+  EXPECT_NE(stderrOutput.find("predecessor_cube=1"), std::string::npos)
+      << stderrOutput;
+  // Exact F[0] still contributes all three initialized state constraints, but
+  // only x3 is requested as a predecessor model value.
+  EXPECT_NE(
+      stderrOutput.find("predecessor_symbols=1 solver_symbols=3"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineBlockingUsesPaperRelativeInductionQuery) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(2));
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.transitions0 = {{2, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(2);
+  problem.property = BoolExpr::Not(problem.bad);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  ASSERT_EQ(result.status, PDRStatus::Equivalent);
+  // Query Q2 in Figure 1 includes !s in the current frame.
+  EXPECT_NE(stderrOutput.find("exclude_target=1"), std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -7160,36 +7258,18 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrOrderedClauseFingerprintSeparatesProjectedRetries) {
-  struct ClauseLiteralForFingerprintTest {
-    size_t symbol = 0;
-    bool positive = false;
-  };
-  using ClauseForFingerprintTest =
-      std::vector<ClauseLiteralForFingerprintTest>;
-  const std::vector<ClauseForFingerprintTest> emptyClauses;
-  const std::vector<ClauseForFingerprintTest> retryClauses = {
-      {{2, true}, {3, false}}, {{5, true}}};
-  const std::vector<ClauseForFingerprintTest> sameClauses = {
-      {{2, true}, {3, false}}, {{5, true}}};
-  const std::vector<ClauseForFingerprintTest> reorderedClauses = {
-      {{5, true}}, {{2, true}, {3, false}}};
-  const std::vector<ClauseForFingerprintTest> polarityChangedClauses = {
-      {{2, true}, {3, true}}, {{5, true}}};
-
-  // Projected PDR retries use this fingerprint in the predecessor result-cache
-  // key. Empty means "no extra retry clauses"; every real local refinement must
-  // remain distinct so cached UNSAT/SAT answers cannot leak across retries.
-  EXPECT_EQ(detail::pdrOrderedClauseFingerprint(emptyClauses), 0u);
-  EXPECT_EQ(
-      detail::pdrOrderedClauseFingerprint(retryClauses),
-      detail::pdrOrderedClauseFingerprint(sameClauses));
-  EXPECT_NE(
-      detail::pdrOrderedClauseFingerprint(retryClauses),
-      detail::pdrOrderedClauseFingerprint(reorderedClauses));
-  EXPECT_NE(
-      detail::pdrOrderedClauseFingerprint(retryClauses),
-      detail::pdrOrderedClauseFingerprint(polarityChangedClauses));
+       PdrProofObligationsUseLowestFrameThenLifoOrder) {
+  // Figure 6 orders by the lowest frame and reports a small benefit from
+  // stack-like behavior among obligations in the same frame.
+  EXPECT_TRUE(detail::pdrProofObligationPriorityLess(
+      /*lhsLevel=*/0, /*lhsSequence=*/1,
+      /*rhsLevel=*/1, /*rhsSequence=*/100));
+  EXPECT_TRUE(detail::pdrProofObligationPriorityLess(
+      /*lhsLevel=*/2, /*lhsSequence=*/8,
+      /*rhsLevel=*/2, /*rhsSequence=*/7));
+  EXPECT_FALSE(detail::pdrProofObligationPriorityLess(
+      /*lhsLevel=*/2, /*lhsSequence=*/7,
+      /*rhsLevel=*/2, /*rhsSequence=*/8));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -7200,8 +7280,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::vector<size_t> merged =
       detail::mergeSortedPdrSymbolVectors(stableSurface, localSymbols);
 
-  // Local dual-rail predecessor caching uses this instead of rebuilding a
-  // large unordered_set and sorting it on every query. The result must still be
+  // Incremental predecessor caching and bad-state queries use this instead of
+  // rebuilding a large unordered_set on every query. The result must remain
   // the exact sorted union used by FrameVariableStore.
   const std::vector<size_t> expected = {2, 3, 4, 8, 16, 32};
   EXPECT_EQ(merged, expected);
@@ -7215,9 +7295,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
       detail::widenSortedPdrSymbolSurface(stableSurface, {2, 8}));
   EXPECT_EQ(stableSurface, (std::vector<size_t>{2, 4, 8}));
 
-  // Local dual-rail predecessor caches use this to keep one solver alive when
-  // neighboring target cubes add a few non-state support symbols. The widened
-  // surface must stay sorted/unique because it becomes the SAT variable list.
+  // Section V's incremental predecessor solver uses this to stay alive when
+  // neighboring target cubes add support symbols. The widened surface must
+  // stay sorted and unique because it becomes the SAT variable list.
   EXPECT_TRUE(
       detail::widenSortedPdrSymbolSurface(stableSurface, {3, 4, 9}));
   EXPECT_EQ(stableSurface, (std::vector<size_t>{2, 3, 4, 8, 9}));
@@ -7228,38 +7308,18 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PdrStableLocalPredecessorCacheSurfaceIsLevelZeroOnly) {
-  // The stable solver surface is only a cache optimization for startup/frontier
-  // local leaves. Level-1+ predecessor retries must stay on their exact local
-  // symbol surface so Swerv does not spend budgets on broad SAT instances.
-  EXPECT_TRUE(
-      detail::shouldUseStableLocalPredecessorCacheSurface(true, 0));
-  EXPECT_FALSE(
-      detail::shouldUseStableLocalPredecessorCacheSurface(true, 1));
-  EXPECT_FALSE(
-      detail::shouldUseStableLocalPredecessorCacheSurface(false, 0));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        PdrPredecessorUnsatCoreSharingUsesBaseContextOnly) {
   // A predecessor UNSAT core can be reused for stronger target cubes only when
-  // it came from the monotonic base frame context. Selector assumptions and
-  // temporary retry clauses stay target-local.
+  // it came from the monotonic base frame context. Q2 selector assumptions stay
+  // target-local.
   EXPECT_TRUE(detail::shouldSharePredecessorUnsatCore(
       /*frameFingerprint=*/0,
-      /*extraFrameFingerprint=*/0,
       /*excludeTargetOnCurrentFrame=*/false));
   EXPECT_FALSE(detail::shouldSharePredecessorUnsatCore(
       /*frameFingerprint=*/7,
-      /*extraFrameFingerprint=*/0,
       /*excludeTargetOnCurrentFrame=*/false));
   EXPECT_FALSE(detail::shouldSharePredecessorUnsatCore(
       /*frameFingerprint=*/0,
-      /*extraFrameFingerprint=*/11,
-      /*excludeTargetOnCurrentFrame=*/false));
-  EXPECT_FALSE(detail::shouldSharePredecessorUnsatCore(
-      /*frameFingerprint=*/0,
-      /*extraFrameFingerprint=*/0,
       /*excludeTargetOnCurrentFrame=*/true));
 }
 
@@ -7267,8 +7327,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
        PdrResidualDualRailPredecessorBudgetCoversLocalLeafShape) {
   // Swerv final dual-rail leaves can produce 28-32 literal residual targets
   // with a local 9k-15k symbol solver surface. Those are not broad batches, so
-  // they should use the restored residual predecessor budget instead of the
-  // lightweight batch retry cap.
+  // they should use the residual predecessor budget instead of the lightweight
+  // batch query cap.
   EXPECT_TRUE(
       detail::shouldUseResidualDualRailPredecessorBudget(
           true, /*observedOutputCount=*/1, /*level=*/0,
@@ -7312,8 +7372,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   constexpr size_t kDualRailMediumOutputLimit = 384;
 
   // AES-sized designs become one-output residual leaves after splitting, but
-  // they must keep the 376a017 partial reset-conflict and fresh predecessor
-  // route instead of broad-output residual shortcuts.
+  // they must keep the regular exact predecessor route instead of broad-output
+  // residual handling.
   EXPECT_FALSE(
       detail::isBroadDualRailResidualOutputSurface(
           /*usesDualRailStateEncoding=*/true,
@@ -7475,6 +7535,26 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineLiftsBlockedCubeThroughRelativeInductiveFrames) {
+  const auto problem = buildLinearChainSecProblem(6);
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(5);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  // Figure 6 repeatedly calls solveRelative(next(z)); this fixture has a
+  // blocker first learned in F2 that is also relatively inductive in F3.
+  EXPECT_NE(
+      stderrOutput.find("blocked cube lifted level=2->3"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineProvesClassicSafeChainsWithinDepthsThreeFourFive) {
   for (const size_t proofDepth : {size_t{3}, size_t{4}, size_t{5}}) {
     const auto problem =
@@ -7502,9 +7582,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
     PDREngine earlyEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
     const auto earlyResult = earlyEngine.run(badDepth - 1);
 
-    EXPECT_EQ(earlyResult.status, PDRStatus::Inconclusive)
+    // Figure 6 requeues next(s), specifically allowing a counterexample longer
+    // than the current trace. A trace one frame short must still find this bug.
+    EXPECT_EQ(earlyResult.status, PDRStatus::Different)
         << "badDepth=" << badDepth;
-    EXPECT_EQ(earlyResult.bound, badDepth - 1) << "badDepth=" << badDepth;
+    EXPECT_EQ(earlyResult.bound, badDepth) << "badDepth=" << badDepth;
 
     PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
     const auto result = engine.run(badDepth);
@@ -12809,12 +12891,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.runExtractedModels(model0, model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Dynamic-node has 331 observed outputs. Exact PDR may prove only the slices
-  // that fit its full-state obligations; the remaining outputs are reported as
-  // inconclusive instead of being validated through a reduced model.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
-  EXPECT_GT(result.coveredOutputs, 0u);
-  EXPECT_LT(result.coveredOutputs, kOutputCount);
+  // Ternary obligations remove unrelated state from each exact output slice,
+  // so PDR can prove this initialized 331-output surface without reduction.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, kOutputCount);
   EXPECT_EQ(result.totalOutputs, kOutputCount);
   EXPECT_EQ(
       stderrOutput.find("skipped dual-rail frame-0 validation"),
@@ -12868,12 +12948,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.runExtractedModels(model0, model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // A very wide dual-rail surface should be handled by exact PDR directly. If
-  // exact PDR proves only some slices, the remaining outputs stay inconclusive
-  // instead of going through a separate validation/deferral layer.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
-  EXPECT_GT(result.coveredOutputs, 0u);
-  EXPECT_LT(result.coveredOutputs, kOutputCount);
+  // Ternary obligations let exact PDR prove every initialized output directly;
+  // no validation/deferral layer or reduced transition system is involved.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, kOutputCount);
   EXPECT_EQ(result.totalOutputs, kOutputCount);
   EXPECT_EQ(
       stderrOutput.find("deferred wide dual-rail equivalent validation outputs=385"),
@@ -13384,7 +13462,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailLeavesResetlessStateLeafInconclusive) {
+       RunExtractedModelsPdrDualRailFindsResetlessTransitionMismatch) {
   constexpr size_t kDummyStatesPerDesign = 1024;
   const auto models =
       makeDelayedRailMismatchModelsForTest(kDummyStatesPerDesign);
@@ -13398,11 +13476,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 4);
 
-  // The observable edit is driven by unanchored internal state. Exact PDR does
-  // not report a concrete counterexample or defer to a reduced model.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  // Both arbitrary initial values reach opposite constants after one step, so
+  // exact PDR must report the observable cycle-1 mismatch.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
   EXPECT_EQ(result.bound, 1u);
-  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_FALSE(result.reason.empty());
 }
@@ -13860,11 +13938,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(5));
 
   auto strategy = makeBinaryExtractedSecStrategy(SecEngine::Pdr);
-  // The output is combinational, but the surrounding reset model does not
-  // provide an exact F[0], so PDR must return inconclusive before proving it.
+  // Unconstrained startup state is represented exactly by F[0] = true. The
+  // combinational output is independent of that state, so exact PDR proves it.
   const auto result = strategy.runExtractedModels(model0, model1, 1);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_TRUE(result.skippedObservedOutputs.empty());
 }
@@ -14080,7 +14158,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineReturnsInconclusiveWithoutExactBootstrapFrameZero) {
+       PDREngineBuildsExactBootstrapFrameZeroFromResetPrefix) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
   problem.inputSymbols = {4};
@@ -14099,8 +14177,129 @@ TEST_F(SequentialEquivalenceStrategyTests,
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(2);
 
-  EXPECT_EQ(result.status, PDRStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_GE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineKeepsExactRelationalBootstrapState) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t reset = 4;
+  constexpr size_t data = 5;
+  problem.state0Symbols = {x, y};
+  problem.inputSymbols = {reset, data};
+  problem.allSymbols = {x, y, reset, data};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+
+  // Reset loads both registers from the same arbitrary input. After reset the
+  // registers swap, so the exact x == y frontier is invariant. Treating the
+  // incomplete constant summary as F[0] would admit 01 and report a spurious
+  // 01 -> 10 counterexample.
+  BoolExpr* resetAndData =
+      BoolExpr::And(BoolExpr::Var(reset), BoolExpr::Var(data));
+  BoolExpr* resetInactive = BoolExpr::Not(BoolExpr::Var(reset));
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::Or(
+          resetAndData,
+          BoolExpr::And(resetInactive, BoolExpr::Var(y))));
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::Or(
+          resetAndData,
+          BoolExpr::And(resetInactive, BoolExpr::Var(x))));
+  problem.bad =
+      BoolExpr::And(BoolExpr::Var(x), BoolExpr::Not(BoolExpr::Var(y)));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_GE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineFindsCounterexampleFromExactRelationalBootstrapState) {
+  KInductionProblem problem;
+  constexpr size_t x = 2;
+  constexpr size_t y = 3;
+  constexpr size_t reset = 4;
+  constexpr size_t data = 5;
+  problem.state0Symbols = {x, y};
+  problem.inputSymbols = {reset, data};
+  problem.allSymbols = {x, y, reset, data};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+
+  BoolExpr* resetAndData =
+      BoolExpr::And(BoolExpr::Var(reset), BoolExpr::Var(data));
+  BoolExpr* resetInactive = BoolExpr::Not(BoolExpr::Var(reset));
+  problem.transitions0.emplace_back(
+      x,
+      BoolExpr::Or(
+          resetAndData,
+          BoolExpr::And(
+              resetInactive, BoolExpr::Not(BoolExpr::Var(y)))));
+  problem.transitions0.emplace_back(
+      y,
+      BoolExpr::Or(
+          resetAndData,
+          BoolExpr::And(resetInactive, BoolExpr::Var(x))));
+  problem.bad =
+      BoolExpr::And(BoolExpr::Var(x), BoolExpr::Not(BoolExpr::Var(y)));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineBootstrapPrefixEnforcesHistoricalDualRailValidity) {
+  KInductionProblem problem;
+  constexpr size_t target = 2;
+  constexpr size_t mayBeOne = 3;
+  constexpr size_t mayBeZero = 4;
+  constexpr size_t reset = 5;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {target, mayBeOne, mayBeZero};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {target, mayBeOne, mayBeZero, reset};
+  problem.totalStateCount = 3;
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.bootstrapStateAssignments = {{mayBeOne, true}, {mayBeZero, true}};
+  problem.dualRailStatePairs = {
+      DualRailSymbolPair{mayBeOne, mayBeZero}};
+
+  // The target can become true only from the invalid rail encoding 00. The
+  // exact reset prefix must exclude that historical pseudo-state just as every
+  // ordinary PDR frame does.
+  problem.transitions0 = {
+      {target,
+       BoolExpr::Not(BoolExpr::Or(
+           BoolExpr::Var(mayBeOne), BoolExpr::Var(mayBeZero)))},
+      {mayBeOne, BoolExpr::createTrue()},
+      {mayBeZero, BoolExpr::createTrue()}};
+  problem.bad = BoolExpr::Var(target);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14560,7 +14759,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDualRailPredecessorReusesCachedFallback) {
+       PDREngineDualRailPredecessorZeroDecisionLimitIsUnbounded) {
   KInductionProblem problem;
   constexpr size_t targetState = 2;
   constexpr size_t stateA = 3;
@@ -14581,7 +14780,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = problem.bad;
   problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
-  problem.observedOutputNames = {"single_output_cached_retry"};
+  problem.observedOutputNames = {"single_output_unbounded"};
   problem.originalObservedOutputCount = 1266;
 
   const ScopedEnvVar decisionLimit(
@@ -14595,22 +14794,147 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
-  // The fallback should spend its retry budget in the already encoded cached
-  // predecessor solver instead of reconstructing the same frame and transition
-  // cone as a fresh SAT instance.
+  EXPECT_EQ(result.status, PDRStatus::Different) << stderrOutput;
+  // Zero means unlimited. Section V's incremental query must answer directly,
+  // rather than turning this reachable predecessor into UNKNOWN.
   EXPECT_NE(
-      stderrOutput.find("cached_assumptions=unknown retry=cached_solver"),
+      stderrOutput.find("result=sat cached_assumptions=1"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("cached_solver_retry=1"),
+  EXPECT_EQ(
+      stderrOutput.find("predecessor query budget exhausted"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDualRailAesSizedLeafUsesReferencePredecessorFallback) {
+       PDREngineDualRailPredecessorResourceLimitReturnsInconclusive) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB};
+  problem.allSymbols = {targetState, stateA, stateB};
+  problem.totalStateCount = 3;
+
+  // This four-clause formula excludes every assignment without simplifying to
+  // a unit contradiction. It forces the predecessor SAT query to consume its
+  // deliberately tiny local budget.
+  BoolExpr* hardFalse = BoolExpr::And(
+      BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB)),
+      BoolExpr::And(
+          BoolExpr::Or(BoolExpr::Not(BoolExpr::Var(stateA)),
+                       BoolExpr::Var(stateB)),
+          BoolExpr::And(
+              BoolExpr::Or(BoolExpr::Var(stateA),
+                           BoolExpr::Not(BoolExpr::Var(stateB))),
+              BoolExpr::Or(BoolExpr::Not(BoolExpr::Var(stateA)),
+                           BoolExpr::Not(BoolExpr::Var(stateB))))));
+  problem.transitions0 = {
+      {targetState, hardFalse},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"single_output_limited"};
+  problem.originalObservedOutputCount = 129;
+
+  const ScopedEnvVar conflictLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT", "1");
+  const ScopedEnvVar decisionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "1");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  // UNKNOWN is not UNSAT. The local limit skips this output as inconclusive;
+  // it must not retry the same proof obligation through another solver path.
+  EXPECT_NE(
+      stderrOutput.find("predecessor query budget exhausted"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("cached_assumptions=1"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailPropagationResourceLimitContinuesCurrentRun) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t gateState = 3;
+  constexpr size_t firstRailState = 10;
+  constexpr size_t railPairCount = 16;
+
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, gateState};
+  problem.allSymbols = problem.state0Symbols;
+  problem.transitions0 = {
+      {targetState, BoolExpr::Var(gateState)},
+      {gateState, BoolExpr::Var(gateState)}};
+  for (size_t pair = 0; pair < railPairCount; ++pair) {
+    const size_t mayBeOne = firstRailState + pair * 2;
+    const size_t mayBeZero = mayBeOne + 1;
+    problem.state0Symbols.push_back(mayBeOne);
+    problem.state0Symbols.push_back(mayBeZero);
+    problem.allSymbols.push_back(mayBeOne);
+    problem.allSymbols.push_back(mayBeZero);
+    problem.transitions0.emplace_back(mayBeOne, BoolExpr::Var(mayBeOne));
+    problem.transitions0.emplace_back(mayBeZero, BoolExpr::Var(mayBeZero));
+    problem.dualRailStatePairs.push_back(
+        DualRailSymbolPair{mayBeOne, mayBeZero});
+  }
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.initialCondition = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(targetState)),
+      BoolExpr::Not(BoolExpr::Var(gateState)));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"propagation_budget"};
+
+  // F[0] makes the first blocker immediate. Propagating that blocker from
+  // F[1] has a satisfiable predecessor and deliberately exceeds this tiny
+  // decision budget. Figure 9 leaves the clause in F[1] and continues.
+  const ScopedEnvVar conflictLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT", "0");
+  const ScopedEnvVar decisionLimit(
+      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "1");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Inconclusive) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("propagation left clause in frame"),
+      std::string::npos)
+      << stderrOutput;
+  // Reaching the normal frame bound proves UNKNOWN did not abort the run.
+  EXPECT_NE(
+      stderrOutput.find("max frame budget exhausted"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailAesSizedSatLeafUsesIncrementalPredecessor) {
   KInductionProblem problem;
   constexpr size_t targetState = 2;
   constexpr size_t stateA = 3;
@@ -14631,11 +14955,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = problem.bad;
   problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
-  problem.observedOutputNames = {"single_output_aes_sized_fallback"};
+  problem.observedOutputNames = {"single_output_aes_sized_incremental"};
   problem.originalObservedOutputCount = 129;
 
-  const ScopedEnvVar decisionLimit(
-      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT", "0");
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
@@ -14646,83 +14968,18 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Different) << stderrOutput;
-  // AES residual leaves have a one-output local shape after splitting, but the
-  // original design is still inside the medium-output guard. Keep the
-  // 376a017-style fresh predecessor fallback and do not retain the cached retry
-  // solver that caused available-memory spikes on AES.
+  // Section V reuses the exact incremental SAT model as the predecessor. A SAT
+  // answer must not rebuild the same complete query in a fresh solver.
   EXPECT_NE(
-      stderrOutput.find("cached_assumptions=unknown fallback=exact"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("cached_assumptions=unknown retry=cached_solver"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("cached_solver_retry=1"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("predecessor result cache hit"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("predecessor cached core"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDualRailAesSizedSatLeafUsesFreshPredecessorFallback) {
-  KInductionProblem problem;
-  constexpr size_t targetState = 2;
-  constexpr size_t stateA = 3;
-  constexpr size_t stateB = 4;
-  problem.usesDualRailStateEncoding = true;
-  problem.state0Symbols = {targetState, stateA, stateB};
-  problem.allSymbols = {targetState, stateA, stateB};
-  problem.totalStateCount = 3;
-
-  problem.transitions0 = {
-      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
-      {stateA, BoolExpr::Var(stateA)},
-      {stateB, BoolExpr::Var(stateB)}};
-  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
-  problem.bad = BoolExpr::Var(targetState);
-  problem.property = BoolExpr::Not(problem.bad);
-  problem.inductionProperty = problem.property;
-  problem.inductionBad = problem.bad;
-  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
-  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
-  problem.observedOutputNames = {"single_output_aes_sized_sat_fallback"};
-  problem.originalObservedOutputCount = 129;
-
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-  testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT);
-  (void)engine.run(1);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // The good AES path used the cached solver only as a cheap probe.  A cached
-  // SAT answer still falls through to the ordinary exact predecessor solver so
-  // AES-sized leaves do not keep the broad residual-leaf cached model path.
-  EXPECT_NE(
-      stderrOutput.find("cached_assumptions=sat fallback=exact"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
       stderrOutput.find("result=sat cached_assumptions=1"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("predecessor result cache hit"),
+  EXPECT_NE(
+      stderrOutput.find("predecessor_cube="),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(
-      stderrOutput.find("predecessor cached core"),
+      stderrOutput.find("fallback=exact"),
       std::string::npos)
       << stderrOutput;
 }
@@ -14769,7 +15026,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDualRailSingleOutputUsesFullStatePredecessorSurface) {
+       PDREngineDualRailPredecessorUsesExactOnDemandStateSurface) {
   KInductionProblem problem;
   constexpr size_t targetState = 2;
   constexpr size_t stateA = 3;
@@ -14792,7 +15049,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = problem.bad;
   problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
-  problem.observedOutputNames = {"single_output_stable_cache"};
+  problem.observedOutputNames = {"single_output_on_demand_cache"};
   problem.originalObservedOutputCount = 1266;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
@@ -14804,14 +15061,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
   (void)engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Exact predecessor cubes include every state symbol, including the decoy.
+  // Section V encodes the exact frame and target-transition cone on demand.
+  // The decoy is absent from both, so existentially omitting it changes no SAT
+  // answer and avoids carrying it through every incremental query.
   EXPECT_NE(
-      stderrOutput.find("solver_symbols=4 cached_solver_symbols=4"),
+      stderrOutput.find(
+          "predecessor_symbols=2 solver_symbols=3 cached_solver_symbols=3"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "predecessor cached solver created level=0 symbols=4"),
+          "predecessor cached solver created level=0 symbols=3"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("solver_symbols=4 cached_solver_symbols=4"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
