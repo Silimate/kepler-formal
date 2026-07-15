@@ -9,6 +9,8 @@
 
 #include "strategy/SequentialEquivalenceStrategy.h"
 
+inline constexpr int kSecPartiallyProvedExitCode = 2;
+
 // Shared helper for consistent filename handling.
 std::string sanitizeFileToken(const std::string& input);
 

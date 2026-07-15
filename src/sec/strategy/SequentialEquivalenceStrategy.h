@@ -29,6 +29,7 @@ enum class SecEncoding {
 
 enum class SequentialEquivalenceStatus {
   Equivalent,
+  PartiallyProved,
   Different,
   Inconclusive,
   Unsupported,

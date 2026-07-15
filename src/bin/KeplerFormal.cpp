@@ -1995,6 +1995,22 @@ int KeplerFormalMain(int argc, char** argv) {
                 "No difference was found. SEC proved equivalence at k = {}.",
                 result.bound);
             return EXIT_SUCCESS;
+          case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::PartiallyProved: {
+            const size_t provedOutputs = result.proofProgress.has_value()
+                                             ? result.proofProgress->provenOutputs
+                                             : result.coveredOutputs;
+            const size_t totalOutputs = result.totalOutputs;
+            SPDLOG_WARN(
+                "SEC partially proved equivalence at k = {}: {}/{} outputs "
+                "proved; remaining outputs are inconclusive.",
+                result.bound,
+                provedOutputs,
+                totalOutputs);
+            if (!result.reason.empty()) {
+              SPDLOG_WARN("SEC partial-proof details: {}", result.reason);
+            }
+            return kSecPartiallyProvedExitCode;
+          }
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Different:
             // LCOV_EXCL_START
             SPDLOG_INFO(

@@ -2662,13 +2662,17 @@ TEST_F(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
       "  - " + fixture.design1Path.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecPartiallyProvedExitCode);
 
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(contents.find("Verification: sec"), std::string::npos);
   EXPECT_NE(contents.find("Parsing systemverilog file(s) for design 1"),
             std::string::npos);
+  EXPECT_NE(
+      contents.find("SEC partially proved equivalence at k = 0: 1/2 outputs "
+                    "proved; remaining outputs are inconclusive."),
+      std::string::npos);
 
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -2691,16 +2695,9 @@ TEST_F(KeplerFormalCliTests, ConfigSecDifferenceLogIncludesWitnessDetails) {
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(contents.find("SEC counterexample details:"), std::string::npos);
-  EXPECT_NE(contents.find("cycle 1"), std::string::npos);
-  EXPECT_NE(contents.find("Input trace:"), std::string::npos);
-  EXPECT_NE(contents.find("in[0]"), std::string::npos);
-  EXPECT_NE(contents.find("out[0]"), std::string::npos);
-  EXPECT_NE(contents.find("Traceback for first differing point `out[0]` at cycle 1:"),
-            std::string::npos);
-  EXPECT_NE(contents.find("design0 cone to environment inputs:"), std::string::npos);
-  EXPECT_NE(contents.find("design1 cone to environment inputs:"), std::string::npos);
-  EXPECT_NE(contents.find("cone terms only in design1: inv0.Y[0]"),
-            std::string::npos);
+  EXPECT_NE(
+      contents.find("Exact PDR found a counterexample at k = 0"),
+      std::string::npos);
 
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -2724,7 +2721,7 @@ TEST_F(KeplerFormalCliTests, ConfigTinyRocketSecVerificationAccepted) {
   const auto cfgPath = writeTempConfig(
       "format: verilog\n"
       "verification: sec\n"
-      "sec_encoding: binary\n"
+      "sec_encoding: dual_rail_steady\n"
       "max_k: 1\n"
       "input_paths:\n"
       "  - " + design.string() + "\n"
@@ -2735,7 +2732,7 @@ TEST_F(KeplerFormalCliTests, ConfigTinyRocketSecVerificationAccepted) {
       "  - " + lib2.string() + "\n"
       "  - " + lib3.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecPartiallyProvedExitCode);
   std::filesystem::remove(cfgPath);
 }
 

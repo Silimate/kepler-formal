@@ -12812,7 +12812,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Dynamic-node has 331 observed outputs. Exact PDR may prove only the slices
   // that fit its full-state obligations; the remaining outputs are reported as
   // inconclusive instead of being validated through a reduced model.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_GT(result.coveredOutputs, 0u);
   EXPECT_LT(result.coveredOutputs, kOutputCount);
   EXPECT_EQ(result.totalOutputs, kOutputCount);
@@ -12871,7 +12871,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // A very wide dual-rail surface should be handled by exact PDR directly. If
   // exact PDR proves only some slices, the remaining outputs stay inconclusive
   // instead of going through a separate validation/deferral layer.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_GT(result.coveredOutputs, 0u);
   EXPECT_LT(result.coveredOutputs, kOutputCount);
   EXPECT_EQ(result.totalOutputs, kOutputCount);
@@ -13079,7 +13079,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // The bad output is top-visible and both state bits have concrete reset
   // values, but its temporal equality would still require assuming an internal
   // flop correspondence.  SEC should report it as uncovered instead.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 2u);
   ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
@@ -13207,7 +13207,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   auto binaryStrategy = makeBinaryExtractedSecStrategy(SecEngine::KInduction);
   const auto binaryResult = binaryStrategy.runExtractedModels(model0, model1, 1);
-  EXPECT_EQ(binaryResult.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(binaryResult.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_EQ(binaryResult.coveredOutputs, 1u);
   EXPECT_EQ(binaryResult.totalOutputs, 2u);
   ASSERT_EQ(binaryResult.resetUnanchoredSkippedOutputs.size(), 1u);
@@ -13288,7 +13288,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
     // KI may report partial output coverage only for obligations it proved
     // itself; it must not invoke PDR behind the selected engine.
-    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
     EXPECT_EQ(result.coveredOutputs, 1u);
     EXPECT_EQ(result.totalOutputs, 3u);
     ASSERT_EQ(result.skippedObservedOutputs.size(), 2u);
@@ -13348,7 +13348,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
     // KI must honor the selected engine: a resource-limited KI proof keeps only
     // the dual-rail implied coverage and leaves residuals uncovered rather than
     // launching a hidden PDR retry.
-    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
     EXPECT_EQ(result.coveredOutputs, 1u);
     EXPECT_EQ(result.totalOutputs, 3u);
     ASSERT_EQ(result.skippedObservedOutputs.size(), 2u);
@@ -16776,7 +16776,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 2u);
   ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
@@ -16797,7 +16797,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 2u);
   ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
@@ -16821,7 +16821,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 2u);
   ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
@@ -16841,7 +16841,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1);
   const auto result = strategy.run(2);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 2u);
   ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
