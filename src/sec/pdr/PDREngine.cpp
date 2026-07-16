@@ -111,6 +111,9 @@ constexpr size_t kMaxPreciseBadCubeSupportNodes = 262144;
 constexpr size_t kMaxMediumDualRailObservedOutputs = 384;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
+// Incremental assumption solving counts this as a propagation budget, so it
+// needs more room than the conflict cap for ordinary exact predecessor queries.
+constexpr unsigned kDefaultDualRailPredecessorDecisionLimit = 150000;
 // Residual one-output leaves need more search than broad batch queries.  Do not
 // lower this bound to save runtime; doing so can make a legal PDR obligation
 // report inconclusive before the residual repair has had its intended search
@@ -641,10 +644,22 @@ struct PredecessorAssumptionSolver {
       exclusionAssumptionByClause;
 };
 
+struct InitIntersectionAssumptionSolver {
+  const KInductionProblem* problem = nullptr;
+  const BoolExpr* initFormula = nullptr;
+  KEPLER_FORMAL::Config::SolverType requestedSolverType =
+      KEPLER_FORMAL::Config::SolverType::KISSAT;
+  std::unique_ptr<SATSolverWrapper> solver;
+  std::unique_ptr<FrameVariableStore> variables;
+};
+
 struct PredecessorAssumptionCache {
   // PDR level-local predecessor queries share the same frame/bootstrap context
   // and differ mostly by target cube.
   std::unique_ptr<PredecessorAssumptionSolver> solver;
+  // Figure 6 asks whether many candidate cubes intersect the same exact F[0].
+  // Keep that immutable formula encoded and vary only cube assumptions.
+  std::unique_ptr<InitIntersectionAssumptionSolver> initIntersectionSolver;
   // Full predecessor-query result cache. SAT entries are keyed by the exact
   // frame fingerprint; UNSAT entries also get a fingerprint-free key because
   // PDR frames only strengthen over time, so a proven-empty predecessor set
@@ -880,10 +895,10 @@ unsigned dualRailPredecessorConflictLimitForQuery(
   return configuredLimit;
 }
 
-unsigned dualRailPredecessorDecisionLimit(unsigned defaultValue) {
+unsigned dualRailPredecessorDecisionLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
       "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT",
-      defaultValue);
+      kDefaultDualRailPredecessorDecisionLimit);
 }
 
 size_t dualRailPredecessorEncodingNodeLimit() {
@@ -1816,17 +1831,13 @@ std::vector<size_t> predecessorAssumptionCacheSymbols(
 }
 
 std::vector<size_t> initIntersectionSymbols(const KInductionProblem& problem,
-                                            BoolExpr* initFormula,
-                                            const StateCube& cube) {
-  // Init-intersection checks are issued many times during cube
-  // generalization. They only need the startup formula, the candidate cube, and
-  // complemented partners of those bits; allocating every SEC state/input here
-  // made PDR spend most of its time constructing throwaway SAT variables.
+                                            BoolExpr* initFormula) {
+  // One incremental solver serves every candidate cube in this PDR run, so its
+  // symbol surface includes every state bit that a later cube may assume.
   std::unordered_set<size_t> symbols;
   addFormulaSymbols(initFormula, symbols);
-  for (const auto& literal : cube) {
-    symbols.insert(literal.symbol);
-  }
+  const auto stateSymbols = problem.combinedStateSymbols();
+  symbols.insert(stateSymbols.begin(), stateSymbols.end());
   addRelevantComplementedStatePartners(problem.complementedStatePairs0, symbols);
   addRelevantComplementedStatePartners(problem.complementedStatePairs1, symbols);
   addRelevantSameFrameStateEqualityPartners(problem, symbols);
@@ -1891,10 +1902,8 @@ bool cubeContradictsKnownInitFacts(
     const KInductionProblem& problem,
     const StateCube& cube) {
   const bool usesBootstrapFrontier = problem.resetBootstrapCycles != 0;
-  const auto& assignments = usesBootstrapFrontier
-                                ? problem.bootstrapStateAssignments
-                                : problem.initialStateAssignments;
-  if (contradictsAssignments(cube, assignments)) {
+  if (!usesBootstrapFrontier &&
+      contradictsAssignments(cube, problem.initialStateAssignments)) {
     return true;
   }
   if (problem.complementedStatePairs0.size() <=
@@ -2279,14 +2288,13 @@ SymbolPair canonicalPair(size_t lhs, size_t rhs) {
 
 InitFactIndex buildInitFactIndex(const KInductionProblem& problem) {
   const bool usesBootstrapFrontier = problem.resetBootstrapCycles != 0;
-  const auto& assignments = usesBootstrapFrontier
-                                ? problem.bootstrapStateAssignments
-                                : problem.initialStateAssignments;
   InitFactIndex index;
-  index.assignments.reserve(assignments.size());
-  for (const auto& [symbol, value] : assignments) {
-    index.assignments.emplace(symbol, value);
-    index.relations.ensureSymbol(symbol);
+  if (!usesBootstrapFrontier) {
+    index.assignments.reserve(problem.initialStateAssignments.size());
+    for (const auto& [symbol, value] : problem.initialStateAssignments) {
+      index.assignments.emplace(symbol, value);
+      index.relations.ensureSymbol(symbol);
+    }
   }
   for (const auto& [lhsSymbol, rhsSymbol] :
        problem.sameFrameStateEqualityPairs0) {
@@ -3856,7 +3864,7 @@ std::optional<StateCube> findPredecessorCube(
           : 0;
   const unsigned predecessorDecisionLimit =
       problem.usesDualRailStateEncoding
-          ? dualRailPredecessorDecisionLimit(predecessorConflictLimit)
+          ? dualRailPredecessorDecisionLimit()
           : std::numeric_limits<unsigned>::max();
   if (emitStatsForQuery) {
     emitSecDiag(
@@ -3870,6 +3878,7 @@ std::optional<StateCube> findPredecessorCube(
         " solver_symbols=", solverSymbols.size(),
         " cached_solver_symbols=", cachedSolverSymbols.size(),
         " conflict_limit=", predecessorConflictLimit,
+        " decision_limit=", predecessorDecisionLimit,
         " frame_clauses=",
         level < frames.size() ? frames[level].clauses.size() : 0,
         " exclude_target=", excludeTargetOnCurrentFrame ? 1 : 0);
@@ -4064,36 +4073,83 @@ std::optional<StateCube> findPredecessorCube(
   return predecessor;
 }
 
+InitIntersectionAssumptionSolver& getInitIntersectionAssumptionSolver(
+    PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    BoolExpr* initFormula) {
+  if (cache.initIntersectionSolver != nullptr &&
+      cache.initIntersectionSolver->problem == &problem &&
+      cache.initIntersectionSolver->initFormula == initFormula &&
+      cache.initIntersectionSolver->requestedSolverType == solverType) {
+    return *cache.initIntersectionSolver;
+  }
+
+  auto cached = std::make_unique<InitIntersectionAssumptionSolver>();
+  cached->problem = &problem;
+  cached->initFormula = initFormula;
+  cached->requestedSolverType = solverType;
+  const std::vector<size_t> solverSymbols =
+      initIntersectionSymbols(problem, initFormula);
+  cached->solver = std::make_unique<SATSolverWrapper>(
+      SATSolverWrapper::assumptionSolverTypeFor(solverType));
+  cached->solver->configureForSecPdrQuery(solverSymbols.size());
+  cached->variables = std::make_unique<FrameVariableStore>(
+      *cached->solver, solverSymbols, 1);
+  addComplementedStateRelations(
+      *cached->solver,
+      *cached->variables,
+      problem.complementedStatePairs0,
+      1);
+  addComplementedStateRelations(
+      *cached->solver,
+      *cached->variables,
+      problem.complementedStatePairs1,
+      1);
+  addSameFrameStateEqualities(
+      *cached->solver, *cached->variables, problem, 1);
+  addDualRailStateValidity(
+      *cached->solver,
+      *cached->variables,
+      problem.dualRailStatePairs,
+      1);
+  FrameFormulaEncoder encoder(
+      *cached->solver, cached->variables->makeLeafLits(0));
+  cached->solver->addClause({encoder.encode(initFormula)});
+
+  cache.initIntersectionSolver = std::move(cached);
+  return *cache.initIntersectionSolver;
+}
+
 bool cubeIntersectsInit(const KInductionProblem& problem,
                         KEPLER_FORMAL::Config::SolverType solverType,
                         BoolExpr* initFormula,
-                        const StateCube& cube) {
+                        const StateCube& cube,
+                        PredecessorAssumptionCache* cache) {
   // Definite conflicts can avoid a SAT call. Otherwise Figure 6 requires the
   // exact F[0] = I query; absence of a known conflict is not reachability.
   if (cubeContradictsKnownInitFacts(problem, cube)) {
     return false;
   }
 
-  const std::vector<size_t> solverSymbols =
-      // LCOV_EXCL_START
-      initIntersectionSymbols(problem, initFormula, cube);
-      // LCOV_EXCL_STOP
-  SATSolverWrapper solver(solverType);
-  solver.configureForSecPdrQuery(solverSymbols.size());
-  // LCOV_EXCL_START
-  FrameVariableStore variables(solver, solverSymbols, 1);
-  addComplementedStateRelations(solver, variables, problem.complementedStatePairs0, 1);
-  // LCOV_EXCL_STOP
-  addComplementedStateRelations(solver, variables, problem.complementedStatePairs1, 1);
-  // LCOV_EXCL_START
-  addSameFrameStateEqualities(solver, variables, problem, 1);
-  addDualRailStateValidity(solver, variables, problem.dualRailStatePairs, 1);
-  FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
-  solver.addClause({encoder.encode(initFormula)});
-  // LCOV_EXCL_STOP
-  addCubeAssumptions(solver, variables, cube, 0);
-  // LCOV_EXCL_START
-  return solver.solve();
+  PredecessorAssumptionCache localCache;
+  PredecessorAssumptionCache& activeCache =
+      cache != nullptr ? *cache : localCache;
+  auto& cached = getInitIntersectionAssumptionSolver(
+      activeCache, problem, solverType, initFormula);
+  std::vector<int> assumptions;
+  assumptions.reserve(cube.size());
+  for (const auto& literal : cube) {
+    if (!cached.variables->hasSymbol(literal.symbol)) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR init-intersection encoding missing state symbol " +
+          std::to_string(literal.symbol));  // LCOV_EXCL_LINE
+    }
+    const int satLiteral =
+        cached.variables->getLiteral(literal.symbol, 0);
+    assumptions.push_back(literal.value ? satLiteral : -satLiteral);
+  }
+  return cached.solver->solveWithAssumptions(assumptions);
 }
 
 std::optional<StateCube> growCoreOutsideInit(
@@ -4101,9 +4157,11 @@ std::optional<StateCube> growCoreOutsideInit(
     KEPLER_FORMAL::Config::SolverType solverType,
     BoolExpr* initFormula,
     const StateCube& core,
-    const StateCube& targetCube) {
+    const StateCube& targetCube,
+    PredecessorAssumptionCache* cache) {
   StateCube candidate = core;
-  if (!cubeIntersectsInit(problem, solverType, initFormula, candidate)) {
+  if (!cubeIntersectsInit(
+          problem, solverType, initFormula, candidate, cache)) {
     return candidate;
   }
 
@@ -4116,7 +4174,8 @@ std::optional<StateCube> growCoreOutsideInit(
     }
     candidate.push_back(literal);
     normalizeCube(candidate);
-    if (!cubeIntersectsInit(problem, solverType, initFormula, candidate)) {
+    if (!cubeIntersectsInit(
+            problem, solverType, initFormula, candidate, cache)) {
       if (pdrStatsEnabled()) {
         emitSecDiag(
             "SEC PDR stats: predecessor core kept outside init core=",
@@ -4176,12 +4235,22 @@ class BlockedCubeReductionChecker {
       return std::nullopt;
     }
     return growCoreOutsideInit(
-        problem_, solverType_, initFormula_, *core, cube);
+        problem_,
+        solverType_,
+        initFormula_,
+        *core,
+        cube,
+        predecessorAssumptionCache_);
   }
 
   std::optional<StateCube> generalize(const StateCube& reduced) const {
     if (reduced.empty() ||
-        cubeIntersectsInit(problem_, solverType_, initFormula_, reduced)) {
+        cubeIntersectsInit(
+            problem_,
+            solverType_,
+            initFormula_,
+            reduced,
+            predecessorAssumptionCache_)) {
       return std::nullopt;
     }
     // Figure 7 generalizes with Q2: F[k-1] & !s & T & s'.
@@ -4323,7 +4392,8 @@ bool obligationAlreadyBlocked(const std::vector<FrameClauses>& frames,
 StateCube generalizeInitExcludedCube(const KInductionProblem& problem,  // LCOV_EXCL_LINE
                                      KEPLER_FORMAL::Config::SolverType solverType,
                                      BoolExpr* initFormula,
-                                     const StateCube& cube) {
+                                     const StateCube& cube,
+                                     PredecessorAssumptionCache* cache) {
   // Ordinary Init can also be a relational frontier made of equality facts.
   // When a predecessor violates that frontier, learn a generalized
   // LCOV_EXCL_STOP
@@ -4339,7 +4409,8 @@ StateCube generalizeInitExcludedCube(const KInductionProblem& problem,  // LCOV_
     ++attempts;  // LCOV_EXCL_LINE
     StateCube reduced = candidate;  // LCOV_EXCL_LINE
     reduced.erase(reduced.begin() + static_cast<std::ptrdiff_t>(index));  // LCOV_EXCL_LINE
-    if (!cubeIntersectsInit(problem, solverType, initFormula, reduced)) {  // LCOV_EXCL_LINE
+    if (!cubeIntersectsInit(  // LCOV_EXCL_LINE
+            problem, solverType, initFormula, reduced, cache)) {  // LCOV_EXCL_LINE
       candidate = std::move(reduced);  // LCOV_EXCL_LINE
       continue;  // LCOV_EXCL_LINE
     }
@@ -4515,12 +4586,18 @@ bool blockProofObligations(const KInductionProblem& problem,
         addClauseToFrame(frames[0], clauseFromCube(*conflictCube));  // LCOV_EXCL_LINE
         continue;  // LCOV_EXCL_LINE
       }
-      if (!cubeIntersectsInit(problem, solverType, initFormula, obligation.cube)) {
+      if (!cubeIntersectsInit(
+              problem,
+              solverType,
+              initFormula,
+              obligation.cube,
+              &predecessorAssumptionCache)) {
         const StateCube generalizedCube = generalizeInitExcludedCube(  // LCOV_EXCL_LINE
             problem,  // LCOV_EXCL_LINE
             solverType,  // LCOV_EXCL_LINE
             initFormula,  // LCOV_EXCL_LINE
-            obligation.cube);  // LCOV_EXCL_LINE
+            obligation.cube,  // LCOV_EXCL_LINE
+            &predecessorAssumptionCache);  // LCOV_EXCL_LINE
         addClauseToFrame(frames[0], clauseFromCube(generalizedCube));  // LCOV_EXCL_LINE
         continue;
       }  // LCOV_EXCL_LINE
@@ -4538,7 +4615,12 @@ bool blockProofObligations(const KInductionProblem& problem,
 
     // Q2 is sound only for cubes outside Init. Figure 6 makes this invariant
     // explicit before every relative-induction query.
-    if (cubeIntersectsInit(problem, solverType, initFormula, obligation.cube)) {
+    if (cubeIntersectsInit(
+            problem,
+            solverType,
+            initFormula,
+            obligation.cube,
+            &predecessorAssumptionCache)) {
       if (pdrStatsEnabled()) {
         emitSecDiag(
             "SEC PDR stats: counterexample candidate intersects init ",
@@ -4854,7 +4936,10 @@ class ExactPdrBootstrapInitBuilder {
     std::vector<BoolExpr*> terms;
     terms.reserve(
         transitions_.size() * problem_.resetBootstrapCycles +
-        problem_.bootstrapStateAssignments.size() + 32);
+        problem_.initialStateAssignments.size() + 32);
+    // The reset prefix starts from the design's actual ternary initialization:
+    // known registers use 01/10 and resetless registers use X=11.
+    addInitialStateAssignments(terms);
     for (size_t frame = 0; frame < problem_.resetBootstrapCycles; ++frame) {
       addResetInputAssignments(frame, /*asserted=*/true, terms);
       addStateDomainRelations(frame, terms);
@@ -4867,7 +4952,6 @@ class ExactPdrBootstrapInitBuilder {
     // same one used by the exact bounded SEC base query.
     addResetInputAssignments(
         problem_.resetBootstrapCycles, /*asserted=*/false, terms);
-    addAssignments(problem_.bootstrapStateAssignments, terms);
     if (problem_.usesResetBootstrapObservationFrontier()) {
       terms.push_back(problem_.property);
     }
@@ -4883,6 +4967,10 @@ class ExactPdrBootstrapInitBuilder {
     reservedSymbols_.insert(support.begin(), support.end());
   }
 
+  void reserveSupportSymbols(const std::set<size_t>& support) {
+    reservedSymbols_.insert(support.begin(), support.end());
+  }
+
   void reserveAssignments(
       const std::vector<std::pair<size_t, bool>>& assignments) {
     for (const auto& [symbol, /*value*/ _] : assignments) {
@@ -4894,7 +4982,7 @@ class ExactPdrBootstrapInitBuilder {
     reservedSymbols_.insert(problem_.allSymbols.begin(), problem_.allSymbols.end());
     reservedSymbols_.insert(stateSymbols_.begin(), stateSymbols_.end());
     reserveAssignments(problem_.resetBootstrapInputs);
-    reserveAssignments(problem_.bootstrapStateAssignments);
+    reserveAssignments(problem_.initialStateAssignments);
     reserveFormulaSymbols(problem_.property);
     reserveFormulaSymbols(problem_.bad);
 
@@ -4905,7 +4993,10 @@ class ExactPdrBootstrapInitBuilder {
       }
       BoolExpr* transition = transitionByState_.at(stateSymbol);
       transitions_.emplace_back(stateSymbol, transition);
-      reserveFormulaSymbols(transition);
+      // The resolver already caches exact support for eager and lazy
+      // transitions. Reuse it here so reset-prefix construction does not walk
+      // each large materialized dual-rail DAG once for every use.
+      reserveSupportSymbols(transitionByState_.support(stateSymbol));
     }
   }
 
@@ -4942,14 +5033,23 @@ class ExactPdrBootstrapInitBuilder {
     return mapped;
   }
 
-  BoolExpr* remapAtFrame(BoolExpr* formula, size_t frame) {
-    for (const size_t symbol : formula->getSupportVars()) {
+  BoolExpr* remapAtFrame(BoolExpr* formula,
+                         size_t frame,
+                         const std::set<size_t>& support) {
+    for (const size_t symbol : support) {
       if (symbol >= 2) {
         static_cast<void>(mappedSymbol(frame, symbol));
       }
     }
     return remapBoolExprVariables(
         formula, symbolAtFrame_.at(frame), remapMemoByFrame_.at(frame));
+  }
+
+  void addInitialStateAssignments(std::vector<BoolExpr*>& terms) {
+    for (const auto& [symbol, value] : problem_.initialStateAssignments) {
+      BoolExpr* variable = BoolExpr::Var(mappedSymbol(0, symbol));
+      terms.push_back(value ? variable : BoolExpr::Not(variable));
+    }
   }
 
   void addResetInputAssignments(size_t frame,
@@ -4961,15 +5061,6 @@ class ExactPdrBootstrapInitBuilder {
           frame == problem_.resetBootstrapCycles
               ? BoolExpr::Var(symbol)
               : BoolExpr::Var(mappedSymbol(frame, symbol));
-      terms.push_back(value ? variable : BoolExpr::Not(variable));
-    }
-  }
-
-  void addAssignments(
-      const std::vector<std::pair<size_t, bool>>& assignments,
-      std::vector<BoolExpr*>& terms) const {
-    for (const auto& [symbol, value] : assignments) {
-      BoolExpr* variable = BoolExpr::Var(symbol);
       terms.push_back(value ? variable : BoolExpr::Not(variable));
     }
   }
@@ -5021,7 +5112,8 @@ class ExactPdrBootstrapInitBuilder {
     for (const auto& [stateSymbol, transition] : transitions_) {
       terms.push_back(makeEqualityExpr(
           BoolExpr::Var(mappedSymbol(frame + 1, stateSymbol)),
-          remapAtFrame(transition, frame)));
+          remapAtFrame(
+              transition, frame, transitionByState_.support(stateSymbol))));
     }
   }
 
@@ -5037,21 +5129,10 @@ class ExactPdrBootstrapInitBuilder {
 
 BoolExpr* buildExactPdrInitFormula(const KInductionProblem& problem) {
   if (problem.resetBootstrapCycles != 0) {
-    if (!problem.hasCompleteBootstrapStateAssignments()) {
-      // Represent the exact reset image as an existential transition prefix.
-      // Historical state/input leaves are private to I, while the final state
-      // keeps the normal PDR symbols. This is the paper's exact F[0], not a
-      // projected or validated counterexample model.
-      return ExactPdrBootstrapInitBuilder(problem).build();
-    }
-    BoolExpr* init = appendAssignmentFormula(
-        BoolExpr::createTrue(), problem.bootstrapStateAssignments);
-    for (const auto& [symbol, assertedValue] : problem.resetBootstrapInputs) {
-      BoolExpr* variable = BoolExpr::Var(symbol);
-      init = BoolExpr::And(
-          init, assertedValue ? BoolExpr::Not(variable) : variable);
-    }
-    return BoolExpr::simplify(init);
+    // PDR requires F[0] to be the initial-state predicate.  For SEC that starts
+    // after reset, this predicate is the reset transition image; a vector of
+    // per-state values cannot preserve relations created during reset.
+    return ExactPdrBootstrapInitBuilder(problem).build();
   }
 
   BoolExpr* init = problem.initialCondition != nullptr

@@ -1230,6 +1230,7 @@ KInductionProblem makeOutputSubsetProblem(
   subset.observedOutputNames.clear();
   subset.observedOutputExprs0.clear();
   subset.observedOutputExprs1.clear();
+  subset.dualRailOutputStrictEqualityExprs.clear();
   subset.dualRailOutputSkipReasons.clear();
 
   // LCOV_DISABLED_START
@@ -1238,6 +1239,9 @@ KInductionProblem makeOutputSubsetProblem(
       source.observedOutputs.size() == source.observedOutputExprs0.size();
   const bool copySkipReasons =
       source.dualRailOutputSkipReasons.size() ==
+      source.observedOutputExprs0.size();
+  const bool copyStrictEqualityExprs =
+      source.dualRailOutputStrictEqualityExprs.size() ==
       source.observedOutputExprs0.size();
   for (const size_t outputIndex : outputIndices) {
     if (copyObservedKeys) {
@@ -1249,6 +1253,10 @@ KInductionProblem makeOutputSubsetProblem(
         source.observedOutputExprs0[outputIndex]);
     subset.observedOutputExprs1.push_back(
         source.observedOutputExprs1[outputIndex]);
+    if (copyStrictEqualityExprs) {
+      subset.dualRailOutputStrictEqualityExprs.push_back(
+          source.dualRailOutputStrictEqualityExprs[outputIndex]);
+    }
     if (copySkipReasons) {
       subset.dualRailOutputSkipReasons.push_back(
           source.dualRailOutputSkipReasons[outputIndex]);
@@ -2701,6 +2709,37 @@ void attachLazyDualRailTransitions(
   problem.lazyTransitions = std::move(store);
 }
 
+BoolExpr* buildDualRailBinaryDefinedExpr(const DualRailBoolExpr& value) {
+  // In the paper's encoding, 01 and 10 are binary values while 11 is X.
+  // Legal-state constraints separately exclude the empty value 00.
+  return BoolExpr::simplify(
+      BoolExpr::Xor(value.mayBeOne, value.mayBeZero));
+}
+
+struct DualRailOutputProperties {
+  BoolExpr* guardedEquality = nullptr;
+  BoolExpr* strictEquality = nullptr;
+};
+
+DualRailOutputProperties buildDualRailOutputProperties(
+    const DualRailBoolExpr& value0,
+    const DualRailBoolExpr& value1) {
+  BoolExpr* bothValuesDefined = BoolExpr::simplify(BoolExpr::And(
+      buildDualRailBinaryDefinedExpr(value0),
+      buildDualRailBinaryDefinedExpr(value1)));
+  BoolExpr* strictEquality = BoolExpr::simplify(BoolExpr::And(
+      makeEqualityExpr(value0.mayBeOne, value1.mayBeOne),
+      makeEqualityExpr(value0.mayBeZero, value1.mayBeZero)));
+  // The paper's steady-state property guards the concrete mismatch. Its full
+  // three-valued property is strict equality of both rails; PDR proves these as
+  // two exact safety obligations instead of using a bounded definedness probe.
+  BoolExpr* binaryMismatch = BoolExpr::And(
+      bothValuesDefined,
+      BoolExpr::Xor(value0.mayBeOne, value1.mayBeOne));
+  return {
+      BoolExpr::simplify(BoolExpr::Not(binaryMismatch)), strictEquality};
+}
+
 void applyInitialStateAssignments(
     const std::unordered_map<SignalKey, bool, SignalKeyHash>& initialValues,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& stateSymbols,
@@ -2919,6 +2958,9 @@ KInductionProblem buildDualRailSecProblem(
 
   BoolExpr* property = BoolExpr::createTrue();
   // LCOV_DISABLED_STOP
+  problem.dualRailOutputStrictEqualityExprs.clear();
+  problem.dualRailOutputStrictEqualityExprs.reserve(
+      alignedOutputs.names.size());
   problem.dualRailOutputSkipReasons.clear();
   problem.dualRailOutputSkipReasons.reserve(alignedOutputs.names.size());
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
@@ -2931,9 +2973,8 @@ KInductionProblem buildDualRailSecProblem(
         mapper1,
         memo1);
 
-    BoolExpr* outputRailEquality = BoolExpr::And(
-        makeEqualityExpr(out0.mayBeOne, out1.mayBeOne),
-        makeEqualityExpr(out0.mayBeZero, out1.mayBeZero));
+    const auto outputProperties =
+        buildDualRailOutputProperties(out0, out1);
     // LCOV_DISABLED_START
     // Keep batching/reporting aligned to real top outputs.  The rail pair is a
     // single ternary output value, so its may-one and may-zero equalities are
@@ -2941,8 +2982,10 @@ KInductionProblem buildDualRailSecProblem(
     // one SEC obligation rather than two independent output bits.
     problem.observedOutputNames.push_back(alignedOutputs.names[i]);
     // LCOV_DISABLED_START
-    problem.observedOutputExprs0.push_back(outputRailEquality);
+    problem.observedOutputExprs0.push_back(outputProperties.guardedEquality);
     problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
+    problem.dualRailOutputStrictEqualityExprs.push_back(
+        outputProperties.strictEquality);
     // LCOV_DISABLED_STOP
     // Dual-rail strategy construction only builds obligations.  The selected
     // engine must prove each top output; no side implication query can mark it
@@ -2955,7 +2998,7 @@ KInductionProblem buildDualRailSecProblem(
       fflush(stderr);
     }
     problem.dualRailOutputSkipReasons.emplace_back();
-    property = BoolExpr::And(property, outputRailEquality);
+    property = BoolExpr::And(property, outputProperties.guardedEquality);
   // LCOV_DISABLED_START
   }
   // LCOV_DISABLED_STOP
@@ -3160,6 +3203,8 @@ SequentialEquivalenceResult runPdrSecEngine(
       makeInitialPdrCoveredOutputs(problem);
   std::unordered_map<size_t, std::string> pdrSkippedOutputReasons =
       presetDualRailSkipReasons;
+  std::vector<PdrOutputBatch> guardedProvedBatches;
+  std::vector<std::string> xAffectedOutputNames;
   size_t provedBound = 0;
   bool stopAfterInconclusiveBatch = false;
 
@@ -3178,6 +3223,7 @@ SequentialEquivalenceResult runPdrSecEngine(
             pdrSkippedOutputReasons,
             firstOutput,
             endOutput);
+        guardedProvedBatches.push_back({firstOutput, endOutput});
         break;
       case PDRStatus::Different:
         return makeSecResult(
@@ -3226,21 +3272,110 @@ SequentialEquivalenceResult runPdrSecEngine(
     }
   }
 
+  if (problem.usesDualRailStateEncoding) {
+    std::vector<bool> strictCoveredOutputs(
+        problem.observedOutputExprs0.size(), false);
+    if (problem.dualRailOutputStrictEqualityExprs.size() !=
+        problem.observedOutputExprs0.size()) {
+      for (size_t outputIndex = 0;
+           outputIndex < pdrCoveredOutputs.size();
+           ++outputIndex) {
+        if (pdrCoveredOutputs[outputIndex]) {
+          pdrSkippedOutputReasons[outputIndex] =
+              "strict dual-rail equality obligation is unavailable";
+        }
+      }
+    } else {
+      KInductionProblem strictProblem = problem;
+      strictProblem.observedOutputExprs0 =
+          problem.dualRailOutputStrictEqualityExprs;
+      strictProblem.observedOutputExprs1.assign(
+          strictProblem.observedOutputExprs0.size(),
+          BoolExpr::createTrue());
+      rebuildSelectedOutputProperty(strictProblem);
+      strictProblem.description =
+          problem.description + " strict three-valued equality";
+
+      // Round one has already proved that these batches cannot contain a
+      // binary 01/10 mismatch. A strict rail mismatch in round two therefore
+      // identifies an X-only difference, not a concrete counterexample.
+      std::vector<PdrOutputBatch> strictBatches = guardedProvedBatches;
+      KInductionProblem strictBatchProblem = strictProblem;
+      for (size_t batchIndex = 0;
+           batchIndex < strictBatches.size();
+           ++batchIndex) {
+        const auto [firstOutput, endOutput] = strictBatches[batchIndex];
+        configureOutputBatchProblem(
+            strictBatchProblem, strictProblem, firstOutput, endOutput);
+        PDREngine strictPdrEngine(strictBatchProblem, solverType);
+        const auto strictResult = strictPdrEngine.run(maxK);
+        provedBound = std::max(provedBound, strictResult.bound);
+        if (strictResult.status == PDRStatus::Equivalent) {
+          markPdrOutputRangeCovered(
+              strictCoveredOutputs,
+              pdrSkippedOutputReasons,
+              firstOutput,
+              endOutput);
+          continue;
+        }
+        if (endOutput - firstOutput > 1) {
+          const size_t midOutput =
+              firstOutput + (endOutput - firstOutput) / 2;
+          strictBatches.insert(
+              strictBatches.begin() +
+                  static_cast<std::ptrdiff_t>(batchIndex + 1),
+              {PdrOutputBatch{firstOutput, midOutput},
+               PdrOutputBatch{midOutput, endOutput}});
+          continue;
+        }
+        if (strictResult.status == PDRStatus::Different) {
+          constexpr const char* kXInconclusiveReason =
+              "affected by X propagated from uninitialized sequential logic; "
+              "no concrete 0/1 mismatch was found";
+          markPdrOutputRangeSkipped(
+              strictCoveredOutputs,
+              pdrSkippedOutputReasons,
+              firstOutput,
+              endOutput,
+              kXInconclusiveReason);
+          xAffectedOutputNames.push_back(
+              outputNameForProblemIndex(problem, firstOutput));
+          continue;
+        }
+        markPdrOutputRangeSkipped(
+            strictCoveredOutputs,
+            pdrSkippedOutputReasons,
+            firstOutput,
+            endOutput,
+            "strict dual-rail equality PDR was inconclusive");
+      }
+    }
+    pdrCoveredOutputs = std::move(strictCoveredOutputs);
+  }
+
   {
     const OutputCoverageSelection finalCoverage =
         buildCoverageWithDualRailOutputSkips(
             outputCoverage, problem, pdrCoveredOutputs, pdrSkippedOutputReasons);
     const size_t coveredOutputCount = static_cast<size_t>(
         std::count(pdrCoveredOutputs.begin(), pdrCoveredOutputs.end(), true));
+    const std::string xInconclusiveSummary =
+        xAffectedOutputNames.empty()
+            ? std::string{}
+            : "X propagated from uninitialized sequential logic affects "
+              "output(s): " +
+                  joinReasons(xAffectedOutputNames);
     if (finalCoverage.checkedOutputs.names.empty()) {
       const OutputCoverageSelection& noProofCoverage =
           problem.usesDualRailStateEncoding ? finalCoverage : outputCoverage;
       return makeSecResult(
           SequentialEquivalenceStatus::Inconclusive,
           provedBound,
-          problem.usesDualRailStateEncoding
-              ? "Exact dual-rail PDR did not prove any observed output"
-              : "Exact PDR did not prove any observed output",
+          !xInconclusiveSummary.empty()
+              ? xInconclusiveSummary
+              : (problem.usesDualRailStateEncoding
+                     ? "Exact dual-rail PDR did not prove any observed output"
+                     : "Exact PDR did not prove any observed output"),
           noProofCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -3254,7 +3389,10 @@ SequentialEquivalenceResult runPdrSecEngine(
               "PDR proved " +
               std::to_string(coveredOutputCount) + " of " +
               std::to_string(pdrCoveredOutputs.size()) +
-              " observed outputs; remaining outputs are inconclusive",
+              " observed outputs; remaining outputs are inconclusive" +
+              (xInconclusiveSummary.empty()
+                   ? std::string{}
+                   : "; " + xInconclusiveSummary),
           finalCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);

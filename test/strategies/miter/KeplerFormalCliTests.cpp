@@ -2510,6 +2510,54 @@ TEST_F(KeplerFormalCliTests,
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
+TEST_F(KeplerFormalCliTests,
+       ConfigSystemVerilogSecPdrDualRailNamesXAffectedOutput) {
+  const auto fixture = createDesignFixture(
+      "sv",
+      "module T(input clk, output y);\n"
+      "  reg r;\n"
+      "  always @(posedge clk) r <= r;\n"
+      "  assign y = r;\n"
+      "endmodule\n",
+      "module T(input clk, output y);\n"
+      "  assign y = 1'b0;\n"
+      "endmodule\n");
+  const auto logPath = fixture.tmpDir / "sv_sec_dual_rail_x_output.log";
+  const auto cfgPath = writeTempConfig(
+      "format: systemverilog\n"
+      "verification: sec\n"
+      "sec_engine: pdr\n"
+      "sec_encoding: dual_rail_steady\n"
+      "max_k: 2\n"
+      "sv_design1_top: T\n"
+      "sv_design2_top: T\n"
+      "input_paths:\n"
+      "  - " + fixture.design0Path.string() + "\n"
+      "  - " + fixture.design1Path.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecInconclusiveExitCode);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto contents = readFileContents(logPath);
+  EXPECT_NE(
+      contents.find(
+          "y[0]: affected by X propagated from uninitialized sequential logic"),
+      std::string::npos)
+      << contents;
+  EXPECT_NE(
+      contents.find(
+          "X propagated from uninitialized sequential logic affects output(s): y[0]"),
+      std::string::npos)
+      << contents;
+  EXPECT_EQ(contents.find("Difference was found."), std::string::npos);
+  EXPECT_EQ(
+      contents.find("No difference was found. SEC proved equivalence"),
+      std::string::npos);
+
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
 TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesModel) {
   const auto fixture = createEquivalentDesignFixture(
       "sv",

@@ -2018,6 +2018,45 @@ DelayedRailMismatchModels makeDelayedRailMismatchModelsForTest(
   return models;
 }
 
+DelayedRailMismatchModels makeHeldRailModelsForTest(
+    const std::string& prefix,
+    std::optional<bool> initialValue0,
+    std::optional<bool> initialValue1) {
+  const SignalKey output = makeSignalKey(prefix + "Output");
+  const SignalKey state0 = makeSignalKey(prefix + "State0");
+  const SignalKey state1 = makeSignalKey(prefix + "State1");
+  DelayedRailMismatchModels models;
+
+  addStateBitForTest(
+      models.model0,
+      state0,
+      /*symbol=*/2,
+      prefix + ".left_q[0]",
+      BoolExpr::Var(2));
+  models.model0.allObservedOutputs = {output};
+  models.model0.observedOutputs = {output};
+  models.model0.displayNameByKey.emplace(output, prefix + "_out[0]");
+  models.model0.observedOutputExprByKey.emplace(output, BoolExpr::Var(2));
+  if (initialValue0.has_value()) {
+    models.model0.initialStateValueByKey.emplace(state0, *initialValue0);
+  }
+
+  addStateBitForTest(
+      models.model1,
+      state1,
+      /*symbol=*/2,
+      prefix + ".right_q[0]",
+      BoolExpr::Var(2));
+  models.model1.allObservedOutputs = {output};
+  models.model1.observedOutputs = {output};
+  models.model1.displayNameByKey.emplace(output, prefix + "_out[0]");
+  models.model1.observedOutputExprByKey.emplace(output, BoolExpr::Var(2));
+  if (initialValue1.has_value()) {
+    models.model1.initialStateValueByKey.emplace(state1, *initialValue1);
+  }
+  return models;
+}
+
 size_t bitCountForPdrChainStateCount(size_t logicalStateCount) {
   size_t bits = 0;
   size_t encodedStates = 1;
@@ -6442,7 +6481,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       BaseCaseSolverConcreteDualRailBootstrapForbidsUnknownRailValues) {
+       BaseCaseSolverExactDualRailBootstrapDerivesConcreteRailValue) {
   KInductionProblem problem;
   constexpr size_t mayBeOne = 2;
   constexpr size_t mayBeZero = 3;
@@ -6454,8 +6493,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.totalStateCount = 2;
   problem.resetBootstrapCycles = 1;
   problem.resetBootstrapInputs = {{reset, true}};
+  problem.initialStateAssignments = {
+      {mayBeOne, true}, {mayBeZero, true}};
+  problem.initializedStateCount = 2;
   problem.bootstrapStateAssignments = {{mayBeOne, false}, {mayBeZero, true}};
   problem.dualRailStatePairs = {DualRailSymbolPair{mayBeOne, mayBeZero}};
+  problem.transitions0 = {
+      {mayBeOne, BoolExpr::createFalse()},
+      {mayBeZero, BoolExpr::createTrue()}};
   problem.property = BoolExpr::Not(
       BoolExpr::And(BoolExpr::Var(mayBeOne), BoolExpr::Var(mayBeZero)));
   problem.bad = BoolExpr::Not(problem.property);
@@ -6469,6 +6514,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   initialProblem.resetBootstrapCycles = 0;
   initialProblem.resetBootstrapInputs.clear();
   initialProblem.bootstrapStateAssignments.clear();
+  initialProblem.initialStateAssignments = {
+      {mayBeOne, false}, {mayBeZero, true}};
   initialProblem.initialCondition = BoolExpr::And(
       BoolExpr::Not(BoolExpr::Var(mayBeOne)), BoolExpr::Var(mayBeZero));
   initialProblem.initializedStateCount = 2;
@@ -8018,7 +8065,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       DualRailConcreteBootstrapStateForbidsUnknownRailValues) {
+       DualRailInductionKeepsUnknownRailValuesInLegalStateDomain) {
   KInductionProblem problem;
   constexpr size_t mayBeOne = 2;
   constexpr size_t mayBeZero = 3;
@@ -8041,27 +8088,26 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   problem.bootstrapStateAssignments = {{mayBeOne, false}, {mayBeZero, true}};
 
-  // Complete bootstrap assignments describe a concrete Boolean rail value.
-  // Induction may forbid the synthetic "unknown" rail state (both rails true)
-  // without assuming any relation between the two compared designs.
+  // Bootstrap assignments constrain only the reachable initial frontier.
+  // Arbitrary induction frames still use the paper's legal ternary domain,
+  // where 11 is X, so this property is not inductive.
   EXPECT_EQ(
       proveByInductionStatus(
           problem,
           KEPLER_FORMAL::Config::SolverType::KISSAT,
           1,
           std::nullopt),
-      InductionProofStatus::Proved);
+      InductionProofStatus::NotProved);
 
   problem.deferBaseCaseChecks = true;
-  // Deferring the local base check for an output slice must not widen the
-  // induction step beyond the same concrete dual-rail state domain.
+  // Deferring a local base check changes neither that domain nor the result.
   EXPECT_EQ(
       proveByInductionStatus(
           problem,
           KEPLER_FORMAL::Config::SolverType::KISSAT,
           1,
           std::nullopt),
-      InductionProofStatus::Proved);
+      InductionProofStatus::NotProved);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13013,10 +13059,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // IMC must enter its own interpolation engine directly.  The old dual-rail
-  // residual helper batched/skipped outputs before IMCEngine saw the problem;
-  // strict IMC may return inconclusive on this large state-dependent surface.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  // IMC must enter its own interpolation engine directly. The removed bounded
+  // definedness probe must not rewrite the selected engine's proof result.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
@@ -13486,6 +13531,90 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailDoesNotReportXVersusBinaryAsDifferent) {
+  auto models = makeHeldRailModelsForTest(
+      "dualRailXVersusBinary", std::nullopt, false);
+  const SignalKey concreteEqual =
+      makeSignalKey("dualRailXVersusBinaryConcreteEqual");
+  for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
+    model->allObservedOutputs.push_back(concreteEqual);
+    model->observedOutputs.push_back(concreteEqual);
+    model->displayNameByKey.emplace(concreteEqual, "concrete_equal[0]");
+    model->observedOutputExprByKey.emplace(
+        concreteEqual, BoolExpr::createFalse());
+  }
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+
+  // The guarded round rules out a concrete mismatch. The strict rail round
+  // then isolates only the X-versus-0 output and preserves the clean proof.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find(
+          "dualRailXVersusBinary_out[0]"),
+      std::string::npos);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find(
+          "uninitialized sequential logic"),
+      std::string::npos);
+  EXPECT_NE(
+      result.reason.find("dualRailXVersusBinary_out[0]"),
+      std::string::npos);
+  EXPECT_EQ(result.reason.find("concrete_equal[0]"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailProvesStrictPermanentXEquality) {
+  const auto models = makeHeldRailModelsForTest(
+      "dualRailPermanentX", std::nullopt, std::nullopt);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+
+  // Both published safety properties hold: there is no concrete mismatch and
+  // both rails remain equal. This is strict three-valued equality, not a claim
+  // that the output eventually becomes binary-defined.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailReportsDefinedBinaryMismatch) {
+  const auto models = makeHeldRailModelsForTest(
+      "dualRailDefinedMismatch", false, true);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+
+  // Both sides are binary at frame zero: 01 versus 10 is a real mismatch.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsPdrDoesNotMineCrossDesignStateEqualities) {
   constexpr size_t kStateBitsPerDesign = 4097;
   const SignalKey out = makeSignalKey("smallOutputLargeStateOut");
@@ -13735,15 +13864,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 4);
 
-  // Large dual-rail IMC residuals may use Craig/deferred proof work, but a
-  // resetless state-dependent edit is not a concrete top-output mismatch unless
-  // startup state is publicly anchored. Keep it inconclusive instead of
-  // reporting a difference through an internal-state relation.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 4u);
+  // Both all-X startup states reach opposite binary constants after one
+  // transition. The guarded steady-state property therefore has a real public
+  // output mismatch at cycle 1, independent of any internal-state relation.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_EQ(result.reason.find("delayed_out[0]"), std::string::npos);
+  EXPECT_NE(result.reason.find("delayed_out[0]"), std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14225,6 +14353,112 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineUsesResetImageDespiteCompleteDualRailBootstrapSummary) {
+  KInductionProblem problem;
+  constexpr size_t xOne = 2;
+  constexpr size_t xZero = 3;
+  constexpr size_t yOne = 4;
+  constexpr size_t yZero = 5;
+  constexpr size_t reset = 6;
+  constexpr size_t data = 7;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {xOne, xZero, yOne, yZero};
+  problem.inputSymbols = {reset, data};
+  problem.allSymbols = {xOne, xZero, yOne, yZero, reset, data};
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.dualRailStatePairs = {
+      DualRailSymbolPair{xOne, xZero},
+      DualRailSymbolPair{yOne, yZero}};
+
+  // A full-size ternary summary may lose reset-created relations: X versus 0
+  // appears different even though reset loads both registers from the same
+  // public input. F[0] must therefore come from the reset transition image.
+  problem.bootstrapStateAssignments = {
+      {xOne, true}, {xZero, true}, {yOne, false}, {yZero, true}};
+  BoolExpr* resetInactive = BoolExpr::Not(BoolExpr::Var(reset));
+  problem.transitions0 = {
+      {xOne,
+       BoolExpr::Or(
+           BoolExpr::And(BoolExpr::Var(reset), BoolExpr::Var(data)),
+           BoolExpr::And(resetInactive, BoolExpr::Var(xOne)))},
+      {xZero,
+       BoolExpr::Or(
+           BoolExpr::And(
+               BoolExpr::Var(reset), BoolExpr::Not(BoolExpr::Var(data))),
+           BoolExpr::And(resetInactive, BoolExpr::Var(xZero)))},
+      {yOne,
+       BoolExpr::Or(
+           BoolExpr::And(BoolExpr::Var(reset), BoolExpr::Var(data)),
+           BoolExpr::And(resetInactive, BoolExpr::Var(yOne)))},
+      {yZero,
+       BoolExpr::Or(
+           BoolExpr::And(
+               BoolExpr::Var(reset), BoolExpr::Not(BoolExpr::Var(data))),
+           BoolExpr::And(resetInactive, BoolExpr::Var(yZero)))}};
+  problem.bad = BoolExpr::Or(
+      BoolExpr::Xor(BoolExpr::Var(xOne), BoolExpr::Var(yOne)),
+      BoolExpr::Xor(BoolExpr::Var(xZero), BoolExpr::Var(yZero)));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_GE(result.bound, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineResetPrefixStartsFromDualRailXInitialization) {
+  KInductionProblem problem;
+  constexpr size_t xOne = 2;
+  constexpr size_t xZero = 3;
+  constexpr size_t yOne = 4;
+  constexpr size_t yZero = 5;
+  constexpr size_t reset = 6;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {xOne, xZero};
+  problem.state1Symbols = {yOne, yZero};
+  problem.inputSymbols = {reset};
+  problem.allSymbols = {xOne, xZero, yOne, yZero, reset};
+  problem.totalStateCount = 4;
+  problem.initializedStateCount = 4;
+  problem.initialStateAssignments = {
+      {xOne, true}, {xZero, true}, {yOne, true}, {yZero, true}};
+  problem.resetBootstrapCycles = 1;
+  problem.resetBootstrapInputs = {{reset, true}};
+  problem.dualRailStatePairs = {
+      DualRailSymbolPair{xOne, xZero},
+      DualRailSymbolPair{yOne, yZero}};
+  problem.transitions0 = {
+      {xOne, BoolExpr::Var(xOne)}, {xZero, BoolExpr::Var(xZero)}};
+  problem.transitions1 = {
+      {yOne, BoolExpr::Var(yOne)}, {yZero, BoolExpr::Var(yZero)}};
+
+  // This per-register summary claims 1 versus 0, but the exact reset prefix
+  // preserves the real X versus X initialization through both hold flops.
+  problem.bootstrapStateAssignments = {
+      {xOne, true}, {xZero, false}, {yOne, false}, {yZero, true}};
+  BoolExpr* bothDefined = BoolExpr::And(
+      BoolExpr::Xor(BoolExpr::Var(xOne), BoolExpr::Var(xZero)),
+      BoolExpr::Xor(BoolExpr::Var(yOne), BoolExpr::Var(yZero)));
+  problem.bad = BoolExpr::And(
+      bothDefined,
+      BoolExpr::Xor(BoolExpr::Var(xOne), BoolExpr::Var(yOne)));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionBad = problem.bad;
+  problem.inductionProperty = problem.property;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineFindsCounterexampleFromExactRelationalBootstrapState) {
   KInductionProblem problem;
   constexpr size_t x = 2;
@@ -14236,6 +14470,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.allSymbols = {x, y, reset, data};
   problem.resetBootstrapCycles = 1;
   problem.resetBootstrapInputs = {{reset, true}};
+  // This complete but lossy summary excludes the concrete reset state that
+  // reaches the mismatch. Neither F[0] nor its cube checks may rely on it.
+  problem.bootstrapStateAssignments = {{x, true}, {y, true}};
 
   BoolExpr* resetAndData =
       BoolExpr::And(BoolExpr::Var(reset), BoolExpr::Var(data));
@@ -15021,6 +15258,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // shrinking this legal PDR search budget.
   EXPECT_NE(
       stderrOutput.find("conflict_limit=200000"),
+      std::string::npos)
+      << stderrOutput;
+  // The default propagation/decision budget is independent of the larger
+  // residual conflict budget and must allow ordinary incremental SAT progress.
+  EXPECT_NE(
+      stderrOutput.find("decision_limit=150000"),
       std::string::npos)
       << stderrOutput;
 }
