@@ -53,3 +53,15 @@ else()
 endif()
 
 GTEST_DISCOVER_TESTS(keplerFormalCliTests)
+
+# TinyRocket is an intentionally large end-to-end SEC test.  Remove CTest's
+# global timeout for this test alone so slower runners can reach its verdict.
+set(tinyrocket_test_properties
+    "${CMAKE_CURRENT_BINARY_DIR}/TinyRocketTestProperties.cmake")
+file(GENERATE OUTPUT "${tinyrocket_test_properties}" CONTENT [=[
+set_tests_properties(
+    KeplerFormalCliTests.ConfigTinyRocketSecVerificationAccepted
+    PROPERTIES TIMEOUT 0)
+]=])
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+             "${tinyrocket_test_properties}")
