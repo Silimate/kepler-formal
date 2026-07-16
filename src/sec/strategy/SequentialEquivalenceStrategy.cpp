@@ -3207,13 +3207,20 @@ SequentialEquivalenceResult runPdrSecEngine(
   std::vector<std::string> xAffectedOutputNames;
   size_t provedBound = 0;
   bool stopAfterInconclusiveBatch = false;
+  // Guarded, strict, and split output batches have one immutable dual-rail
+  // reset image. Share only that exact F[0] work; every PDR frame stays local.
+  std::shared_ptr<PDRExactInitCache> exactInitCache;
+  if (problem.usesDualRailStateEncoding &&
+      problem.resetBootstrapCycles != 0) {
+    exactInitCache = std::make_shared<PDRExactInitCache>(problem, solverType);
+  }
 
   KInductionProblem exactBatchProblem = problem;
   for (size_t batchIndex = 0; batchIndex < outputBatches.size(); ++batchIndex) {
     const auto [firstOutput, endOutput] = outputBatches[batchIndex];
     configureOutputBatchProblem(
         exactBatchProblem, problem, firstOutput, endOutput);
-    PDREngine pdrEngine(exactBatchProblem, solverType);
+    PDREngine pdrEngine(exactBatchProblem, solverType, 0, exactInitCache);
     const auto pdrResult = pdrEngine.run(maxK);
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:
@@ -3307,7 +3314,8 @@ SequentialEquivalenceResult runPdrSecEngine(
         const auto [firstOutput, endOutput] = strictBatches[batchIndex];
         configureOutputBatchProblem(
             strictBatchProblem, strictProblem, firstOutput, endOutput);
-        PDREngine strictPdrEngine(strictBatchProblem, solverType);
+        PDREngine strictPdrEngine(
+            strictBatchProblem, solverType, 0, exactInitCache);
         const auto strictResult = strictPdrEngine.run(maxK);
         provedBound = std::max(provedBound, strictResult.bound);
         if (strictResult.status == PDRStatus::Equivalent) {

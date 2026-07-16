@@ -12,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -14456,6 +14457,118 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = engine.run(2);
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineSharesExactDualRailInitWithoutSharingBatchResults) {
+  KInductionProblem sourceProblem;
+  constexpr size_t xOne = 2;
+  constexpr size_t xZero = 3;
+  constexpr size_t yOne = 4;
+  constexpr size_t yZero = 5;
+  constexpr size_t reset = 6;
+  sourceProblem.usesDualRailStateEncoding = true;
+  sourceProblem.state0Symbols = {xOne, xZero};
+  sourceProblem.state1Symbols = {yOne, yZero};
+  sourceProblem.inputSymbols = {reset};
+  sourceProblem.allSymbols = {xOne, xZero, yOne, yZero, reset};
+  sourceProblem.totalStateCount = 4;
+  sourceProblem.initializedStateCount = 4;
+  sourceProblem.initialStateAssignments = {
+      {xOne, true}, {xZero, true}, {yOne, true}, {yZero, true}};
+  sourceProblem.resetBootstrapCycles = 1;
+  sourceProblem.resetBootstrapInputs = {{reset, true}};
+  sourceProblem.dualRailStatePairs = {
+      DualRailSymbolPair{xOne, xZero},
+      DualRailSymbolPair{yOne, yZero}};
+  sourceProblem.transitions0 = {
+      {xOne, BoolExpr::Var(xOne)}, {xZero, BoolExpr::Var(xZero)}};
+  sourceProblem.transitions1 = {
+      {yOne, BoolExpr::Var(yOne)}, {yZero, BoolExpr::Var(yZero)}};
+
+  BoolExpr* bothDefined = BoolExpr::And(
+      BoolExpr::Xor(BoolExpr::Var(xOne), BoolExpr::Var(xZero)),
+      BoolExpr::Xor(BoolExpr::Var(yOne), BoolExpr::Var(yZero)));
+  BoolExpr* guardedMismatch = BoolExpr::And(
+      bothDefined,
+      BoolExpr::Xor(BoolExpr::Var(xOne), BoolExpr::Var(yOne)));
+  // The full source property reserves the support needed by either batch.
+  sourceProblem.bad = BoolExpr::Or(guardedMismatch, BoolExpr::Var(xOne));
+  sourceProblem.property = BoolExpr::Not(sourceProblem.bad);
+  sourceProblem.inductionBad = sourceProblem.bad;
+  sourceProblem.inductionProperty = sourceProblem.property;
+  sourceProblem.observedOutputExprs0 = {BoolExpr::Var(xOne)};
+  sourceProblem.observedOutputExprs1 = {BoolExpr::Var(yOne)};
+  sourceProblem.dualRailOutputStrictEqualityExprs = {BoolExpr::Var(xOne)};
+
+  auto exactInitCache = std::make_shared<PDRExactInitCache>(
+      sourceProblem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  KInductionProblem equivalentBatch = sourceProblem;
+  equivalentBatch.bad = guardedMismatch;
+  equivalentBatch.property = BoolExpr::Not(equivalentBatch.bad);
+  equivalentBatch.inductionBad = equivalentBatch.bad;
+  equivalentBatch.inductionProperty = equivalentBatch.property;
+  KInductionProblem secondEquivalentBatch = sourceProblem;
+  secondEquivalentBatch.bad = BoolExpr::Not(BoolExpr::Var(xOne));
+  secondEquivalentBatch.property = BoolExpr::Not(secondEquivalentBatch.bad);
+  secondEquivalentBatch.inductionBad = secondEquivalentBatch.bad;
+  secondEquivalentBatch.inductionProperty =
+      secondEquivalentBatch.property;
+  KInductionProblem differentBatch = sourceProblem;
+  differentBatch.bad = BoolExpr::Var(xOne);
+  differentBatch.property = BoolExpr::Not(differentBatch.bad);
+  differentBatch.inductionBad = differentBatch.bad;
+  differentBatch.inductionProperty = differentBatch.property;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDREngine equivalentEngine(
+      equivalentBatch,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      0,
+      exactInitCache);
+  const auto equivalentResult = equivalentEngine.run(2);
+  PDREngine secondEquivalentEngine(
+      secondEquivalentBatch,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      0,
+      exactInitCache);
+  const auto secondEquivalentResult = secondEquivalentEngine.run(2);
+  PDREngine differentEngine(
+      differentBatch,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      0,
+      exactInitCache);
+  const auto differentResult = differentEngine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(equivalentResult.status, PDRStatus::Equivalent);
+  EXPECT_EQ(secondEquivalentResult.status, PDRStatus::Equivalent);
+  EXPECT_EQ(differentResult.status, PDRStatus::Different);
+  EXPECT_EQ(differentResult.bound, 0u);
+  const std::string built = "shared exact F[0] cache built";
+  const size_t firstBuild = stderrOutput.find(built);
+  ASSERT_NE(firstBuild, std::string::npos) << stderrOutput;
+  EXPECT_EQ(stderrOutput.find(built, firstBuild + built.size()),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("shared exact F[0] cache reused"),
+            std::string::npos)
+      << stderrOutput;
+  const std::string predecessorCreated =
+      "predecessor cached solver created level=0";
+  const size_t firstPredecessorBuild = stderrOutput.find(predecessorCreated);
+  ASSERT_NE(firstPredecessorBuild, std::string::npos) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          predecessorCreated,
+          firstPredecessorBuild + predecessorCreated.size()),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("shared exact F[0] predecessor solver reused"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

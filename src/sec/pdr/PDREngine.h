@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <memory>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -23,6 +24,27 @@ enum class PDRStatus {
 struct PDRResult {
   PDRStatus status = PDRStatus::Inconclusive;
   size_t bound = 0;
+};
+
+// Output batches from one SEC problem have the same exact dual-rail startup
+// relation. This scoped cache keeps that immutable F[0] work across PDR runs;
+// learned frames and predecessor obligations remain local to each engine.
+class PDRExactInitCache {
+ public:
+  struct Impl;
+
+  PDRExactInitCache(
+      const KInductionProblem& sourceProblem,
+      KEPLER_FORMAL::Config::SolverType solverType);
+  ~PDRExactInitCache();
+
+  PDRExactInitCache(const PDRExactInitCache&) = delete;
+  PDRExactInitCache& operator=(const PDRExactInitCache&) = delete;
+
+ private:
+  std::unique_ptr<Impl> impl_;
+
+  friend class PDREngine;
 };
 
 namespace detail {
@@ -136,7 +158,8 @@ class PDREngine {
  public:
   PDREngine(const KInductionProblem& problem,
             KEPLER_FORMAL::Config::SolverType solverType,
-            size_t maxPredecessorQueries = 0);
+            size_t maxPredecessorQueries = 0,
+            std::shared_ptr<PDRExactInitCache> exactInitCache = nullptr);
 
   PDRResult run(size_t maxFrames) const;
 
@@ -144,6 +167,7 @@ class PDREngine {
   const KInductionProblem& problem_;
   KEPLER_FORMAL::Config::SolverType solverType_;
   size_t maxPredecessorQueries_ = 0;
+  std::shared_ptr<PDRExactInitCache> exactInitCache_;
 };
 
 }  // namespace KEPLER_FORMAL::SEC
