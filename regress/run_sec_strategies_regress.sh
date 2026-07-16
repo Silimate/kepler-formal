@@ -337,7 +337,8 @@ run_engine() {
     print_regress_memory_snapshot "after" "${engine}" "${kepler_status}"
     memory_snapshot_recorded=1
     if [[ "${expectation}" == "expect-different" ]]; then
-      if grep -q "SEC found a counterexample" "${stdout_log}"; then
+      if [[ "${kepler_status}" -eq 3 ]] &&
+          grep -q "SEC found a counterexample" "${stdout_log}"; then
         grep "SEC found a counterexample" "${stdout_log}"
         return 0
       fi
@@ -360,14 +361,22 @@ run_engine() {
     fi
 
     if [[ "${expectation}" == "expect-unsupported" ]]; then
-      grep "SEC cannot run on this design pair" "${stdout_log}"
-      return 0
+      if [[ "${kepler_status}" -eq 2 ]] &&
+          grep -q "SEC cannot run on this design pair" "${stdout_log}"; then
+        grep "SEC cannot run on this design pair" "${stdout_log}"
+        return 0
+      fi
+      if [[ "${kepler_status}" -ne 0 ]]; then
+        return "${kepler_status}"
+      fi
+      echo "Expected unsupported SEC result for ${test_name} (${engine})" >&2
+      return 1
     fi
 
     # A partial proof is inconclusive for its remaining outputs and deliberately
-    # exits with status 2. Positive regressions may explicitly accept that
+    # exits with status 1. Positive regressions may explicitly accept that
     # distinct verdict without accepting a fully inconclusive result.
-    if [[ "${kepler_status}" -eq 2 ]] &&
+    if [[ "${kepler_status}" -eq 1 ]] &&
        [[ "${expectation}" == "expect-equivalent-or-partial" ||
           "${expectation}" == "allow-inconclusive" ||
           "${expectation}" == "allow-unset-state-inconclusive" ]] &&
@@ -380,11 +389,13 @@ run_engine() {
     # allow inconclusive positive proofs so one hard design does not stop the
     # rest of the regression from reporting its current behavior.
     if [[ "${expectation}" == "allow-inconclusive" ]]; then
-      if grep -q "SEC proved equivalence" "${stdout_log}"; then
+      if [[ "${kepler_status}" -eq 0 ]] &&
+          grep -q "SEC proved equivalence" "${stdout_log}"; then
         grep "SEC proved equivalence" "${stdout_log}"
         return 0
       fi
-      if grep -q "SEC was inconclusive" "${stdout_log}"; then
+      if [[ "${kepler_status}" -eq 2 ]] &&
+          grep -q "SEC was inconclusive" "${stdout_log}"; then
         grep "SEC was inconclusive" "${stdout_log}"
         return 0
       fi
@@ -399,15 +410,18 @@ run_engine() {
     # because both sides depend on reset-unanchored internal state. Treat that
     # as measurement-only inconclusive when the workflow explicitly asks for it.
     if [[ "${expectation}" == "allow-unset-state-inconclusive" ]]; then
-      if grep -q "SEC proved equivalence" "${stdout_log}"; then
+      if [[ "${kepler_status}" -eq 0 ]] &&
+          grep -q "SEC proved equivalence" "${stdout_log}"; then
         grep "SEC proved equivalence" "${stdout_log}"
         return 0
       fi
-      if grep -q "SEC was inconclusive" "${stdout_log}"; then
+      if [[ "${kepler_status}" -eq 2 ]] &&
+          grep -q "SEC was inconclusive" "${stdout_log}"; then
         grep "SEC was inconclusive" "${stdout_log}"
         return 0
       fi
-      if grep -q "No aligned observed outputs remain after skipping cones that depend on reset-unanchored internal state" "${stdout_log}"; then
+      if [[ "${kepler_status}" -eq 2 ]] &&
+          grep -q "No aligned observed outputs remain after skipping cones that depend on reset-unanchored internal state" "${stdout_log}"; then
         grep "SEC cannot run on this design pair" "${stdout_log}"
         return 0
       fi

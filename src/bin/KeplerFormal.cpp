@@ -2000,7 +2000,7 @@ int KeplerFormalMain(int argc, char** argv) {
             SPDLOG_INFO(
                 "No difference was found. SEC proved equivalence at k = {}.",
                 result.bound);
-            return EXIT_SUCCESS;
+            return kSecProvedExitCode;
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::PartiallyProved: {
             const size_t provedOutputs = result.proofProgress.has_value()
                                              ? result.proofProgress->provenOutputs
@@ -2029,7 +2029,7 @@ int KeplerFormalMain(int argc, char** argv) {
             if (!result.reason.empty()) {
               SPDLOG_INFO("SEC counterexample details:\n{}", result.reason);
             }
-            return EXIT_SUCCESS;
+            return kSecCounterexampleExitCode;
             // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Inconclusive:
             // LCOV_EXCL_START
@@ -2046,7 +2046,7 @@ int KeplerFormalMain(int argc, char** argv) {
             }
             SPDLOG_WARN(
                 "SEC verification did not produce a proof or counterexample.");
-            return EXIT_FAILURE;
+            return kSecInconclusiveExitCode;
             // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:
           // LCOV_DISABLED_STOP
@@ -2056,7 +2056,7 @@ int KeplerFormalMain(int argc, char** argv) {
             // LCOV_EXCL_STOP
                 "SEC cannot run on this design pair: {}", result.reason);
             // LCOV_EXCL_START
-            return EXIT_FAILURE;
+            return kSecInconclusiveExitCode;
             // LCOV_EXCL_STOP
         }
       };

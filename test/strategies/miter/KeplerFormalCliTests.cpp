@@ -597,6 +597,8 @@ ScopedNajaIfFixture createEquivalentScopedNajaIfFixture() {
   return fixture;
 }
 
+// These fixtures have equivalent transition logic but no reset. Exact SEC may
+// therefore report a cycle-0 difference between their independent initial states.
 SequentialNajaIfFixture createEquivalentSequentialNajaIfFixture(
     const std::string& ffName0 = "ff0",
     const std::string& ffName1 = "ff0",
@@ -789,6 +791,13 @@ TEST_F(KeplerFormalCliTests, SanitizeFileToken) {
   EXPECT_EQ(sanitizeFileToken("my scope"), "my_scope");
   EXPECT_EQ(sanitizeFileToken("a/b\\c"), "a_b_c");
   EXPECT_EQ(sanitizeFileToken(""), "scope");
+}
+
+TEST_F(KeplerFormalCliTests, SecResultExitCodesAreStable) {
+  EXPECT_EQ(kSecProvedExitCode, 0);
+  EXPECT_EQ(kSecPartiallyProvedExitCode, 1);
+  EXPECT_EQ(kSecInconclusiveExitCode, 2);
+  EXPECT_EQ(kSecCounterexampleExitCode, 3);
 }
 
 
@@ -2244,7 +2253,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAccepted) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -2284,7 +2293,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithPdrEngine) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -2398,7 +2407,7 @@ TEST_F(KeplerFormalCliTests,
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   EXPECT_FALSE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -2415,7 +2424,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecIgnoresRenamedInternalState) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -2477,7 +2486,7 @@ TEST_F(KeplerFormalCliTests,
       "  - " + fixture.design1Path.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(contents.find("SEC engine: pdr"), std::string::npos);
@@ -2713,7 +2722,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecDifferenceLogIncludesWitnessDetails) {
       "  - " + fixture.design1IfPath.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(contents.find("SEC counterexample details:"), std::string::npos);
@@ -2768,7 +2777,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecCompactModeAccepted) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -2786,7 +2795,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecCompactIdenticalInputReusesExtractedModel)
       "  - " + fixture.design0IfPath.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(
@@ -2842,7 +2851,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecAcceptsSkippedPoReporting) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecCounterexampleExitCode);
   EXPECT_TRUE(KEPLER_FORMAL::Config::getReportSkippedPOs());
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -3046,7 +3055,7 @@ TEST_F(KeplerFormalCliTests, CliSecVerificationAcceptedBeforeFormat) {
                   argv8.data(), argv9.data()};
   int argc = 10;
 
-  EXPECT_EQ(KeplerFormalMain(argc, argv), EXIT_SUCCESS);
+  EXPECT_EQ(KeplerFormalMain(argc, argv), kSecCounterexampleExitCode);
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
@@ -3066,7 +3075,7 @@ TEST_F(KeplerFormalCliTests, CliSecEngineAcceptedBeforeFormat) {
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
-      EXIT_SUCCESS);
+      kSecCounterexampleExitCode);
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
@@ -3231,7 +3240,7 @@ TEST_F(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedBeforeFormat) {
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
-      EXIT_SUCCESS);
+      kSecCounterexampleExitCode);
   EXPECT_TRUE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -3252,7 +3261,7 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedBeforeFormat) {
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
-      EXIT_SUCCESS);
+      kSecCounterexampleExitCode);
   EXPECT_FALSE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -3334,7 +3343,7 @@ TEST_F(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedAfterFormat) {
                    "--sec-uncomputable-seq-boundary",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
-      EXIT_SUCCESS);
+      kSecCounterexampleExitCode);
   EXPECT_TRUE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -3355,7 +3364,7 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedAfterFormat) {
                    "--no-sec-uncomputable-seq-boundary",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
-      EXIT_SUCCESS);
+      kSecCounterexampleExitCode);
   EXPECT_FALSE(KEPLER_FORMAL::Config::getSecTreatUncomputableSeqAsBoundary());
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -3387,7 +3396,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
       "  - " + fixture.design1Path.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_FAILURE);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecInconclusiveExitCode);
 
   const auto contents = readFileContents(logPath);
   const auto resultLine =

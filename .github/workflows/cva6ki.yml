@@ -79,7 +79,7 @@ jobs:
         status=${PIPESTATUS[0]}
         set -e
         # Positive self-SEC accepts a proved or explicitly partial verdict.
-        if [[ "${status}" -eq 2 ]] &&
+        if [[ "${status}" -eq 1 ]] &&
             grep -q "SEC partially proved equivalence" "${RUNNER_TEMP}/cva6-ki.log"; then
           exit 0
         fi

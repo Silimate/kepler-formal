@@ -127,12 +127,12 @@ The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/
 | Result | Exit code | Meaning |
 | --- | ---: | --- |
 | Proved | `0` | All checked outputs were proved equivalent. |
-| Counterexample found | `0` | A definitive mismatch was found; successful execution is distinct from equivalence. |
-| Inconclusive | `1` | SEC produced neither a proof nor a counterexample. |
-| Partially proved | `2` | Some outputs were proved; all remaining outputs are inconclusive. |
+| Partially proved | `1` | Some outputs were proved; all remaining outputs are inconclusive. |
+| Inconclusive | `2` | SEC produced neither a proof nor a counterexample. |
+| Counterexample found | `3` | A definitive mismatch was found. |
 
-Scripts must inspect the SEC result line as well as the exit code because both
-definitive outcomes, proof and counterexample, return `0`.
+These codes describe completed SEC verdicts. Configuration, input, or runtime
+errors are execution failures rather than SEC verdicts.
 
 ### Binary Flags
 
