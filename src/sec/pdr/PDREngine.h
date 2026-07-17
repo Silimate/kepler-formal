@@ -162,6 +162,10 @@ class PDREngine {
             std::shared_ptr<PDRExactInitCache> exactInitCache = nullptr);
 
   PDRResult run(size_t maxFrames) const;
+  // Run the same transition system against an alternate safety property.
+  // The target is deliberately separate from the model so it cannot alter
+  // exact F[0]; the corresponding bad predicate is derived internally.
+  PDRResult run(size_t maxFrames, BoolExpr* property) const;
 
  private:
   const KInductionProblem& problem_;

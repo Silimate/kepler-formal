@@ -836,7 +836,7 @@ MaterializedBuilderOutputs materializeBuilderOutputs(
   // the cloud stops at the root instead of rebuilding its cone; clock-gated flops
   // then see their gated clock as a stale frontier rather than clk & enable.
   // Sequential state outputs must remain PIs here: they are the current-state
-  // variables used by reset/bootstrap proofs and must not be rebuilt as logic.
+  // variables used by the transition relation and must not be rebuilt as logic.
   std::vector<naja::DNL::DNLID> materializationInputs;
   materializationInputs.reserve(collectedInputs.size());
   for (const auto inputTermID : collectedInputs) {
@@ -1897,23 +1897,6 @@ BoolExpr* buildNextStateExpr(
 }  // LCOV_EXCL_LINE
 // LCOV_EXCL_STOP
 
-std::optional<bool> detectInitialStateValue(const PendingTransition& pending) {
-  const bool hasResetHigh = resolvePendingPinRoleTermID(pending, "R").has_value();
-  const bool hasResetLow = resolvePendingPinRoleTermID(pending, "RN").has_value();
-  const bool hasSetHigh = resolvePendingPinRoleTermID(pending, "S").has_value();
-  const bool hasSetLow = resolvePendingPinRoleTermID(pending, "SN").has_value();
-
-  const bool hasReset = hasResetHigh || hasResetLow;
-  const bool hasSet = hasSetHigh || hasSetLow;
-  if (hasReset && !hasSet) {
-    return pending.stateOutputIsComplemented;
-  }
-  if (hasSet && !hasReset) {
-    return !pending.stateOutputIsComplemented;
-  }
-  return std::nullopt;
-}
-
 BoolExpr* makeAndChain(const std::vector<BoolExpr*>& exprs) {
   if (exprs.empty()) {
     // LCOV_EXCL_START
@@ -1946,108 +1929,6 @@ BoolExpr* buildAddressEqualsExpr(
   return makeAndChain(equalities);
 }
 
-std::optional<bool> evaluateConstantUnderAssignments(
-    BoolExpr* expr,
-    const std::unordered_map<size_t, bool>& assignments,
-    std::unordered_map<BoolExpr*, std::optional<bool>>& memo) {
-  if (expr == nullptr) {
-    // LCOV_EXCL_START
-    return std::nullopt;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
-  }
-  if (const auto it = memo.find(expr); it != memo.end()) {
-    // LCOV_EXCL_START
-    return it->second;  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
-  }
-
-  std::optional<bool> value;
-  switch (expr->getOp()) {
-    case Op::VAR:
-      if (expr->getId() < 2) {
-        value = expr->getId() == 1;
-      } else if (const auto it = assignments.find(expr->getId());
-                 it != assignments.end()) {
-        value = it->second;
-      }
-      break;
-    case Op::NOT: {
-      const auto operand =
-          // LCOV_EXCL_START
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);  // LCOV_EXCL_LINE
-      if (operand.has_value()) {  // LCOV_EXCL_LINE
-        value = !*operand;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      break;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-    case Op::AND: {
-      const auto lhs =
-          // LCOV_EXCL_START
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);  // LCOV_EXCL_LINE
-      if (lhs.has_value() && !*lhs) {  // LCOV_EXCL_LINE
-        value = false;  // LCOV_EXCL_LINE
-        break;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-      }
-      const auto rhs =
-          // LCOV_EXCL_START
-          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);  // LCOV_EXCL_LINE
-      if (rhs.has_value() && !*rhs) {  // LCOV_EXCL_LINE
-        value = false;  // LCOV_EXCL_LINE
-      } else if (lhs.has_value() && rhs.has_value()) {  // LCOV_EXCL_LINE
-        value = *lhs && *rhs;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      break;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-    case Op::OR: {
-      const auto lhs =
-          // LCOV_EXCL_START
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);  // LCOV_EXCL_LINE
-      if (lhs.has_value() && *lhs) {  // LCOV_EXCL_LINE
-        value = true;  // LCOV_EXCL_LINE
-        break;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-      }
-      const auto rhs =
-          // LCOV_EXCL_START
-          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);  // LCOV_EXCL_LINE
-      if (rhs.has_value() && *rhs) {  // LCOV_EXCL_LINE
-        value = true;  // LCOV_EXCL_LINE
-      } else if (lhs.has_value() && rhs.has_value()) {  // LCOV_EXCL_LINE
-        value = *lhs || *rhs;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      break;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-    case Op::XOR: {
-      const auto lhs =
-          // LCOV_EXCL_START
-          evaluateConstantUnderAssignments(expr->getLeft(), assignments, memo);  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-      const auto rhs =
-          // LCOV_EXCL_START
-          evaluateConstantUnderAssignments(expr->getRight(), assignments, memo);  // LCOV_EXCL_LINE
-      if (lhs.has_value() && rhs.has_value()) {  // LCOV_EXCL_LINE
-        value = *lhs != *rhs;  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      break;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-    }
-    // LCOV_EXCL_START
-    case Op::NONE:  // LCOV_EXCL_LINE
-    // LCOV_EXCL_STOP
-    default:
-      // LCOV_EXCL_START
-      break;  // LCOV_EXCL_LINE
-      // LCOV_EXCL_STOP
-  }
-
-  memo.emplace(expr, value);
-  return value;
-}
-
 std::string normalizeSignalBaseName(const std::string& name) {
   std::string base = name;
   const auto bracket = base.find('[');
@@ -2055,78 +1936,6 @@ std::string normalizeSignalBaseName(const std::string& name) {
     base = base.substr(0, bracket);
   }
   return normalizePinName(base);
-}
-
-bool isResetNameToken(const std::string& candidate, const std::string& token) {
-  // Domain-prefixed top resets, for example `wb_rst_i`, normalize to `WB_RST`
-  // after input-suffix stripping.  Match only a final underscore-separated
-  // reset token so synthesized reset inference remains conservative.
-  return candidate == token || hasSuffix(candidate, "_" + token);
-// LCOV_EXCL_START
-}  // LCOV_EXCL_LINE
-// LCOV_EXCL_STOP
-
-bool isActiveLowResetToken(const std::string& candidate) {
-  return candidate == "RESET_N" || candidate == "RESETN" ||
-         candidate == "RESET_L" || candidate == "RST_N" ||
-         candidate == "RSTN" || candidate == "RST_L";
-}
-
-void appendDomainPrefixedActiveLowResetCandidates(
-    std::vector<std::string>& candidates) {
-  const size_t originalSize = candidates.size();
-  for (size_t index = 0; index < originalSize; ++index) {
-    const std::string& candidate = candidates[index];
-    if (candidate.size() <= 1) {
-      continue;
-    // LCOV_EXCL_START
-    }
-    const std::string strippedDomain = candidate.substr(1);
-    // LCOV_EXCL_STOP
-    if (isActiveLowResetToken(strippedDomain)) {
-      // Async FIFOs often spell domain resets as rrst_n/wrst_n.  Treat only
-      // one-letter active-low prefixes as reset candidates so unrelated names
-      // containing "rst" do not become reset controls.
-      candidates.push_back(strippedDomain);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-  }
-}
-
-std::vector<std::string> resetNameCandidates(const std::string& displayName) {
-  // Synthesized-reset inference runs before the final SEC symbol space exists.
-  // Use the same top-port spelling policy as later SEC phases so names such as
-  // `reset_i[0]` and `rst_ni[0]` are classified consistently end-to-end.
-  const std::string normalized = normalizeSignalBaseName(displayName);
-  std::vector<std::string> candidates = {normalized};
-  if (hasSuffix(normalized, "_IN")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 3));
-  }
-  if (hasSuffix(normalized, "_I")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 2));
-  }
-  if (hasSuffix(normalized, "_NI")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 1));  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  appendDomainPrefixedActiveLowResetCandidates(candidates);
-  return candidates;
-}
-
-std::optional<bool> getResetAssertionValue(const std::string& displayName) {
-  for (const auto& candidate : resetNameCandidates(displayName)) {
-    if (isResetNameToken(candidate, "RESET") ||
-        isResetNameToken(candidate, "RST")) {
-      return true;
-    }
-    if (isResetNameToken(candidate, "RESET_N") ||
-        isResetNameToken(candidate, "RESETN") ||
-        isResetNameToken(candidate, "RESET_L") ||
-        isResetNameToken(candidate, "RST_N") ||
-        isResetNameToken(candidate, "RSTN") ||
-        isResetNameToken(candidate, "RST_L")) {
-      return false;
-    }
-  }
-  return std::nullopt;
 }
 
 std::vector<std::string> clockNameCandidates(const std::string& displayName) {
@@ -2703,276 +2512,6 @@ size_t expandClockCarrierVarIDsFromStructure(
   return added;
 }
 
-std::unordered_map<size_t, bool> collectResetAssignments(
-    const SequentialDesignModel& model) {
-  std::unordered_map<size_t, bool> assignments;
-  for (const auto& key : model.environmentInputs) {
-    const auto displayIt = model.displayNameByKey.find(key);
-    const auto varIt = model.inputVarByKey.find(key);
-    if (displayIt == model.displayNameByKey.end() ||
-        // LCOV_EXCL_START
-        varIt == model.inputVarByKey.end()) {
-      continue;  // LCOV_EXCL_LINE
-    }
-    // LCOV_EXCL_STOP
-    const auto assertedValue = getResetAssertionValue(displayIt->second);
-    // LCOV_EXCL_START
-    if (!assertedValue.has_value()) {
-      continue;
-    }
-    // LCOV_EXCL_STOP
-    assignments.emplace(varIt->second, *assertedValue);
-  }
-  return assignments;
-}
-
-void inferSynthesizedResetInitialStateValues(SequentialDesignModel& model) {
-  const auto resetAssignments = collectResetAssignments(model);
-  if (resetAssignments.empty()) {
-    return;
-  }
-
-  auto resetInitInferenceNodeLimit = []() {
-    constexpr size_t kDefaultResetSpecializedExprNodesForInitInference = 200000;
-    const char* valueText =
-        std::getenv("KEPLER_SEC_RESET_INIT_INFERENCE_NODE_LIMIT");
-    if (valueText == nullptr || *valueText == '\0') {
-      return kDefaultResetSpecializedExprNodesForInitInference;
-    }
-    const auto value = std::strtoull(valueText, nullptr, 10);  // LCOV_EXCL_LINE
-    if (value == 0) {  // LCOV_EXCL_LINE
-      return kDefaultResetSpecializedExprNodesForInitInference;  // LCOV_EXCL_LINE
-    }
-    return value > std::numeric_limits<size_t>::max()  // LCOV_EXCL_LINE
-               ? std::numeric_limits<size_t>::max()  // LCOV_EXCL_LINE
-               : static_cast<size_t>(value);  // LCOV_EXCL_LINE
-  };
-
-  auto countUniqueExprNodes =
-      [](const std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash>& exprByKey) {
-        std::unordered_set<BoolExpr*> visited;
-        std::vector<BoolExpr*> stack;
-        for (const auto& [_, root] : exprByKey) {
-          if (root != nullptr) {
-            stack.push_back(root);
-          // LCOV_EXCL_START
-          }
-          // LCOV_EXCL_STOP
-        }
-
-        while (!stack.empty()) {
-          BoolExpr* current = stack.back();
-          stack.pop_back();
-          if (current == nullptr || !visited.insert(current).second) {
-            continue;
-          }
-          if (current->getLeft() != nullptr) {
-            stack.push_back(current->getLeft());
-          }
-          if (current->getRight() != nullptr) {
-            stack.push_back(current->getRight());
-          }
-        }
-        return visited.size();
-      // LCOV_EXCL_START
-      };
-
-
-// LCOV_EXCL_STOP
-  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> resetSpecializedNextStateByKey;
-  // LCOV_EXCL_START
-  resetSpecializedNextStateByKey.reserve(model.stateBits.size());
-  std::unordered_map<BoolExpr*, BoolExpr*> resetSubstitutionMemo;
-  for (const auto& key : model.stateBits) {
-    const auto nextStateIt = model.nextStateExprByStateKey.find(key);
-    if (nextStateIt == model.nextStateExprByStateKey.end()) {
-    // LCOV_EXCL_STOP
-      continue;  // LCOV_EXCL_LINE
-    }
-    resetSpecializedNextStateByKey.emplace(
-        // LCOV_EXCL_START
-        key,
-        substituteBoolExprVariables(
-        // LCOV_EXCL_STOP
-            nextStateIt->second, resetAssignments, resetSubstitutionMemo));
-  // LCOV_EXCL_START
-  }
-  // Synthesized reset inference is only a proof-strengthening heuristic. Cap
-  // the specialized DAG size so very large SoCs do not spend most of SEC
-  // extraction deriving reset values, while still allowing measured ASIC-size
-  // LCOV_EXCL_STOP
-  // reset cones to seed PDR's frame-0 frontier once instead of repeatedly
-  // proving the same reset-image facts through SAT.
-  const size_t maxResetSpecializedExprNodesForInitInference =
-      resetInitInferenceNodeLimit();
-  const size_t resetSpecializedExprNodes =
-      countUniqueExprNodes(resetSpecializedNextStateByKey);
-  // LCOV_EXCL_START
-  if (std::getenv("KEPLER_SEC_DIAG") != nullptr) {
-  // LCOV_EXCL_STOP
-    fprintf(  // LCOV_EXCL_LINE
-        stderr,  // LCOV_EXCL_LINE
-        "SEC diag: reset-specialized next-state nodes=%zu limit=%zu states=%zu\n",
-        resetSpecializedExprNodes,  // LCOV_EXCL_LINE
-        maxResetSpecializedExprNodesForInitInference,  // LCOV_EXCL_LINE
-        model.stateBits.size());  // LCOV_EXCL_LINE
-    fflush(stderr);  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  // LCOV_EXCL_START
-  if (resetSpecializedExprNodes >
-  // LCOV_EXCL_STOP
-      maxResetSpecializedExprNodesForInitInference) {
-    if (std::getenv("KEPLER_SEC_DIAG") != nullptr) {
-      fprintf(  // LCOV_EXCL_LINE
-          stderr,  // LCOV_EXCL_LINE
-          "SEC diag: skip synthesized init inference for %zu reset-specialized nodes (limit=%zu)\n",
-          resetSpecializedExprNodes,  // LCOV_EXCL_LINE
-          maxResetSpecializedExprNodesForInitInference);  // LCOV_EXCL_LINE
-      // LCOV_EXCL_START
-      fflush(stderr);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-    return;
-  }
-
-  auto collectReferencedStateVars = [](BoolExpr* expr) {
-  // LCOV_EXCL_STOP
-    std::unordered_set<size_t> referencedVars;
-    if (expr == nullptr) {
-      return referencedVars;  // LCOV_EXCL_LINE
-    }
-
-    std::vector<BoolExpr*> stack = {expr};
-    std::unordered_set<BoolExpr*> visited;
-    while (!stack.empty()) {
-      BoolExpr* current = stack.back();
-      stack.pop_back();
-      if (current == nullptr || !visited.insert(current).second) {
-        continue;  // LCOV_EXCL_LINE
-      }
-      if (current->getOp() == Op::VAR) {
-        if (current->getId() >= 2) {
-          referencedVars.insert(current->getId());
-        }
-        // LCOV_EXCL_START
-        continue;
-        // LCOV_EXCL_STOP
-      }
-      if (current->getLeft() != nullptr) {  // LCOV_EXCL_LINE
-        stack.push_back(current->getLeft());  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      if (current->getRight() != nullptr) {  // LCOV_EXCL_LINE
-        stack.push_back(current->getRight());  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-    }
-    return referencedVars;
-  };
-
-  std::unordered_map<size_t, SignalKey> stateKeyByVar;
-  std::unordered_map<size_t, std::vector<SignalKey>> dependentStatesByVar;
-  // LCOV_EXCL_START
-  stateKeyByVar.reserve(model.stateBits.size());
-  dependentStatesByVar.reserve(model.stateBits.size());
-  // LCOV_EXCL_STOP
-  for (const auto& key : model.stateBits) {
-    const auto varIt = model.inputVarByKey.find(key);
-    if (varIt != model.inputVarByKey.end()) {
-      stateKeyByVar.emplace(varIt->second, key);
-    }
-  }
-  for (const auto& key : model.stateBits) {
-    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
-    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
-      continue;  // LCOV_EXCL_LINE
-    }
-    const auto referencedVars = collectReferencedStateVars(nextStateIt->second);
-    for (const auto referencedVar : referencedVars) {
-      if (stateKeyByVar.find(referencedVar) == stateKeyByVar.end()) {
-        // LCOV_EXCL_START
-        continue;  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-      }
-      dependentStatesByVar[referencedVar].push_back(key);
-    }
-  }
-
-  std::unordered_map<SignalKey, SignalKey, SignalKeyHash> complementedPartnerByKey;
-  complementedPartnerByKey.reserve(model.complementedStateRelations.size() * 2);
-  for (const auto& relation : model.complementedStateRelations) {
-    complementedPartnerByKey.emplace(relation.primaryKey, relation.complementedKey);  // LCOV_EXCL_LINE
-    complementedPartnerByKey.emplace(relation.complementedKey, relation.primaryKey);  // LCOV_EXCL_LINE
-  }
-
-  std::unordered_map<size_t, bool> assignments = resetAssignments;
-  for (const auto& [key, value] : model.initialStateValueByKey) {
-    const auto varIt = model.inputVarByKey.find(key);
-    if (varIt != model.inputVarByKey.end()) {
-      // LCOV_EXCL_START
-      assignments.emplace(varIt->second, value);
-    }
-  }
-
-
-// LCOV_EXCL_STOP
-  std::deque<SignalKey> workQueue(model.stateBits.begin(), model.stateBits.end());
-  auto recordKnownState = [&](const SignalKey& key, bool value) {
-    const auto [it, inserted] = model.initialStateValueByKey.emplace(key, value);
-    if (!inserted) {
-      return;  // LCOV_EXCL_LINE
-    }
-
-    const auto varIt = model.inputVarByKey.find(key);
-    if (varIt != model.inputVarByKey.end()) {
-      // LCOV_EXCL_START
-      assignments[varIt->second] = value;
-      const auto dependentIt = dependentStatesByVar.find(varIt->second);
-      if (dependentIt != dependentStatesByVar.end()) {
-        workQueue.insert(
-        // LCOV_EXCL_STOP
-            workQueue.end(),
-            dependentIt->second.begin(),
-            dependentIt->second.end());
-      }
-    }
-
-// LCOV_EXCL_START
-
-
-// LCOV_EXCL_STOP
-    const auto partnerIt = complementedPartnerByKey.find(key);
-    if (partnerIt != complementedPartnerByKey.end() &&
-        model.initialStateValueByKey.find(partnerIt->second) ==  // LCOV_EXCL_LINE
-            model.initialStateValueByKey.end()) {  // LCOV_EXCL_LINE
-      workQueue.push_back(partnerIt->second);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-  };
-
-  while (!workQueue.empty()) {
-    const SignalKey key = workQueue.front();
-    workQueue.pop_front();
-
-    if (model.initialStateValueByKey.find(key) != model.initialStateValueByKey.end()) {
-      const auto partnerIt = complementedPartnerByKey.find(key);
-      if (partnerIt != complementedPartnerByKey.end() &&
-          model.initialStateValueByKey.find(partnerIt->second) ==  // LCOV_EXCL_LINE
-              model.initialStateValueByKey.end()) {  // LCOV_EXCL_LINE
-        recordKnownState(partnerIt->second, !model.initialStateValueByKey.at(key));  // LCOV_EXCL_LINE
-      }  // LCOV_EXCL_LINE
-      continue;
-    }
-
-    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
-    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
-      continue;  // LCOV_EXCL_LINE
-    }
-
-    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
-    const auto resetValue = evaluateConstantUnderAssignments(
-        nextStateIt->second, assignments, memo);
-    if (resetValue.has_value()) {
-      recordKnownState(key, *resetValue);
-    }
-  }
-}
 
 struct ExtractContext {
   naja::NL::SNLDesign* top = nullptr;
@@ -4525,7 +4064,6 @@ void buildStructuredMemoryTransitions(
       }
       if (resetAssertedExpr != nullptr) {
         next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);
-        model.initialStateValueByKey.emplace(cellState.key, false);
       }
       model.nextStateExprByStateKey.emplace(cellState.key, next);
       cellNextExprs[cellState.cellIndex][cellState.bitIndex] = next;
@@ -4555,7 +4093,6 @@ void buildStructuredMemoryTransitions(
       }
       if (resetAssertedExpr != nullptr) {
         next = makeIte(resetAssertedExpr, BoolExpr::createFalse(), next);
-        model.initialStateValueByKey.emplace(readOutput.key, false);
       }
       // LCOV_EXCL_STOP
       model.nextStateExprByStateKey.emplace(readOutput.key, next);
@@ -5201,14 +4738,6 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
           markConnectivitySkippedState(complementedKey, *skippedPinInfo);  // LCOV_EXCL_LINE
         }
         continue;
-      }
-
-      const auto initialStateValue = detectInitialStateValue(pending);
-      if (initialStateValue.has_value()) {
-        model.initialStateValueByKey.emplace(pending.stateKey, *initialStateValue);
-        for (const auto& complementedKey : pending.complementedStateKeys) {
-          model.initialStateValueByKey.emplace(complementedKey, !*initialStateValue);
-        }
       }
 
       BoolExpr* nextStateExpr =
@@ -6353,16 +5882,7 @@ SequentialDesignModel SequentialDesignModel::extract(naja::NL::SNLDesign* top) {
   propagateConnectivitySkipsThroughDependencies(model);
   partitionCoveredSignals(model);
 
-  inferSynthesizedResetInitialStateValues(model);
   logExtractedModelDebugSummary(ctx, model);
-  if (ctx.secDiagEnabled) {
-    fprintf(
-        stderr,
-        "SEC diag: extract(%s) synthesized init inference done init=%zu\n",
-        ctx.topName.c_str(),
-        model.initialStateValueByKey.size());
-    fflush(stderr);
-  }
 
   // Phase 6: make sure the remaining covered interface is complete before SEC
   // hands this model to the proof engines.

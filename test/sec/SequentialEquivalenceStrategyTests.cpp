@@ -58,7 +58,6 @@
 #include "BuildPrimaryOutputClauses.h"
 #include "Tree2BoolExpr.h"
 #include "clocks/SecClockModel.h"
-#include "strategy/ReachableStateInvariant.h"
 #include "strategy/SequentialEquivalenceStrategy.h"
 
 using namespace naja::NL;
@@ -137,57 +136,6 @@ std::string formatBoolValueForTest(bool value) {
   return value ? "1" : "0";
 }
 
-std::string normalizePinNameForTest(const std::string& name) {
-  std::string normalized = name;
-  for (char& ch : normalized) {
-    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-  }
-  return normalized;
-}
-
-std::string normalizeSignalBaseNameForTest(const std::string& name) {
-  std::string base = name;
-  const auto bracket = base.find('[');
-  if (bracket != std::string::npos) {
-    base = base.substr(0, bracket);
-  }
-  return normalizePinNameForTest(base);
-}
-
-bool hasSuffixForTest(const std::string& value, const std::string& suffix) {
-  return value.size() >= suffix.size() &&
-         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-bool isResetNameTokenForTest(
-    const std::string& candidate,
-    const std::string& token) {
-  return candidate == token || hasSuffixForTest(candidate, "_" + token);
-}
-
-bool isActiveLowResetTokenForTest(const std::string& candidate) {
-  return candidate == "RESET_N" || candidate == "RESETN" ||
-         candidate == "RESET_L" || candidate == "RST_N" ||
-         candidate == "RSTN" || candidate == "RST_L";
-}
-
-void appendDomainPrefixedActiveLowResetCandidatesForTest(
-    std::vector<std::string>& candidates) {
-  const size_t originalSize = candidates.size();
-  for (size_t index = 0; index < originalSize; ++index) {
-    const std::string& candidate = candidates[index];
-    if (candidate.size() <= 1) {
-      continue;
-    }
-    const std::string strippedDomain = candidate.substr(1);
-    if (isActiveLowResetTokenForTest(strippedDomain)) {
-      candidates.push_back(strippedDomain);
-    }
-  }
-}
-
-std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
-    const std::string& displayName);
 
 std::optional<naja::DNL::DNLID> resolvePendingPinTermIDForTest(
     const PendingTransitionForTest& pending,
@@ -236,106 +184,6 @@ BoolExpr* getRequiredOutputExprForTest(
         std::string(pinName) + "`");
   }
   return exprIt->second;
-}
-
-std::optional<bool> evaluateConstantUnderAssignmentsImplForTest(
-    BoolExpr* expr,
-    const std::unordered_map<size_t, bool>& assignments,
-    std::unordered_map<BoolExpr*, std::optional<bool>>& memo) {
-  if (expr == nullptr) {
-    return std::nullopt;
-  }
-  if (const auto it = memo.find(expr); it != memo.end()) {
-    return it->second;
-  }
-
-  std::optional<bool> value;
-  switch (expr->getOp()) {
-    case Op::VAR:
-      if (expr->getId() < 2) {
-        value = expr->getId() == 1;
-      } else if (const auto it = assignments.find(expr->getId());
-                 it != assignments.end()) {
-        value = it->second;
-      }
-      break;
-    case Op::NOT: {
-      const auto operand = evaluateConstantUnderAssignmentsImplForTest(
-          expr->getLeft(), assignments, memo);
-      if (operand.has_value()) {
-        value = !*operand;
-      }
-      break;
-    }
-    case Op::AND: {
-      const auto lhs = evaluateConstantUnderAssignmentsImplForTest(
-          expr->getLeft(), assignments, memo);
-      if (lhs.has_value() && !*lhs) {
-        value = false;
-        break;
-      }
-      const auto rhs = evaluateConstantUnderAssignmentsImplForTest(
-          expr->getRight(), assignments, memo);
-      if (rhs.has_value() && !*rhs) {
-        value = false;
-      } else if (lhs.has_value() && rhs.has_value()) {
-        value = *lhs && *rhs;
-      }
-      break;
-    }
-    case Op::OR: {
-      const auto lhs = evaluateConstantUnderAssignmentsImplForTest(
-          expr->getLeft(), assignments, memo);
-      if (lhs.has_value() && *lhs) {
-        value = true;
-        break;
-      }
-      const auto rhs = evaluateConstantUnderAssignmentsImplForTest(
-          expr->getRight(), assignments, memo);
-      if (rhs.has_value() && *rhs) {
-        value = true;
-      } else if (lhs.has_value() && rhs.has_value()) {
-        value = *lhs || *rhs;
-      }
-      break;
-    }
-    case Op::XOR: {
-      const auto lhs = evaluateConstantUnderAssignmentsImplForTest(
-          expr->getLeft(), assignments, memo);
-      const auto rhs = evaluateConstantUnderAssignmentsImplForTest(
-          expr->getRight(), assignments, memo);
-      if (lhs.has_value() && rhs.has_value()) {
-        value = *lhs != *rhs;
-      }
-      break;
-    }
-    case Op::NONE:
-    default:
-      break;
-  }
-
-  memo.emplace(expr, value);
-  return value;
-}
-
-std::unordered_map<size_t, bool> collectResetAssignmentsForTest(
-    const SequentialDesignModel& model) {
-  std::unordered_map<size_t, bool> assignments;
-  for (const auto& key : model.environmentInputs) {
-    const auto displayIt = model.displayNameByKey.find(key);
-    const auto varIt = model.inputVarByKey.find(key);
-    if (displayIt == model.displayNameByKey.end() ||
-        varIt == model.inputVarByKey.end()) {
-      continue;
-    }
-    const auto assertedValue =
-        getResetAssertionValueFromDisplayNameForTest(displayIt->second);
-    if (!assertedValue.has_value()) {
-      continue;
-    }
-    assignments.emplace(varIt->second, *assertedValue);
-  }
-  return assignments;
 }
 
 std::vector<std::string> setDifferenceForTest(const std::set<std::string>& lhs,
@@ -500,305 +348,6 @@ BoolExpr* buildNextStateExprForTest(
   }
 
   return next;
-}
-
-std::optional<bool> detectInitialStateValueForTest(
-    const std::unordered_map<std::string, naja::DNL::DNLID>& pinTermIDs) {
-  PendingTransitionForTest pending;
-  pending.independentStateOutputCount = 1;
-  for (const auto& [pinName, termID] : pinTermIDs) {
-    pending.pinTermIDs[pinName].push_back({termID, 0});
-  }
-
-  const bool hasResetHigh = resolvePendingPinTermIDForTest(pending, "R").has_value();
-  const bool hasResetLow = resolvePendingPinTermIDForTest(pending, "RN").has_value();
-  const bool hasSetHigh = resolvePendingPinTermIDForTest(pending, "S").has_value();
-  const bool hasSetLow = resolvePendingPinTermIDForTest(pending, "SN").has_value();
-
-  const bool hasReset = hasResetHigh || hasResetLow;
-  const bool hasSet = hasSetHigh || hasSetLow;
-  if (hasReset && !hasSet) {
-    return false;
-  }
-  if (hasSet && !hasReset) {
-    return true;
-  }
-  return std::nullopt;
-}
-
-std::optional<bool> evaluateConstantUnderAssignmentsForTest(
-    BoolExpr* expr,
-    const std::unordered_map<size_t, bool>& assignments) {
-  std::unordered_map<BoolExpr*, std::optional<bool>> memo;
-  return evaluateConstantUnderAssignmentsImplForTest(expr, assignments, memo);
-}
-
-void inferSynthesizedResetInitialStateValuesForTest(SequentialDesignModel& model) {
-  const auto resetAssignments = collectResetAssignmentsForTest(model);
-  if (resetAssignments.empty()) {
-    return;
-  }
-
-  auto countUniqueExprNodes =
-      [](const std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash>& exprByKey) {
-        std::unordered_set<BoolExpr*> visited;
-        std::vector<BoolExpr*> stack;
-        for (const auto& [_, root] : exprByKey) {
-          if (root != nullptr) {
-            stack.push_back(root);
-          }
-        }
-
-        while (!stack.empty()) {
-          BoolExpr* current = stack.back();
-          stack.pop_back();
-          if (current == nullptr || !visited.insert(current).second) {
-            continue;
-          }
-          if (current->getLeft() != nullptr) {
-            stack.push_back(current->getLeft());
-          }
-          if (current->getRight() != nullptr) {
-            stack.push_back(current->getRight());
-          }
-        }
-        return visited.size();
-      };
-
-  std::unordered_map<SignalKey, BoolExpr*, SignalKeyHash> resetSpecializedNextStateByKey;
-  resetSpecializedNextStateByKey.reserve(model.stateBits.size());
-  std::unordered_map<BoolExpr*, BoolExpr*> resetSubstitutionMemo;
-  for (const auto& key : model.stateBits) {
-    const auto nextStateIt = model.nextStateExprByStateKey.find(key);
-    if (nextStateIt == model.nextStateExprByStateKey.end()) {
-      continue;
-    }
-    resetSpecializedNextStateByKey.emplace(
-        key,
-        substituteBoolExprVariables(
-            nextStateIt->second, resetAssignments, resetSubstitutionMemo));
-  }
-
-  constexpr size_t kMaxResetSpecializedExprNodesForInitInference = 50000;
-  if (countUniqueExprNodes(resetSpecializedNextStateByKey) >
-      kMaxResetSpecializedExprNodesForInitInference) {
-    return;
-  }
-
-  auto collectReferencedStateVars = [](BoolExpr* expr) {
-    std::unordered_set<size_t> referencedVars;
-    if (expr == nullptr) {
-      return referencedVars;
-    }
-
-    std::vector<BoolExpr*> stack = {expr};
-    std::unordered_set<BoolExpr*> visited;
-    while (!stack.empty()) {
-      BoolExpr* current = stack.back();
-      stack.pop_back();
-      if (current == nullptr || !visited.insert(current).second) {
-        continue;
-      }
-      if (current->getOp() == Op::VAR) {
-        if (current->getId() >= 2) {
-          referencedVars.insert(current->getId());
-        }
-        continue;
-      }
-      if (current->getLeft() != nullptr) {
-        stack.push_back(current->getLeft());
-      }
-      if (current->getRight() != nullptr) {
-        stack.push_back(current->getRight());
-      }
-    }
-    return referencedVars;
-  };
-
-  std::unordered_map<size_t, SignalKey> stateKeyByVar;
-  std::unordered_map<size_t, std::vector<SignalKey>> dependentStatesByVar;
-  stateKeyByVar.reserve(model.stateBits.size());
-  dependentStatesByVar.reserve(model.stateBits.size());
-  for (const auto& key : model.stateBits) {
-    const auto varIt = model.inputVarByKey.find(key);
-    if (varIt != model.inputVarByKey.end()) {
-      stateKeyByVar.emplace(varIt->second, key);
-    }
-  }
-  for (const auto& key : model.stateBits) {
-    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
-    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
-      continue;
-    }
-    const auto referencedVars = collectReferencedStateVars(nextStateIt->second);
-    for (const auto referencedVar : referencedVars) {
-      if (stateKeyByVar.find(referencedVar) == stateKeyByVar.end()) {
-        continue;
-      }
-      dependentStatesByVar[referencedVar].push_back(key);
-    }
-  }
-
-  std::unordered_map<SignalKey, SignalKey, SignalKeyHash> complementedPartnerByKey;
-  complementedPartnerByKey.reserve(model.complementedStateRelations.size() * 2);
-  for (const auto& relation : model.complementedStateRelations) {
-    complementedPartnerByKey.emplace(relation.primaryKey, relation.complementedKey);
-    complementedPartnerByKey.emplace(relation.complementedKey, relation.primaryKey);
-  }
-
-  std::unordered_map<size_t, bool> assignments = resetAssignments;
-  for (const auto& [key, value] : model.initialStateValueByKey) {
-    const auto varIt = model.inputVarByKey.find(key);
-    if (varIt != model.inputVarByKey.end()) {
-      assignments.emplace(varIt->second, value);
-    }
-  }
-
-  std::deque<SignalKey> workQueue(model.stateBits.begin(), model.stateBits.end());
-  auto recordKnownState = [&](const SignalKey& key, bool value) {
-    const auto [it, inserted] = model.initialStateValueByKey.emplace(key, value);
-    if (!inserted) {
-      return;
-    }
-
-    const auto varIt = model.inputVarByKey.find(key);
-    if (varIt != model.inputVarByKey.end()) {
-      assignments[varIt->second] = value;
-      const auto dependentIt = dependentStatesByVar.find(varIt->second);
-      if (dependentIt != dependentStatesByVar.end()) {
-        workQueue.insert(
-            workQueue.end(),
-            dependentIt->second.begin(),
-            dependentIt->second.end());
-      }
-    }
-
-    const auto partnerIt = complementedPartnerByKey.find(key);
-    if (partnerIt != complementedPartnerByKey.end() &&
-        model.initialStateValueByKey.find(partnerIt->second) ==
-            model.initialStateValueByKey.end()) {
-      workQueue.push_back(partnerIt->second);
-    }
-  };
-
-  while (!workQueue.empty()) {
-    const SignalKey key = workQueue.front();
-    workQueue.pop_front();
-
-    if (model.initialStateValueByKey.find(key) != model.initialStateValueByKey.end()) {
-      const auto partnerIt = complementedPartnerByKey.find(key);
-      if (partnerIt != complementedPartnerByKey.end() &&
-          model.initialStateValueByKey.find(partnerIt->second) ==
-              model.initialStateValueByKey.end()) {
-        recordKnownState(partnerIt->second, !model.initialStateValueByKey.at(key));
-      }
-      continue;
-    }
-
-    const auto nextStateIt = resetSpecializedNextStateByKey.find(key);
-    if (nextStateIt == resetSpecializedNextStateByKey.end()) {
-      continue;
-    }
-
-    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
-    const auto resetValue = evaluateConstantUnderAssignmentsImplForTest(
-        nextStateIt->second, assignments, memo);
-    if (resetValue.has_value()) {
-      recordKnownState(key, *resetValue);
-    }
-  }
-}
-
-std::optional<bool> getResetAssertionValueForTest(const std::string& displayName) {
-  return getResetAssertionValueFromDisplayNameForTest(displayName);
-}
-
-namespace {
-
-std::optional<bool> getResetAssertionValueFromDisplayNameForTest(
-    const std::string& displayName) {
-  const std::string normalized = normalizeSignalBaseNameForTest(displayName);
-  std::vector<std::string> candidates = {normalized};
-  if (hasSuffixForTest(normalized, "_I")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 2));
-  }
-  if (hasSuffixForTest(normalized, "_NI")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 1));
-  }
-  appendDomainPrefixedActiveLowResetCandidatesForTest(candidates);
-  for (const auto& candidate : candidates) {
-    if (isResetNameTokenForTest(candidate, "RESET") ||
-        isResetNameTokenForTest(candidate, "RST")) {
-      return true;
-    }
-    if (isResetNameTokenForTest(candidate, "RESET_N") ||
-        isResetNameTokenForTest(candidate, "RESETN") ||
-        isResetNameTokenForTest(candidate, "RESET_L") ||
-        isResetNameTokenForTest(candidate, "RST_N") ||
-        isResetNameTokenForTest(candidate, "RSTN") ||
-        isResetNameTokenForTest(candidate, "RST_L")) {
-      return false;
-    }
-  }
-  return std::nullopt;
-}
- 
-}  // namespace
-
-std::unordered_map<SignalKey, bool, SignalKeyHash>
-deriveResetBootstrapStateValuesForTest(
-    const SequentialDesignModel& model,
-    size_t cycles) {
-  const auto resetAssignments = collectResetAssignmentsForTest(model);
-  if (resetAssignments.empty() || cycles == 0) {
-    return {};
-  }
-
-  std::unordered_map<SignalKey, bool, SignalKeyHash> knownStates =
-      model.initialStateValueByKey;
-  for (size_t step = 0; step < cycles; ++step) {
-    std::unordered_map<size_t, bool> assignments = resetAssignments;
-    for (const auto& [key, value] : knownStates) {
-      const auto varIt = model.inputVarByKey.find(key);
-      if (varIt != model.inputVarByKey.end()) {
-        assignments.emplace(varIt->second, value);
-      }
-    }
-
-    std::unordered_map<SignalKey, bool, SignalKeyHash> nextKnownStates;
-    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
-    for (const auto& key : model.stateBits) {
-      const auto value = evaluateConstantUnderAssignmentsImplForTest(
-          model.nextStateExprByStateKey.at(key), assignments, memo);
-      if (value.has_value()) {
-        nextKnownStates.emplace(key, *value);
-      }
-    }
-    knownStates = std::move(nextKnownStates);
-  }
-
-  return knownStates;
-}
-
-AlignedSignals filterStateEqualitiesByInitialValueForTest(
-    const SequentialDesignModel& model0,
-    const SequentialDesignModel& model1,
-    const AlignedSignals& candidateStates) {
-  AlignedSignals anchoredStates;
-  for (size_t i = 0; i < candidateStates.names.size(); ++i) {
-    const auto initial0 = model0.initialStateValueByKey.find(candidateStates.keys0[i]);
-    const auto initial1 = model1.initialStateValueByKey.find(candidateStates.keys1[i]);
-    if (initial0 == model0.initialStateValueByKey.end() ||
-        initial1 == model1.initialStateValueByKey.end() ||
-        initial0->second != initial1->second) {
-      continue;
-    }
-
-    anchoredStates.names.push_back(candidateStates.names[i]);
-    anchoredStates.keys0.push_back(candidateStates.keys0[i]);
-    anchoredStates.keys1.push_back(candidateStates.keys1[i]);
-  }
-  return anchoredStates;
 }
 
 std::string formatStringListForTest(const std::vector<std::string>& values,
@@ -2058,6 +1607,70 @@ DelayedRailMismatchModels makeHeldRailModelsForTest(
   return models;
 }
 
+SequentialDesignModel makeFlushingRailModelForTest(
+    const std::string& prefix,
+    const SignalKey& input,
+    const SignalKey& output,
+    size_t stages) {
+  SequentialDesignModel model;
+  model.environmentInputs = {input};
+  model.inputVarByKey.emplace(input, 2);
+  model.displayNameByKey.emplace(input, "flush_input[0]");
+
+  size_t previousSymbol = 2;
+  for (size_t stage = 0; stage < stages; ++stage) {
+    const SignalKey state =
+        makeSignalKey(prefix + "FlushState" + std::to_string(stage));
+    const size_t stateSymbol = 3 + stage;
+    addStateBitForTest(
+        model,
+        state,
+        stateSymbol,
+        prefix + ".flush_q[" + std::to_string(stage) + "]",
+        BoolExpr::Var(previousSymbol));
+    previousSymbol = stateSymbol;
+  }
+
+  model.allObservedOutputs = {output};
+  model.observedOutputs = {output};
+  model.displayNameByKey.emplace(output, "flush_output[0]");
+  model.observedOutputExprByKey.emplace(
+      output, BoolExpr::Var(previousSymbol));
+  return model;
+}
+
+DelayedRailMismatchModels makeFlushingRailModelsForTest(size_t stages) {
+  const SignalKey input = makeSignalKey("dualRailFlushInput");
+  const SignalKey output = makeSignalKey("dualRailFlushOutput");
+  DelayedRailMismatchModels models;
+  models.model0 =
+      makeFlushingRailModelForTest("left", input, output, stages);
+  models.model1 =
+      makeFlushingRailModelForTest("right", input, output, stages);
+  return models;
+}
+
+DelayedRailMismatchModels makeResettableHeldRailModelsForTest() {
+  constexpr const char* kPrefix = "noImplicitResetBootstrap";
+  auto models = makeHeldRailModelsForTest(kPrefix, std::nullopt, false);
+  const SignalKey reset = makeSignalKey("noImplicitResetBootstrapReset");
+  const SignalKey state0 = makeSignalKey(std::string(kPrefix) + "State0");
+  const SignalKey state1 = makeSignalKey(std::string(kPrefix) + "State1");
+
+  models.model0.environmentInputs = {reset};
+  models.model0.inputVarByKey.emplace(reset, 3);
+  models.model0.displayNameByKey.emplace(reset, "reset[0]");
+  models.model0.nextStateExprByStateKey.at(state0) = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(3)), BoolExpr::Var(2));
+
+  models.model1.environmentInputs = {reset};
+  models.model1.inputVarByKey.emplace(reset, 3);
+  models.model1.displayNameByKey.emplace(reset, "reset[0]");
+  models.model1.nextStateExprByStateKey.at(state1) = BoolExpr::And(
+      BoolExpr::Not(BoolExpr::Var(3)), BoolExpr::Var(2));
+  return models;
+}
+
 size_t bitCountForPdrChainStateCount(size_t logicalStateCount) {
   size_t bits = 0;
   size_t encodedStates = 1;
@@ -2572,54 +2185,6 @@ KInductionProblem buildClassicPdrOneHotReachableBadChainProblem(
   return problem;
 }
 
-std::string makeOneHotPdrFullFlowImplSource(const std::string& moduleName,
-                                            size_t depth,
-                                            bool reachableBad) {
-  const size_t stateCount = depth + 1;
-  std::ostringstream source;
-  source << "module " << moduleName
-         << "(input clk, input reset, output out);\n";
-  for (size_t index = 0; index < stateCount; ++index) {
-    source << "  reg s" << index << ";\n";
-  }
-  // Keep the parsed full-flow PDR fixture in one clocked process.  Newer
-  // SystemVerilog frontend lowering can split independent procedural blocks in
-  // a way that makes this tiny synthetic chain frontend-shape dependent, while
-  // the intended SEC/PDR behavior is only the one-hot temporal chain below.
-  source << "  always @(posedge clk) begin\n";
-  source << "    if (reset) begin\n";
-  for (size_t index = 0; index < stateCount; ++index) {
-    source << "      s" << index << " <= "
-           << (index == 0 ? "1'b1" : "1'b0") << ";\n";
-  }
-  source << "    end else begin\n";
-  for (size_t index = 0; index < stateCount; ++index) {
-    source << "      s" << index << " <= ";
-    if (index == 0) {
-      source << (reachableBad ? "1'b0" : "s0");
-    } else if (reachableBad || index > 1) {
-      source << "s" << (index - 1);
-    } else {
-      source << "1'b0";
-    }
-    source << ";\n";
-  }
-  source << "    end\n";
-  source << "  end\n";
-  source << "  assign out = s" << depth << ";\n";
-  source << "endmodule\n";
-  return source.str();
-}
-
-std::string makeOneHotPdrFullFlowReferenceSource(
-    const std::string& moduleName) {
-  std::ostringstream source;
-  source << "module " << moduleName
-         << "(input clk, input reset, output out);\n";
-  source << "  assign out = 1'b0;\n";
-  source << "endmodule\n";
-  return source.str();
-}
 
 KInductionProblem buildDocumentedBooleanPdrCounterexampleProblem() {
   KInductionProblem problem;
@@ -3484,161 +3049,6 @@ SNLDesign* createExtraInputDffTop(
   return top;
 }
 
-SNLDesign* createDffeTop(
-    NLLibrary* library,
-    const std::string& name) {
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topEnable =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("en"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topOut =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
-
-  auto* ff = SNLInstance::create(top, NLDB0::getDFFE(), NLName("ff0"));
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netEnable = SNLScalarNet::create(top, NLName("net_en"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
-
-  topIn->setNet(netIn);
-  topEnable->setNet(netEnable);
-  topClock->setNet(netClock);
-  topOut->setNet(netQ);
-
-  ff->getInstTerm(NLDB0::getDFFEClock())->setNet(netClock);
-  ff->getInstTerm(NLDB0::getDFFEData())->setNet(netIn);
-  ff->getInstTerm(NLDB0::getDFFEEnable())->setNet(netEnable);
-  ff->getInstTerm(NLDB0::getDFFEOutput())->setNet(netQ);
-
-  return top;
-}
-
-SNLDesign* createResetInitializedPipelineTop(
-    NLLibrary* library,
-    const std::string& name,
-    bool driveLastStageFromReset,
-    const std::vector<std::string>& ffNames);
-
-SNLDesign* createResetInitializedShiftPipelineTopWithStages(
-    NLLibrary* library,
-    const std::string& name,
-    size_t stages);
-
-SNLDesign* createResetInitializedPipelineTop(
-    NLLibrary* library,
-    const std::string& name,
-    bool driveLastStageFromReset) {
-  return createResetInitializedPipelineTop(
-      library,
-      name,
-      driveLastStageFromReset,
-      {"ff0", "ff1", "ff2"});
-}
-
-SNLDesign* createResetInitializedPipelineTop(
-    NLLibrary* library,
-    const std::string& name,
-    bool driveLastStageFromReset,
-    const std::vector<std::string>& ffNames) {
-  if (ffNames.size() != 3) {
-    throw std::invalid_argument(
-        "createResetInitializedPipelineTop expects exactly three flop names");
-  }
-
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topResetN =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst_n"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topOut =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
-
-  auto* ff0 = SNLInstance::create(top, NLDB0::getDFFRN(), NLName(ffNames[0]));
-  auto* ff1 = SNLInstance::create(top, NLDB0::getDFFRN(), NLName(ffNames[1]));
-  auto* ff2 = SNLInstance::create(top, NLDB0::getDFFRN(), NLName(ffNames[2]));
-
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netResetN = SNLScalarNet::create(top, NLName("net_rst_n"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  auto* netQ0 = SNLScalarNet::create(top, NLName("net_q0"));
-  auto* netQ1 = SNLScalarNet::create(top, NLName("net_q1"));
-  auto* netQ2 = SNLScalarNet::create(top, NLName("net_q2"));
-
-  topIn->setNet(netIn);
-  topResetN->setNet(netResetN);
-  topClock->setNet(netClock);
-  topOut->setNet(netQ0);
-
-  for (auto* ff : {ff0, ff1, ff2}) {
-    ff->getInstTerm(NLDB0::getDFFRNClock())->setNet(netClock);
-    ff->getInstTerm(NLDB0::getDFFRNResetN())->setNet(netResetN);
-  }
-
-  ff0->getInstTerm(NLDB0::getDFFRNData())->setNet(netQ1);
-  ff0->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ0);
-  ff1->getInstTerm(NLDB0::getDFFRNData())->setNet(netQ2);
-  ff1->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ1);
-  ff2->getInstTerm(NLDB0::getDFFRNData())->setNet(
-      driveLastStageFromReset ? netResetN : netIn);
-  ff2->getInstTerm(NLDB0::getDFFRNOutput())->setNet(netQ2);
-
-  return top;
-}
-
-SNLDesign* createResetInitializedShiftPipelineTopWithStages(
-    NLLibrary* library,
-    const std::string& name,
-    size_t stages) {
-  if (stages == 0) {
-    throw std::invalid_argument(
-        "createResetInitializedShiftPipelineTopWithStages expects at least one stage");
-  }
-
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topResetN =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst_n"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topOut =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
-
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netResetN = SNLScalarNet::create(top, NLName("net_rst_n"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  std::vector<SNLScalarNet*> stageNets;
-  stageNets.reserve(stages);
-  for (size_t i = 0; i < stages; ++i) {
-    stageNets.push_back(
-        SNLScalarNet::create(top, NLName("net_q" + std::to_string(i))));
-  }
-
-  topIn->setNet(netIn);
-  topResetN->setNet(netResetN);
-  topClock->setNet(netClock);
-  topOut->setNet(stageNets.front());
-
-  for (size_t i = 0; i < stages; ++i) {
-    auto* ff = SNLInstance::create(
-        top, NLDB0::getDFFRN(), NLName("ff" + std::to_string(i)));
-    ff->getInstTerm(NLDB0::getDFFRNClock())->setNet(netClock);
-    ff->getInstTerm(NLDB0::getDFFRNResetN())->setNet(netResetN);
-    ff->getInstTerm(NLDB0::getDFFRNData())->setNet(
-        i + 1 == stages ? netIn : stageNets[i + 1]);
-    ff->getInstTerm(NLDB0::getDFFRNOutput())->setNet(stageNets[i]);
-  }
-
-  return top;
-}
 
 SNLDesign* createBootstrapPipelineTopWithStages(
     NLLibrary* library,
@@ -3710,230 +3120,6 @@ SNLDesign* createBootstrapPipelineTopWithStages(
   return top;
 }
 
-SNLDesign* createBootstrapPipelineTop(
-    NLLibrary* library,
-    const std::string& name,
-    SNLDesign* invModel,
-    SNLDesign* andModel) {
-  return createBootstrapPipelineTopWithStages(library, name, invModel, andModel, 3);
-}
-
-SNLDesign* createResetLoadsInputTop(
-    NLLibrary* library,
-    const std::string& name,
-    SNLDesign* invModel,
-    SNLDesign* andModel,
-    SNLDesign* orModel) {
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topReset =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topOut =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
-
-  auto* resetInv = SNLInstance::create(top, invModel, NLName("reset_inv"));
-  auto* loadData = SNLInstance::create(top, andModel, NLName("load_data"));
-  auto* holdData = SNLInstance::create(top, andModel, NLName("hold_data"));
-  auto* muxOut = SNLInstance::create(top, orModel, NLName("mux_out"));
-  auto* ff = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff0"));
-
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netReset = SNLScalarNet::create(top, NLName("net_rst"));
-  auto* netResetN = SNLScalarNet::create(top, NLName("net_rst_n"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  auto* netLoad = SNLScalarNet::create(top, NLName("net_load"));
-  auto* netHold = SNLScalarNet::create(top, NLName("net_hold"));
-  auto* netD = SNLScalarNet::create(top, NLName("net_d"));
-  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
-
-  topIn->setNet(netIn);
-  topReset->setNet(netReset);
-  topClock->setNet(netClock);
-  topOut->setNet(netQ);
-
-  resetInv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netReset);
-  resetInv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netResetN);
-
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netReset);
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(netIn);
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netLoad);
-
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netResetN);
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(netQ);
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netHold);
-
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("A")))->setNet(netLoad);
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("B")))->setNet(netHold);
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("Y")))->setNet(netD);
-
-  ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
-  ff->getInstTerm(NLDB0::getDFFData())->setNet(netD);
-  ff->getInstTerm(NLDB0::getDFFOutput())->setNet(netQ);
-
-  return top;
-}
-
-SNLDesign* createResetLoadsInputTwoStageTop(
-    NLLibrary* library,
-    const std::string& name,
-    SNLDesign* invModel,
-    SNLDesign* andModel,
-    SNLDesign* orModel) {
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topReset =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topOut =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
-
-  auto* resetInv = SNLInstance::create(top, invModel, NLName("reset_inv"));
-  auto* loadData = SNLInstance::create(top, andModel, NLName("load_data"));
-  auto* holdData = SNLInstance::create(top, andModel, NLName("hold_data"));
-  auto* muxOut = SNLInstance::create(top, orModel, NLName("mux_out"));
-  auto* ffHidden = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff_hidden"));
-  auto* ffOut = SNLInstance::create(top, NLDB0::getDFF(), NLName("ff_out"));
-
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netReset = SNLScalarNet::create(top, NLName("net_rst"));
-  auto* netResetN = SNLScalarNet::create(top, NLName("net_rst_n"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  auto* netLoad = SNLScalarNet::create(top, NLName("net_load"));
-  auto* netHold = SNLScalarNet::create(top, NLName("net_hold"));
-  auto* netHiddenD = SNLScalarNet::create(top, NLName("net_hidden_d"));
-  auto* netHiddenQ = SNLScalarNet::create(top, NLName("net_hidden_q"));
-  auto* netOutQ = SNLScalarNet::create(top, NLName("net_out_q"));
-
-  topIn->setNet(netIn);
-  topReset->setNet(netReset);
-  topClock->setNet(netClock);
-  topOut->setNet(netOutQ);
-
-  resetInv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netReset);
-  resetInv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netResetN);
-
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netReset);
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(netIn);
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netLoad);
-
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netResetN);
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(netHiddenQ);
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netHold);
-
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("A")))->setNet(netLoad);
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("B")))->setNet(netHold);
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("Y")))->setNet(netHiddenD);
-
-  for (auto* ff : {ffHidden, ffOut}) {
-    ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
-  }
-  ffHidden->getInstTerm(NLDB0::getDFFData())->setNet(netHiddenD);
-  ffHidden->getInstTerm(NLDB0::getDFFOutput())->setNet(netHiddenQ);
-  ffOut->getInstTerm(NLDB0::getDFFData())->setNet(netHiddenQ);
-  ffOut->getInstTerm(NLDB0::getDFFOutput())->setNet(netOutQ);
-
-  return top;
-}
-
-SNLDesign* createResetLoadsInputShiftPipelineTopWithStages(
-    NLLibrary* library,
-    const std::string& name,
-    SNLDesign* invModel,
-    SNLDesign* andModel,
-    SNLDesign* orModel,
-    size_t stages) {
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topReset =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("rst"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topOut =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out"));
-
-  auto* resetInv = SNLInstance::create(top, invModel, NLName("reset_inv"));
-  auto* loadData = SNLInstance::create(top, andModel, NLName("load_data"));
-  auto* holdData = SNLInstance::create(top, andModel, NLName("hold_data"));
-  auto* muxOut = SNLInstance::create(top, orModel, NLName("mux_out"));
-
-  std::vector<SNLInstance*> flops;
-  flops.reserve(stages);
-  for (size_t i = 0; i < stages; ++i) {
-    flops.push_back(
-        SNLInstance::create(top, NLDB0::getDFF(), NLName("ff" + std::to_string(i))));
-  }
-
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netReset = SNLScalarNet::create(top, NLName("net_rst"));
-  auto* netResetN = SNLScalarNet::create(top, NLName("net_rst_n"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  auto* netLoad = SNLScalarNet::create(top, NLName("net_load"));
-  auto* netHold = SNLScalarNet::create(top, NLName("net_hold"));
-  auto* netLastD = SNLScalarNet::create(top, NLName("net_last_d"));
-  std::vector<SNLScalarNet*> stateNets;
-  stateNets.reserve(stages);
-  for (size_t i = 0; i < stages; ++i) {
-    stateNets.push_back(
-        SNLScalarNet::create(top, NLName("net_q" + std::to_string(i))));
-  }
-
-  topIn->setNet(netIn);
-  topReset->setNet(netReset);
-  topClock->setNet(netClock);
-  topOut->setNet(stateNets.front());
-
-  resetInv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netReset);
-  resetInv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netResetN);
-
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netReset);
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(netIn);
-  loadData->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netLoad);
-
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("A")))->setNet(netResetN);
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("B")))->setNet(stateNets.back());
-  holdData->getInstTerm(andModel->getScalarTerm(NLName("Y")))->setNet(netHold);
-
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("A")))->setNet(netLoad);
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("B")))->setNet(netHold);
-  muxOut->getInstTerm(orModel->getScalarTerm(NLName("Y")))->setNet(netLastD);
-
-  for (auto* ff : flops) {
-    ff->getInstTerm(NLDB0::getDFFClock())->setNet(netClock);
-  }
-  for (size_t i = 0; i + 1 < stages; ++i) {
-    flops[i]->getInstTerm(NLDB0::getDFFData())->setNet(stateNets[i + 1]);
-    flops[i]->getInstTerm(NLDB0::getDFFOutput())->setNet(stateNets[i]);
-  }
-  flops.back()->getInstTerm(NLDB0::getDFFData())->setNet(netLastD);
-  flops.back()->getInstTerm(NLDB0::getDFFOutput())->setNet(stateNets.back());
-
-  return top;
-}
-
-SNLDesign* createDffQnModel(NLLibrary* library) {
-  auto* model =
-      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName("DFF_Q_QN"));
-  auto* data =
-      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
-  auto* clock =
-      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
-  auto* q =
-      SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("Q"));
-  auto* qn =
-      SNLScalarTerm::create(model, SNLTerm::Direction::Output, NLName("QN"));
-  SNLDesignModeling::addInputsToClockArcs({data}, clock);
-  SNLDesignModeling::addClockToOutputsArcs(clock, {q, qn});
-  return model;
-}
 
 SNLDesign* createNamedComplementSequentialModel(
     NLLibrary* library,
@@ -4055,27 +3241,6 @@ SNLDesign* createResetSetSequentialModel(NLLibrary* library,
   return model;
 }
 
-SNLDesign* createNamedComplementSetSequentialModel(
-    NLLibrary* library,
-    const std::string& name,
-    const std::string& primaryPinName,
-    const std::string& complementPinName) {
-  auto* model =
-      SNLDesign::create(library, SNLDesign::Type::Primitive, NLName(name));
-  auto* data =
-      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("D"));
-  auto* set =
-      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("S"));
-  auto* clock =
-      SNLScalarTerm::create(model, SNLTerm::Direction::Input, NLName("CK"));
-  auto* primary = SNLScalarTerm::create(
-      model, SNLTerm::Direction::Output, NLName(primaryPinName));
-  auto* complement = SNLScalarTerm::create(
-      model, SNLTerm::Direction::Output, NLName(complementPinName));
-  SNLDesignModeling::addInputsToClockArcs({data, set}, clock);
-  SNLDesignModeling::addClockToOutputsArcs(clock, {primary, complement});
-  return model;
-}
 
 SNLDesign* createSequentialOutputPairTop(
     NLLibrary* library,
@@ -4182,48 +3347,6 @@ SNLDesign* createBusSequentialTop(
   return top;
 }
 
-SNLDesign* createComplementedSetSequentialTop(
-    NLLibrary* library,
-    const std::string& name,
-    SNLDesign* sequentialModel,
-    const std::string& primaryPinName,
-    const std::string& complementPinName) {
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topSet =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("set"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topPrimary =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out_primary"));
-  auto* topSecondary = SNLScalarTerm::create(
-      top, SNLTerm::Direction::Output, NLName("out_secondary"));
-
-  auto* seq = SNLInstance::create(top, sequentialModel, NLName("ff0"));
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netSet = SNLScalarNet::create(top, NLName("net_set"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  auto* netPrimary = SNLScalarNet::create(top, NLName("net_primary"));
-  auto* netSecondary = SNLScalarNet::create(top, NLName("net_secondary"));
-
-  topIn->setNet(netIn);
-  topSet->setNet(netSet);
-  topClock->setNet(netClock);
-  topPrimary->setNet(netPrimary);
-  topSecondary->setNet(netSecondary);
-
-  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("D")))->setNet(netIn);
-  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("S")))->setNet(netSet);
-  seq->getInstTerm(sequentialModel->getScalarTerm(NLName("CK")))->setNet(netClock);
-  seq->getInstTerm(sequentialModel->getScalarTerm(NLName(primaryPinName)))->setNet(
-      netPrimary);
-  seq->getInstTerm(sequentialModel->getScalarTerm(NLName(complementPinName)))->setNet(
-      netSecondary);
-
-  return top;
-}
 
 SNLDesign* createNoDataSequentialTop(
     NLLibrary* library,
@@ -4981,61 +4104,6 @@ SNLDesign* createConstantDrivenDffTop(
   return top;
 }
 
-SNLDesign* createComplementedOutputTop(
-    NLLibrary* library,
-    const std::string& name,
-    SNLDesign* ffModel,
-    SNLDesign* invModel,
-    bool rebuildOutputsFromComplements) {
-  auto* top =
-      SNLDesign::create(library, SNLDesign::Type::Standard, NLName(name));
-  auto* topIn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("in"));
-  auto* topClock =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Input, NLName("clk"));
-  auto* topOutQ =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out_q"));
-  auto* topOutQn =
-      SNLScalarTerm::create(top, SNLTerm::Direction::Output, NLName("out_qn"));
-
-  auto* ff = SNLInstance::create(top, ffModel, NLName("ff0"));
-  SNLInstance* qnToQInv = nullptr;
-  SNLInstance* qToQnInv = nullptr;
-  if (rebuildOutputsFromComplements) {
-    qnToQInv = SNLInstance::create(top, invModel, NLName("inv_qn_to_q"));
-    qToQnInv = SNLInstance::create(top, invModel, NLName("inv_q_to_qn"));
-  }
-
-  auto* netIn = SNLScalarNet::create(top, NLName("net_in"));
-  auto* netClock = SNLScalarNet::create(top, NLName("net_clk"));
-  auto* netQ = SNLScalarNet::create(top, NLName("net_q"));
-  auto* netQn = SNLScalarNet::create(top, NLName("net_qn"));
-  auto* netOutQ = SNLScalarNet::create(top, NLName("net_out_q"));
-  auto* netOutQn = SNLScalarNet::create(top, NLName("net_out_qn"));
-
-  topIn->setNet(netIn);
-  topClock->setNet(netClock);
-
-  ff->getInstTerm(ffModel->getScalarTerm(NLName("CK")))->setNet(netClock);
-  ff->getInstTerm(ffModel->getScalarTerm(NLName("D")))->setNet(netIn);
-  ff->getInstTerm(ffModel->getScalarTerm(NLName("Q")))->setNet(netQ);
-  ff->getInstTerm(ffModel->getScalarTerm(NLName("QN")))->setNet(netQn);
-
-  if (rebuildOutputsFromComplements) {
-    topOutQ->setNet(netOutQ);
-    topOutQn->setNet(netOutQn);
-    qnToQInv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netQn);
-    qnToQInv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netOutQ);
-    qToQnInv->getInstTerm(invModel->getScalarTerm(NLName("A")))->setNet(netQ);
-    qToQnInv->getInstTerm(invModel->getScalarTerm(NLName("Y")))->setNet(netOutQn);
-  } else {
-    topOutQ->setNet(netQ);
-    topOutQn->setNet(netQn);
-  }
-
-  return top;
-}
-
 SignalKey findKeyByDisplayName(const SequentialDesignModel& model,
                                const std::string& displayName) {
   for (const auto& [key, currentName] : model.displayNameByKey) {
@@ -5148,7 +4216,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       UninitializedDffProductHasFrameZeroMismatchWithPdr) {
+       BinarySecSkipsUninitializedDffOutput) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* library = NLLibrary::create(db, NLName("LIB"));
@@ -5163,293 +4231,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::Pdr);
   const auto result = strategy.run(2);
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  // Binary SEC cannot compare independently initialized internal state. The
+  // state-dependent output is skipped instead of reporting a false mismatch.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
   EXPECT_EQ(result.bound, 0u);
+  EXPECT_EQ(result.coveredOutputs, 0u);
 }
 
-TEST_F(SequentialEquivalenceStrategyTests,
-       IdenticalDffDesignsAreEquivalentWithKInductionEngine) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library = NLLibrary::create(db, NLName("LIB"));
-  auto* primitives = NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
-  auto* invModel = createInvModel(primitives);
 
-  auto* top0 =
-      createDffTop(library, "top0", invModel, false, false, "in", "out", "ff0");
-  auto* top1 =
-      createDffTop(library, "top1", invModel, false, false, "in", "out", "ff1");
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(2);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests, IdenticalDffDesignsAreEquivalentWithImcEngine) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library = NLLibrary::create(db, NLName("LIB"));
-  auto* primitives = NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("PRIMS"));
-  auto* invModel = createInvModel(primitives);
-
-  auto* top0 =
-      createDffTop(library, "top0", invModel, false, false, "in", "out", "ff0");
-  auto* top1 =
-      createDffTop(library, "top1", invModel, false, false, "in", "out", "ff1");
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::Imc);
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  testing::internal::CaptureStderr();
-  const auto result = strategy.run(2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 1u);
-  EXPECT_NE(
-      stderrOutput.find("SEC diag: SEC IMC proven outputs: 1/1"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("SEC diag: SEC IMC not proven output"),
-      std::string::npos)
-      << stderrOutput;
-  ASSERT_TRUE(result.proofProgress.has_value());
-  EXPECT_EQ(result.proofProgress->engineLabel, "IMC");
-  EXPECT_EQ(result.proofProgress->provenOutputs, 1u);
-  EXPECT_EQ(result.proofProgress->totalOutputs, 1u);
-  EXPECT_TRUE(result.proofProgress->unprovenOutputs.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests, OutputMismatchFailsAfterInitialObservation) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* top0 = createDffTop(library, "top0", invModel, false, false);
-  auto* top1 = createDffTop(library, "top1", invModel, false, true);
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  // Without a cross-design state assumption, the inverted registered output is
-  // first a concrete SEC mismatch after one transition.
-  EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests, NextStateMismatchFailsAtOneStep) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* top0 = createDffTop(library, "top0", invModel, false, false);
-  auto* top1 = createDffTop(library, "top1", invModel, true, false);
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests, DffeHoldSemanticsAreProved) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top0 = createDffeTop(library, "top0");
-  auto* top1 = createDffeTop(library, "top1");
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests, ComplementedStateOutputsRemainConsistent) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* dffQnModel = createDffQnModel(primitives);
-  auto* top0 =
-      createComplementedOutputTop(library, "top0", dffQnModel, invModel, false);
-  auto* top1 =
-      createComplementedOutputTop(library, "top1", dffQnModel, invModel, true);
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests, EquivalentDesignsWithRenamedStateAreAccepted) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* top0 = createDffTop(library, "top0", invModel, false, false, "state_a");
-  auto* top1 = createDffTop(library, "top1", invModel, false, false, "state_b");
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RenamedStatePipelineIsProvedWithoutNameBasedStateMatching) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top0 = createResetInitializedPipelineTop(
-      library, "top0", false, {"left0", "left1", "left2"});
-  auto* top1 = createResetInitializedPipelineTop(
-      library, "top1", false, {"right0", "right1", "right2"});
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetInitializedThreeStagePipelineFailsAtThreeSteps) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
-  auto* top1 = createResetInitializedPipelineTop(library, "top1", true);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(4);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetInitializedEquivalentPipelineIsProved) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
-  auto* top1 = createResetInitializedPipelineTop(library, "top1", false);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  // PDR can close the invariant before the visible output stage.
-  EXPECT_LE(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetInitializedRenamedPipelineClosesWithinThreeStepSecProof) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top0 = createResetInitializedPipelineTop(
-      library, "top0", false, {"ff0", "ff1", "ff2"});
-  auto* top1 = createResetInitializedPipelineTop(
-      library, "top1", false, {"state_a", "state_b", "state_c"});
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(4);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapEquivalentPipelineIsProved) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* andModel = createAnd2Model(primitives);
-  auto* top0 =
-      createBootstrapPipelineTop(library, "top0", invModel, andModel);
-  auto* top1 =
-      createBootstrapPipelineTop(library, "top1", invModel, andModel);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapCanAnchorEqualStatesWithoutConstantValues) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* andModel = createAnd2Model(primitives);
-  auto* orModel = createOr2Model(primitives);
-  auto* top0 =
-      createResetLoadsInputTop(library, "top0", invModel, andModel, orModel);
-  auto* top1 =
-      createResetLoadsInputTop(library, "top1", invModel, andModel, orModel);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapCanAnchorHiddenEqualStatesWithoutConstantValues) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* andModel = createAnd2Model(primitives);
-  auto* orModel = createOr2Model(primitives);
-  auto* top0 = createResetLoadsInputTwoStageTop(
-      library, "top0", invModel, andModel, orModel);
-  auto* top1 = createResetLoadsInputTwoStageTop(
-      library, "top1", invModel, andModel, orModel);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
-}
 
 TEST_F(SequentialEquivalenceStrategyTests,
        BoolFormulaImplicationProvesCommutedConeUnderStateEquality) {
@@ -5470,336 +4259,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       KEPLER_FORMAL::Config::getSolverType()));
 }
 
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapHiddenShiftPipelineDoesNotCloseBelowDepth) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* andModel = createAnd2Model(primitives);
-  auto* orModel = createOr2Model(primitives);
-  auto* top0 = createResetLoadsInputShiftPipelineTopWithStages(
-      library, "top0", invModel, andModel, orModel, 20);
-  auto* top1 = createResetLoadsInputShiftPipelineTopWithStages(
-      library, "top1", invModel, andModel, orModel, 20);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(1);
-
-  // A one-step proof cannot justify equality of a hidden 20-stage shift chain
-  // because SEC does not assume cross-design internal state correspondence.
-  // Keep the result inconclusive until the caller supplies a sufficient KI
-  // horizon.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 1u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ResetBootstrapLongEquivalentPipelineDoesNotCloseAtSmallK) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* andModel = createAnd2Model(primitives);
-  auto* top0 =
-      createBootstrapPipelineTopWithStages(library, "top0", invModel, andModel, 12);
-  auto* top1 =
-      createBootstrapPipelineTopWithStages(library, "top1", invModel, andModel, 12);
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(3);
-
-  // The removed startup fast path used internal cross-design state facts.
-  // With strict top-output k-induction inputs only, this 12-stage pipe needs
-  // a deeper caller horizon than k=3.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       StructuralInvariantHandlesMismatchedStateCountsWithoutOscillation) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top0 = createResetInitializedShiftPipelineTopWithStages(
-      library, "top0", 5);
-  auto* top1 = createResetInitializedShiftPipelineTopWithStages(
-      library, "top1", 1);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(6);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 1u);
-  EXPECT_LE(result.bound, 6u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantDoesNotRelateInternalStateWithoutReset) {
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.stateBits = {state0};
-  model0.displayNameByKey.emplace(state0, "same_name_state[0]");
-  model0.initialStateValueByKey.emplace(state0, false);
-
-  SequentialDesignModel model1;
-  model1.stateBits = {state1};
-  model1.displayNameByKey.emplace(state1, "same_name_state[0]");
-  model1.initialStateValueByKey.emplace(state1, false);
-
-  const auto invariant = buildReachableStateInvariant(model0, model1);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 0u);
-  EXPECT_TRUE(invariant.bootstrapValues0.empty());
-  EXPECT_TRUE(invariant.bootstrapValues1.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantSkipsBootstrapWhenResetAndInitialStateAreComplete) {
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.initialStateValueByKey.emplace(state0, false);
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.initialStateValueByKey.emplace(state1, true);
-
-  const auto invariant = buildReachableStateInvariant(model0, model1);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 0u);
-  EXPECT_TRUE(invariant.bootstrapValues0.empty());
-  EXPECT_TRUE(invariant.bootstrapValues1.empty());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantDerivesDesignLocalBootstrapValuesFromReset) {
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(state0, 4);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(state1, 5);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
-
-  const auto invariant = buildReachableStateInvariant(model0, model1);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
-  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantRecognizesInputSuffixedResetNames) {
-  const SignalKey reset0 = makeSignalKey("reset0");
-  const SignalKey reset1 = makeSignalKey("reset1");
-  const SignalKey activeLowReset0 = makeSignalKey("activeLowReset0");
-  const SignalKey activeLowReset1 = makeSignalKey("activeLowReset1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-  const SignalKey lowState0 = makeSignalKey("lowState0");
-  const SignalKey lowState1 = makeSignalKey("lowState1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {reset0, activeLowReset0};
-  model0.stateBits = {state0, lowState0};
-  model0.inputVarByKey.emplace(reset0, 2);
-  model0.inputVarByKey.emplace(activeLowReset0, 4);
-  model0.inputVarByKey.emplace(state0, 6);
-  model0.inputVarByKey.emplace(lowState0, 8);
-  model0.displayNameByKey.emplace(reset0, "reset_i");
-  model0.displayNameByKey.emplace(activeLowReset0, "rst_ni");
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Not(BoolExpr::Var(2)));
-  model0.nextStateExprByStateKey.emplace(lowState0, BoolExpr::Var(4));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {reset1, activeLowReset1};
-  model1.stateBits = {state1, lowState1};
-  model1.inputVarByKey.emplace(reset1, 3);
-  model1.inputVarByKey.emplace(activeLowReset1, 5);
-  model1.inputVarByKey.emplace(state1, 7);
-  model1.inputVarByKey.emplace(lowState1, 9);
-  model1.displayNameByKey.emplace(reset1, "reset_i");
-  model1.displayNameByKey.emplace(activeLowReset1, "rst_ni");
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
-  model1.nextStateExprByStateKey.emplace(lowState1, BoolExpr::Var(5));
-
-  const auto invariant = buildReachableStateInvariant(model0, model1);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.bootstrapValues0.size(), 2u);
-  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
-  EXPECT_FALSE(invariant.bootstrapValues0.at(lowState0));
-  ASSERT_EQ(invariant.bootstrapValues1.size(), 2u);
-  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
-  EXPECT_FALSE(invariant.bootstrapValues1.at(lowState1));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantRecognizesDomainPrefixedActiveLowResetNames) {
-  const SignalKey readReset0 = makeSignalKey("readReset0");
-  const SignalKey writeReset1 = makeSignalKey("writeReset1");
-  const SignalKey state0 = makeSignalKey("state0");
-  const SignalKey state1 = makeSignalKey("state1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {readReset0};
-  model0.stateBits = {state0};
-  model0.inputVarByKey.emplace(readReset0, 2);
-  model0.inputVarByKey.emplace(state0, 4);
-  model0.displayNameByKey.emplace(readReset0, "rrst_n");
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {writeReset1};
-  model1.stateBits = {state1};
-  model1.inputVarByKey.emplace(writeReset1, 3);
-  model1.inputVarByKey.emplace(state1, 5);
-  model1.displayNameByKey.emplace(writeReset1, "wrst_n");
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Var(3));
-
-  const auto invariant = buildReachableStateInvariant(model0, model1);
-
-  // These resets are design-local active-low controls, not cross-design state
-  // relations.
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues0.at(state0));
-  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
-  EXPECT_FALSE(invariant.bootstrapValues1.at(state1));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantHandlesInputInSuffixAndMissingNextState) {
-  const SignalKey reset0 = makeSignalKey("reset0");
-  const SignalKey reset1 = makeSignalKey("reset1");
-  const SignalKey driven0 = makeSignalKey("driven0");
-  const SignalKey driven1 = makeSignalKey("driven1");
-  const SignalKey missingNext0 = makeSignalKey("missingNext0");
-  const SignalKey missingNext1 = makeSignalKey("missingNext1");
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {reset0};
-  model0.stateBits = {driven0, missingNext0};
-  model0.inputVarByKey.emplace(reset0, 2);
-  model0.inputVarByKey.emplace(driven0, 4);
-  model0.inputVarByKey.emplace(missingNext0, 6);
-  model0.displayNameByKey.emplace(reset0, "reset_in");
-  model0.nextStateExprByStateKey.emplace(driven0, BoolExpr::Var(2));
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {reset1};
-  model1.stateBits = {driven1, missingNext1};
-  model1.inputVarByKey.emplace(reset1, 3);
-  model1.inputVarByKey.emplace(driven1, 5);
-  model1.inputVarByKey.emplace(missingNext1, 7);
-  model1.displayNameByKey.emplace(reset1, "reset_in");
-  model1.nextStateExprByStateKey.emplace(driven1, BoolExpr::Var(3));
-
-  const auto invariant = buildReachableStateInvariant(model0, model1);
-
-  // States without a local next-state expression cannot receive a reset-derived
-  // bootstrap value.
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  ASSERT_EQ(invariant.bootstrapValues0.size(), 1u);
-  EXPECT_TRUE(invariant.bootstrapValues0.at(driven0));
-  EXPECT_EQ(invariant.bootstrapValues0.count(missingNext0), 0u);
-  ASSERT_EQ(invariant.bootstrapValues1.size(), 1u);
-  EXPECT_TRUE(invariant.bootstrapValues1.at(driven1));
-  EXPECT_EQ(invariant.bootstrapValues1.count(missingNext1), 0u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ReachableStateInvariantEvaluatesBootstrapValueOperatorsAndInvalidNodes) {
-  const SignalKey rst0 = makeSignalKey("rst0");
-  const SignalKey rst1 = makeSignalKey("rst1");
-  const SignalKey const0 = makeSignalKey("const0");
-  const SignalKey const1 = makeSignalKey("const1");
-  const SignalKey xor0 = makeSignalKey("xor0");
-  const SignalKey xor1 = makeSignalKey("xor1");
-  const SignalKey diff0 = makeSignalKey("diff0");
-  const SignalKey diff1 = makeSignalKey("diff1");
-  const SignalKey invalid0 = makeSignalKey("invalid0");
-  const SignalKey invalid1 = makeSignalKey("invalid1");
-  BoolExpr invalidExpr0;
-  BoolExpr invalidExpr1;
-
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst0};
-  model0.stateBits = {const0, xor0, diff0, invalid0};
-  model0.inputVarByKey.emplace(rst0, 2);
-  model0.inputVarByKey.emplace(const0, 4);
-  model0.inputVarByKey.emplace(xor0, 6);
-  model0.inputVarByKey.emplace(diff0, 8);
-  model0.inputVarByKey.emplace(invalid0, 10);
-  model0.displayNameByKey.emplace(rst0, "rst");
-  model0.nextStateExprByStateKey.emplace(const0, BoolExpr::createTrue());
-  model0.nextStateExprByStateKey.emplace(
-      xor0, BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::createFalse()));
-  model0.nextStateExprByStateKey.emplace(diff0, BoolExpr::Var(2));
-  model0.nextStateExprByStateKey.emplace(invalid0, &invalidExpr0);
-
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst1};
-  model1.stateBits = {const1, xor1, diff1, invalid1};
-  model1.inputVarByKey.emplace(rst1, 3);
-  model1.inputVarByKey.emplace(const1, 5);
-  model1.inputVarByKey.emplace(xor1, 7);
-  model1.inputVarByKey.emplace(diff1, 9);
-  model1.inputVarByKey.emplace(invalid1, 11);
-  model1.displayNameByKey.emplace(rst1, "rst");
-  model1.nextStateExprByStateKey.emplace(const1, BoolExpr::createTrue());
-  model1.nextStateExprByStateKey.emplace(
-      xor1, BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::createFalse()));
-  model1.nextStateExprByStateKey.emplace(diff1, BoolExpr::Not(BoolExpr::Var(3)));
-  model1.nextStateExprByStateKey.emplace(invalid1, &invalidExpr1);
-
-  const auto invariant = buildReachableStateInvariant(model0, model1);
-
-  EXPECT_EQ(invariant.bootstrapCycles, 3u);
-  EXPECT_TRUE(invariant.bootstrapValues0.at(const0));
-  EXPECT_TRUE(invariant.bootstrapValues1.at(const1));
-  EXPECT_TRUE(invariant.bootstrapValues0.at(xor0));
-  EXPECT_TRUE(invariant.bootstrapValues1.at(xor1));
-  EXPECT_TRUE(invariant.bootstrapValues0.at(diff0));
-  EXPECT_FALSE(invariant.bootstrapValues1.at(diff1));
-  EXPECT_EQ(invariant.bootstrapValues0.count(invalid0), 0u);
-  EXPECT_EQ(invariant.bootstrapValues1.count(invalid1), 0u);
-}
 
 TEST_F(SequentialEquivalenceStrategyTests,
        BoolExprRemapThrowsOnMissingVariableMapping) {
@@ -7228,6 +5687,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineTernarySimulationPreservesSharedTransitionRoots) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2, 3, 4};
+  problem.allSymbols = problem.state0Symbols;
+  problem.initialStateAssignments = {{2, false}, {3, false}, {4, true}};
+  problem.initialCondition = BoolExpr::createTrue();
+  problem.initializedStateCount = 3;
+  problem.totalStateCount = 3;
+
+  // Both target bits use the same transition DAG. The ternary reducer may
+  // share evaluation work, but it must still retain the controlling x4 value.
+  BoolExpr* sharedTransition = BoolExpr::Var(4);
+  problem.transitions0 = {
+      {2, sharedTransition}, {3, sharedTransition}, {4, BoolExpr::Var(4)}};
+  problem.bad = BoolExpr::And(BoolExpr::Var(2), BoolExpr::Var(3));
+  problem.property = BoolExpr::Not(problem.bad);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 1u);
+  EXPECT_NE(stderrOutput.find("predecessor_cube=1"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineBlockingUsesPaperRelativeInductionQuery) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -7645,81 +6135,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   }
 }
 
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrFullFlowProvesParsedVerilogSafeChainsWithinDepthsThreeFourFive) {
-  for (const size_t proofDepth : {size_t{3}, size_t{4}, size_t{5}}) {
-    NLUniverse::create();
-    auto* db = NLDB::create(NLUniverse::get());
-    auto* library = NLLibrary::create(db, NLName("LIB"));
-    const std::string suffix = std::to_string(proofDepth);
-    auto* impl = loadSystemVerilogTopFromSource(
-        library,
-        "pdr_full_safe_impl_k" + suffix,
-        makeOneHotPdrFullFlowImplSource(
-            "pdr_full_safe_impl_k" + suffix,
-            proofDepth,
-            /*reachableBad=*/false));
-    auto* reference = loadSystemVerilogTopFromSource(
-        library,
-        "pdr_full_safe_ref_k" + suffix,
-        makeOneHotPdrFullFlowReferenceSource("pdr_full_safe_ref_k" + suffix));
-
-    auto strategy = makeBinarySecStrategy(impl, reference, SecEngine::Pdr);
-    const auto result = strategy.run(proofDepth);
-
-    // Full-flow parsed-Verilog safe proofs have the same limitation as direct
-    // PDR safe proofs: exact proof depth is implementation-dependent because
-    // PDR may generalize to an invariant before the requested depth.
-    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
-        << "proofDepth=" << proofDepth << " reason=" << result.reason;
-    EXPECT_LE(result.bound, proofDepth) << "proofDepth=" << proofDepth;
-    EXPECT_EQ(result.coveredOutputs, 1u) << "proofDepth=" << proofDepth;
-    EXPECT_EQ(result.totalOutputs, 1u) << "proofDepth=" << proofDepth;
-
-    naja::DNL::destroy();
-    NLUniverse::get()->destroy();
-    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
-    KEPLER_FORMAL::BoolExprCache::destroy();
-  }
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrFullFlowFindsParsedVerilogCounterexamplesAtDepthsThreeFourFive) {
-  for (const size_t badDepth : {size_t{3}, size_t{4}, size_t{5}}) {
-    NLUniverse::create();
-    auto* db = NLDB::create(NLUniverse::get());
-    auto* library = NLLibrary::create(db, NLName("LIB"));
-    const std::string suffix = std::to_string(badDepth);
-    auto* impl = loadSystemVerilogTopFromSource(
-        library,
-        "pdr_full_diff_impl_k" + suffix,
-        makeOneHotPdrFullFlowImplSource(
-            "pdr_full_diff_impl_k" + suffix,
-            badDepth,
-            /*reachableBad=*/true));
-    auto* reference = loadSystemVerilogTopFromSource(
-        library,
-        "pdr_full_diff_ref_k" + suffix,
-        makeOneHotPdrFullFlowReferenceSource("pdr_full_diff_ref_k" + suffix));
-
-    // Exact early-depth PDR behavior is covered above by the direct PDREngine
-    // test.  This full-flow test verifies the Verilog parser, SEC miter build,
-    // and selected PDR engine agree on the reachable counterexample.
-    auto strategy = makeBinarySecStrategy(impl, reference, SecEngine::Pdr);
-    const auto result = strategy.run(badDepth);
-
-    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different)
-        << "badDepth=" << badDepth << " reason=" << result.reason;
-    EXPECT_EQ(result.bound, badDepth) << "badDepth=" << badDepth;
-    EXPECT_EQ(result.coveredOutputs, 1u) << "badDepth=" << badDepth;
-    EXPECT_EQ(result.totalOutputs, 1u) << "badDepth=" << badDepth;
-
-    naja::DNL::destroy();
-    NLUniverse::get()->destroy();
-    KEPLER_FORMAL::Tree2BoolExpr::iso2boolExpr_.clear();
-    KEPLER_FORMAL::BoolExprCache::destroy();
-  }
-}
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PdrDebugFormattingPrintsDocumentedBooleanMiterProblemAndFrames) {
@@ -13575,9 +11990,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailProvesStrictPermanentXEquality) {
-  const auto models = makeHeldRailModelsForTest(
-      "dualRailPermanentX", std::nullopt, std::nullopt);
+       RunExtractedModelsPdrDoesNotInventResetBootstrapCycles) {
+  const auto models = makeResettableHeldRailModelsForTest();
 
   SequentialEquivalenceStrategy strategy(
       nullptr,
@@ -13588,12 +12002,193 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 2);
 
-  // Both published safety properties hold: there is no concrete mismatch and
-  // both rails remain equal. This is strict three-valued equality, not a claim
-  // that the output eventually becomes binary-defined.
+  // IC3 starts from the supplied initial predicate. Merely naming an input
+  // reset must not apply hidden transitions before F[0].
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      result.reason.find("noImplicitResetBootstrap_out[0]"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailDisabledAgePreservesStrictPermanentXEquality) {
+  const auto models = makeHeldRailModelsForTest(
+      "dualRailPermanentX", std::nullopt, std::nullopt);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/false, /*minimum=*/10, /*maximum=*/20});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+
+  // Disabling age discovery must preserve the historical flow exactly: the
+  // guarded property and strict rail equality are both proved from F[0].
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailAutoAgeLeavesPermanentXInconclusive) {
+  const auto models = makeHeldRailModelsForTest(
+      "dualRailPermanentXWithAge", std::nullopt, std::nullopt);
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/2});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+
+  // Strict X==X is retained as the fallback check, but it cannot establish
+  // concrete equivalence when no age proves that both outputs are defined.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      result.reason.find("dualRailPermanentXWithAge_out[0]"),
+      std::string::npos);
+  EXPECT_NE(
+      result.reason.find("uninitialized sequential logic"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailAutoAgeFindsMinimumFlushAge) {
+  const auto models = makeFlushingRailModelsForTest(/*stages=*/2);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/0, /*maximum=*/4});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 4);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The two resetless pipeline stages carry X at ages 0 and 1. At age 2 the
+  // shared binary input has flushed both designs, so the age proof must select
+  // the exact minimum and the final SEC property is concrete.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
+      << stderrOutput;
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR certified age output range=0..1 age=2"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailAgeGatesOnlyEnabledFlow) {
+  constexpr const char* kPrefix = "dualRailTransientStartupMismatch";
+  auto models = makeHeldRailModelsForTest(kPrefix, false, true);
+  const SignalKey state0 = makeSignalKey(std::string(kPrefix) + "State0");
+  const SignalKey state1 = makeSignalKey(std::string(kPrefix) + "State1");
+  models.model0.nextStateExprByStateKey.at(state0) = BoolExpr::createFalse();
+  models.model1.nextStateExprByStateKey.at(state1) = BoolExpr::createFalse();
+
+  SequentialEquivalenceStrategy disabledStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/false, /*minimum=*/1, /*maximum=*/2});
+  const auto disabledResult = disabledStrategy.runExtractedModels(
+      models.model0, models.model1, 2);
+
+  SequentialEquivalenceStrategy enabledStrategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/2});
+  const auto enabledResult = enabledStrategy.runExtractedModels(
+      models.model0, models.model1, 2);
+
+  // The original flow still sees the concrete F[0] mismatch. Only the enabled
+  // monitor gates startup; both designs hold binary zero from age 1 onward.
+  EXPECT_EQ(disabledResult.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(disabledResult.bound, 0u);
+  EXPECT_EQ(enabledResult.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(enabledResult.coveredOutputs, 1u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailAgeSplitsUncertifiedOutputBatch) {
+  auto models = makeFlushingRailModelsForTest(/*stages=*/1);
+  const SignalKey heldOutput = makeSignalKey("dualRailAgeHeldOutput");
+  const SignalKey heldState0 = makeSignalKey("dualRailAgeHeldState0");
+  const SignalKey heldState1 = makeSignalKey("dualRailAgeHeldState1");
+  addStateBitForTest(
+      models.model0,
+      heldState0,
+      /*localVar=*/4,
+      "left.held_q[0]",
+      BoolExpr::Var(4));
+  addStateBitForTest(
+      models.model1,
+      heldState1,
+      /*localVar=*/4,
+      "right.held_q[0]",
+      BoolExpr::Var(4));
+  for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
+    model->allObservedOutputs.push_back(heldOutput);
+    model->observedOutputs.push_back(heldOutput);
+    model->displayNameByKey.emplace(heldOutput, "held_x[0]");
+    model->observedOutputExprByKey.emplace(heldOutput, BoolExpr::Var(4));
+  }
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/0, /*maximum=*/2});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 3);
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 2u);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find("held_x[0]"),
+      std::string::npos);
+  EXPECT_NE(
+      result.skippedObservedOutputs.front().find(
+          "uninitialized sequential logic"),
+      std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrAgeOptionsRejectDescendingSearchRange) {
+  EXPECT_THROW(
+      SequentialEquivalenceStrategy(
+          nullptr,
+          nullptr,
+          KEPLER_FORMAL::Config::SolverType::KISSAT,
+          SecEngine::Pdr,
+          SecEncoding::DualRailSteady,
+          PdrAgeOptions{/*automatic=*/true, /*minimum=*/3, /*maximum=*/2}),
+      std::invalid_argument);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14020,10 +12615,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
       SecEncoding::DualRailSteady);
   const auto dualRailImcResult =
       dualRailImcStrategy.runExtractedModels(model0, model1, 1);
-  EXPECT_EQ(dualRailImcResult.status, SequentialEquivalenceStatus::Equivalent);
-  // Craig IMC now follows the paper-style loop, so the first valid fixed-point
-  // proof is the k=1 interpolant containment check rather than the removed
-  // immediate transition-closure shortcut.
+  // Without an initial predicate, IMC must not turn an X-only startup relation
+  // into an equivalence proof.
+  EXPECT_EQ(dualRailImcResult.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(dualRailImcResult.bound, 1u);
   EXPECT_EQ(dualRailImcResult.coveredOutputs, kWideStartupRelationOutputs);
   EXPECT_EQ(dualRailImcResult.totalOutputs, kWideStartupRelationOutputs);
@@ -14569,6 +13163,49 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("shared exact F[0] predecessor solver reused"),
       std::string::npos)
       << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineRunsIndependentPropertiesWithVerifierOwnedState) {
+  KInductionProblem problem;
+  constexpr size_t designState = 2;
+  constexpr size_t monitorState = 3;
+  problem.state0Symbols = {designState};
+  problem.auxiliaryStateSymbols = {monitorState};
+  problem.allSymbols = {designState, monitorState};
+  problem.totalStateCount = 2;
+  problem.initializedStateCount = 2;
+  problem.initialStateAssignments = {
+      {designState, false}, {monitorState, false}};
+  problem.transitions0 = {{designState, BoolExpr::createTrue()}};
+  problem.auxiliaryTransitions = {
+      {monitorState, BoolExpr::createTrue()}};
+  problem.property = BoolExpr::createTrue();
+  problem.bad = BoolExpr::createFalse();
+
+  auto exactInitCache = std::make_shared<PDRExactInitCache>(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*maxPredecessorQueries=*/0,
+      exactInitCache);
+
+  BoolExpr* holdsAfterMonitor = BoolExpr::Or(
+      BoolExpr::Not(BoolExpr::Var(monitorState)),
+      BoolExpr::Var(designState));
+  BoolExpr* failsAfterMonitor = BoolExpr::Or(
+      BoolExpr::Not(BoolExpr::Var(monitorState)),
+      BoolExpr::Not(BoolExpr::Var(designState)));
+
+  const auto proved = engine.run(2, holdsAfterMonitor);
+  const auto different = engine.run(2, failsAfterMonitor);
+
+  // The transition model and exact F[0] cache are shared, while each supplied
+  // safety property still gets fresh IC3 frames and an independent verdict.
+  EXPECT_EQ(proved.status, PDRStatus::Equivalent);
+  EXPECT_EQ(different.status, PDRStatus::Different);
+  EXPECT_EQ(different.bound, 1u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -15453,6 +14090,60 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineExtendsIncrementalPredecessorSolverForWiderCone) {
+  KInductionProblem problem;
+  constexpr size_t targetA = 2;
+  constexpr size_t targetB = 3;
+  constexpr size_t sourceA = 4;
+  constexpr size_t sourceB = 5;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetA, targetB, sourceA, sourceB};
+  problem.allSymbols = problem.state0Symbols;
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.initialCondition = BoolExpr::createTrue();
+  problem.initialStateAssignments = {
+      {targetA, false},
+      {targetB, false},
+      {sourceA, false},
+      {sourceB, false}};
+  problem.transitions0 = {
+      {targetA, BoolExpr::Var(sourceA)},
+      {targetB, BoolExpr::Var(sourceB)},
+      {sourceA, BoolExpr::createFalse()},
+      {sourceB, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Or(
+      BoolExpr::Var(targetA), BoolExpr::Var(targetB));
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent) << stderrOutput;
+  const std::string frameZeroCreated =
+      "predecessor cached solver created level=0";
+  const size_t firstFrameZeroBuild = stderrOutput.find(frameZeroCreated);
+  ASSERT_NE(firstFrameZeroBuild, std::string::npos) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          frameZeroCreated,
+          firstFrameZeroBuild + frameZeroCreated.size()),
+      std::string::npos)
+      << stderrOutput;
+  // A wider cone at the same PDR level extends the one incremental SAT
+  // instance, while each distinct frame keeps its own exact solver context.
+  EXPECT_NE(
+      stderrOutput.find("predecessor cached solver surface extended"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineDualRailHugeStateSurfaceAvoidsRetainedPredecessorCaches) {
   KInductionProblem problem;
   constexpr size_t targetState = 2;
@@ -15581,7 +14272,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SynthesizedResetInferencePropagatesThroughLongBootstrapPipeline) {
+       SequentialDesignModelExtractDoesNotTreatResetAsInitialState) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -15596,26 +14287,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto model = SequentialDesignModel::extract(top);
 
   EXPECT_FALSE(model.hasUnsupportedFeatures());
-  EXPECT_EQ(model.initialStateValueByKey.size(), model.stateBits.size());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       SynthesizedResetInferenceScalesPastLargeStateCutoff) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* andModel = createAnd2Model(primitives);
-  auto* top = createBootstrapPipelineTopWithStages(
-      library, "top", invModel, andModel, 2200);
-
-  const auto model = SequentialDesignModel::extract(top);
-
-  EXPECT_FALSE(model.hasUnsupportedFeatures());
-  EXPECT_EQ(model.initialStateValueByKey.size(), model.stateBits.size());
+  EXPECT_FALSE(model.stateBits.empty());
+  // Reset controls the transition relation. Without a declared initializer it
+  // must not constrain IC3's exact initial frame.
+  EXPECT_TRUE(model.initialStateValueByKey.empty());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -16638,24 +15313,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelExtractSupportsSetHighInitialState) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* model = createSetOnlySequentialModel(primitives, "DFF_SET");
-  auto* top = createSetOnlySequentialTop(library, "top", model);
-
-  const auto extracted = SequentialDesignModel::extract(top);
-
-  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
-  ASSERT_EQ(extracted.stateBits.size(), 1u);
-  EXPECT_TRUE(extracted.initialStateValueByKey.at(extracted.stateBits.front()));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractPreservesSetHighControlSemantics) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
@@ -16681,21 +15338,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_FALSE(expr->evaluate(
       {{extracted.inputVarByKey.at(inKey), false},
        {extracted.inputVarByKey.at(setKey), false}}));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelExtractSupportsResetHighInitialState) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top = createDffreTop(library, "top");
-
-  const auto extracted = SequentialDesignModel::extract(top);
-
-  EXPECT_FALSE(extracted.hasUnsupportedFeatures());
-  ASSERT_EQ(extracted.stateBits.size(), 1u);
-  EXPECT_FALSE(extracted.initialStateValueByKey.at(extracted.stateBits.front()));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17108,28 +15750,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelExtractMirrorsComplementedInitialStateValue) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* model = createNamedComplementSetSequentialModel(
-      primitives, "DFF_STATE_SET", "STATE", "STATEN");
-  auto* top = createComplementedSetSequentialTop(
-      library, "top", model, "STATE", "STATEN");
-
-  const auto extracted = SequentialDesignModel::extract(top);
-
-  ASSERT_EQ(extracted.stateBits.size(), 2u);
-  ASSERT_EQ(extracted.initialStateValueByKey.size(), 2u);
-  const auto& relation = extracted.complementedStateRelations.front();
-  EXPECT_TRUE(extracted.initialStateValueByKey.at(relation.primaryKey));
-  EXPECT_FALSE(extracted.initialStateValueByKey.at(relation.complementedKey));
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        SequentialDesignModelExtractReportsSharedScalarDataForMultiOutputPrimitive) {
   ScopedSecBoundaryAbstraction strictSequentialModeling(false);
   NLUniverse::create();
@@ -17299,41 +15919,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       TooSmallBoundRemainsInconclusiveBeforeCounterexampleDepth) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* top0 = createResetInitializedPipelineTop(library, "top0", false);
-  auto* top1 = createResetInitializedPipelineTop(library, "top1", true);
-
-  auto strategy = makeBinarySecStrategy(top0, top1, SecEngine::KInduction);
-  const auto result = strategy.run(2);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.bound, 2u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       ZeroBoundFindsUninitializedProductFrameZeroMismatch) {
-  NLUniverse::create();
-  auto* db = NLDB::create(NLUniverse::get());
-  auto* primitives =
-      NLLibrary::create(db, NLLibrary::Type::Primitives, NLName("prims"));
-  auto* library =
-      NLLibrary::create(db, NLLibrary::Type::Standard, NLName("designs"));
-  auto* invModel = createInvModel(primitives);
-  auto* top0 = createDffTop(library, "top0", invModel, false, false);
-  auto* top1 = createDffTop(library, "top1", invModel, false, false);
-
-  auto strategy = makeBinarySecStrategy(top0, top1);
-  const auto result = strategy.run(0);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(result.bound, 0u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        UnsupportedReasonsFromBothDesignsAreJoined) {
   ScopedSecBoundaryAbstraction strictSequentialModeling(false);
   NLUniverse::create();
@@ -17472,7 +16057,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       EquivalentDffDesignsReportTopBoundarySurface) {
+       UninitializedDffDesignsReportTopBoundarySurface) {
   NLUniverse::create();
   auto* db = NLDB::create(NLUniverse::get());
   auto* primitives =
@@ -17497,7 +16082,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
         });
   };
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Unsupported);
   EXPECT_TRUE(hasRole("design0", "clk[0]", "top_input"));
   EXPECT_TRUE(hasRole("design0", "in[0]", "top_input"));
   EXPECT_TRUE(hasRole("design0", "out[0]", "top_output"));
@@ -17624,24 +16209,28 @@ TEST_F(SequentialEquivalenceStrategyTests,
   ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
   testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
-  auto strategy = makeBinarySecStrategy(top0, top1);
+  SequentialEquivalenceStrategy strategy(
+      top0,
+      top1,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
   const auto result = strategy.run(3);
   const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_NE(stderrOutput.find("SEC diag: start run"), std::string::npos);
   EXPECT_NE(
       stderrOutput.find("SEC diag: extract(top0) collect begin"),
       std::string::npos);
   EXPECT_NE(
-      stderrOutput.find("SEC diag: deferred next-state formula remapping"),
-      std::string::npos);
-  EXPECT_NE(
       stderrOutput.find("SEC diag: entering pdr engine"),
       std::string::npos);
   EXPECT_NE(stdoutOutput.find("SEC diag: aligned_inputs="), std::string::npos);
-  EXPECT_NE(stdoutOutput.find("SEC summary: property_is_true="), std::string::npos);
+  EXPECT_NE(
+      stdoutOutput.find("SEC summary: encoding=dual_rail_steady"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17759,7 +16348,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelDetailHelpersCoverNextStateAndInitErrors) {
+       SequentialDesignModelDetailHelpersCoverNextStateErrors) {
   const std::unordered_map<naja::DNL::DNLID, BoolExpr*> outputExprByTerm = {
       {11, BoolExpr::Var(7)},
       {12, BoolExpr::Var(8)},
@@ -17792,20 +16381,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       0, {{"D", 11}, {"S", 12}}, {2}, outputExprByTerm);
   EXPECT_TRUE(setExpr->evaluate({{2, false}, {7, false}, {8, true}}));
   EXPECT_FALSE(setExpr->evaluate({{2, false}, {7, false}, {8, false}}));
-
-  EXPECT_EQ(
-      detail::detectInitialStateValueForTest({{"R", 11}}),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::detectInitialStateValueForTest({{"RN", 11}}),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::detectInitialStateValueForTest({{"S", 11}}),
-      std::optional<bool>(true));
-  EXPECT_EQ(detail::detectInitialStateValueForTest({}), std::nullopt);
-  EXPECT_EQ(
-      detail::detectInitialStateValueForTest({{"R", 11}, {"S", 12}}),
-      std::nullopt);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17863,7 +16438,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       SequentialDesignModelDetailResetInferenceAndReachableStateHelpersCoverBranches) {
+       SequentialDesignModelDetailSelectsRequiredBuilderOutputs) {
   const auto requiredOutputs = detail::selectRequiredBuilderOutputsForTest(
       {10, 11, 12, 13, 14},
       {10, 14},
@@ -17873,219 +16448,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       requiredOutputs,
       (std::vector<naja::DNL::DNLID>{10, 12, 13}));
 
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("rst[0]"),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("rst_n[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("reset_i[0]"),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("rst_ni[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("rst_l[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("reset_l[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("wb_rst_i[0]"),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("wb_reset_i[0]"),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("wb_rst_ni[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("rrst_n[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("wrst_n[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::getResetAssertionValueForTest("aresetn[0]"),
-      std::optional<bool>(false));
-  EXPECT_EQ(detail::getResetAssertionValueForTest("burst_n[0]"), std::nullopt);
-  EXPECT_EQ(detail::getResetAssertionValueForTest("enable[0]"), std::nullopt);
-
-  const auto shared = BoolExpr::Not(BoolExpr::Var(3));
-  EXPECT_EQ(detail::evaluateConstantUnderAssignmentsForTest(nullptr, {}), std::nullopt);
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(BoolExpr::Var(1), {}),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(BoolExpr::Var(0), {}),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::And(shared, shared), {{3, false}}),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::And(BoolExpr::createFalse(), BoolExpr::Var(99)), {}),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, false}, {4, true}}),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, false}}),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::And(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, true}}),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::Or(BoolExpr::createTrue(), BoolExpr::Var(99)), {}),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::Or(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, false}}),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::Or(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, false}, {4, true}}),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::Or(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, false}, {4, false}}),
-      std::optional<bool>(false));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}, {4, false}}),
-      std::optional<bool>(true));
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(
-          BoolExpr::Xor(BoolExpr::Var(3), BoolExpr::Var(4)), {{3, true}}),
-      std::nullopt);
-  BoolExpr invalidExpr;
-  EXPECT_EQ(
-      detail::evaluateConstantUnderAssignmentsForTest(&invalidExpr, {}),
-      std::nullopt);
-
-  const auto rstKey = makeSignalKey("rst");
-  const auto stateAKey = makeSignalKey("state_a");
-  const auto stateBKey = makeSignalKey("state_b");
-  const auto stateAComplementKey = makeSignalKey("state_a_n");
-
-  SequentialDesignModel inferredModel;
-  inferredModel.environmentInputs = {rstKey};
-  inferredModel.stateBits = {stateAKey, stateBKey, stateAComplementKey};
-  inferredModel.displayNameByKey[rstKey] = "rst[0]";
-  inferredModel.inputVarByKey[rstKey] = 10;
-  inferredModel.inputVarByKey[stateAKey] = 2;
-  inferredModel.inputVarByKey[stateBKey] = 3;
-  inferredModel.inputVarByKey[stateAComplementKey] = 4;
-  inferredModel.nextStateExprByStateKey[stateAKey] = BoolExpr::Var(10);
-  inferredModel.nextStateExprByStateKey[stateBKey] =
-      BoolExpr::And(BoolExpr::Var(2), BoolExpr::createTrue());
-  inferredModel.nextStateExprByStateKey[stateAComplementKey] =
-      BoolExpr::Not(BoolExpr::Var(2));
-  inferredModel.complementedStateRelations.push_back(
-      {stateAKey, stateAComplementKey});
-
-  detail::inferSynthesizedResetInitialStateValuesForTest(inferredModel);
-  EXPECT_EQ(
-      inferredModel.initialStateValueByKey.at(stateAKey),
-      true);
-  EXPECT_EQ(
-      inferredModel.initialStateValueByKey.at(stateBKey),
-      true);
-  EXPECT_EQ(
-      inferredModel.initialStateValueByKey.at(stateAComplementKey),
-      false);
-
-  const auto missingDisplayResetKey = makeSignalKey("rst_missing_display");
-  const auto missingVarResetKey = makeSignalKey("rst_missing_var");
-  const auto nullStateKey = makeSignalKey("null_state");
-  const auto derivedStateKey = makeSignalKey("derived_state");
-  const auto partnerPrimaryKey = makeSignalKey("partner_primary");
-  const auto partnerComplementKey = makeSignalKey("partner_complement");
-
-  SequentialDesignModel edgeCaseModel;
-  edgeCaseModel.environmentInputs = {missingDisplayResetKey, missingVarResetKey, rstKey};
-  edgeCaseModel.stateBits = {
-      nullStateKey, derivedStateKey, partnerPrimaryKey, partnerComplementKey};
-  edgeCaseModel.displayNameByKey[missingVarResetKey] = "rst[0]";
-  edgeCaseModel.displayNameByKey[rstKey] = "rst[0]";
-  edgeCaseModel.inputVarByKey[missingDisplayResetKey] = 30;
-  edgeCaseModel.inputVarByKey[rstKey] = 31;
-  edgeCaseModel.inputVarByKey[nullStateKey] = 2;
-  edgeCaseModel.inputVarByKey[derivedStateKey] = 3;
-  edgeCaseModel.inputVarByKey[partnerPrimaryKey] = 4;
-  edgeCaseModel.inputVarByKey[partnerComplementKey] = 5;
-  auto* sharedResetVar = BoolExpr::Var(31);
-  edgeCaseModel.nextStateExprByStateKey[nullStateKey] = nullptr;
-  edgeCaseModel.nextStateExprByStateKey[derivedStateKey] = BoolExpr::And(
-      sharedResetVar, BoolExpr::Or(BoolExpr::Var(99), sharedResetVar));
-  edgeCaseModel.nextStateExprByStateKey[partnerPrimaryKey] = BoolExpr::createFalse();
-  edgeCaseModel.nextStateExprByStateKey[partnerComplementKey] = BoolExpr::createTrue();
-  edgeCaseModel.initialStateValueByKey[partnerPrimaryKey] = false;
-  edgeCaseModel.complementedStateRelations.push_back(
-      {partnerPrimaryKey, partnerComplementKey});
-
-  detail::inferSynthesizedResetInitialStateValuesForTest(edgeCaseModel);
-  EXPECT_TRUE(edgeCaseModel.initialStateValueByKey.at(derivedStateKey));
-  EXPECT_TRUE(edgeCaseModel.initialStateValueByKey.at(partnerComplementKey));
-
-  const auto dependencyKnownKey = makeSignalKey("dependency_known");
-  const auto dependencyDerivedKey = makeSignalKey("dependency_derived");
-  SequentialDesignModel dependencyModel;
-  dependencyModel.environmentInputs = {rstKey};
-  dependencyModel.stateBits = {dependencyKnownKey, dependencyDerivedKey};
-  dependencyModel.displayNameByKey[rstKey] = "rst[0]";
-  dependencyModel.inputVarByKey[rstKey] = 40;
-  dependencyModel.inputVarByKey[dependencyKnownKey] = 2;
-  dependencyModel.inputVarByKey[dependencyDerivedKey] = 3;
-  dependencyModel.initialStateValueByKey[dependencyKnownKey] = true;
-  auto* sharedStateExpr = BoolExpr::Var(2);
-  dependencyModel.nextStateExprByStateKey[dependencyKnownKey] = sharedStateExpr;
-  dependencyModel.nextStateExprByStateKey[dependencyDerivedKey] = BoolExpr::And(
-      sharedStateExpr,
-      BoolExpr::Or(BoolExpr::Var(99), sharedStateExpr));
-
-  detail::inferSynthesizedResetInitialStateValuesForTest(dependencyModel);
-  EXPECT_TRUE(dependencyModel.initialStateValueByKey.at(dependencyDerivedKey));
-
-  const auto derivedKey0 = makeSignalKey("derived0");
-  const auto derivedKey1 = makeSignalKey("derived1");
-  const auto xorKey = makeSignalKey("derived_xor");
-  SequentialDesignModel bootstrapModel0;
-  bootstrapModel0.environmentInputs = {rstKey};
-  bootstrapModel0.stateBits = {derivedKey0, derivedKey1, xorKey};
-  bootstrapModel0.displayNameByKey[rstKey] = "rst[0]";
-  bootstrapModel0.inputVarByKey[rstKey] = 20;
-  bootstrapModel0.inputVarByKey[derivedKey0] = 2;
-  bootstrapModel0.inputVarByKey[derivedKey1] = 3;
-  bootstrapModel0.inputVarByKey[xorKey] = 4;
-  bootstrapModel0.initialStateValueByKey[derivedKey0] = true;
-  bootstrapModel0.initialStateValueByKey[derivedKey1] = false;
-  bootstrapModel0.nextStateExprByStateKey[derivedKey0] = BoolExpr::Var(2);
-  bootstrapModel0.nextStateExprByStateKey[derivedKey1] = BoolExpr::Var(3);
-  bootstrapModel0.nextStateExprByStateKey[xorKey] =
-      BoolExpr::Xor(BoolExpr::Var(2), BoolExpr::Var(3));
-
-  const auto bootstrapValues =
-      detail::deriveResetBootstrapStateValuesForTest(bootstrapModel0, 1);
-  EXPECT_EQ(bootstrapValues.at(xorKey), true);
-
-  SequentialDesignModel bootstrapModel1 = bootstrapModel0;
-  bootstrapModel1.initialStateValueByKey[derivedKey1] = true;
-
-  AlignedSignals candidateStates;
-  candidateStates.names = {"state_a", "state_b"};
-  candidateStates.keys0 = {derivedKey0, derivedKey1};
-  candidateStates.keys1 = {derivedKey0, derivedKey1};
-  const auto anchoredStates = detail::filterStateEqualitiesByInitialValueForTest(
-      bootstrapModel0, bootstrapModel1, candidateStates);
-  ASSERT_EQ(anchoredStates.names.size(), 1u);
-  EXPECT_EQ(anchoredStates.names.front(), "state_a");
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

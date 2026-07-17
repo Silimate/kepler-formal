@@ -61,14 +61,18 @@ static void print_usage(const char* prog) {
   SPDLOG_INFO(
   // LCOV_EXCL_STOP
       "Usage: {} [--config <file>] | <-naja_if/-verilog/-systemverilog/-sv/-sv2v> "
-      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] <netlist1> <netlist2> [<library-file>...] | "
+      "[-v <lec|sec>] [-k <max-k>] [--sec-engine <k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
+      "[--sec-pdr-auto-age|--no-sec-pdr-auto-age] [--sec-pdr-age-min <n>] [--sec-pdr-age-max <n>] "
+      "<netlist1> <netlist2> [<library-file>...] | "
       "<-naja_if/-verilog/-systemverilog/-sv/-sv2v> --design1 <file...> --design2 "
       "<file...> [--liberty <library-file>...] [-v <lec|sec>] [-k <max-k>] [--sec-engine <k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
+      "[--sec-pdr-auto-age|--no-sec-pdr-auto-age] [--sec-pdr-age-min <n>] [--sec-pdr-age-max <n>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos] | "
       "-systemverilog/-sv [--sv_design1_flist <file>] [--sv_design1_top <name>] "
       "[--sv_design2_flist <file>] [--sv_design2_top <name>] [-v <lec|sec>] [-k <max-k>] [--sec-engine <k_induction|imc|pdr>] [--sec-encoding <binary|dual_rail_steady>] "
       "[--design1 <file...>] [--design2 <file...>] "
+      "[--sec-pdr-auto-age|--no-sec-pdr-auto-age] [--sec-pdr-age-min <n>] [--sec-pdr-age-max <n>] "
       "[--no-sec-uncomputable-seq-boundary] [--compact] "
       "[--report-skipped-pos]",
       prog);
@@ -291,33 +295,43 @@ static std::string configureMainLogger(const std::string& logLevel,
   return chosenLogFile;
 }
 
+static bool parseNonNegativeSizeToken(const std::string& token,
+                                      const char* optionName,
+                                      size_t& value,
+                                      std::string& error) {
+  if (token.empty()) {
+    error = std::string(optionName) + " must not be empty";
+    return false;
+  }
+  if (token.find_first_not_of("0123456789") != std::string::npos) {
+    error = std::string(optionName) + " must be a non-negative integer";
+    return false;
+  }
+  try {
+    value = static_cast<size_t>(std::stoull(token));
+  } catch (const std::exception&) {
+    error = std::string(optionName) + " is out of range";
+    return false;
+  }
+  return true;
+}
+
 // LCOV_EXCL_START
 static bool parseMaxKToken(const std::string& token,
 // LCOV_EXCL_STOP
                            size_t& maxK,
                            std::string& error) {
   // LCOV_EXCL_START
-  if (token.empty()) {
-    error = "max_k must not be empty";
-    return false;
-    // LCOV_EXCL_STOP
-  }
-  // LCOV_EXCL_START
-  if (!std::all_of(token.begin(), token.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
-    error = "max_k must be a non-negative integer";
-    return false;
-    // LCOV_EXCL_STOP
-  }
-  try {
-    // LCOV_EXCL_START
-    maxK = static_cast<size_t>(std::stoull(token));
-  } catch (const std::exception&) {
-    error = "max_k is out of range";
-    return false;
-  }
-  return true;
+  return parseNonNegativeSizeToken(token, "max_k", maxK, error);
 }
 // LCOV_EXCL_STOP
+
+static bool parsePdrAgeToken(const std::string& token,
+                             const char* optionName,
+                             size_t& age,
+                             std::string& error) {
+  return parseNonNegativeSizeToken(token, optionName, age, error);
+}
 
 static bool validateConfigKeys(const YAML::Node& cfg) {
   if (!cfg || !cfg.IsMap()) {
@@ -331,6 +345,9 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "max_k",
       "sec_engine",
       "sec_encoding",
+      "sec_pdr_auto_age",
+      "sec_pdr_age_min",
+      "sec_pdr_age_max",
       "sec_uncomputable_seq_as_boundary",
       "input_paths",
       "liberty_files",
@@ -1099,8 +1116,11 @@ int KeplerFormalMain(int argc, char** argv) {
   KEPLER_FORMAL::SEC::SecEngine secEngine = KEPLER_FORMAL::SEC::SecEngine::Pdr;
   KEPLER_FORMAL::SEC::SecEncoding secEncoding =
       KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady;
+  KEPLER_FORMAL::SEC::PdrAgeOptions secPdrAgeOptions;
+  secPdrAgeOptions.automatic = true;
   bool secEngineExplicit = false;
   bool secEncodingExplicit = false;
+  bool secPdrAgeExplicit = false;
   size_t secMaxK = kDefaultSecMaxK;
   bool secMaxKExplicit = false;
   bool secTreatUncomputableSeqAsBoundary = true;
@@ -1240,6 +1260,47 @@ int KeplerFormalMain(int argc, char** argv) {
             // LCOV_EXCL_STOP
           }
           secEncodingExplicit = true;  // LCOV_EXCL_LINE
+        }
+
+        if (cfg["sec_pdr_auto_age"]) {
+          if (!cfg["sec_pdr_auto_age"].IsScalar()) {
+            SPDLOG_CRITICAL("sec_pdr_auto_age must be a scalar");
+            return EXIT_FAILURE;
+          }
+          secPdrAgeOptions.automatic = cfg["sec_pdr_auto_age"].as<bool>();
+          secPdrAgeExplicit = true;
+        }
+        if (cfg["sec_pdr_age_min"]) {
+          if (!cfg["sec_pdr_age_min"].IsScalar()) {
+            SPDLOG_CRITICAL("sec_pdr_age_min must be a scalar");
+            return EXIT_FAILURE;
+          }
+          std::string ageError;
+          if (!parsePdrAgeToken(
+                  cfg["sec_pdr_age_min"].as<std::string>(),
+                  "sec_pdr_age_min",
+                  secPdrAgeOptions.minimum,
+                  ageError)) {
+            SPDLOG_CRITICAL("Invalid sec_pdr_age_min in config: {}", ageError);
+            return EXIT_FAILURE;
+          }
+          secPdrAgeExplicit = true;
+        }
+        if (cfg["sec_pdr_age_max"]) {
+          if (!cfg["sec_pdr_age_max"].IsScalar()) {
+            SPDLOG_CRITICAL("sec_pdr_age_max must be a scalar");
+            return EXIT_FAILURE;
+          }
+          std::string ageError;
+          if (!parsePdrAgeToken(
+                  cfg["sec_pdr_age_max"].as<std::string>(),
+                  "sec_pdr_age_max",
+                  secPdrAgeOptions.maximum,
+                  ageError)) {
+            SPDLOG_CRITICAL("Invalid sec_pdr_age_max in config: {}", ageError);
+            return EXIT_FAILURE;
+          }
+          secPdrAgeExplicit = true;
         }
 
         if (cfg["sec_uncomputable_seq_as_boundary"]) {
@@ -1477,6 +1538,36 @@ int KeplerFormalMain(int argc, char** argv) {
         parseStart += 2;
         continue;
       }
+      if (arg == "--sec-pdr-auto-age") {
+        secPdrAgeOptions.automatic = true;
+        secPdrAgeExplicit = true;
+        ++parseStart;
+        continue;
+      }
+      if (arg == "--no-sec-pdr-auto-age") {
+        secPdrAgeOptions.automatic = false;
+        secPdrAgeExplicit = true;
+        ++parseStart;
+        continue;
+      }
+      if (arg == "--sec-pdr-age-min" || arg == "--sec-pdr-age-max") {
+        if (parseStart + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing value after {}", arg);
+          return EXIT_FAILURE;
+        }
+        size_t& age = arg == "--sec-pdr-age-min"
+                          ? secPdrAgeOptions.minimum
+                          : secPdrAgeOptions.maximum;
+        std::string ageError;
+        if (!parsePdrAgeToken(
+                argv[parseStart + 1], arg.c_str() + 2, age, ageError)) {
+          SPDLOG_CRITICAL("Invalid {}: {}", arg, ageError);
+          return EXIT_FAILURE;
+        }
+        secPdrAgeExplicit = true;
+        parseStart += 2;
+        continue;
+      }
       if (arg == "--sec-uncomputable-seq-boundary") {
         secTreatUncomputableSeqAsBoundary = true;
         ++parseStart;
@@ -1605,6 +1696,32 @@ int KeplerFormalMain(int argc, char** argv) {
         }
         // LCOV_EXCL_START
         secEncodingExplicit = true;
+        continue;
+      }
+      if (arg == "--sec-pdr-auto-age") {
+        secPdrAgeOptions.automatic = true;
+        secPdrAgeExplicit = true;
+        continue;
+      }
+      if (arg == "--no-sec-pdr-auto-age") {
+        secPdrAgeOptions.automatic = false;
+        secPdrAgeExplicit = true;
+        continue;
+      }
+      if (arg == "--sec-pdr-age-min" || arg == "--sec-pdr-age-max") {
+        if (i + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing value after {}", arg);
+          return EXIT_FAILURE;
+        }
+        size_t& age = arg == "--sec-pdr-age-min"
+                          ? secPdrAgeOptions.minimum
+                          : secPdrAgeOptions.maximum;
+        std::string ageError;
+        if (!parsePdrAgeToken(argv[++i], arg.c_str() + 2, age, ageError)) {
+          SPDLOG_CRITICAL("Invalid {}: {}", arg, ageError);
+          return EXIT_FAILURE;
+        }
+        secPdrAgeExplicit = true;
         continue;
       }
       if (arg == "--sec-uncomputable-seq-boundary") {
@@ -1828,6 +1945,27 @@ int KeplerFormalMain(int argc, char** argv) {
     return EXIT_FAILURE;  // LCOV_EXCL_LINE
     // LCOV_EXCL_STOP
   }
+  if (verificationMode == VerificationMode::LEC && secPdrAgeExplicit) {
+    SPDLOG_CRITICAL(
+        "sec_pdr_auto_age/sec_pdr_age_min/sec_pdr_age_max are only "
+        "supported with SEC verification");
+    return EXIT_FAILURE;
+  }
+  if (secPdrAgeOptions.minimum > secPdrAgeOptions.maximum) {
+    SPDLOG_CRITICAL(
+        "SEC PDR age minimum ({}) must not exceed maximum ({})",
+        secPdrAgeOptions.minimum,
+        secPdrAgeOptions.maximum);
+    return EXIT_FAILURE;
+  }
+  if (verificationMode == VerificationMode::SEC && secPdrAgeExplicit &&
+      (secEngine != KEPLER_FORMAL::SEC::SecEngine::Pdr ||
+       secEncoding != KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady)) {
+    SPDLOG_CRITICAL(
+        "SEC PDR age options require --sec-engine pdr and "
+        "--sec-encoding dual_rail_steady");
+    return EXIT_FAILURE;
+  }
   if (verificationMode == VerificationMode::SEC) {
     if (useScopes || cleanScopes) {
       // LCOV_EXCL_START
@@ -1902,6 +2040,18 @@ int KeplerFormalMain(int argc, char** argv) {
     SPDLOG_INFO("SEC max_k: {}", secMaxK);
     SPDLOG_INFO("SEC engine: {}", secEngineName(secEngine));
     SPDLOG_INFO("SEC encoding: {}", secEncodingName(secEncoding));
+    if (secEngine == KEPLER_FORMAL::SEC::SecEngine::Pdr &&
+        secEncoding == KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady) {
+      SPDLOG_INFO(
+          "SEC PDR automatic age discovery: {}",
+          secPdrAgeOptions.automatic ? "enabled" : "disabled");
+      if (secPdrAgeOptions.automatic) {
+        SPDLOG_INFO(
+            "SEC PDR age search range: {}..{}",
+            secPdrAgeOptions.minimum,
+            secPdrAgeOptions.maximum);
+      }
+    }
     SPDLOG_INFO(
         "SEC uncomputable sequentials: {}",
         secTreatUncomputableSeqAsBoundary ? "boundary abstraction"
@@ -2382,7 +2532,12 @@ int KeplerFormalMain(int argc, char** argv) {
               "identical design 2 input");
           // LCOV_EXCL_START
           KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-              nullptr, nullptr, solverType, secEngine, secEncoding);
+              nullptr,
+              nullptr,
+              solverType,
+              secEngine,
+              secEncoding,
+              secPdrAgeOptions);
           return emitSecResult(
               strategy.runExtractedModels(model0, model0, secMaxK));
               // LCOV_EXCL_STOP
@@ -2398,7 +2553,12 @@ int KeplerFormalMain(int argc, char** argv) {
             "design 2");
 
         KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-            nullptr, nullptr, solverType, secEngine, secEncoding);
+            nullptr,
+            nullptr,
+            solverType,
+            secEngine,
+            secEncoding,
+            secPdrAgeOptions);
         return emitSecResult(
             strategy.runExtractedModels(model0, model1, secMaxK));
       // LCOV_EXCL_START
@@ -2643,7 +2803,12 @@ int KeplerFormalMain(int argc, char** argv) {
     try {
       // LCOV_EXCL_START
       KEPLER_FORMAL::SEC::SequentialEquivalenceStrategy strategy(
-          top0, top1, solverType, secEngine, secEncoding);
+          top0,
+          top1,
+          solverType,
+          secEngine,
+          secEncoding,
+          secPdrAgeOptions);
       return emitSecResult(strategy.run(secMaxK));
       // LCOV_EXCL_STOP
     // LCOV_EXCL_START

@@ -269,11 +269,15 @@ BoolExpr* materializeLazyDualRailTransition(
 TransitionExprResolver::TransitionExprResolver(const KInductionProblem& problem)
     : problem_(problem) {
   eagerByStateSymbol_.reserve(
-      problem.transitions0.size() + problem.transitions1.size());
+      problem.transitions0.size() + problem.transitions1.size() +
+      problem.auxiliaryTransitions.size());
   for (const auto& [stateSymbol, expr] : problem.transitions0) {
     eagerByStateSymbol_.emplace(stateSymbol, expr);
   }
   for (const auto& [stateSymbol, expr] : problem.transitions1) {
+    eagerByStateSymbol_.emplace(stateSymbol, expr);
+  }
+  for (const auto& [stateSymbol, expr] : problem.auxiliaryTransitions) {
     eagerByStateSymbol_.emplace(stateSymbol, expr);
   }
 }
@@ -633,9 +637,13 @@ const std::unordered_set<size_t>& TransitionExprResolver::stateSymbols() const {
   // combined state space. Build that lookup once per proof instead of
   // allocating the same set for every obligation.
   stateSymbols_.reserve(
-      problem_.state0Symbols.size() + problem_.state1Symbols.size());
+      problem_.state0Symbols.size() + problem_.state1Symbols.size() +
+      problem_.auxiliaryStateSymbols.size());
   stateSymbols_.insert(problem_.state0Symbols.begin(), problem_.state0Symbols.end());
   stateSymbols_.insert(problem_.state1Symbols.begin(), problem_.state1Symbols.end());
+  stateSymbols_.insert(
+      problem_.auxiliaryStateSymbols.begin(),
+      problem_.auxiliaryStateSymbols.end());
   stateSymbolsInitialized_ = true;
   return stateSymbols_;
 }

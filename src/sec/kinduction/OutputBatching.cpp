@@ -191,6 +191,14 @@ void configureOutputBatchProblem(KInductionProblem& batch,
   } else {
     batch.dualRailOutputStrictEqualityExprs.clear();
   }
+  if (source.dualRailOutputBothDefinedExprs.size() ==
+      source.observedOutputExprs0.size()) {
+    batch.dualRailOutputBothDefinedExprs.assign(
+        source.dualRailOutputBothDefinedExprs.begin() + firstOutput,
+        source.dualRailOutputBothDefinedExprs.begin() + endOutput);
+  } else {
+    batch.dualRailOutputBothDefinedExprs.clear();
+  }
   if (source.dualRailOutputSkipReasons.size() ==
       source.observedOutputExprs0.size()) {
     batch.dualRailOutputSkipReasons.assign(

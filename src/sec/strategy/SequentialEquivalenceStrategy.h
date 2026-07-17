@@ -27,6 +27,14 @@ enum class SecEncoding {
   DualRailSteady,
 };
 
+struct PdrAgeOptions {
+  // Keep direct API callers on the historical PDR flow unless they opt in.
+  // The command-line frontend enables automatic discovery by default.
+  bool automatic = false;
+  size_t minimum = 10;
+  size_t maximum = 20;
+};
+
 enum class SequentialEquivalenceStatus {
   Equivalent,
   PartiallyProved,
@@ -90,7 +98,8 @@ class SequentialEquivalenceStrategy {
       KEPLER_FORMAL::Config::SolverType solverType =
           KEPLER_FORMAL::Config::getSolverType(),
       SecEngine secEngine = SecEngine::Pdr,
-      SecEncoding encoding = SecEncoding::DualRailSteady);
+      SecEncoding encoding = SecEncoding::DualRailSteady,
+      PdrAgeOptions pdrAgeOptions = {});
 
   SequentialEquivalenceResult run(size_t maxK) const;
   SequentialEquivalenceResult runExtractedModels(
@@ -104,6 +113,7 @@ class SequentialEquivalenceStrategy {
   KEPLER_FORMAL::Config::SolverType solverType_;
   SecEngine secEngine_;
   SecEncoding encoding_;
+  PdrAgeOptions pdrAgeOptions_;
 };
 
 namespace detail {

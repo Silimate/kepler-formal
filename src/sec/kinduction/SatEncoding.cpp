@@ -75,7 +75,8 @@ class EncoderStack {
 
 FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
                                        const std::vector<size_t>& symbols,
-                                       size_t numFrames) {
+                                       size_t numFrames)
+    : numFrames_(numFrames) {
   // The store knows the frame-variable count before any clause is emitted.
   // Reserving it up front is especially helpful for PDR, which creates many
   // small solvers and otherwise makes Kissat repeatedly grow its variable
@@ -89,6 +90,29 @@ FrameVariableStore::FrameVariableStore(SATSolverWrapper& solver,
 
   for (size_t frame = 0; frame < numFrames; ++frame) {
     for (const auto symbol : symbols) {
+      symbolFrameLits_[symbol].push_back(newSolverLiteral(solver));
+    }
+  }
+}
+
+void FrameVariableStore::addSymbols(
+    SATSolverWrapper& solver,
+    const std::vector<size_t>& symbols) {
+  std::vector<size_t> addedSymbols;
+  addedSymbols.reserve(symbols.size());
+  for (const size_t symbol : symbols) {
+    if (symbolFrameLits_.find(symbol) != symbolFrameLits_.end()) {
+      continue;
+    }
+    symbolFrameLits_[symbol].reserve(numFrames_);
+    addedSymbols.push_back(symbol);
+  }
+
+  // Incremental PDR queries may expose a wider transition cone. Allocate only
+  // those new frame variables so the existing SAT clauses and learned state
+  // remain reusable.
+  for (size_t frame = 0; frame < numFrames_; ++frame) {
+    for (const size_t symbol : addedSymbols) {
       symbolFrameLits_[symbol].push_back(newSolverLiteral(solver));
     }
   }

@@ -616,8 +616,7 @@ struct PredecessorAssumptionCacheKey {
            transitionModel == other.transitionModel &&
            initFormula == other.initFormula &&
            frameInvariant == other.frameInvariant &&
-           level == other.level &&
-           solverSymbols == other.solverSymbols;
+           level == other.level;
   }
 };
 
@@ -644,6 +643,19 @@ struct PredecessorAssumptionSolver {
   // be reused for neighboring queries without permanently excluding a cube.
   std::unordered_map<StateClause, int, StateClauseHash>
       exclusionAssumptionByClause;
+
+  bool canExtendTo(const PredecessorAssumptionCacheKey& candidate) const {
+    return key.hasSameReusableContext(candidate) &&
+           std::includes(
+               candidate.solverSymbols.begin(),
+               candidate.solverSymbols.end(),
+               key.solverSymbols.begin(),
+               key.solverSymbols.end());
+  }
+
+  void extendSymbolSurface(
+      const KInductionProblem& problem,
+      const std::vector<size_t>& solverSymbols);
 };
 
 struct InitIntersectionAssumptionSolver {
@@ -656,9 +668,10 @@ struct InitIntersectionAssumptionSolver {
 };
 
 struct PredecessorAssumptionCache {
-  // PDR level-local predecessor queries share the same frame/bootstrap context
-  // and differ mostly by target cube.
-  std::unique_ptr<PredecessorAssumptionSolver> solver;
+  // PDR level-local predecessor queries share the same frame context and
+  // differ mostly by target cube.
+  std::unordered_map<size_t, std::unique_ptr<PredecessorAssumptionSolver>>
+      solversByLevel;
   // Figure 6 asks whether many candidate cubes intersect the same exact F[0].
   // Keep that immutable formula encoded and vary only cube assumptions.
   std::unique_ptr<InitIntersectionAssumptionSolver> initIntersectionSolver;
@@ -776,9 +789,6 @@ struct PDRExactInitCache::Impl {
   bool matches(const KInductionProblem& candidate,
                KEPLER_FORMAL::Config::SolverType candidateSolverType) const {
     if (sourceProblem == nullptr || solverType != candidateSolverType ||
-        !sourceProblem->usesDualRailStateEncoding ||
-        !candidate.usesDualRailStateEncoding ||
-        sourceProblem->resetBootstrapCycles == 0 ||
         sourceProblem->resetBootstrapCycles != candidate.resetBootstrapCycles) {
       return false;
     }
@@ -795,6 +805,8 @@ struct PDRExactInitCache::Impl {
                candidate.bootstrapStateAssignments &&
            sourceProblem->state0Symbols == candidate.state0Symbols &&
            sourceProblem->state1Symbols == candidate.state1Symbols &&
+           sourceProblem->auxiliaryStateSymbols ==
+               candidate.auxiliaryStateSymbols &&
            sourceProblem->allSymbols == candidate.allSymbols &&
            sourceProblem->complementedStatePairs0 ==
                candidate.complementedStatePairs0 &&
@@ -807,6 +819,8 @@ struct PDRExactInitCache::Impl {
            hasSameDualRailPairs(candidate) &&
            sourceProblem->transitions0 == candidate.transitions0 &&
            sourceProblem->transitions1 == candidate.transitions1 &&
+           sourceProblem->auxiliaryTransitions ==
+               candidate.auxiliaryTransitions &&
            sourceProblem->lazyTransitions == candidate.lazyTransitions &&
            sourceProblem->initialCondition == candidate.initialCondition;
   }
@@ -884,7 +898,8 @@ size_t pdrDualRailStateSymbolCount(const KInductionProblem& problem) {
 }
 
 size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
-  size_t count = problem.transitions0.size() + problem.transitions1.size();
+  size_t count = problem.transitions0.size() + problem.transitions1.size() +
+                 problem.auxiliaryTransitions.size();
   if (problem.lazyTransitions != nullptr) {
     count += problem.lazyTransitions->sourceByStateSymbol.size();
   }
@@ -2832,6 +2847,41 @@ size_t addNewPredecessorFrameClauses(
   return addedClauses;
 }
 
+void PredecessorAssumptionSolver::extendSymbolSurface(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& solverSymbols) {
+  std::vector<size_t> addedSymbols;
+  std::set_difference(
+      solverSymbols.begin(),
+      solverSymbols.end(),
+      key.solverSymbols.begin(),
+      key.solverSymbols.end(),
+      std::back_inserter(addedSymbols));
+  if (addedSymbols.empty()) {
+    return;
+  }
+
+  variables->addSymbols(*solver, addedSymbols);
+  querySymbolSet.insert(addedSymbols.begin(), addedSymbols.end());
+  for (const size_t symbol : addedSymbols) {
+    transitionLeafLits.emplace(symbol, variables->getLiteral(symbol, 0));
+  }
+
+  // Existing transition roots remain valid. New roots need an encoder whose
+  // leaf map includes the enlarged surface, so discard only encoder memo tables.
+  transitionEncoderBySymbolMap.clear();
+  key.solverSymbols = solverSymbols;
+
+  // The symbol-surface builder closes every relation pair. Re-emitting these
+  // exact domain clauses is harmless and avoids rebuilding the SAT instance.
+  addComplementedStateRelations(
+      *solver, *variables, problem.complementedStatePairs0, 1);
+  addComplementedStateRelations(
+      *solver, *variables, problem.complementedStatePairs1, 1);
+  addSameFrameStateEqualities(*solver, *variables, problem, 1);
+  addDualRailStateValidity(*solver, *variables, problem.dualRailStatePairs, 1);
+}
+
 PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
     PredecessorAssumptionCache& cache,
     const KInductionProblem& problem,
@@ -2846,7 +2896,7 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
       level == 0 && cache.sharedFrameZeroPredecessorSolver != nullptr;
   auto& solver = useSharedFrameZeroSolver
                      ? *cache.sharedFrameZeroPredecessorSolver
-                     : cache.solver;
+                     : cache.solversByLevel[level];
   PredecessorAssumptionCacheKey key{
       useSharedFrameZeroSolver
           ? cache.sharedFrameZeroPredecessorProblem
@@ -2859,7 +2909,19 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
       level,
       frameClausesFingerprint(frames, level),
       solverSymbols};
-  if (solver != nullptr && solver->key.hasSameReusableContext(key)) {
+  if (solver != nullptr && solver->canExtendTo(key)) {
+    const size_t previousSymbolCount = solver->key.solverSymbols.size();
+    solver->extendSymbolSurface(problem, key.solverSymbols);
+    if (solver->key.solverSymbols.size() != previousSymbolCount &&
+        pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor cached solver surface extended added=",
+          solver->key.solverSymbols.size() - previousSymbolCount,
+          " symbols=",
+          solver->key.solverSymbols.size(),
+          " level=",
+          level);
+    }
     // PDR frames strengthen monotonically. Reuse the expensive transition and
     // frame prefix solver, then stream only newly learned frame clauses into it.
     const size_t addedClauses =
@@ -3461,6 +3523,12 @@ class PdrTernaryModelReducer {
   }
 
  private:
+  using EvaluationMemo =
+      std::unordered_map<BoolExpr*, std::optional<bool>>;
+  using EvaluationMemosBySymbolMap = std::unordered_map<
+      const std::unordered_map<size_t, size_t>*,
+      EvaluationMemo>;
+
   struct Root {
     BoolExpr* formula = nullptr;
     const std::unordered_map<size_t, size_t>* symbolMap = nullptr;
@@ -3483,7 +3551,7 @@ class PdrTernaryModelReducer {
   std::optional<bool> evaluate(
       BoolExpr* node,
       const Root& root,
-      std::unordered_map<BoolExpr*, std::optional<bool>>& memo) const {
+      EvaluationMemo& memo) const {
     if (node == nullptr) {
       return std::nullopt;
     }
@@ -3544,17 +3612,21 @@ class PdrTernaryModelReducer {
     return result;
   }
 
-  bool rootHasExpectedValue(const Root& root) const {
-    std::unordered_map<BoolExpr*, std::optional<bool>> memo;
+  bool rootHasExpectedValue(const Root& root,
+                            EvaluationMemo& memo) const {
     const auto value = evaluate(root.formula, root, memo);
     return value.has_value() && *value == root.expectedValue;
   }
 
   bool rootsHaveExpectedValues(std::optional<size_t> changedSymbol) const {
+    // Transition roots from one design share both a symbol map and BoolExpr
+    // subgraphs. Reuse their evaluations within this one tentative X assignment;
+    // a fresh memo is still created for every literal-removal attempt.
+    EvaluationMemosBySymbolMap memosBySymbolMap;
     for (const auto& root : roots_) {
       if ((!changedSymbol.has_value() ||
            root.support.find(*changedSymbol) != root.support.end()) &&
-          !rootHasExpectedValue(root)) {
+          !rootHasExpectedValue(root, memosBySymbolMap[root.symbolMap])) {
         return false;
       }
     }
@@ -3805,6 +3877,8 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
                                      BoolExpr* initFormula,
                                      BoolExpr* frameInvariant,
                                      const std::vector<FrameClauses>& frames,
+                                     BoolExpr* badFormula,
+                                     bool decomposeOutputBad,
                                      const std::optional<std::vector<size_t>>&
                                          preciseBadStateSupport,
                                      const std::unordered_set<size_t>& stateSymbols,
@@ -3812,10 +3886,10 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
                                      const ComplementPartnerIndex& complementPartners,
                                      BadCubeAssumptionCache* badCubeAssumptionCache,
                                      PdrFormulaSupportCache* supportCache) {
-  if (problem.observedOutputExprs0.size() <= 1 ||
+  if (!decomposeOutputBad || problem.observedOutputExprs0.size() <= 1 ||
       problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {
     return findBadCubeForFormula(
-        problem, solverType, initFormula, frameInvariant, frames, problem.bad,
+        problem, solverType, initFormula, frameInvariant, frames, badFormula,
         preciseBadStateSupport, level,
         complementPartners, badCubeAssumptionCache, supportCache);
   }
@@ -5306,33 +5380,34 @@ class ExactPdrBootstrapInitBuilder {
 BoolExpr* buildExactPdrInitFormula(
     const KInductionProblem& problem,
     PDRExactInitCache::Impl* sharedExactInit) {
-  if (problem.resetBootstrapCycles != 0) {
-    // PDR requires F[0] to be the initial-state predicate.  For SEC that starts
-    // after reset, this predicate is the reset transition image; a vector of
-    // per-state values cannot preserve relations created during reset.
-    if (sharedExactInit != nullptr) {
-      if (sharedExactInit->initFormula == nullptr) {
-        // Build from the full top-level problem so historical fresh symbols do
-        // not collide with an output expression introduced by a later batch.
-        sharedExactInit->initFormula =
-            ExactPdrBootstrapInitBuilder(*sharedExactInit->sourceProblem)
-                .build();
-        if (pdrStatsEnabled()) {
-          emitSecDiag("SEC PDR stats: shared exact F[0] cache built");
-        }
-      } else if (pdrStatsEnabled()) {
-        emitSecDiag("SEC PDR stats: shared exact F[0] cache reused");
-      }
-      return sharedExactInit->initFormula;
+  if (sharedExactInit != nullptr && sharedExactInit->initFormula != nullptr) {
+    if (pdrStatsEnabled()) {
+      emitSecDiag("SEC PDR stats: shared exact F[0] cache reused");
     }
-    return ExactPdrBootstrapInitBuilder(problem).build();
+    return sharedExactInit->initFormula;
   }
 
-  BoolExpr* init = problem.initialCondition != nullptr
-                       ? problem.initialCondition
-                       : BoolExpr::createTrue();
-  return BoolExpr::simplify(
-      appendAssignmentFormula(init, problem.initialStateAssignments));
+  const KInductionProblem& source =
+      sharedExactInit != nullptr ? *sharedExactInit->sourceProblem : problem;
+  BoolExpr* initFormula = nullptr;
+  if (source.resetBootstrapCycles != 0) {
+    // PDR requires F[0] to be the initial-state predicate. For SEC that starts
+    // after reset, this predicate is the exact reset transition image.
+    initFormula = ExactPdrBootstrapInitBuilder(source).build();
+  } else {
+    BoolExpr* init = source.initialCondition != nullptr
+                         ? source.initialCondition
+                         : BoolExpr::createTrue();
+    initFormula = BoolExpr::simplify(
+        appendAssignmentFormula(init, source.initialStateAssignments));
+  }
+  if (sharedExactInit != nullptr) {
+    sharedExactInit->initFormula = initFormula;
+    if (pdrStatsEnabled()) {
+      emitSecDiag("SEC PDR stats: shared exact F[0] cache built");
+    }
+  }
+  return initFormula;
 }
 
 }  // namespace
@@ -5347,11 +5422,29 @@ PDREngine::PDREngine(const KInductionProblem& problem,
       exactInitCache_(std::move(exactInitCache)) {}
 
 PDRResult PDREngine::run(size_t maxFrames) const {
+  return run(maxFrames, problem_.property);
+}
+
+PDRResult PDREngine::run(size_t maxFrames, BoolExpr* property) const {
+  if (property == nullptr) {
+    return {PDRStatus::Inconclusive, 0};  // LCOV_EXCL_LINE
+  }
+  const bool usesDefaultProperty = property == problem_.property;
+  KInductionProblem runProblem = problem_;
+  runProblem.property = BoolExpr::simplify(property);
+  runProblem.bad = BoolExpr::simplify(BoolExpr::Not(runProblem.property));
+  if (!usesDefaultProperty) {
+    // Alternate targets are independent PDR safety properties. Do not inherit
+    // a target-specific induction hypothesis from the normal SEC obligation.
+    runProblem.inductionProperty = nullptr;
+    runProblem.inductionBad = nullptr;
+  }
+
   // Build the SEC startup frontier once so every frame query shares the same
   // interpretation of reset/bootstrap and frame-0 equality constraints.
   resetPdrBudgetExhaustion();
   setPdrPredecessorQueryLimit(maxPredecessorQueries_);
-  emitPdrTraceProblem(problem_);
+  emitPdrTraceProblem(runProblem);
   PDRExactInitCache::Impl* sharedExactInit = nullptr;
   if (exactInitCache_ != nullptr &&
       exactInitCache_->impl_->matches(problem_, solverType_)) {
@@ -5377,9 +5470,9 @@ PDRResult PDREngine::run(size_t maxFrames) const {
   BoolExpr* frameInvariant =
       selectPdrFrameInvariant(problem_, initFormula, solverType_);
 
-  TransitionExprResolver transitionByState(problem_);
-  ComplementPartnerIndex complementPartners(problem_);
-  PdrFormulaSupportCache formulaSupportCache(problem_.dualRailStatePairs);
+  TransitionExprResolver transitionByState(runProblem);
+  ComplementPartnerIndex complementPartners(runProblem);
+  PdrFormulaSupportCache formulaSupportCache(runProblem.dualRailStatePairs);
   if (sharedExactInit != nullptr) {
     prepareSharedExactInitQueries(
         *sharedExactInit,
@@ -5390,7 +5483,7 @@ PDRResult PDREngine::run(size_t maxFrames) const {
   // The bad predicate is the same for every frame query. Cache its support too
   // so repeated checks do not walk the combined mismatch formula again.
   const auto preciseBadStateSupport = collectBoundedStateSupportSymbols(
-      problem_.bad,
+      runProblem.bad,
       std::numeric_limits<size_t>::max(),
       0,
       transitionByState.stateSymbols());
@@ -5423,11 +5516,13 @@ PDRResult PDREngine::run(size_t maxFrames) const {
           ? &sharedExactInit->frameZeroBadCubeCache
           : &badCubeAssumptionCache;
   if (auto badCube = findBadCube(
-          problem_,
+          runProblem,
           solverType_,
           initFormula,
           frameInvariant,
           frames,
+          runProblem.bad,
+          usesDefaultProperty,
           preciseBadStateSupport,
           transitionByState.stateSymbols(),
           0,
@@ -5449,8 +5544,8 @@ PDRResult PDREngine::run(size_t maxFrames) const {
   // Init/bootstrap facts are static for a PDR run. Wide dual-rail SEC problems
   // can carry tens of thousands of boot assignments, so build the lookup index
   // once instead of rebuilding it for every blocked obligation.
-  const InitFactIndex initFacts = buildInitFactIndex(problem_);
-  const auto seedClauses = buildSeedClauses(problem_, initFacts);
+  const InitFactIndex initFacts = buildInitFactIndex(runProblem);
+  const auto seedClauses = buildSeedClauses(runProblem, initFacts);
   frames.emplace_back(FrameClauses{seedClauses});
   emitPdrTraceFrames("seeded_frames", frames);
   for (size_t level = 1; level <= maxFrames; ++level) {
@@ -5459,11 +5554,13 @@ PDRResult PDREngine::run(size_t maxFrames) const {
     while (true) {
       const auto badCube =
           findBadCube(
-              problem_,
+              runProblem,
               solverType_,
               initFormula,
               frameInvariant,
               frames,
+              runProblem.bad,
+              usesDefaultProperty,
               preciseBadStateSupport,
               transitionByState.stateSymbols(),
               level,
@@ -5480,7 +5577,7 @@ PDRResult PDREngine::run(size_t maxFrames) const {
                    formatCubeForPdrTrace(*badCube));
       size_t badFrame = level;
       if (!blockProofObligations(
-              problem_,
+              runProblem,
               solverType_,
               transitionByState,
               initFormula,
@@ -5513,7 +5610,7 @@ PDRResult PDREngine::run(size_t maxFrames) const {
     // We push in order to reach covergence and the condition is that that 
     // the clause is not preventing an actual bad path
     propagateClauses(
-        problem_,
+        runProblem,
         solverType_,
         transitionByState,
         initFormula,

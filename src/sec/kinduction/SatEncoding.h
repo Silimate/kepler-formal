@@ -23,6 +23,8 @@ class FrameVariableStore {
                      const std::vector<size_t>& symbols,
                      size_t numFrames);
 
+  void addSymbols(SATSolverWrapper& solver,
+                  const std::vector<size_t>& symbols);
   bool hasSymbol(size_t symbol) const;
   int getLiteral(size_t symbol, size_t frame) const;
   std::unordered_map<size_t, int> makeLeafLits(size_t frame) const;
@@ -35,6 +37,7 @@ class FrameVariableStore {
 
  private:
   std::unordered_map<size_t, std::vector<int>> symbolFrameLits_;
+  size_t numFrames_ = 0;
 };
 
 // Converts a BoolExpr DAG into SAT clauses over one specific frame using a

@@ -37,7 +37,6 @@
 #include "pdr/PDREngine.h"
 #include "proof/DualRailEncoding.h"
 #include "proof/TransitionExprResolver.h"
-#include "strategy/ReachableStateInvariant.h"
 #include "../../sat/SATSolverWrapper.h"
 
 namespace KEPLER_FORMAL::SEC {
@@ -45,10 +44,10 @@ namespace KEPLER_FORMAL::SEC {
 // Overall SEC strategy pipeline:
 // 1. Extract both designs into the normalized sequential model used by SEC.
 // 2. Align environment inputs and observed outputs by stable external names.
-// 3. Keep cross-design internal state uncorrelated; only public/reset facts can
-//    constrain the two designs before the selected SEC engine proves outputs.
-// 4. Build reset/init reachable-state strengthening for startup anchoring.
-// 5. Remap both designs into one shared SAT symbol space.
+// 3. Keep cross-design internal state uncorrelated; only public facts constrain
+//    the two designs before the selected SEC engine proves outputs.
+// 4. Remap both designs into one shared SAT symbol space.
+// 5. Build F[0] from the extracted initial predicate.
 // 6. Build the checked SEC property and the stronger proof invariant.
 // 7. Hand the combined transition system to the selected top-level engine and
 //    translate its result back into user-facing SEC diagnostics.
@@ -254,100 +253,6 @@ std::string describeMismatchedNames(const std::vector<std::string>& lhs,
 
 std::string formatBoolValue(bool value) {
   return value ? "1" : "0";
-}
-
-std::string normalizeSignalBaseName(const std::string& name) {
-  std::string base = name;
-  const auto bracket = base.find('[');
-  if (bracket != std::string::npos) {
-    base = base.substr(0, bracket);
-  }
-  std::transform(base.begin(), base.end(), base.begin(), [](unsigned char ch) {
-    return static_cast<char>(std::toupper(ch));
-  });
-  return base;
-}
-
-bool hasSuffix(const std::string& value, const std::string& suffix) {
-  return value.size() >= suffix.size() &&
-         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-bool isResetNameToken(const std::string& candidate, const std::string& token) {
-  // Domain-prefixed top resets, for example `wb_rst_i`, normalize to `WB_RST`
-  // after input-suffix stripping.  Match only a final underscore-separated
-  // reset token so prefixes do not block reset bootstrap alignment.
-  return candidate == token || hasSuffix(candidate, "_" + token);
-// LCOV_EXCL_START
-}  // LCOV_EXCL_LINE
-// LCOV_EXCL_STOP
-
-bool isActiveLowResetToken(const std::string& candidate) {
-  return candidate == "RESET_N" || candidate == "RESETN" ||
-         candidate == "RESET_L" || candidate == "RST_N" ||
-         candidate == "RSTN" || candidate == "RST_L";
-}
-
-void appendDomainPrefixedActiveLowResetCandidates(
-    std::vector<std::string>& candidates) {
-  // LCOV_EXCL_START
-  const size_t originalSize = candidates.size();
-  for (size_t index = 0; index < originalSize; ++index) {
-  // LCOV_EXCL_STOP
-    const std::string& candidate = candidates[index];
-    if (candidate.size() <= 1) {
-      continue;
-    }
-    // LCOV_EXCL_START
-    const std::string strippedDomain = candidate.substr(1);
-    if (isActiveLowResetToken(strippedDomain)) {
-    // LCOV_EXCL_STOP
-      // Async FIFO top ports commonly use rrst_n/wrst_n.  Recognize those
-      // active-low one-letter domain prefixes without treating arbitrary
-      // embedded "rst" names as reset controls.
-      candidates.push_back(strippedDomain);  // LCOV_EXCL_LINE
-    }  // LCOV_EXCL_LINE
-  }
-}
-
-std::vector<std::string> resetNameCandidates(const std::string& displayName) {
-  // The shared SEC symbol space sees user-visible top-input names such as
-  // `reset_i[0]`.  Match the same reset spelling policy as the reachable-state
-  // pass so a reset discovered during model analysis remains available when
-  // bootstrap constraints are converted to shared SAT symbols.
-  const std::string normalized = normalizeSignalBaseName(displayName);
-  std::vector<std::string> candidates = {normalized};
-  if (hasSuffix(normalized, "_IN")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 3));  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  if (hasSuffix(normalized, "_I")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 2));  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  if (hasSuffix(normalized, "_NI")) {
-    candidates.push_back(normalized.substr(0, normalized.size() - 1));  // LCOV_EXCL_LINE
-  }  // LCOV_EXCL_LINE
-  appendDomainPrefixedActiveLowResetCandidates(candidates);
-  return candidates;
-// LCOV_EXCL_START
-}
-// LCOV_EXCL_STOP
-
-std::optional<bool> getResetAssertionValue(const std::string& displayName) {
-  for (const auto& candidate : resetNameCandidates(displayName)) {
-    if (isResetNameToken(candidate, "RESET") ||
-        isResetNameToken(candidate, "RST")) {
-      return true;
-    }
-    if (isResetNameToken(candidate, "RESET_N") ||
-        isResetNameToken(candidate, "RESETN") ||
-        isResetNameToken(candidate, "RESET_L") ||
-        isResetNameToken(candidate, "RST_N") ||
-        isResetNameToken(candidate, "RSTN") ||
-        isResetNameToken(candidate, "RST_L")) {
-      return false;
-    }
-  }
-  return std::nullopt;
 }
 
 SignalKey getTerminalPathKey(const naja::DNL::DNLTerminalFull& terminal) {
@@ -1231,6 +1136,7 @@ KInductionProblem makeOutputSubsetProblem(
   subset.observedOutputExprs0.clear();
   subset.observedOutputExprs1.clear();
   subset.dualRailOutputStrictEqualityExprs.clear();
+  subset.dualRailOutputBothDefinedExprs.clear();
   subset.dualRailOutputSkipReasons.clear();
 
   // LCOV_DISABLED_START
@@ -1242,6 +1148,9 @@ KInductionProblem makeOutputSubsetProblem(
       source.observedOutputExprs0.size();
   const bool copyStrictEqualityExprs =
       source.dualRailOutputStrictEqualityExprs.size() ==
+      source.observedOutputExprs0.size();
+  const bool copyBothDefinedExprs =
+      source.dualRailOutputBothDefinedExprs.size() ==
       source.observedOutputExprs0.size();
   for (const size_t outputIndex : outputIndices) {
     if (copyObservedKeys) {
@@ -1256,6 +1165,10 @@ KInductionProblem makeOutputSubsetProblem(
     if (copyStrictEqualityExprs) {
       subset.dualRailOutputStrictEqualityExprs.push_back(
           source.dualRailOutputStrictEqualityExprs[outputIndex]);
+    }
+    if (copyBothDefinedExprs) {
+      subset.dualRailOutputBothDefinedExprs.push_back(
+          source.dualRailOutputBothDefinedExprs[outputIndex]);
     }
     if (copySkipReasons) {
       subset.dualRailOutputSkipReasons.push_back(
@@ -1331,14 +1244,13 @@ std::string describeUnanchoredStateSupport(
 
 void logSecDiagLine(bool secDiagEnabled, const char* message);
 
-void filterOutputsRequiringUnanchoredResetState(
+void filterOutputsRequiringUninitializedState(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
-    const ReachableStateInvariant& reachableInvariant,
-    bool resetBootstrapActive,
+    bool hasIncompleteInitialState,
     AlignedSecInterface& aligned,
     bool secDiagEnabled) {
-  if (!resetBootstrapActive || aligned.outputs.names.empty()) {
+  if (!hasIncompleteInitialState || aligned.outputs.names.empty()) {
     return;
   }
 
@@ -1403,10 +1315,8 @@ void filterOutputsRequiringUnanchoredResetState(
     }
 
     if (!reasons.empty()) {
-      // This is a coverage decision, not an internal-state equality shortcut:
-      // reset/bootstrap values are per-design facts at one frontier.  They do
-      // not justify comparing later state-dependent outputs unless SEC also
-      // has an inductive cross-design state relation for that support.
+      // Binary SEC cannot distinguish an initialization-only mismatch from a
+      // concrete design mismatch without an initial value for this state.
       const auto skippedOutput = name + ": " + joinReasons(reasons);
       aligned.outputCoverage.skippedOutputs.push_back(skippedOutput);
       aligned.outputCoverage.resetUnanchoredSkippedOutputs.push_back(
@@ -1694,9 +1604,9 @@ findInputOnlyFrameZeroResidualCounterexample(
     return std::nullopt;
   }
 
-  // This is a witness-only guard for skipped residual top outputs.  Restrict it
-  // to frame-0 input/constant mismatches so equivalent reset-bootstrap designs
-  // do not pay to materialize transition cones before the selected SEC engine.
+  // This is a witness-only guard for skipped residual top outputs. Restrict it
+  // to frame-0 input/constant mismatches so stateful residuals do not pay to
+  // materialize transition cones before the selected SEC engine.
   const KInductionProblem inputOnlyProblem =
       makeOutputSubsetProblem(problem, inputOnlyOutputs);
   return SEC::findFastBaseCounterexampleAtFrontier(
@@ -2277,10 +2187,6 @@ SharedSecSymbolSpace buildSharedSecSymbolSpace(
     symbolSpace.inputSymbols1.emplace(alignedInputs.keys1[i], symbol);
     symbolSpace.problem.allSymbols.push_back(symbol);
     symbolSpace.problem.inputSymbols.push_back(symbol);
-    if (auto assertedValue = getResetAssertionValue(alignedInputs.names[i]);
-        assertedValue.has_value()) {
-      symbolSpace.problem.resetBootstrapInputs.emplace_back(symbol, *assertedValue);
-    }
   }
 
   for (const auto& key : model0.stateBits) {
@@ -2573,16 +2479,6 @@ std::optional<bool> lookupStateValue(
   return valueIt->second;
 }
 
-std::optional<bool> lookupBootstrapValue(
-    const std::unordered_map<SignalKey, bool, SignalKeyHash>& values,
-    const SignalKey& key) {
-  const auto valueIt = values.find(key);
-  if (valueIt == values.end()) {
-    return std::nullopt;
-  }
-  return valueIt->second;  // LCOV_EXCL_LINE
-}
-
 void addDualRailInitialAssignments(
     const SequentialDesignModel& model,
     const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& railsByKey,
@@ -2592,22 +2488,6 @@ void addDualRailInitialAssignments(
     const auto value = lookupStateValue(model.initialStateValueByKey, key);
     addDualRailStateAssignment(problem.initialStateAssignments, rails, value);
     problem.initializedStateCount += 2;
-  }
-}
-
-void addDualRailBootstrapAssignments(
-    const SequentialDesignModel& model,
-    const std::unordered_map<SignalKey, bool, SignalKeyHash>& bootstrapValues,
-    const std::unordered_map<SignalKey, DualRailSymbolPair, SignalKeyHash>& railsByKey,
-    KInductionProblem& problem) {
-  if (problem.resetBootstrapInputs.empty() || problem.resetBootstrapCycles == 0) {
-    return;
-  }
-  for (const auto& key : model.stateBits) {
-    addDualRailStateAssignment(
-        problem.bootstrapStateAssignments,
-        railsByKey.at(key),
-        lookupBootstrapValue(bootstrapValues, key));
   }
 }
 
@@ -2719,6 +2599,7 @@ BoolExpr* buildDualRailBinaryDefinedExpr(const DualRailBoolExpr& value) {
 struct DualRailOutputProperties {
   BoolExpr* guardedEquality = nullptr;
   BoolExpr* strictEquality = nullptr;
+  BoolExpr* bothValuesDefined = nullptr;
 };
 
 DualRailOutputProperties buildDualRailOutputProperties(
@@ -2737,8 +2618,239 @@ DualRailOutputProperties buildDualRailOutputProperties(
       bothValuesDefined,
       BoolExpr::Xor(value0.mayBeOne, value1.mayBeOne));
   return {
-      BoolExpr::simplify(BoolExpr::Not(binaryMismatch)), strictEquality};
+      BoolExpr::simplify(BoolExpr::Not(binaryMismatch)),
+      strictEquality,
+      bothValuesDefined};
 }
+
+class PdrAgeMonitor {
+ public:
+  PdrAgeMonitor(const KInductionProblem& source, size_t maximumAge)
+      : problem_(source), maximumAge_(maximumAge) {
+    addCounterState();
+  }
+
+  const KInductionProblem& problem() const { return problem_; }
+
+  BoolExpr* propertyFromAge(size_t age, BoolExpr* property) const {
+    return BoolExpr::simplify(BoolExpr::Or(ageLessThan(age), property));
+  }
+
+  BoolExpr* outputsDefinedFromAge(size_t firstOutput,
+                                  size_t endOutput,
+                                  size_t age) const {
+    BoolExpr* allDefined = BoolExpr::createTrue();
+    const size_t cappedEnd = std::min(
+        endOutput, problem_.dualRailOutputBothDefinedExprs.size());
+    for (size_t output = firstOutput; output < cappedEnd; ++output) {
+      allDefined = BoolExpr::And(
+          allDefined, problem_.dualRailOutputBothDefinedExprs[output]);
+    }
+    return propertyFromAge(age, BoolExpr::simplify(allDefined));
+  }
+
+ private:
+  static size_t counterWidth(size_t maximumAge) {
+    size_t width = 1;
+    while (width < std::numeric_limits<size_t>::digits &&
+           (maximumAge >> width) != 0) {
+      ++width;
+    }
+    return width;
+  }
+
+  static BoolExpr* selectExpr(BoolExpr* condition,
+                              BoolExpr* whenTrue,
+                              BoolExpr* whenFalse) {
+    return BoolExpr::Or(
+        BoolExpr::And(condition, whenTrue),
+        BoolExpr::And(BoolExpr::Not(condition), whenFalse));
+  }
+
+  BoolExpr* ageLessThan(size_t value) const {
+    if (value == 0) {
+      return BoolExpr::createFalse();
+    }
+    if (const auto cached = ageLessThanByValue_.find(value);
+        cached != ageLessThanByValue_.end()) {
+      return cached->second;
+    }
+
+    BoolExpr* less = BoolExpr::createFalse();
+    BoolExpr* equalPrefix = BoolExpr::createTrue();
+    for (size_t offset = 0; offset < counterSymbols_.size(); ++offset) {
+      const size_t bit = counterSymbols_.size() - 1 - offset;
+      BoolExpr* variable = BoolExpr::Var(counterSymbols_[bit]);
+      if (((value >> bit) & size_t{1}) != 0) {
+        less = BoolExpr::Or(
+            less,
+            BoolExpr::And(equalPrefix, BoolExpr::Not(variable)));
+        equalPrefix = BoolExpr::And(equalPrefix, variable);
+      } else {
+        equalPrefix = BoolExpr::And(equalPrefix, BoolExpr::Not(variable));
+      }
+    }
+    BoolExpr* result = BoolExpr::simplify(less);
+    ageLessThanByValue_.emplace(value, result);
+    return result;
+  }
+
+  void addCounterState() {
+    const size_t width = counterWidth(maximumAge_);
+    size_t nextSymbol = nextUnusedProofSymbol(problem_);
+    counterSymbols_.reserve(width);
+    for (size_t bit = 0; bit < width; ++bit) {
+      const size_t symbol = nextSymbol++;
+      counterSymbols_.push_back(symbol);
+      problem_.auxiliaryStateSymbols.push_back(symbol);
+      problem_.allSymbols.push_back(symbol);
+      problem_.initialStateAssignments.emplace_back(symbol, false);
+    }
+    problem_.totalStateCount += width;
+    problem_.initializedStateCount += width;
+
+    // Values above the configured maximum are unreachable. Defining them to
+    // move to the maximum keeps the monitor transition total without adding a
+    // domain assumption to PDR.
+    BoolExpr* atOrAboveMaximum =
+        BoolExpr::Not(ageLessThan(maximumAge_));
+    BoolExpr* carry = BoolExpr::createTrue();
+    for (size_t bit = 0; bit < width; ++bit) {
+      BoolExpr* current = BoolExpr::Var(counterSymbols_[bit]);
+      BoolExpr* incremented = BoolExpr::Xor(current, carry);
+      carry = BoolExpr::And(carry, current);
+      BoolExpr* maximumBit =
+          ((maximumAge_ >> bit) & size_t{1}) != 0
+              ? BoolExpr::createTrue()
+              : BoolExpr::createFalse();
+      problem_.auxiliaryTransitions.emplace_back(
+          counterSymbols_[bit],
+          BoolExpr::simplify(selectExpr(
+              atOrAboveMaximum, maximumBit, incremented)));
+    }
+  }
+
+  KInductionProblem problem_;
+  size_t maximumAge_ = 0;
+  std::vector<size_t> counterSymbols_;
+  mutable std::unordered_map<size_t, BoolExpr*> ageLessThanByValue_;
+};
+
+struct PdrAgeSearchResult {
+  std::optional<size_t> certifiedAge;
+  size_t reachedBound = 0;
+  PDRStatus minimumStatus = PDRStatus::Inconclusive;
+  PDRStatus maximumStatus = PDRStatus::Inconclusive;
+};
+
+const char* pdrStatusName(PDRStatus status) {
+  switch (status) {
+    case PDRStatus::Equivalent:
+      return "equivalent";
+    case PDRStatus::Different:
+      return "different";
+    case PDRStatus::Inconclusive:
+    default:
+      return "inconclusive";
+  }
+}
+
+PdrAgeOptions capPdrAgeOptionsToMaxFrames(
+    const PdrAgeOptions& options,
+    size_t maxFrames) {
+  PdrAgeOptions effective = options;
+  // An age outside the PDR frame budget cannot be checked. Keep the monitor
+  // within the caller's existing resource bound instead of deepening PDR.
+  effective.minimum = std::min(effective.minimum, maxFrames);
+  effective.maximum = std::min(effective.maximum, maxFrames);
+  return effective;
+}
+
+class PdrAgeProofSession {
+ public:
+  PdrAgeProofSession(const KInductionProblem& problem,
+                     KEPLER_FORMAL::Config::SolverType solverType,
+                     size_t maxFrames,
+                     const PdrAgeOptions& options)
+      : monitor_(problem, options.maximum),
+        exactInitCache_(std::make_shared<PDRExactInitCache>(
+            monitor_.problem(), solverType)),
+        engine_(monitor_.problem(), solverType, 0, exactInitCache_),
+        maxFrames_(maxFrames),
+        options_(options) {}
+
+  PdrAgeSearchResult findDefinedAge(size_t firstOutput,
+                                    size_t endOutput) const {
+    PdrAgeSearchResult search;
+    const PDRResult minimum = probeDefinedAge(
+        firstOutput, endOutput, options_.minimum);
+    search.reachedBound = minimum.bound;
+    search.minimumStatus = minimum.status;
+    search.maximumStatus = minimum.status;
+    if (minimum.status == PDRStatus::Equivalent) {
+      search.certifiedAge = options_.minimum;
+      return search;
+    }
+
+    if (options_.minimum == options_.maximum) {
+      return search;
+    }
+    const PDRResult maximum = probeDefinedAge(
+        firstOutput, endOutput, options_.maximum);
+    search.reachedBound = std::max(search.reachedBound, maximum.bound);
+    search.maximumStatus = maximum.status;
+    if (maximum.status != PDRStatus::Equivalent) {
+      return search;
+    }
+
+    size_t lower = minimum.status == PDRStatus::Different
+                       ? options_.minimum + 1
+                       : options_.minimum;
+    size_t upper = options_.maximum;
+    while (lower < upper) {
+      const size_t middle = lower + (upper - lower) / 2;
+      const PDRResult probe = probeDefinedAge(firstOutput, endOutput, middle);
+      search.reachedBound = std::max(search.reachedBound, probe.bound);
+      if (probe.status == PDRStatus::Equivalent) {
+        upper = middle;
+        continue;
+      }
+      if (probe.status == PDRStatus::Different) {
+        lower = middle + 1;
+        continue;
+      }
+      // UNKNOWN cannot establish either side of the monotone search. Keep the
+      // already-proved upper age rather than treating a resource limit as SAT
+      // or UNSAT.
+      break;
+    }
+    search.certifiedAge = upper;
+    return search;
+  }
+
+  PDRResult runFromAge(BoolExpr* property, size_t age) const {
+    return engine_.run(maxFrames_, monitor_.propertyFromAge(age, property));
+  }
+
+  BoolExpr* propertyFromAge(size_t age, BoolExpr* property) const {
+    return monitor_.propertyFromAge(age, property);
+  }
+
+ private:
+  PDRResult probeDefinedAge(size_t firstOutput,
+                            size_t endOutput,
+                            size_t age) const {
+    return engine_.run(
+        maxFrames_,
+        monitor_.outputsDefinedFromAge(firstOutput, endOutput, age));
+  }
+
+  PdrAgeMonitor monitor_;
+  std::shared_ptr<PDRExactInitCache> exactInitCache_;
+  PDREngine engine_;
+  size_t maxFrames_ = 0;
+  PdrAgeOptions options_;
+};
 
 void applyInitialStateAssignments(
     const std::unordered_map<SignalKey, bool, SignalKeyHash>& initialValues,
@@ -2762,7 +2874,7 @@ void applyInitialStateAssignments(
   }
 }
 
-ReachableStateInvariant integrateReachableStateInvariant(
+void integrateInitialState(
     const SequentialDesignModel& model0,
     const SequentialDesignModel& model1,
     const std::unordered_map<SignalKey, size_t, SignalKeyHash>& state0Symbols,
@@ -2778,43 +2890,7 @@ ReachableStateInvariant integrateReachableStateInvariant(
   if (problem.hasExplicitInitialState()) {
     problem.initialCondition = BoolExpr::simplify(initialCondition);
   }
-  const ReachableStateInvariant reachableInvariant = buildReachableStateInvariant(
-      model0,
-      model1);
-
-  for (const auto& [key, value] : reachableInvariant.bootstrapValues0) {
-    if (state0Symbols.find(key) != state0Symbols.end()) {
-      problem.bootstrapStateAssignments.emplace_back(state0Symbols.at(key), value);
-    }
-  }
-  // LCOV_DISABLED_START
-  for (const auto& [key, value] : reachableInvariant.bootstrapValues1) {
-  // LCOV_DISABLED_STOP
-    if (state1Symbols.find(key) != state1Symbols.end()) {
-      problem.bootstrapStateAssignments.emplace_back(state1Symbols.at(key), value);
-    // LCOV_DISABLED_START
-    }
-    // LCOV_DISABLED_STOP
-  }
-
-// LCOV_DISABLED_START
-
-  problem.resetBootstrapCycles = reachableInvariant.bootstrapCycles;
-  if (problem.resetBootstrapInputs.empty()) {
-  // LCOV_DISABLED_STOP
-    // The reachable-state pass works on each extracted model and can recognize
-    // reset-looking local inputs before the final shared SEC symbol space is
-    // assembled. PDR/KI/IMC can only run a reset-bootstrap proof when that
-    // reset also exists as an aligned environment input with one shared symbol.
-    // If no such symbol was created, keep the proof in normal initial-frontier
-    // mode so design-local initial facts remain active instead of being
-    // replaced by an unconstrained "bootstrap" frontier.
-    problem.resetBootstrapCycles = 0;
-    problem.bootstrapStateAssignments.clear();
-  }
-  return reachableInvariant;
 }
-// LCOV_DISABLED_STOP
 
 void buildSecPropertiesAndTransitions(
     const SequentialDesignModel& model0,
@@ -2873,15 +2949,11 @@ void buildSecPropertiesAndTransitions(
     printf(
     // LCOV_DISABLED_STOP
         "SEC summary: property_is_true=%d induction_property_is_true=%d "
-        "bad_is_false=%d induction_bad_is_false=%d reset_bootstrap_inputs=%zu "
-        "bootstrap_cycles=%zu bootstrap_assignments=%zu\n",
+        "bad_is_false=%d induction_bad_is_false=%d\n",
         problem.property == BoolExpr::createTrue(),
         problem.inductionProperty == BoolExpr::createTrue(),
         problem.bad == BoolExpr::createFalse(),
-        problem.inductionBad == BoolExpr::createFalse(),
-        problem.resetBootstrapInputs.size(),
-        problem.resetBootstrapCycles,
-        problem.bootstrapStateAssignments.size());
+        problem.inductionBad == BoolExpr::createFalse());
     fflush(stdout);
   }
 }
@@ -2892,7 +2964,6 @@ KInductionProblem buildDualRailSecProblem(
     // LCOV_DISABLED_START
     const AlignedSignals& alignedInputs,
     const AlignedSignals& alignedOutputs,
-    const ReachableStateInvariant& reachableInvariant,
     SharedSecSymbolSpace& symbolSpace,
     // LCOV_DISABLED_STOP
     bool useLazyTransitionRemapping,
@@ -2901,8 +2972,6 @@ KInductionProblem buildDualRailSecProblem(
   problem.environmentInputs = alignedInputs.keys0;
   problem.environmentInputNames = symbolSpace.problem.environmentInputNames;
   problem.inputSymbols = symbolSpace.problem.inputSymbols;
-  problem.resetBootstrapCycles = symbolSpace.problem.resetBootstrapCycles;
-  problem.resetBootstrapInputs = symbolSpace.problem.resetBootstrapInputs;
   problem.allSymbols = symbolSpace.problem.inputSymbols;
   problem.usesDualRailStateEncoding = true;
 
@@ -2921,16 +2990,11 @@ KInductionProblem buildDualRailSecProblem(
   addDualRailInitialAssignments(model0, railMaps.state0ByKey, problem);
   addDualRailInitialAssignments(model1, railMaps.state1ByKey, problem);
   // LCOV_DISABLED_STOP
-  // The rail-valued boot frontier is already represented as structured unit
+  // The rail-valued initial predicate is represented as structured unit
   // facts in initialStateAssignments.  Keep initialCondition non-null so the
   // existing base-case encoders enter their structured-init path without
   // materializing a huge duplicate conjunction over every rail.
   problem.initialCondition = BoolExpr::createTrue();
-
-  addDualRailBootstrapAssignments(
-      model0, reachableInvariant.bootstrapValues0, railMaps.state0ByKey, problem);
-  addDualRailBootstrapAssignments(
-      model1, reachableInvariant.bootstrapValues1, railMaps.state1ByKey, problem);
 
 // LCOV_DISABLED_START
 
@@ -2961,6 +3025,9 @@ KInductionProblem buildDualRailSecProblem(
   problem.dualRailOutputStrictEqualityExprs.clear();
   problem.dualRailOutputStrictEqualityExprs.reserve(
       alignedOutputs.names.size());
+  problem.dualRailOutputBothDefinedExprs.clear();
+  problem.dualRailOutputBothDefinedExprs.reserve(
+      alignedOutputs.names.size());
   problem.dualRailOutputSkipReasons.clear();
   problem.dualRailOutputSkipReasons.reserve(alignedOutputs.names.size());
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
@@ -2986,6 +3053,8 @@ KInductionProblem buildDualRailSecProblem(
     problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
     problem.dualRailOutputStrictEqualityExprs.push_back(
         outputProperties.strictEquality);
+    problem.dualRailOutputBothDefinedExprs.push_back(
+        outputProperties.bothValuesDefined);
     // LCOV_DISABLED_STOP
     // Dual-rail strategy construction only builds obligations.  The selected
     // engine must prove each top output; no side implication query can mark it
@@ -3043,14 +3112,10 @@ KInductionProblem buildDualRailSecProblem(
   if (secDiagEnabled || secSummaryStatsEnabled()) {
     printf(
         "SEC summary: encoding=dual_rail_steady rail_state_bits=%zu "
-        "rail_outputs=%zu reset_bootstrap_inputs=%zu bootstrap_cycles=%zu "
-        "bootstrap_assignments=%zu "
+        "rail_outputs=%zu "
         "dual_rail_state_relation_pairs=%zu\n",
         problem.totalStateCount,
         problem.observedOutputExprs0.size(),
-        problem.resetBootstrapInputs.size(),
-        problem.resetBootstrapCycles,
-        problem.bootstrapStateAssignments.size(),
         problem.sameFrameStateEqualityPairs0.size() +
             problem.sameFrameStateEqualityPairs1.size());
     fflush(stdout);
@@ -3108,6 +3173,7 @@ SequentialEquivalenceResult runPdrSecEngine(
     const SequentialDesignModel& model1,
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
+    const PdrAgeOptions& ageOptions,
     // LCOV_DISABLED_STOP
     const OutputCoverageSelection& outputCoverage,
     // LCOV_DISABLED_START
@@ -3124,6 +3190,9 @@ SequentialEquivalenceResult runPdrSecEngine(
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
   }
+
+  const PdrAgeOptions effectiveAgeOptions =
+      capPdrAgeOptionsToMaxFrames(ageOptions, maxK);
 
 
 // LCOV_DISABLED_STOP
@@ -3180,6 +3249,12 @@ SequentialEquivalenceResult runPdrSecEngine(
     size_t endOutput = 0;
   // LCOV_DISABLED_START
   };
+  struct PdrStrictBatch {
+    size_t firstOutput = 0;
+    size_t endOutput = 0;
+    std::optional<size_t> ageGate;
+    bool mayCover = true;
+  };
   std::vector<PdrOutputBatch> outputBatches;
   const bool useSupportBoundedPdrBatches =
       problem.usesDualRailStateEncoding ||
@@ -3188,9 +3263,9 @@ SequentialEquivalenceResult runPdrSecEngine(
   // LCOV_DISABLED_START
   if (!useSupportBoundedPdrBatches) {
     // Batching protects very wide SEC/PDR properties from broad bad-state
-    // queries.  On medium designs, each tiny batch repeats the same
-    // reset/bootstrap invariant validation, so prove one conjunction slice and
-    // reserve batching for BlackParrot/AES-scale output counts.
+    // queries. On medium designs, each tiny batch repeats the same frame and
+    // transition setup, so prove one conjunction slice and reserve batching
+    // for BlackParrot/AES-scale output counts.
     outputBatches.push_back({0, problem.observedOutputExprs0.size()});  // LCOV_EXCL_LINE
     // LCOV_DISABLED_STOP
   } else {  // LCOV_EXCL_LINE
@@ -3203,34 +3278,107 @@ SequentialEquivalenceResult runPdrSecEngine(
       makeInitialPdrCoveredOutputs(problem);
   std::unordered_map<size_t, std::string> pdrSkippedOutputReasons =
       presetDualRailSkipReasons;
-  std::vector<PdrOutputBatch> guardedProvedBatches;
+  std::vector<PdrStrictBatch> strictBatches;
   std::vector<std::string> xAffectedOutputNames;
   size_t provedBound = 0;
   bool stopAfterInconclusiveBatch = false;
-  // Guarded, strict, and split output batches have one immutable dual-rail
-  // reset image. Share only that exact F[0] work; every PDR frame stays local.
-  std::shared_ptr<PDRExactInitCache> exactInitCache;
-  if (problem.usesDualRailStateEncoding &&
-      problem.resetBootstrapCycles != 0) {
-    exactInitCache = std::make_shared<PDRExactInitCache>(problem, solverType);
+  const bool useAutomaticAge =
+      problem.usesDualRailStateEncoding && effectiveAgeOptions.automatic &&
+      problem.dualRailOutputBothDefinedExprs.size() ==
+          problem.observedOutputExprs0.size();
+  std::unique_ptr<PdrAgeProofSession> ageSession;
+  if (useAutomaticAge) {
+    ageSession = std::make_unique<PdrAgeProofSession>(
+        problem, solverType, maxK, effectiveAgeOptions);
   }
-
+  std::shared_ptr<PDRExactInitCache> exactInitCache;
+  if (problem.usesDualRailStateEncoding && !useAutomaticAge) {
+    exactInitCache =
+        std::make_shared<PDRExactInitCache>(problem, solverType);
+  }
   KInductionProblem exactBatchProblem = problem;
   for (size_t batchIndex = 0; batchIndex < outputBatches.size(); ++batchIndex) {
     const auto [firstOutput, endOutput] = outputBatches[batchIndex];
     configureOutputBatchProblem(
         exactBatchProblem, problem, firstOutput, endOutput);
-    PDREngine pdrEngine(exactBatchProblem, solverType, 0, exactInitCache);
-    const auto pdrResult = pdrEngine.run(maxK);
+    std::optional<size_t> selectedAge;
+    bool usesUnflushedFallback = false;
+    if (useAutomaticAge) {
+      const PdrAgeSearchResult ageResult =
+          ageSession->findDefinedAge(firstOutput, endOutput);
+      provedBound = std::max(provedBound, ageResult.reachedBound);
+      if (isSecDiagEnabled()) {
+        emitSecDiag(
+            "SEC diag: PDR age definedness output range=",
+            firstOutput,
+            "..",
+            endOutput,
+            " minimum_status=",
+            pdrStatusName(ageResult.minimumStatus),
+            " maximum_status=",
+            pdrStatusName(ageResult.maximumStatus));
+      }
+      selectedAge = ageResult.certifiedAge;
+      if (!selectedAge.has_value()) {
+        if (endOutput - firstOutput > 1) {
+          const size_t midOutput =
+              firstOutput + (endOutput - firstOutput) / 2;
+          outputBatches.insert(
+              outputBatches.begin() +
+                  static_cast<std::ptrdiff_t>(batchIndex + 1),
+              {PdrOutputBatch{firstOutput, midOutput},
+               PdrOutputBatch{midOutput, endOutput}});
+          continue;
+        }
+        selectedAge = effectiveAgeOptions.maximum;
+        usesUnflushedFallback = true;
+      }
+      if (isSecDiagEnabled()) {
+        emitSecDiag(
+            usesUnflushedFallback
+                ? "SEC diag: PDR age fallback output range="
+                : "SEC diag: PDR certified age output range=",
+            firstOutput,
+            "..",
+            endOutput,
+            " age=",
+            *selectedAge);
+      }
+    }
+
+    PDRResult pdrResult;
+    if (useAutomaticAge) {
+      pdrResult = ageSession->runFromAge(
+          exactBatchProblem.property, *selectedAge);
+    } else {
+      PDREngine pdrEngine(
+          exactBatchProblem, solverType, 0, exactInitCache);
+      pdrResult = pdrEngine.run(maxK);
+    }
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:
         provedBound = std::max(provedBound, pdrResult.bound);
-        markPdrOutputRangeCovered(
-            pdrCoveredOutputs,
-            pdrSkippedOutputReasons,
-            firstOutput,
-            endOutput);
-        guardedProvedBatches.push_back({firstOutput, endOutput});
+        if (problem.usesDualRailStateEncoding &&
+            (!useAutomaticAge || usesUnflushedFallback)) {
+          strictBatches.push_back(
+              {firstOutput,
+               endOutput,
+               useAutomaticAge ? selectedAge : std::nullopt,
+               !usesUnflushedFallback});
+          if (!usesUnflushedFallback) {
+            markPdrOutputRangeCovered(
+                pdrCoveredOutputs,
+                pdrSkippedOutputReasons,
+                firstOutput,
+                endOutput);
+          }
+        } else {
+          markPdrOutputRangeCovered(
+              pdrCoveredOutputs,
+              pdrSkippedOutputReasons,
+              firstOutput,
+              endOutput);
+        }
         break;
       case PDRStatus::Different:
         return makeSecResult(
@@ -3280,17 +3428,16 @@ SequentialEquivalenceResult runPdrSecEngine(
   }
 
   if (problem.usesDualRailStateEncoding) {
-    std::vector<bool> strictCoveredOutputs(
-        problem.observedOutputExprs0.size(), false);
+    std::vector<bool> strictCoveredOutputs = pdrCoveredOutputs;
     if (problem.dualRailOutputStrictEqualityExprs.size() !=
         problem.observedOutputExprs0.size()) {
-      for (size_t outputIndex = 0;
-           outputIndex < pdrCoveredOutputs.size();
-           ++outputIndex) {
-        if (pdrCoveredOutputs[outputIndex]) {
-          pdrSkippedOutputReasons[outputIndex] =
-              "strict dual-rail equality obligation is unavailable";
-        }
+      for (const PdrStrictBatch& batch : strictBatches) {
+        markPdrOutputRangeSkipped(
+            strictCoveredOutputs,
+            pdrSkippedOutputReasons,
+            batch.firstOutput,
+            batch.endOutput,
+            "strict dual-rail equality obligation is unavailable");
       }
     } else {
       KInductionProblem strictProblem = problem;
@@ -3306,24 +3453,46 @@ SequentialEquivalenceResult runPdrSecEngine(
       // Round one has already proved that these batches cannot contain a
       // binary 01/10 mismatch. A strict rail mismatch in round two therefore
       // identifies an X-only difference, not a concrete counterexample.
-      std::vector<PdrOutputBatch> strictBatches = guardedProvedBatches;
       KInductionProblem strictBatchProblem = strictProblem;
       for (size_t batchIndex = 0;
            batchIndex < strictBatches.size();
            ++batchIndex) {
-        const auto [firstOutput, endOutput] = strictBatches[batchIndex];
+        const PdrStrictBatch batch = strictBatches[batchIndex];
+        const size_t firstOutput = batch.firstOutput;
+        const size_t endOutput = batch.endOutput;
         configureOutputBatchProblem(
             strictBatchProblem, strictProblem, firstOutput, endOutput);
-        PDREngine strictPdrEngine(
-            strictBatchProblem, solverType, 0, exactInitCache);
-        const auto strictResult = strictPdrEngine.run(maxK);
+        PDRResult strictResult;
+        if (batch.ageGate.has_value()) {
+          strictResult = ageSession->runFromAge(
+              strictBatchProblem.property, *batch.ageGate);
+        } else {
+          PDREngine strictPdrEngine(
+              strictBatchProblem, solverType, 0, exactInitCache);
+          strictResult = strictPdrEngine.run(maxK);
+        }
         provedBound = std::max(provedBound, strictResult.bound);
         if (strictResult.status == PDRStatus::Equivalent) {
-          markPdrOutputRangeCovered(
-              strictCoveredOutputs,
-              pdrSkippedOutputReasons,
-              firstOutput,
-              endOutput);
+          if (batch.mayCover) {
+            markPdrOutputRangeCovered(
+                strictCoveredOutputs,
+                pdrSkippedOutputReasons,
+                firstOutput,
+                endOutput);
+          } else {
+            const std::string reason =
+                "affected by X propagated from uninitialized sequential "
+                "logic; definedness was not certified through age " +
+                std::to_string(effectiveAgeOptions.maximum);
+            markPdrOutputRangeSkipped(
+                strictCoveredOutputs,
+                pdrSkippedOutputReasons,
+                firstOutput,
+                endOutput,
+                reason);
+            xAffectedOutputNames.push_back(
+                outputNameForProblemIndex(problem, firstOutput));
+          }
           continue;
         }
         if (endOutput - firstOutput > 1) {
@@ -3332,8 +3501,10 @@ SequentialEquivalenceResult runPdrSecEngine(
           strictBatches.insert(
               strictBatches.begin() +
                   static_cast<std::ptrdiff_t>(batchIndex + 1),
-              {PdrOutputBatch{firstOutput, midOutput},
-               PdrOutputBatch{midOutput, endOutput}});
+              {PdrStrictBatch{
+                   firstOutput, midOutput, batch.ageGate, batch.mayCover},
+               PdrStrictBatch{
+                   midOutput, endOutput, batch.ageGate, batch.mayCover}});
           continue;
         }
         if (strictResult.status == PDRStatus::Different) {
@@ -3355,7 +3526,15 @@ SequentialEquivalenceResult runPdrSecEngine(
             pdrSkippedOutputReasons,
             firstOutput,
             endOutput,
-            "strict dual-rail equality PDR was inconclusive");
+            batch.mayCover
+                ? "strict dual-rail equality PDR was inconclusive"
+                : "affected by X propagated from uninitialized sequential "
+                  "logic; definedness was not certified through age " +
+                      std::to_string(effectiveAgeOptions.maximum));
+        if (!batch.mayCover) {
+          xAffectedOutputNames.push_back(
+              outputNameForProblemIndex(problem, firstOutput));
+        }
       }
     }
     pdrCoveredOutputs = std::move(strictCoveredOutputs);
@@ -3563,6 +3742,7 @@ SequentialEquivalenceResult runSelectedSecEngine(
     const SequentialDesignModel& model1,
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
+    const PdrAgeOptions& pdrAgeOptions,
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
@@ -3576,6 +3756,7 @@ SequentialEquivalenceResult runSelectedSecEngine(
           model1,
           top0,
           top1,
+          pdrAgeOptions,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -3615,6 +3796,7 @@ SequentialEquivalenceResult runSelectedSecEngine(
           model1,
           top0,
           top1,
+          pdrAgeOptions,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -3714,12 +3896,19 @@ SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
     naja::NL::SNLDesign* top1,
     KEPLER_FORMAL::Config::SolverType solverType,
     SecEngine secEngine,
-    SecEncoding encoding)
+    SecEncoding encoding,
+    PdrAgeOptions pdrAgeOptions)
     : top0_(top0),
       top1_(top1),
       solverType_(solverType),
       secEngine_(secEngine),
-      encoding_(encoding) {}
+      encoding_(encoding),
+      pdrAgeOptions_(pdrAgeOptions) {
+  if (pdrAgeOptions_.minimum > pdrAgeOptions_.maximum) {
+    throw std::invalid_argument(
+        "PDR age minimum must not exceed PDR age maximum");
+  }
+}
 
 SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) const {
   const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
@@ -3817,28 +4006,24 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
     fflush(stdout);
   }
 
-  // Phase 3: rewrite both designs into one shared symbol space, strengthen the
-  // startup frontier with reset/bootstrap facts, and build the final SEC
-  // property plus the induction-friendly variant that some engines consume.
+  // Phase 3: rewrite both designs into one shared symbol space and preserve the
+  // exact extracted initial predicate as IC3/PDR's F[0].
   SharedSecSymbolSpace symbolSpace = buildSharedSecSymbolSpace(
       model0, model1, aligned.inputs, aligned.outputs);
-  // Derive the exact post-reset state facts before selecting an engine. PDR
-  // refuses to run when these facts do not completely define F[0].
-  // Reset bootstrap is allowed to add concrete values inside each design, but
-  // it must not add any cross-design internal state relation.
-  const auto reachableInvariant = integrateReachableStateInvariant(
+  integrateInitialState(
       model0,
       model1,
       symbolSpace.state0Symbols,
       symbolSpace.state1Symbols,
       symbolSpace.problem);
   if (encoding_ == SecEncoding::Binary) {
-    filterOutputsRequiringUnanchoredResetState(
+    const bool hasIncompleteInitialState =
+        model0.initialStateValueByKey.size() != model0.stateBits.size() ||
+        model1.initialStateValueByKey.size() != model1.stateBits.size();
+    filterOutputsRequiringUninitializedState(
         model0,
         model1,
-        reachableInvariant,
-        !symbolSpace.problem.resetBootstrapInputs.empty() &&
-            symbolSpace.problem.resetBootstrapCycles != 0,
+        hasIncompleteInitialState,
         aligned,
         secDiagEnabled);
   } else {
@@ -3873,7 +4058,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
         model1,
         aligned.inputs,
         aligned.outputs,
-        reachableInvariant,
         symbolSpace,
         useLazyTransitionRemapping,
         secDiagEnabled);
@@ -3925,6 +4109,7 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       model1,
       top0_,
       top1_,
+      pdrAgeOptions_,
       aligned.outputCoverage,
       abstractedSequentialBoundaries,
       extractedBoundaryReports);

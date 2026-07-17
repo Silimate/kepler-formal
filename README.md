@@ -120,7 +120,7 @@ Bazel build notes, dependency details, release flow, and the BCR publication roa
 
 ## Usage
 
-The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/flags-spec.md). SEC-specific flags, engine behavior, encoding defaults, and skipped-output reports are documented in [docs/sec-flags-spec.md](docs/sec-flags-spec.md).
+The full binary and YAML flag reference is tracked in [docs/flags-spec.md](docs/flags-spec.md). SEC-specific flags, engine behavior, encoding defaults, and skipped-output reports are documented in [docs/sec-flags-spec.md](docs/sec-flags-spec.md). The dual-rail PDR age-discovery proof flow is described in [docs/sec-pdr-age/README.md](docs/sec-pdr-age/README.md).
 
 ### SEC Result Codes
 
