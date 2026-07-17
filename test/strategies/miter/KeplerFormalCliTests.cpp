@@ -2355,10 +2355,41 @@ TEST_F(KeplerFormalCliTests, ConfigSecDefaultsToDualRailEncoding) {
   const auto contents = readFileContents(logPath);
   EXPECT_NE(contents.find("SEC encoding: dual_rail_steady"), std::string::npos);
   EXPECT_NE(
-      contents.find("SEC PDR automatic age discovery: enabled"),
+      contents.find("SEC PDR automatic age discovery: disabled"),
       std::string::npos);
+  EXPECT_EQ(contents.find("SEC PDR age search range:"), std::string::npos);
+  std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(fixture.tmpDir);
+}
+
+TEST_F(KeplerFormalCliTests, ConfigSecPdrCapsAutomaticAgeRangeToMaxK) {
+  SecBoundaryAbstractionGuard boundaryGuard;
+  const auto fixture = createEquivalentSequentialNajaIfFixture();
+  const auto logPath = fixture.tmpDir / "capped_sec_pdr_age.log";
+  const auto cfgPath = writeTempConfig(
+      "format: naja_if\n"
+      "verification: sec\n"
+      "sec_engine: pdr\n"
+      "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
+      "sec_pdr_age_min: 10\n"
+      "sec_pdr_age_max: 20\n"
+      "max_k: 3\n"
+      "input_paths:\n"
+      "  - " + fixture.design0IfPath.string() + "\n"
+      "  - " + fixture.design1IfPath.string() + "\n"
+      "log_file: " + logPath.string() + "\n");
+
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecProvedExitCode);
+  ASSERT_TRUE(std::filesystem::exists(logPath));
+  const auto contents = readFileContents(logPath);
+  const auto warningLine = logLineContaining(
+      contents,
+      "SEC PDR age search range 10..20 exceeds max_k = 3; using 3..3.");
+  ASSERT_FALSE(warningLine.empty());
+  EXPECT_NE(warningLine.find("[warning]"), std::string::npos);
   EXPECT_NE(
-      contents.find("SEC PDR age search range: 10..20"),
+      contents.find("SEC PDR age search range: 3..3"),
       std::string::npos);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -2933,7 +2964,6 @@ TEST_F(KeplerFormalCliTests, ConfigTinyRocketSecVerificationAccepted) {
       "format: verilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
-      "sec_pdr_auto_age: false\n"
       "max_k: 1\n"
       "input_paths:\n"
       "  - " + design.string() + "\n"

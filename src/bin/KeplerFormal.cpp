@@ -1117,7 +1117,6 @@ int KeplerFormalMain(int argc, char** argv) {
   KEPLER_FORMAL::SEC::SecEncoding secEncoding =
       KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady;
   KEPLER_FORMAL::SEC::PdrAgeOptions secPdrAgeOptions;
-  secPdrAgeOptions.automatic = true;
   bool secEngineExplicit = false;
   bool secEncodingExplicit = false;
   bool secPdrAgeExplicit = false;
@@ -1965,6 +1964,26 @@ int KeplerFormalMain(int argc, char** argv) {
         "SEC PDR age options require --sec-engine pdr and "
         "--sec-encoding dual_rail_steady");
     return EXIT_FAILURE;
+  }
+  if (verificationMode == VerificationMode::SEC &&
+      secEngine == KEPLER_FORMAL::SEC::SecEngine::Pdr &&
+      secEncoding == KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady &&
+      secPdrAgeOptions.automatic &&
+      (secPdrAgeOptions.minimum > secMaxK ||
+       secPdrAgeOptions.maximum > secMaxK)) {
+    const size_t configuredMinimum = secPdrAgeOptions.minimum;
+    const size_t configuredMaximum = secPdrAgeOptions.maximum;
+    // Age discovery is part of the requested PDR run and must not silently
+    // increase its frame budget.
+    secPdrAgeOptions.minimum = std::min(configuredMinimum, secMaxK);
+    secPdrAgeOptions.maximum = std::min(configuredMaximum, secMaxK);
+    SPDLOG_WARN(
+        "SEC PDR age search range {}..{} exceeds max_k = {}; using {}..{}.",
+        configuredMinimum,
+        configuredMaximum,
+        secMaxK,
+        secPdrAgeOptions.minimum,
+        secPdrAgeOptions.maximum);
   }
   if (verificationMode == VerificationMode::SEC) {
     if (useScopes || cleanScopes) {

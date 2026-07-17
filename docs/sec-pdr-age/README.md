@@ -6,9 +6,9 @@ the selected public outputs of both designs are proved binary-defined. SEC can
 then prove concrete output equality without treating a persistent unknown value
 as a concrete proof.
 
-The feature is enabled by default in the command-line frontend. Disable it with
-`--no-sec-pdr-auto-age` or `sec_pdr_auto_age: false` to use the existing PDR
-flow unchanged.
+The feature is disabled by default. Enable it explicitly with
+`--sec-pdr-auto-age` or `sec_pdr_auto_age: true`. Without that opt-in, SEC uses
+the existing PDR flow unchanged.
 
 ## Scope And Invariants
 
@@ -168,8 +168,8 @@ change a verdict.
 
 | CLI | YAML | Default | Meaning |
 | --- | --- | ---: | --- |
-| `--sec-pdr-auto-age` | `sec_pdr_auto_age: true` | enabled | Enable automatic age discovery. |
-| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | enabled | Disable age discovery and preserve the existing PDR flow. |
+| `--sec-pdr-auto-age` | `sec_pdr_auto_age: true` | disabled | Enable automatic age discovery. |
+| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | disabled | Disable age discovery and preserve the existing PDR flow. |
 | `--sec-pdr-age-min N` | `sec_pdr_age_min: N` | `10` | First candidate age. |
 | `--sec-pdr-age-max N` | `sec_pdr_age_max: N` | `20` | Last candidate and fallback age. |
 
@@ -177,9 +177,9 @@ Both ages are non-negative integers and the minimum must not exceed the
 maximum. Explicit age options are rejected unless PDR and dual-rail steady-state
 encoding are selected.
 
-`max_k` remains the PDR frame-iteration budget. An enabled age check uses at
-least its candidate age as the run budget so a counterexample at that monitor
-age can reach exact `F[0]`. This adjustment is confined to the enabled age flow.
+`max_k` is the PDR frame-iteration budget for both normal and age-monitor
+properties. If either configured age exceeds `max_k`, SEC caps it to `max_k`
+and emits a warning. Age discovery never silently deepens the requested run.
 
 Set `KEPLER_SEC_DIAG=1` to print the certified or fallback age selected for each
 output range.

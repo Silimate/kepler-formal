@@ -105,11 +105,11 @@ liberty_files:
 | CLI flag | YAML key | Default | Values | Effect |
 | --- | --- | --- | --- | --- |
 | `-v sec`, `--verification sec` | `verification: sec` | `lec` | `lec`, `sec` | Selects SEC instead of combinational LEC. Values are lowercase. |
-| `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the normal SEC proof/search bound. An enabled PDR age probe uses at least its candidate age; disable automatic age discovery to preserve the strict historical bound. |
+| `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the SEC proof/search bound. Enabled PDR age candidates are capped to this bound with a warning. |
 | `--sec-engine <engine>` | `sec_engine: <engine>` | `pdr` | `k_induction`, `imc`, `pdr` | Selects the top-level SEC proof engine. Engine names are lowercase. |
 | `--sec-encoding <mode>` | `sec_encoding: <mode>` | `dual_rail_steady` | `binary`, `dual_rail_steady` | Selects how SEC models unknown or reset-unanchored state values. Omit the key/flag to use the dual-rail default. |
-| `--sec-pdr-auto-age` | `sec_pdr_auto_age: true` | `true` | boolean | Enables verifier-owned age discovery for dual-rail PDR. |
-| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | `true` | boolean | Disables age discovery and preserves the existing PDR behavior. |
+| `--sec-pdr-auto-age` | `sec_pdr_auto_age: true` | `false` | boolean | Enables verifier-owned age discovery for dual-rail PDR. |
+| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | `false` | boolean | Disables age discovery and preserves the existing PDR behavior. |
 | `--sec-pdr-age-min <n>` | `sec_pdr_age_min: <n>` | `10` | Non-negative integer | Sets the first candidate definedness age. |
 | `--sec-pdr-age-max <n>` | `sec_pdr_age_max: <n>` | `20` | Non-negative integer | Sets the last candidate and uncertified fallback age. Must be at least the minimum. |
 | `--sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: true` | `true` | boolean | Abstracts unsupported sequential instances as SEC boundaries instead of failing immediately. |
@@ -143,7 +143,7 @@ flows that require stable behavior should always spell out either `binary` or
 | --- | --- |
 | `k_induction` | Explicit classic k-induction flow: bounded base-case search followed by induction-step proof over the extracted SEC transition system. |
 | `imc` | Interpolation-Based Model Checking flow over the same extracted SEC problem. It uses the shared base-case search and exact interpolant strengthening where applicable. |
-| `pdr` | Property Directed Reachability flow over the extracted SEC transition system. It runs normal PDR frames up to `max_k`; enabled dual-rail age probes use at least their candidate monitor age. |
+| `pdr` | Property Directed Reachability flow over the extracted SEC transition system. Normal and age-monitor properties use the same `max_k` frame bound. |
 
 All engines use the same extracted SEC model: aligned environment inputs,
 state bits, observed outputs, next-state formulas, initial-state information,

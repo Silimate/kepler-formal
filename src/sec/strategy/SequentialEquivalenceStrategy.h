@@ -28,8 +28,7 @@ enum class SecEncoding {
 };
 
 struct PdrAgeOptions {
-  // Keep direct API callers on the historical PDR flow unless they opt in.
-  // The command-line frontend enables automatic discovery by default.
+  // Keep every entry point on the historical PDR flow unless it opts in.
   bool automatic = false;
   size_t minimum = 10;
   size_t maximum = 20;

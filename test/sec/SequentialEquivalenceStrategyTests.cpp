@@ -12094,6 +12094,99 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailAutoAgeFindsFlushAfterMinimum) {
+  const auto models = makeFlushingRailModelsForTest(/*stages=*/12);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/10, /*maximum=*/20});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 32);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // Exercise the configured 10..20 search directly. The pipeline still
+  // carries X at ages 10 and 11 and is binary-defined from age 12 onward.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
+      << stderrOutput;
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      stderrOutput.find("PDR certified age output range=0..1 age=12"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailAutoAgeFindsFlushAtMaximum) {
+  const auto models = makeFlushingRailModelsForTest(/*stages=*/20);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/10, /*maximum=*/20});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 32);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // The saturating monitor must still check the boundary cycle itself. A
+  // 20-stage pipeline is undefined through age 19 and defined at age 20.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
+      << stderrOutput;
+  EXPECT_EQ(result.coveredOutputs, 1u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      stderrOutput.find("PDR certified age output range=0..1 age=20"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailCapsAgeToMaxFrames) {
+  const auto models = makeFlushingRailModelsForTest(/*stages=*/2);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/2, /*maximum=*/4});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 1);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  // A two-cycle flush cannot be certified from a one-frame PDR run. The age
+  // monitor must remain inside the caller's frame budget and fall back at 1.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive)
+      << stderrOutput;
+  EXPECT_EQ(result.coveredOutputs, 0u);
+  EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR age definedness output range=0..1 "
+          "minimum_status=different maximum_status=different"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("PDR age fallback output range=0..1 age=1"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsPdrDualRailAgeGatesOnlyEnabledFlow) {
   constexpr const char* kPrefix = "dualRailTransientStartupMismatch";
   auto models = makeHeldRailModelsForTest(kPrefix, false, true);
