@@ -118,7 +118,7 @@ _FLEX_VERSION = "2.6.4"
 _CADICAL_COMMIT = "7b99c07f0bcab5824a5a3ce62c7066554017f641"
 _GLUCOSE_COMMIT = "7f887abba7cf13636a5ac2d28653668a20a91b25"
 _KISSAT_COMMIT = "8af8e56f174b778aef3aa45af9f739b2a5f492c2"
-_NAJA_COMMIT = "30f65197f51c04dc3ec0ddd0143bb3b8f5e6db90"
+_NAJA_COMMIT = "e1a649e2fce182d8b7ca5c5c80ab5d04aad3ffa3"
 _NAJA_VERILOG_COMMIT = "8a13b5986c765035548775808273d61defcaf738"
 _NAJA_IF_COMMIT = "8719bf93fdcd65534c75eb7a8a1f69393f74a75a"
 _CPPTRACE_COMMIT = "3db8da80111171c219ab5839905771386bee06b3"
@@ -185,7 +185,7 @@ def _deps_impl(_module_ctx):
     naja_repo(
         name = "naja",
         naja_url = "https://github.com/najaeda/naja/archive/{}.tar.gz".format(_NAJA_COMMIT),
-        naja_sha256 = "0e394baf202b46efbd41324a4b3ffeaacc53fcf944a7a7f6c0480014325d57e1",
+        naja_sha256 = "bedbb745eb5110278c3de9da9538b3e5ef025a736e4862d491bc8209626d3f45",
         naja_strip_prefix = "naja-{}".format(_NAJA_COMMIT),
         naja_verilog_url = "https://github.com/najaeda/naja-verilog/archive/{}.tar.gz".format(_NAJA_VERILOG_COMMIT),
         naja_verilog_sha256 = "e5caf041d7c8867bb0805b8a182cc4330afc40d0dde74760f4ee42d10b70c9cb",
