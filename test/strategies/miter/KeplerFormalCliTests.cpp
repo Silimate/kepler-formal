@@ -3594,6 +3594,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
       "format: systemverilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "sec_pdr_age_min: 1\n"
       "sec_pdr_age_max: 1\n"
       "max_k: 1\n"
