@@ -4376,6 +4376,56 @@ TEST_F(SequentialEquivalenceStrategyTests, SatEncodingFlatCacheGrows) {
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       SatEncodingCachedPostorderMatchesNormalDagEncoding) {
+  constexpr size_t a = 2;
+  constexpr size_t b = 3;
+  constexpr size_t c = 4;
+  constexpr size_t state = 5;
+  constexpr size_t secondState = 6;
+  BoolExpr* shared = BoolExpr::And(BoolExpr::Var(a), BoolExpr::Var(b));
+  BoolExpr* transition =
+      BoolExpr::Or(shared, BoolExpr::Xor(shared, BoolExpr::Var(c)));
+  KInductionProblem problem;
+  problem.state0Symbols = {state, secondState};
+  problem.inputSymbols = {a, b, c};
+  problem.allSymbols = {a, b, c, state, secondState};
+  problem.transitions0 = {{state, transition}, {secondState, transition}};
+
+  const TransitionExprResolver resolver(problem);
+  const std::vector<BoolExpr*>& postorder = resolver.encodingPostorder(state);
+  EXPECT_EQ(postorder,
+            (std::vector<BoolExpr*>{BoolExpr::Var(a), BoolExpr::Var(b), shared,
+                                    BoolExpr::Var(c), transition->getRight(),
+                                    transition}));
+  EXPECT_EQ(&postorder, &resolver.encodingPostorder(state));
+  EXPECT_EQ(&postorder, &resolver.encodingPostorder(secondState));
+
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  FrameVariableStore variables(solver, {a, b, c}, 1);
+  const auto leafLits = variables.makeLeafLits(0);
+  FrameFormulaEncoder normalEncoder(solver, leafLits);
+  FrameFormulaEncoder plannedEncoder(solver, leafLits);
+  const int normalRoot = normalEncoder.encode(transition);
+  const int plannedRoot = plannedEncoder.encode(transition, postorder);
+
+  // Both encoders share the same leaves but allocate independent Tseitin
+  // literals. Opposite root assumptions must therefore be UNSAT in both
+  // directions, proving that the cached traversal changes preparation only.
+  EXPECT_EQ(solver.solveWithAssumptionsStatus({normalRoot, -plannedRoot}),
+            SATSolverWrapper::SolveStatus::Unsat);
+  EXPECT_EQ(solver.solveWithAssumptionsStatus({-normalRoot, plannedRoot}),
+            SATSolverWrapper::SolveStatus::Unsat);
+
+  SATSolverWrapper invalidSolver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  FrameVariableStore invalidVariables(invalidSolver, {a, b, c}, 1);
+  FrameFormulaEncoder invalidEncoder(invalidSolver,
+                                     invalidVariables.makeLeafLits(0));
+  EXPECT_THROW(
+      static_cast<void>(invalidEncoder.encode(transition, {transition})),
+      std::runtime_error);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        SatEncodingHonorsLargeHintedFrameFormulaReserve) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::KISSAT);
   std::unordered_map<size_t, int> leafLits;
@@ -5774,6 +5824,73 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineIndexedRelationsPreserveEverySameDesignConstraint) {
+  constexpr size_t complement0 = 2;
+  constexpr size_t complement0N = 3;
+  constexpr size_t equality0 = 4;
+  constexpr size_t equality0Peer = 5;
+  constexpr size_t railOne = 6;
+  constexpr size_t railZero = 7;
+  constexpr size_t complement1 = 8;
+  constexpr size_t complement1N = 9;
+  constexpr size_t equality1 = 10;
+  constexpr size_t equality1Peer = 11;
+
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {complement0,   complement0N, equality0,
+                           equality0Peer, railOne,      railZero};
+  problem.state1Symbols = {complement1, complement1N, equality1, equality1Peer};
+  problem.allSymbols = problem.state0Symbols;
+  problem.allSymbols.insert(problem.allSymbols.end(),
+                            problem.state1Symbols.begin(),
+                            problem.state1Symbols.end());
+  problem.complementedStatePairs0 = {{complement0, complement0N}};
+  problem.complementedStatePairs1 = {{complement1, complement1N}};
+  problem.sameFrameStateEqualityPairs0 = {{equality0, equality0Peer}};
+  problem.sameFrameStateEqualityPairs1 = {{equality1, equality1Peer}};
+  problem.dualRailStatePairs = {{railOne, railZero}};
+  for (size_t index = 0; index < 32; ++index) {
+    const size_t base = 1000 + index * 16;
+    problem.complementedStatePairs0.emplace_back(base, base + 1);
+    problem.complementedStatePairs1.emplace_back(base + 2, base + 3);
+    problem.sameFrameStateEqualityPairs0.emplace_back(base + 4, base + 5);
+    problem.sameFrameStateEqualityPairs1.emplace_back(base + 6, base + 7);
+    problem.dualRailStatePairs.push_back({base + 8, base + 9});
+  }
+  problem.totalStateCount = problem.allSymbols.size();
+
+  for (const size_t symbol : problem.state0Symbols) {
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  for (const size_t symbol : problem.state1Symbols) {
+    problem.transitions1.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+
+  // Every disjunct violates one relation kind. The unrelated pairs force the
+  // sparse index path; if it drops a relevant pair, F[0] admits a false CEX.
+  BoolExpr* bad =
+      makeEqualityExpr(BoolExpr::Var(complement0), BoolExpr::Var(complement0N));
+  bad = BoolExpr::Or(bad, makeEqualityExpr(BoolExpr::Var(complement1),
+                                           BoolExpr::Var(complement1N)));
+  bad = BoolExpr::Or(bad, BoolExpr::Xor(BoolExpr::Var(equality0),
+                                        BoolExpr::Var(equality0Peer)));
+  bad = BoolExpr::Or(bad, BoolExpr::Xor(BoolExpr::Var(equality1),
+                                        BoolExpr::Var(equality1Peer)));
+  bad = BoolExpr::Or(bad, BoolExpr::Not(BoolExpr::Or(BoolExpr::Var(railOne),
+                                                     BoolExpr::Var(railZero))));
+  problem.bad = bad;
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionBad = problem.bad;
+  problem.inductionProperty = problem.property;
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PdrDeterministicWorklistSortsHashSetSymbols) {
   std::unordered_set<size_t> symbols;
   std::vector<size_t> rawIteration;
@@ -6628,6 +6745,31 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(batches[0], (std::pair<size_t, size_t>(0, 16)));
   EXPECT_EQ(batches[1], (std::pair<size_t, size_t>(16, 32)));
   EXPECT_EQ(batches[2], (std::pair<size_t, size_t>(32, 40)));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ConfigureOutputBatchPreservesImmutableSameDesignRelations) {
+  KInductionProblem source;
+  source.observedOutputNames = {"out0", "out1"};
+  source.observedOutputExprs0 = {BoolExpr::Var(2), BoolExpr::Var(3)};
+  source.observedOutputExprs1 = {BoolExpr::Var(4), BoolExpr::Var(5)};
+  source.sameFrameStateEqualityPairs0 = {{10, 11}, {12, 13}};
+  source.sameFrameStateEqualityPairs1 = {{20, 21}, {22, 23}};
+
+  // A reusable batch starts as the source model. Selecting another output
+  // range must replace only output-owned fields and retain model relations.
+  KInductionProblem batch = source;
+  configureOutputBatchProblem(batch, source, 0, 1);
+  EXPECT_EQ(batch.sameFrameStateEqualityPairs0,
+            source.sameFrameStateEqualityPairs0);
+  EXPECT_EQ(batch.sameFrameStateEqualityPairs1,
+            source.sameFrameStateEqualityPairs1);
+
+  configureOutputBatchProblem(batch, source, 1, 2);
+  EXPECT_EQ(batch.sameFrameStateEqualityPairs0,
+            source.sameFrameStateEqualityPairs0);
+  EXPECT_EQ(batch.sameFrameStateEqualityPairs1,
+            source.sameFrameStateEqualityPairs1);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -12974,6 +13116,27 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineNoCopyPathPreservesDefaultBadNormalization) {
+  KInductionProblem problem;
+  problem.state0Symbols = {2};
+  problem.allSymbols = {2};
+  problem.initialCondition = BoolExpr::Var(2);
+  problem.initializedStateCount = 1;
+  problem.totalStateCount = 1;
+  problem.transitions0 = {{2, BoolExpr::Var(2)}};
+  problem.property = BoolExpr::Not(BoolExpr::Var(2));
+  // Internal callers historically had their bad root normalized by run().
+  // An inconsistent stored root must therefore use the copy fallback.
+  problem.bad = BoolExpr::createFalse();
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  EXPECT_EQ(result.status, PDRStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineBuildsExactBootstrapFrameZeroFromResetPrefix) {
   KInductionProblem problem;
   problem.state0Symbols = {2, 3};
@@ -13240,6 +13403,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
             std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find("shared exact F[0] cache reused"),
+            std::string::npos)
+      << stderrOutput;
+  const std::string metadataBuilt = "immutable model metadata built";
+  const size_t firstMetadataBuild = stderrOutput.find(metadataBuilt);
+  ASSERT_NE(firstMetadataBuild, std::string::npos) << stderrOutput;
+  EXPECT_EQ(stderrOutput.find(metadataBuilt,
+                              firstMetadataBuild + metadataBuilt.size()),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("immutable model metadata reused"),
             std::string::npos)
       << stderrOutput;
   const std::string predecessorCreated =
@@ -14237,7 +14410,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDualRailHugeStateSurfaceAvoidsRetainedPredecessorCaches) {
+       PDREngineDualRailHugeStateSurfaceRetainsOnlyPreparationCache) {
   KInductionProblem problem;
   constexpr size_t targetState = 2;
   constexpr size_t stateA = 3;
@@ -14247,8 +14420,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.state0Symbols = {targetState, stateA, stateB, decoyState};
   problem.allSymbols = {targetState, stateA, stateB, decoyState};
   // Model Ariane's multi-million-bit rail surface without allocating it in the
-  // unit test. The real query surface stays tiny, but the PDR cache policy must
-  // still choose the low-retention path for this shape.
+  // unit test. The SAT solver remains one-shot for this shape, while the small
+  // exact target-support preparation can be reused independently.
   problem.totalStateCount = 300000;
 
   problem.transitions0 = {
@@ -14263,29 +14436,32 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.inductionBad = problem.bad;
   problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
   problem.observedOutputExprs1 = {BoolExpr::createFalse()};
-  problem.observedOutputNames = {"huge_state_uncached_surface"};
+  problem.observedOutputNames = {"huge_state_preparation_surface"};
   problem.originalObservedOutputCount = 278;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  auto exactInitCache = std::make_shared<PDRExactInitCache>(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   testing::internal::CaptureStderr();
-  PDREngine engine(
-      problem,
-      KEPLER_FORMAL::Config::SolverType::KISSAT);
-  (void)engine.run(1);
+  PDREngine firstEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0,
+                        exactInitCache);
+  const auto firstResult = firstEngine.run(1);
+  PDREngine secondEngine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0,
+                         exactInitCache);
+  const auto secondResult = secondEngine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  EXPECT_NE(
-      stderrOutput.find("predecessor target surface uncached"),
-      std::string::npos)
+  EXPECT_EQ(firstResult.status, secondResult.status);
+  EXPECT_EQ(firstResult.bound, secondResult.bound);
+  EXPECT_NE(stderrOutput.find("predecessor target surface cached"),
+            std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("predecessor cached solver disabled"),
-      std::string::npos)
+  EXPECT_NE(stderrOutput.find("predecessor target surface reused"),
+            std::string::npos)
       << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("predecessor target surface cached"),
-      std::string::npos)
+  EXPECT_NE(stderrOutput.find("predecessor cached solver disabled"),
+            std::string::npos)
       << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("predecessor cached solver created"),

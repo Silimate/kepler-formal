@@ -26,9 +26,10 @@ struct PDRResult {
   size_t bound = 0;
 };
 
-// Output batches from one SEC problem have the same exact dual-rail startup
-// relation. This scoped cache keeps that immutable F[0] work across PDR runs;
-// learned frames and predecessor obligations remain local to each engine.
+// Output batches from one SEC problem have the same immutable transition and
+// startup model. This serial, scoped cache keeps exact model preparation and
+// F[0] work across PDR runs; learned frames, SAT answers, and proof obligations
+// remain local to each engine.
 class PDRExactInitCache {
  public:
   struct Impl;

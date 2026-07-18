@@ -438,6 +438,110 @@ bool FrameFormulaEncoder::isConstLit(int lit, bool value) {
   return lit == getConstLit(value);
 }
 
+void FrameFormulaEncoder::encodeReadyNode(BoolExpr* node) {
+  if (node->getOp() == Op::VAR) {
+    if (node->getId() == 0) {
+      cacheEncodedLiteral(node, getConstLit(false));
+    } else if (node->getId() == 1) {
+      cacheEncodedLiteral(node, getConstLit(true));
+    } else {
+      const size_t symbol = mappedSymbol(node->getId());
+      auto it = leafLits_.find(symbol);
+      if (it == leafLits_.end()) {
+        if (!createMissingLeaves_) {
+          throw std::runtime_error("Missing leaf literal for symbol " +
+                                   std::to_string(symbol));
+        }
+        it = leafLits_.emplace(symbol, newSolverLiteral(solver_)).first;
+      }
+      cacheEncodedLiteral(node, it->second);
+    }
+    return;
+  }
+
+  const int leftLit = node->getLeft() ? cachedLiteral(node->getLeft()) : 0;
+  const int rightLit = node->getRight() ? cachedLiteral(node->getRight()) : 0;
+  int lit = 0;
+
+  // Standard Tseitin clauses for the BoolExpr node at this frame.  Keep the
+  // local literal simplifications for constants and repeated subexpressions
+  // so expressions such as (a XOR a) do not become needless CNF cones.
+  switch (node->getOp()) {
+    case Op::NOT:
+      lit = -leftLit;
+      break;
+    case Op::AND:
+      if (leftLit == rightLit || isConstLit(rightLit, true)) {
+        lit = leftLit; // LCOV_EXCL_LINE
+      } else if (isConstLit(leftLit, true)) {
+        lit = rightLit; // LCOV_EXCL_LINE
+      } else if (leftLit == -rightLit || isConstLit(leftLit, false) ||
+                 isConstLit(rightLit, false)) {
+        lit = getConstLit(false);
+      } else {
+        lit = newSolverLiteral(solver_);
+        solver_.addClause({-lit, leftLit});
+        solver_.addClause({-lit, rightLit});
+        solver_.addClause({lit, -leftLit, -rightLit});
+      }
+      break;
+    case Op::OR:
+      if (leftLit == rightLit || isConstLit(rightLit, false)) {
+        // LCOV_EXCL_START
+        lit = leftLit;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+      } else if (isConstLit(leftLit, false)) {
+        // LCOV_EXCL_START
+        lit = rightLit;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+      } else if (leftLit == -rightLit || isConstLit(leftLit, true) ||
+                 isConstLit(rightLit, true)) {
+        lit = getConstLit(true); // LCOV_EXCL_LINE
+      } else { // LCOV_EXCL_LINE
+        lit = newSolverLiteral(solver_);
+        solver_.addClause({-leftLit, lit});
+        solver_.addClause({-rightLit, lit});
+        solver_.addClause({-lit, leftLit, rightLit});
+      }
+      break;
+    case Op::XOR:
+      if (leftLit == rightLit) {
+        lit = getConstLit(false); // LCOV_EXCL_LINE
+      } else if (leftLit == -rightLit) {
+        lit = getConstLit(true);
+      } else if (isConstLit(leftLit, false)) {
+        // LCOV_EXCL_START
+        lit = rightLit;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+      } else if (isConstLit(rightLit, false)) {
+        // LCOV_EXCL_START
+        lit = leftLit;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+      } else if (isConstLit(leftLit, true)) {
+        // LCOV_EXCL_START
+        lit = -rightLit;  // LCOV_EXCL_LINE
+        // LCOV_EXCL_STOP
+      } else if (isConstLit(rightLit, true)) {
+        // LCOV_EXCL_START
+        lit = -leftLit;  // LCOV_EXCL_LINE
+      } else {  // LCOV_EXCL_LINE
+      // LCOV_EXCL_STOP
+        lit = newSolverLiteral(solver_);
+        solver_.addClause({-lit, -leftLit, -rightLit});
+        solver_.addClause({-lit, leftLit, rightLit});
+        solver_.addClause({lit, -leftLit, rightLit});
+        solver_.addClause({lit, leftLit, -rightLit});
+      }
+      break;
+    case Op::VAR:
+    case Op::NONE:
+    default:
+      throw std::runtime_error("Unsupported BoolExpr operator in frame encoder");
+  }
+
+  cacheEncodedLiteral(node, lit);
+}
+
 int FrameFormulaEncoder::encode(BoolExpr* expr) {
   if (expr == nullptr) {
     throw std::invalid_argument("FrameFormulaEncoder::encode: null expr");
@@ -458,22 +562,7 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
     }
 
     if (node->getOp() == Op::VAR) {
-      if (node->getId() == 0) {
-        cacheEncodedLiteral(node, getConstLit(false));
-      } else if (node->getId() == 1) {
-        cacheEncodedLiteral(node, getConstLit(true));
-      } else {
-        const size_t symbol = mappedSymbol(node->getId());
-        auto it = leafLits_.find(symbol);
-        if (it == leafLits_.end()) {
-          if (!createMissingLeaves_) {
-            throw std::runtime_error("Missing leaf literal for symbol " +
-                                     std::to_string(symbol));
-          }
-          it = leafLits_.emplace(symbol, newSolverLiteral(solver_)).first;
-        }
-        cacheEncodedLiteral(node, it->second);
-      }
+      encodeReadyNode(node);
       continue;
     }
 
@@ -488,89 +577,33 @@ int FrameFormulaEncoder::encode(BoolExpr* expr) {
       continue;
     }
 
-    const int leftLit = node->getLeft() ? cachedLiteral(node->getLeft()) : 0;
-    const int rightLit = node->getRight() ? cachedLiteral(node->getRight()) : 0;
-    int lit = 0;
-
-    // Standard Tseitin clauses for the BoolExpr node at this frame.  Keep the
-    // local literal simplifications for constants and repeated subexpressions
-    // so expressions such as (a XOR a) do not become needless CNF cones.
-    switch (node->getOp()) {
-      case Op::NOT:
-        lit = -leftLit;
-        break;
-      case Op::AND:
-        if (leftLit == rightLit || isConstLit(rightLit, true)) {
-          lit = leftLit; // LCOV_EXCL_LINE
-        } else if (isConstLit(leftLit, true)) {
-          lit = rightLit; // LCOV_EXCL_LINE
-        } else if (leftLit == -rightLit || isConstLit(leftLit, false) ||
-                   isConstLit(rightLit, false)) {
-          lit = getConstLit(false);
-        } else {
-          lit = newSolverLiteral(solver_);
-          solver_.addClause({-lit, leftLit});
-          solver_.addClause({-lit, rightLit});
-          solver_.addClause({lit, -leftLit, -rightLit});
-        }
-        break;
-      case Op::OR:
-        if (leftLit == rightLit || isConstLit(rightLit, false)) {
-          // LCOV_EXCL_START
-          lit = leftLit;  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-        } else if (isConstLit(leftLit, false)) {
-          // LCOV_EXCL_START
-          lit = rightLit;  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-        } else if (leftLit == -rightLit || isConstLit(leftLit, true) ||
-                   isConstLit(rightLit, true)) {
-          lit = getConstLit(true); // LCOV_EXCL_LINE
-        } else { // LCOV_EXCL_LINE
-          lit = newSolverLiteral(solver_);
-          solver_.addClause({-leftLit, lit});
-          solver_.addClause({-rightLit, lit});
-          solver_.addClause({-lit, leftLit, rightLit});
-        }
-        break;
-      case Op::XOR:
-        if (leftLit == rightLit) {
-          lit = getConstLit(false); // LCOV_EXCL_LINE
-        } else if (leftLit == -rightLit) {
-          lit = getConstLit(true);
-        } else if (isConstLit(leftLit, false)) {
-          // LCOV_EXCL_START
-          lit = rightLit;  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-        } else if (isConstLit(rightLit, false)) {
-          // LCOV_EXCL_START
-          lit = leftLit;  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-        } else if (isConstLit(leftLit, true)) {
-          // LCOV_EXCL_START
-          lit = -rightLit;  // LCOV_EXCL_LINE
-          // LCOV_EXCL_STOP
-        } else if (isConstLit(rightLit, true)) {
-          // LCOV_EXCL_START
-          lit = -leftLit;  // LCOV_EXCL_LINE
-        } else {  // LCOV_EXCL_LINE
-        // LCOV_EXCL_STOP
-          lit = newSolverLiteral(solver_);
-          solver_.addClause({-lit, -leftLit, -rightLit});
-          solver_.addClause({-lit, leftLit, rightLit});
-          solver_.addClause({lit, -leftLit, rightLit});
-          solver_.addClause({lit, leftLit, -rightLit});
-        }
-        break;
-      case Op::VAR:
-      case Op::NONE:
-      default:
-        throw std::runtime_error("Unsupported BoolExpr operator in frame encoder");
-    }
-
-    cacheEncodedLiteral(node, lit);
+    encodeReadyNode(node);
   }
 
+  return cachedLiteral(expr);
+}
+
+int FrameFormulaEncoder::encode(BoolExpr* expr,
+                                const std::vector<BoolExpr*>& postorder) {
+  if (expr == nullptr) {
+    throw std::invalid_argument("FrameFormulaEncoder::encode: null expr");
+  }
+  for (BoolExpr* node : postorder) {
+    if (findCachedLiteral(node) != 0) {
+      continue;
+    }
+    // A cached recipe is accepted only when it preserves the encoder's normal
+    // child-before-parent order. This guard cannot change a legal query; it
+    // catches stale or malformed preparation data before emitting clauses.
+    if ((node->getLeft() != nullptr &&
+         findCachedLiteral(node->getLeft()) == 0) ||
+        (node->getRight() != nullptr &&
+         findCachedLiteral(node->getRight()) == 0)) {
+      throw std::runtime_error(
+          "FrameFormulaEncoder postorder contains an unencoded child");
+    }
+    encodeReadyNode(node);
+  }
   return cachedLiteral(expr);
 }
 

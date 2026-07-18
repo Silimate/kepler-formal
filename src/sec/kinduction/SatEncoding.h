@@ -63,6 +63,7 @@ class FrameFormulaEncoder {
                       size_t expectedNodeHint);
 
   int encode(BoolExpr* expr);
+  int encode(BoolExpr* expr, const std::vector<BoolExpr*>& postorder);
   const std::unordered_map<size_t, int>& leafLits() const;
 
  private:
@@ -90,6 +91,7 @@ class FrameFormulaEncoder {
   void cacheEncodedLiteral(BoolExpr* node, int lit);
   int getConstLit(bool value);
   bool isConstLit(int lit, bool value);
+  void encodeReadyNode(BoolExpr* node);
 
   SATSolverWrapper& solver_;
   std::unordered_map<size_t, int> leafLits_;
