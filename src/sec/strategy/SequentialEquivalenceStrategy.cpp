@@ -3346,6 +3346,20 @@ SequentialEquivalenceResult runPdrSecEngine(
       }
     }
 
+    if (isSecDiagEnabled()) {
+      // Output batches may split after an inconclusive result. Record the live
+      // range so one fully diagnostic performance run identifies the slow PDR
+      // slice without changing batching or proof order.
+      emitSecDiag(
+          "SEC diag: PDR output batch begin index=",
+          batchIndex,
+          " pending_batches=",
+          outputBatches.size(),
+          " output_range=",
+          firstOutput,
+          "..",
+          endOutput);
+    }
     PDRResult pdrResult;
     if (useAutomaticAge) {
       pdrResult = ageSession->runFromAge(
@@ -3354,6 +3368,19 @@ SequentialEquivalenceResult runPdrSecEngine(
       PDREngine pdrEngine(
           exactBatchProblem, solverType, 0, exactInitCache);
       pdrResult = pdrEngine.run(maxK);
+    }
+    if (isSecDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: PDR output batch end index=",
+          batchIndex,
+          " output_range=",
+          firstOutput,
+          "..",
+          endOutput,
+          " status=",
+          pdrStatusName(pdrResult.status),
+          " bound=",
+          pdrResult.bound);
     }
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <list>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -127,6 +128,84 @@ class PdrFrameSymbolSurfaceCache {
   // each context's monotonic symbol surface when queries move between frames.
   std::unordered_map<size_t, std::vector<size_t>> surfacesByLevel_;
 };
+
+template <typename Key, typename Value, typename Hash>
+class PdrWeightedLruCache {
+ public:
+  struct InsertResult {
+    Value* value = nullptr;
+    size_t evictedEntries = 0;
+  };
+
+  explicit PdrWeightedLruCache(size_t maxWeight) : maxWeight_(maxWeight) {}
+
+  PdrWeightedLruCache(const PdrWeightedLruCache&) = delete;
+  PdrWeightedLruCache& operator=(const PdrWeightedLruCache&) = delete;
+
+  Value* find(const Key& key) {
+    const auto existing = entries_.find(key);
+    if (existing == entries_.end()) {
+      return nullptr;
+    }
+    recency_.splice(recency_.begin(), recency_, existing->second.recency);
+    return &existing->second.value;
+  }
+
+  InsertResult insert(Key key, Value value, size_t weight) {
+    if (weight > maxWeight_) {
+      return {};
+    }
+    if (Value* existing = find(key); existing != nullptr) {
+      return {existing, 0};
+    }
+
+    size_t evictedEntries = 0;
+    while (!entries_.empty() && weight > maxWeight_ - retainedWeight_) {
+      evictLeastRecent();
+      ++evictedEntries;
+    }
+
+    auto [inserted, insertedNew] = entries_.emplace(
+        std::move(key), Entry{std::move(value), weight, {}});
+    (void)insertedNew;
+    recency_.push_front(&inserted->first);
+    inserted->second.recency = recency_.begin();
+    retainedWeight_ += weight;
+    return {&inserted->second.value, evictedEntries};
+  }
+
+  size_t size() const { return entries_.size(); }
+  size_t retainedWeight() const { return retainedWeight_; }
+
+ private:
+  struct Entry {
+    Value value;
+    size_t weight = 0;
+    typename std::list<const Key*>::iterator recency;
+  };
+
+  void evictLeastRecent() {
+    const Key* key = recency_.back();
+    const auto existing = entries_.find(*key);
+    retainedWeight_ -= existing->second.weight;
+    recency_.pop_back();
+    entries_.erase(existing);
+  }
+
+  size_t maxWeight_ = 0;
+  size_t retainedWeight_ = 0;
+  // Unordered-map references survive rehashing, so recency nodes can point at
+  // map keys without storing a second ASIC-sized cube.
+  std::list<const Key*> recency_;
+  std::unordered_map<Key, Entry, Hash> entries_;
+};
+
+inline bool shouldResetPdrStableUnsatCache(size_t stableUnsatEntries,
+                                           size_t maxEntries) {
+  // Exact query results use a separate LRU. Stable UNSAT facts remain valid
+  // across frame strengthening and therefore expire only at their own bound.
+  return stableUnsatEntries >= maxEntries;
+}
 
 inline bool isBroadDualRailResidualOutputSurface(
     bool usesDualRailStateEncoding,

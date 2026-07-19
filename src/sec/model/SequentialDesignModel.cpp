@@ -2392,39 +2392,75 @@ size_t expandClockCarrierVarIDsFromPureClockTermExprs(
   return added;
 }  // LCOV_EXCL_LINE
 
-size_t expandClockCarrierVarIDsFromStructure(
-    naja::DNL::DNLFull* dnl,
-    const SequentialDesignModel& model,
-    const std::vector<size_t>& termDNLID2varID,
-    std::unordered_set<size_t>& clockCarrierVarIDs,
-    // LCOV_EXCL_START
-    std::unordered_set<naja::DNL::DNLID>* pureClockCarrierTermIDs = nullptr) {
-    // LCOV_EXCL_STOP
-  if (dnl == nullptr) {
-    return 0;  // LCOV_EXCL_LINE
+class PureClockCarrierStructureIndex {
+ public:
+  explicit PureClockCarrierStructureIndex(naja::DNL::DNLFull* dnl)
+      : dnl_(dnl),
+        pureClockMemoStrict_(dnl == nullptr ? 0 : dnl->getNBterms(), -1),
+        pureClockMemoAfterNamedClockTree_(
+            dnl == nullptr ? 0 : dnl->getNBterms(), -1) {
+    for (naja::DNL::DNLID termID = 0;
+         termID < pureClockMemoStrict_.size();
+         ++termID) {
+      if (isPureClockCarrier(termID, false)) {
+        pureClockCarrierTermIDs_.push_back(termID);
+      }
+    }
   }
 
-  std::vector<int8_t> pureClockMemoStrict(dnl->getNBterms(), -1);
-  std::vector<int8_t> pureClockMemoAfterNamedClockTree(dnl->getNBterms(), -1);
-  auto isPureClockCarrier =
-      [&](auto&& self,
-          naja::DNL::DNLID termID,
-          bool afterNamedClockTree) -> bool {
+  const std::vector<naja::DNL::DNLID>& pureClockCarrierTermIDs() const {
+    return pureClockCarrierTermIDs_;
+  }
+
+  size_t addMappedCarrierVarIDs(
+      const SequentialDesignModel& model,
+      const std::vector<size_t>& termDNLID2varID,
+      std::unordered_set<size_t>& clockCarrierVarIDs) const {
+    size_t added = 0;
+    for (const auto termID : pureClockCarrierTermIDs_) {
+      if (termID < termDNLID2varID.size()) {
+        addCarrierVarID(
+            termDNLID2varID[termID], clockCarrierVarIDs, added);
+      }
+
+      const auto& term = dnl_->getDNLTerminalFromID(termID);
+      if (term.isNull()) {
+        continue;  // LCOV_EXCL_LINE
+      }
+      const auto varIt = model.inputVarByKey.find(getTerminalPathKey(term));
+      if (varIt != model.inputVarByKey.end()) {
+        addCarrierVarID(varIt->second, clockCarrierVarIDs, added);
+      }
+    }
+    return added;
+  }
+
+ private:
+  static void addCarrierVarID(
+      size_t varID,
+      std::unordered_set<size_t>& clockCarrierVarIDs,
+      size_t& added) {
+    if (varID >= 2 && clockCarrierVarIDs.insert(varID).second) {
+      ++added;
+    }
+  }
+
+  bool isPureClockCarrier(
+      naja::DNL::DNLID termID,
+      bool afterNamedClockTree) {
     if (termID == naja::DNL::DNLID_MAX ||
-        termID >= pureClockMemoStrict.size()) {
+        termID >= pureClockMemoStrict_.size()) {
       return false;  // LCOV_EXCL_LINE
     }
-    // LCOV_EXCL_START
     int8_t& cached = afterNamedClockTree
-    // LCOV_EXCL_STOP
-                         ? pureClockMemoAfterNamedClockTree[termID]
-                         : pureClockMemoStrict[termID];
+                         ? pureClockMemoAfterNamedClockTree_[termID]
+                         : pureClockMemoStrict_[termID];
     if (cached != -1) {
       return cached == 1;
     }
     cached = 0;
 
-    const auto& term = dnl->getDNLTerminalFromID(termID);
+    const auto& term = dnl_->getDNLTerminalFromID(termID);
     if (term.isNull()) {
       return false;  // LCOV_EXCL_LINE
     }
@@ -2443,12 +2479,12 @@ size_t expandClockCarrierVarIDsFromStructure(
       if (isoID == naja::DNL::DNLID_MAX) {
         return false;  // LCOV_EXCL_LINE
       }
-      const auto& iso = dnl->getDNLIsoDB().getIsoFromIsoIDconst(isoID);
+      const auto& iso = dnl_->getDNLIsoDB().getIsoFromIsoIDconst(isoID);
       if (iso.isConstant() || iso.getDrivers().size() != 1) {
         return false;
       }
-      const bool result =
-          self(self, iso.getDrivers().front(), afterNamedClockTree);
+      const bool result = isPureClockCarrier(
+          iso.getDrivers().front(), afterNamedClockTree);
       cached = result ? 1 : 0;
       return result;
     }
@@ -2458,9 +2494,10 @@ size_t expandClockCarrierVarIDsFromStructure(
     }
 
     if (isPotentialClockTreeBufferCell(term)) {
-      const auto sourceDriver = getClockTreeBufferSourceDriverTerm(dnl, term);
-      const bool result =
-          sourceDriver.has_value() && self(self, *sourceDriver, true);
+      const auto sourceDriver =
+          getClockTreeBufferSourceDriverTerm(dnl_, term);
+      const bool result = sourceDriver.has_value() &&
+                          isPureClockCarrier(*sourceDriver, true);
       cached = result ? 1 : 0;
       return result;
     }
@@ -2469,48 +2506,22 @@ size_t expandClockCarrierVarIDsFromStructure(
       // Some CTS flows insert a generic root buffer before the named clkbuf
       // tree. Once a named clock-tree branch has been seen, permit transparent
       // single-input cells to bridge that root back to the top clock.
-      const auto sourceDriver = getClockTreeBufferSourceDriverTerm(dnl, term);
-      const bool result =
-          sourceDriver.has_value() && self(self, *sourceDriver, true);
+      const auto sourceDriver =
+          getClockTreeBufferSourceDriverTerm(dnl_, term);
+      const bool result = sourceDriver.has_value() &&
+                          isPureClockCarrier(*sourceDriver, true);
       cached = result ? 1 : 0;
-      // LCOV_EXCL_START
       return result;
-      // LCOV_EXCL_STOP
     }
 
     return false;
-  };
-
-  size_t added = 0;
-  const auto addCarrierVarID = [&](size_t varID) {
-    if (varID >= 2 && clockCarrierVarIDs.insert(varID).second) {
-      ++added;
-    }
-  };
-  for (naja::DNL::DNLID termID = 0; termID < pureClockMemoStrict.size(); ++termID) {
-    if (!isPureClockCarrier(isPureClockCarrier, termID, false)) {
-      continue;
-    }
-    if (pureClockCarrierTermIDs != nullptr) {
-      pureClockCarrierTermIDs->insert(termID);
-    // LCOV_EXCL_START
-    }
-    // LCOV_EXCL_STOP
-    if (termID < termDNLID2varID.size()) {
-      addCarrierVarID(termDNLID2varID[termID]);
-    }
-
-    const auto& term = dnl->getDNLTerminalFromID(termID);
-    if (term.isNull()) {
-      continue;  // LCOV_EXCL_LINE
-    }
-    const auto varIt = model.inputVarByKey.find(getTerminalPathKey(term));
-    if (varIt != model.inputVarByKey.end()) {
-      addCarrierVarID(varIt->second);
-    }
   }
-  return added;
-}
+
+  naja::DNL::DNLFull* dnl_ = nullptr;
+  std::vector<int8_t> pureClockMemoStrict_;
+  std::vector<int8_t> pureClockMemoAfterNamedClockTree_;
+  std::vector<naja::DNL::DNLID> pureClockCarrierTermIDs_;
+};
 
 
 struct ExtractContext {
@@ -4373,7 +4384,23 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
   std::unordered_set<size_t> requiredPendingIndexes;
   std::unordered_set<naja::DNL::DNLID> materializedOutputTerms;
   std::unordered_set<size_t> topClockCarrierVarIDs;
-  std::unordered_set<naja::DNL::DNLID> pureClockCarrierTermIDs;
+  // DNL connectivity and cell identities are immutable during extraction.
+  // Classify the structural clock tree once, then only apply variable mappings
+  // that become available as the dependency frontier is materialized.
+  PureClockCarrierStructureIndex pureClockCarrierStructure(ctx.dnl);
+  std::unordered_set<naja::DNL::DNLID> pureClockCarrierTermIDs(
+      pureClockCarrierStructure.pureClockCarrierTermIDs().begin(),
+      pureClockCarrierStructure.pureClockCarrierTermIDs().end());
+  if (ctx.secDiagEnabled) {
+    std::fprintf(
+        stderr,
+        "SEC diag: extract(%s) immutable clock structure indexed terms=%zu "
+        "pure_terms=%zu\n",
+        ctx.topName.c_str(),
+        ctx.dnl == nullptr ? 0 : ctx.dnl->getNBterms(),
+        pureClockCarrierTermIDs.size());
+    std::fflush(stderr);
+  }
   std::unordered_map<size_t, ClockEvent> clockEventByCarrierVarID;
   std::unordered_map<BoolExpr*, BoolExpr*> transitionClockStripMemo;
   materializedOutputTerms.reserve(outputExprByTerm.size());
@@ -4393,13 +4420,9 @@ RebuiltTransitionArtifacts rebuildRequiredStateTransitions(
     const size_t addedTermNames = expandClockCarrierVarIDsFromTermNames(
         ctx.dnl, termDNLID2varID, topClockCarrierVarIDs);
         // LCOV_EXCL_STOP
-    const size_t addedStructure = expandClockCarrierVarIDsFromStructure(
-        ctx.dnl,
-        // LCOV_EXCL_START
-        model,
-        termDNLID2varID,
-        topClockCarrierVarIDs,
-        &pureClockCarrierTermIDs);
+    const size_t addedStructure =
+        pureClockCarrierStructure.addMappedCarrierVarIDs(
+            model, termDNLID2varID, topClockCarrierVarIDs);
     const size_t addedPureExprs = expandClockCarrierVarIDsFromPureClockTermExprs(
         pureClockCarrierTermIDs, outputExprByTerm, topClockCarrierVarIDs);
     seedTopClockCarrierEvents(model, topClockCarrierVarIDs, clockEventByCarrierVarID);

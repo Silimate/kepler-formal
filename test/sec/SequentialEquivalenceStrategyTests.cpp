@@ -5628,6 +5628,36 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineIndexedInitFactsPreserveWideExactFrameZero) {
+  constexpr size_t kStateCount = 2048;
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols.reserve(kStateCount);
+  problem.allSymbols.reserve(kStateCount);
+  problem.initialStateAssignments.reserve(kStateCount);
+  problem.transitions0.reserve(kStateCount);
+  for (size_t index = 0; index < kStateCount; ++index) {
+    const size_t symbol = index + 2;
+    problem.state0Symbols.push_back(symbol);
+    problem.allSymbols.push_back(symbol);
+    problem.initialStateAssignments.emplace_back(symbol, false);
+    problem.transitions0.emplace_back(symbol, BoolExpr::Var(symbol));
+  }
+  problem.initialCondition = BoolExpr::createTrue();
+  problem.initializedStateCount = kStateCount;
+  problem.totalStateCount = kStateCount;
+  problem.bad = BoolExpr::Var(problem.state0Symbols.back());
+  problem.property = BoolExpr::Not(problem.bad);
+
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(1);
+
+  // Exact F[0] fixes every bit low. The immutable assignment index changes
+  // only lookup cost; the final bad bit must remain unreachable.
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineFindsReachableBadState) {
   KInductionProblem problem;
   problem.state0Symbols = {2};
@@ -5751,6 +5781,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.property = BoolExpr::Not(problem.bad);
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
@@ -5790,18 +5821,30 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  auto exactCache = std::make_shared<PDRExactInitCache>(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  PDREngine engine(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT, 0, exactCache);
   const auto result = engine.run(1);
+  const auto repeatedResult = engine.run(1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Different);
   EXPECT_EQ(result.bound, 1u);
+  // Exact metadata and dense ternary memo allocations survive serial output
+  // runs, but every generation must still produce the same predecessor.
+  EXPECT_EQ(repeatedResult.status, result.status);
+  EXPECT_EQ(repeatedResult.bound, result.bound);
   EXPECT_NE(stderrOutput.find("predecessor_cube=1"), std::string::npos)
       << stderrOutput;
   // Each tentative X assignment must recompute values while reusing the
   // allocation backing the shared transition-DAG evaluation memo.
   EXPECT_NE(
       stderrOutput.find("ternary evaluation memo storage reused entries="),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("ternary mapped support cache reused="),
       std::string::npos)
       << stderrOutput;
   // The support index must retain the one controlling symbol shared by both
@@ -5885,6 +5928,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   problem.property = BoolExpr::Not(problem.bad);
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(1);
@@ -5892,8 +5936,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   // The target cone initially contains only x2. Its immutable equality
-  // component must still close transitively through x3 to x4.
-  EXPECT_NE(stderrOutput.find("closed symbol cache seed=1 closed=3"),
+  // component must still close transitively through x3 to x4 before the
+  // target surface is retained.
+  EXPECT_NE(stderrOutput.find("predecessor target surface cached target=1"),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("cached solver created level=0 symbols=3"),
             std::string::npos)
       << stderrOutput;
 }
@@ -6057,6 +6105,47 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Symbol identities are local to one transition model.
   EXPECT_EQ(cache.widen(&secondModel, 1, {5}),
             (std::vector<size_t>{5}));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrWeightedLruCacheEvictsOnlyLeastRecentEntries) {
+  detail::PdrWeightedLruCache<int, std::string, std::hash<int>> cache(5);
+
+  EXPECT_EQ(cache.insert(1, "one", 2).evictedEntries, 0u);
+  EXPECT_EQ(cache.insert(2, "two", 3).evictedEntries, 0u);
+  ASSERT_NE(cache.find(1), nullptr);
+
+  // Touching key 1 makes key 2 least recent. Inserting key 3 should preserve
+  // that hot exact value instead of clearing the complete cache at its bound.
+  const auto inserted = cache.insert(3, "three", 3);
+  ASSERT_NE(inserted.value, nullptr);
+  EXPECT_EQ(inserted.evictedEntries, 1u);
+  EXPECT_EQ(*inserted.value, "three");
+  EXPECT_NE(cache.find(1), nullptr);
+  EXPECT_EQ(cache.find(2), nullptr);
+  EXPECT_NE(cache.find(3), nullptr);
+  EXPECT_EQ(cache.size(), 2u);
+  EXPECT_EQ(cache.retainedWeight(), 5u);
+
+  // An entry larger than the complete byte budget remains uncached and must
+  // not evict exact entries that are still reusable.
+  const auto oversized = cache.insert(4, "four", 6);
+  EXPECT_EQ(oversized.value, nullptr);
+  EXPECT_EQ(oversized.evictedEntries, 0u);
+  EXPECT_EQ(cache.size(), 2u);
+  EXPECT_EQ(cache.retainedWeight(), 5u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrStableUnsatCacheUsesItsOwnEntryBound) {
+  constexpr size_t stableUnsatLimit = 8;
+
+  // Exact-result LRU churn is intentionally absent from this policy: stable
+  // UNSAT facts remain valid as IC3 strengthens a frame.
+  EXPECT_FALSE(detail::shouldResetPdrStableUnsatCache(
+      stableUnsatLimit - 1, stableUnsatLimit));
+  EXPECT_TRUE(detail::shouldResetPdrStableUnsatCache(
+      stableUnsatLimit, stableUnsatLimit));
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -6311,6 +6400,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
           "predecessor cached solver frame sync source=frame_log"),
       std::string::npos)
       << stderrOutput;
+  // Repeated solveRelative calls for one obligation must reuse only the
+  // prepared assumption surface; each call still performs its exact SAT solve.
+  EXPECT_NE(
+      stderrOutput.find("predecessor target assumptions reused"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -6355,7 +6450,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
     EXPECT_EQ(result.bound, badDepth) << "badDepth=" << badDepth;
   }
 }
-
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PdrDebugFormattingPrintsDocumentedBooleanMiterProblemAndFrames) {
@@ -12338,6 +12432,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
           "PDR certified age output range=0..1 age=2"),
       std::string::npos)
       << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR output batch begin index=0 pending_batches=1 "
+          "output_range=0..1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("PDR output batch end index=0 output_range=0..1"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14068,7 +14172,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("predecessor frame symbol cache built level=1"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(stderrOutput.find("predecessor closed symbol cache"),
+  EXPECT_NE(stderrOutput.find("predecessor target surface cached"),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("predecessor target surface reused"),
             std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("predecessor cached solver disabled"),
@@ -14499,10 +14606,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find("predecessor transition encoder cached"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("predecessor closed symbol cache seed="),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
@@ -15885,7 +15988,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* bufferModel = createBufModel(primitives);
   auto* top = createClockTreeBufferedDffTop(library, "top", bufferModel);
 
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  testing::internal::CaptureStderr();
   const auto extracted = SequentialDesignModel::extract(top);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
   expectAllExpressionSupportIsPublished(extracted);
   const auto stateKey = findKeyByDisplayName(extracted, "ff0.Q[0]");
   const auto inKey = findKeyByDisplayName(extracted, "in[0]");
@@ -15900,6 +16006,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
       {{extracted.inputVarByKey.at(inKey), true}, {stateVar, false}}));
   EXPECT_FALSE(expr->evaluate(
       {{extracted.inputVarByKey.at(inKey), false}, {stateVar, true}}));
+  const std::string structureIndexBuilt =
+      "immutable clock structure indexed terms=";
+  const size_t firstStructureIndex = stderrOutput.find(structureIndexBuilt);
+  ASSERT_NE(firstStructureIndex, std::string::npos) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          structureIndexBuilt,
+          firstStructureIndex + structureIndexBuilt.size()),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
