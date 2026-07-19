@@ -13580,6 +13580,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   differentBatch.inductionProperty = differentBatch.property;
 
   const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
   testing::internal::CaptureStderr();
   PDREngine equivalentEngine(
       equivalentBatch,
