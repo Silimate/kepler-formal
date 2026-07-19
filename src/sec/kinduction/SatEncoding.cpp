@@ -248,6 +248,17 @@ const std::unordered_map<size_t, int>& FrameFormulaEncoder::leafLits() const {
   return leafLits_;
 }
 
+void FrameFormulaEncoder::addLeafLiteral(size_t symbol, int literal) {
+  // Incremental PDR solvers can widen their state surface after this encoder
+  // has emitted clauses. Adding a leaf preserves every existing Tseitin
+  // literal while allowing later formulas to reference the enlarged surface.
+  const auto [existing, inserted] = leafLits_.emplace(symbol, literal);
+  if (!inserted && existing->second != literal) {  // LCOV_EXCL_LINE
+    throw std::logic_error(                         // LCOV_EXCL_LINE
+        "FrameFormulaEncoder leaf literal changed");  // LCOV_EXCL_LINE
+  }
+}
+
 size_t FrameFormulaEncoder::BoolExprPtrHash::operator()(
     const BoolExpr* node) const noexcept {
   auto value = reinterpret_cast<std::uintptr_t>(node);

@@ -64,6 +64,7 @@ class FrameFormulaEncoder {
 
   int encode(BoolExpr* expr);
   int encode(BoolExpr* expr, const std::vector<BoolExpr*>& postorder);
+  void addLeafLiteral(size_t symbol, int literal);
   const std::unordered_map<size_t, int>& leafLits() const;
 
  private:

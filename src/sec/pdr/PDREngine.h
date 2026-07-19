@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <iterator>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -97,6 +98,35 @@ inline bool widenSortedPdrSymbolSurface( // LCOV_EXCL_LINE
       mergeSortedPdrSymbolVectors(stableSurface, requestedSurface); // LCOV_EXCL_LINE
   return true; // LCOV_EXCL_LINE
 } // LCOV_EXCL_LINE
+
+class PdrFrameSymbolSurfaceCache {
+ public:
+  const std::vector<size_t>& widen(
+      const void* modelIdentity,
+      size_t level,
+      const std::vector<size_t>& requestedSurface,
+      bool* widened = nullptr) {
+    if (modelIdentity_ != modelIdentity) {
+      // Symbol numbers belong to one transition model. A new model must not
+      // inherit a surface from the previous PDR run.
+      surfacesByLevel_.clear();
+      modelIdentity_ = modelIdentity;
+    }
+    auto& stableSurface = surfacesByLevel_[level];
+    const bool surfaceWidened =
+        widenSortedPdrSymbolSurface(stableSurface, requestedSurface);
+    if (widened != nullptr) {
+      *widened = surfaceWidened;
+    }
+    return stableSurface;
+  }
+
+ private:
+  const void* modelIdentity_ = nullptr;
+  // IC3 keeps a distinct incremental SAT context for every frame. Preserve
+  // each context's monotonic symbol surface when queries move between frames.
+  std::unordered_map<size_t, std::vector<size_t>> surfacesByLevel_;
+};
 
 inline bool isBroadDualRailResidualOutputSurface(
     bool usesDualRailStateEncoding,
