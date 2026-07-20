@@ -13695,6 +13695,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("exact F[0] init intersection cache reused"),
       std::string::npos)
       << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("shared exact F[0] solver used for bad cube"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("shared exact F[0] solver used for init intersection"),
+      std::string::npos)
+      << stderrOutput;
   const std::string metadataBuilt = "immutable model metadata built";
   const size_t firstMetadataBuild = stderrOutput.find(metadataBuilt);
   ASSERT_NE(firstMetadataBuild, std::string::npos) << stderrOutput;
@@ -14215,10 +14223,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(firstResult.status, PDRStatus::Equivalent) << stderrOutput;
   EXPECT_EQ(secondResult.status, firstResult.status) << stderrOutput;
   EXPECT_EQ(secondResult.bound, firstResult.bound) << stderrOutput;
-  // F[0] is immutable across output batches. Its exact SAT instance should be
-  // retained even when the model's reported state surface is ASIC-sized.
+  // F[0] is immutable across output batches. Bad-state queries must reuse the
+  // exact predecessor SAT instance instead of retaining a duplicate Init CNF.
   EXPECT_NE(
-      stderrOutput.find("bad cube cached frame clauses unchanged frame=0"),
+      stderrOutput.find("shared exact F[0] solver used for bad cube"),
       std::string::npos)
       << stderrOutput;
   // Higher-frame caching is bounded by the exact SAT surface, not unrelated
@@ -14228,7 +14236,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("bad cube cached frame clauses added=1"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(stderrOutput.find("shared exact F[0] bad symbols reused"),
+  EXPECT_NE(
+      stderrOutput.find("shared exact F[0] symbols reused for bad cube"),
             std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find("formula closed support reused"),

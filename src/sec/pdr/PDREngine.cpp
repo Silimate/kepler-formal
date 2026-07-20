@@ -911,6 +911,15 @@ struct PredecessorAssumptionSolver {
   std::unordered_map<const std::unordered_map<size_t, size_t>*,
                      std::unique_ptr<FrameFormulaEncoder>>
       transitionEncoderBySymbolMap;
+  // Exact F[0] bad-state queries differ from predecessor queries only by
+  // assumptions. Encode their roots lazily in the same incremental solver so
+  // a whole-chip Init CNF is not retained a second time.
+  std::unique_ptr<FrameFormulaEncoder> badRootEncoder;
+  std::unordered_map<BoolExpr*, int> encodedBadRoots;
+  // Figure 6 repeatedly asks whether candidate cubes intersect exact Init.
+  // Keep those answers with the same F[0] solver that answers the query.
+  std::unordered_map<StateCube, bool, StateCubeHash>
+      initIntersectionResultByCube;
   std::unordered_set<size_t> querySymbolSet;
   std::unordered_set<StateClause, StateClauseHash> emittedFrameClauses;
   size_t emittedFrameFingerprint = 0;
@@ -979,10 +988,6 @@ struct PredecessorAssumptionCache {
   // Figure 6 asks whether many candidate cubes intersect the same exact F[0].
   // Keep that immutable formula encoded and vary only cube assumptions.
   std::unique_ptr<InitIntersectionAssumptionSolver> initIntersectionSolver;
-  // Output-batch PDR runs share the immutable F[0] intersection solver.
-  std::unique_ptr<InitIntersectionAssumptionSolver>*
-      sharedInitIntersectionSolver = nullptr;
-  const KInductionProblem* sharedInitIntersectionProblem = nullptr;
   // F[0] and its transition relation are identical for every output batch.
   // Clauses streamed into it are exact-Init consequences; higher-frame
   // solvers, frame vectors, and proof obligations remain local to one run.
@@ -1060,10 +1065,6 @@ struct BadCubeAssumptionCache {
   // output-bad roots. Keep frame facts permanent and vary only the root
   // literal as a solver assumption.
   std::unique_ptr<BadCubeAssumptionSolver> solver;
-  // A top-level dual-rail SEC call can give every output batch one stable F[0]
-  // symbol surface and identity. This never applies to higher PDR frames.
-  const KInductionProblem* sharedFrameZeroProblem = nullptr;
-  std::vector<size_t> sharedFrameZeroSolverSymbols;
 };
 
 }  // namespace
@@ -1146,11 +1147,9 @@ struct PDRExactInitCache::Impl {
   const KInductionProblem* sourceProblem = nullptr;
   KEPLER_FORMAL::Config::SolverType solverType;
   BoolExpr* initFormula = nullptr;
-  std::unique_ptr<InitIntersectionAssumptionSolver> initIntersectionSolver;
   std::unique_ptr<PredecessorAssumptionSolver> frameZeroPredecessorSolver;
   std::vector<size_t> frameZeroPredecessorSymbols;
   PredecessorQueryResultStore frameZeroPredecessorResults;
-  BadCubeAssumptionCache frameZeroBadCubeCache;
   // These structures depend only on the validated transition model. SEC runs
   // output batches serially, so every batch can reuse their exact contents
   // without sharing property-specific proof state or changing query order.
@@ -2129,8 +2128,7 @@ void prepareSharedExactInitQueries(
     BoolExpr* initFormula,
     const ComplementPartnerIndex& complementPartners,
     PdrFormulaSupportCache* supportCache) {
-  auto& badCache = cache.frameZeroBadCubeCache;
-  if (!badCache.sharedFrameZeroSolverSymbols.empty()) {
+  if (!cache.frameZeroPredecessorSymbols.empty()) {
     return;
   }
 
@@ -2157,15 +2155,11 @@ void prepareSharedExactInitQueries(
   symbols.insert(cache.sourceProblem->allSymbols.begin(),
                  cache.sourceProblem->allSymbols.end());
 
-  badCache.sharedFrameZeroProblem = cache.sourceProblem;
-  badCache.sharedFrameZeroSolverSymbols =
-      sortUniqueSymbols(std::move(symbols));
-  cache.frameZeroPredecessorSymbols =
-      badCache.sharedFrameZeroSolverSymbols;
+  cache.frameZeroPredecessorSymbols = sortUniqueSymbols(std::move(symbols));
   if (pdrStatsEnabled()) {
     emitSecDiag(
         "SEC PDR stats: shared exact F[0] query surface symbols=",
-        badCache.sharedFrameZeroSolverSymbols.size());
+        cache.frameZeroPredecessorSymbols.size());
   }
 }
 
@@ -3265,6 +3259,9 @@ void PredecessorAssumptionSolver::extendSymbolSurface(
       (void)symbolMap;
       encoder->addLeafLiteral(symbol, literal);
     }
+    if (badRootEncoder != nullptr) {
+      badRootEncoder->addLeafLiteral(symbol, literal);
+    }
   }
 
   // Existing transition roots and clauses remain valid. Extend each encoder's
@@ -3431,6 +3428,54 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
   }
   solver = std::move(next);
   return *solver;
+}
+
+int64_t resourceLimitOrUnbounded(unsigned limit);
+
+int encodeCachedFrameZeroBadRoot(
+    PredecessorAssumptionSolver& cachedSolver,
+    BoolExpr* badFormula) {
+  const auto existing = cachedSolver.encodedBadRoots.find(badFormula);
+  if (existing != cachedSolver.encodedBadRoots.end()) {
+    return existing->second;
+  }
+  if (cachedSolver.badRootEncoder == nullptr) {
+    cachedSolver.badRootEncoder = std::make_unique<FrameFormulaEncoder>(
+        *cachedSolver.solver, cachedSolver.variables->makeLeafLits(0));
+  }
+  const int root = cachedSolver.badRootEncoder->encode(badFormula);
+  cachedSolver.encodedBadRoots.emplace(badFormula, root);
+  return root;
+}
+
+SATSolverWrapper::SolveStatus solveFrameZeroBadCubeWithSharedSolver(
+    PredecessorAssumptionCache& cache,
+    const KInductionProblem& problem,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const TransitionExprResolver& transitionByState,
+    const ComplementPartnerIndex& stateRelations,
+    BoolExpr* initFormula,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    BoolExpr* badFormula,
+    const std::vector<size_t>& solverSymbols,
+    unsigned badCubeConflictLimit,
+    PdrFormulaSupportCache* supportCache,
+    PredecessorAssumptionSolver** solvedCache) {
+  auto& cachedSolver = getOrCreatePredecessorAssumptionSolver(
+      cache, problem, solverType, transitionByState, stateRelations,
+      initFormula, frameInvariant, frames,
+      /*level=*/0, solverSymbols, supportCache);
+  const int badRoot =
+      encodeCachedFrameZeroBadRoot(cachedSolver, badFormula);
+  *solvedCache = &cachedSolver;
+  if (shouldEmitFrequentPdrStats()) {
+    emitSecDiag(
+        "SEC PDR stats: shared exact F[0] solver used for bad cube");
+  }
+  return cachedSolver.solver->solveWithAssumptionsStatus(
+      {badRoot}, resourceLimitOrUnbounded(badCubeConflictLimit),
+      /*propagationLimit=*/-1);
 }
 
 int64_t resourceLimitOrUnbounded(unsigned limit) {
@@ -3856,12 +3901,8 @@ BadCubeAssumptionSolver& getOrCreateBadCubeAssumptionSolver(
     const std::vector<FrameClauses>& frames,
     size_t level,
     const std::vector<size_t>& solverSymbols) {
-  const KInductionProblem* cacheProblem =
-      level == 0 && cache.sharedFrameZeroProblem != nullptr
-          ? cache.sharedFrameZeroProblem
-          : &problem;
   BadCubeAssumptionCacheKey key{
-      cacheProblem,
+      &problem,
       initFormula,
       level == 0 ? nullptr : frameInvariant,
       level,
@@ -4244,6 +4285,7 @@ StateCube extractSolvedBadCubeForFormula(
 std::optional<StateCube> findBadCubeForFormula(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
+    const TransitionExprResolver& transitionByState,
     BoolExpr* initFormula,
     BoolExpr* frameInvariant,
     const std::vector<FrameClauses>& frames,
@@ -4252,6 +4294,7 @@ std::optional<StateCube> findBadCubeForFormula(
     size_t level,
     const ComplementPartnerIndex& complementPartners,
     BadCubeAssumptionCache* badCubeAssumptionCache,
+    PredecessorAssumptionCache* predecessorAssumptionCache,
     PdrFormulaSupportCache* supportCache) {
   if (!preciseBadStateSupport.has_value()) {
     if (pdrStatsEnabled()) {
@@ -4269,15 +4312,20 @@ std::optional<StateCube> findBadCubeForFormula(
   // after all learned blocking clauses and optional strengthening are applied.
   std::vector<size_t> computedSolverSymbols;
   const std::vector<size_t>* solverSymbolsPtr = nullptr;
-  if (level == 0 && badCubeAssumptionCache != nullptr &&
-      !badCubeAssumptionCache->sharedFrameZeroSolverSymbols.empty()) {
+  const bool useSharedFrameZeroSolver =
+      level == 0 && predecessorAssumptionCache != nullptr &&
+      predecessorAssumptionCache->sharedFrameZeroPredecessorSolver != nullptr &&
+      predecessorAssumptionCache->sharedFrameZeroPredecessorSymbols !=
+          nullptr &&
+      !predecessorAssumptionCache->sharedFrameZeroPredecessorSymbols->empty();
+  if (useSharedFrameZeroSolver) {
     // prepareSharedExactInitQueries() already built this complete immutable
     // surface. Borrow it rather than reconstructing exact Init for every output.
     solverSymbolsPtr =
-        &badCubeAssumptionCache->sharedFrameZeroSolverSymbols;
+        predecessorAssumptionCache->sharedFrameZeroPredecessorSymbols;
     if (pdrStatsEnabled()) {
       emitSecDiag(
-          "SEC PDR stats: shared exact F[0] bad symbols reused count=",
+          "SEC PDR stats: shared exact F[0] symbols reused for bad cube count=",
           solverSymbolsPtr->size());
     }
   } else {
@@ -4300,11 +4348,13 @@ std::optional<StateCube> findBadCubeForFormula(
   const bool emitStatsForBadCubeQuery =
       shouldEmitPdrStats(badCubeStatsQueryNumber);
   BadCubeAssumptionCache* solverCache =
-      shouldUseBadCubeSolverCache(problem, level, solverSymbols.size())
+      !useSharedFrameZeroSolver &&
+              shouldUseBadCubeSolverCache(problem, level, solverSymbols.size())
           ? badCubeAssumptionCache
           : nullptr;
   if (problem.usesDualRailStateEncoding && badCubeAssumptionCache != nullptr &&
-      solverCache == nullptr && emitStatsForBadCubeQuery) {
+      !useSharedFrameZeroSolver && solverCache == nullptr &&
+      emitStatsForBadCubeQuery) {
     emitSecDiag(
         "SEC PDR stats: bad cube cached solver disabled query_symbols=",
         solverSymbols.size(),
@@ -4314,6 +4364,37 @@ std::optional<StateCube> findBadCubeForFormula(
         problem.totalStateCount,
         " level=",
         level);
+  }
+  if (problem.usesDualRailStateEncoding && useSharedFrameZeroSolver) {
+    PredecessorAssumptionSolver* solvedCache = nullptr;
+    const auto badSolveStatus = solveFrameZeroBadCubeWithSharedSolver(
+        *predecessorAssumptionCache, problem, solverType, transitionByState,
+        complementPartners, initFormula, frameInvariant, frames, badFormula,
+        solverSymbols, badCubeConflictLimit, supportCache, &solvedCache);
+    if (badSolveStatus == SATSolverWrapper::SolveStatus::Unknown) {
+      if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
+        emitSecDiag(  // LCOV_EXCL_LINE
+            "SEC PDR stats: bad cube query budget exhausted limit=",
+            badCubeConflictLimit,
+            " symbols=",
+            solverSymbols.size(),  // LCOV_EXCL_LINE
+            " level=",
+            level,
+            " cached_assumptions=1");
+      }  // LCOV_EXCL_LINE
+      markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);
+      return std::nullopt;
+    }
+    if (badSolveStatus == SATSolverWrapper::SolveStatus::Unsat) {
+      return std::nullopt;
+    }
+    return extractSolvedBadCubeForFormula(
+        *solvedCache->solver,
+        *solvedCache->variables,
+        *preciseBadStateSupport,
+        badFormula,
+        level,
+        supportCache);
   }
   if (problem.usesDualRailStateEncoding && solverCache != nullptr) {
     BadCubeAssumptionSolver* solvedCache = nullptr;
@@ -4406,6 +4487,7 @@ std::optional<StateCube> findBadCubeForFormula(
 
 std::optional<StateCube> findBadCube(const KInductionProblem& problem,
                                      KEPLER_FORMAL::Config::SolverType solverType,
+                                     const TransitionExprResolver& transitionByState,
                                      BoolExpr* initFormula,
                                      BoolExpr* frameInvariant,
                                      const std::vector<FrameClauses>& frames,
@@ -4417,13 +4499,16 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
                                      size_t level,
                                      const ComplementPartnerIndex& complementPartners,
                                      BadCubeAssumptionCache* badCubeAssumptionCache,
+                                     PredecessorAssumptionCache* predecessorAssumptionCache,
                                      PdrFormulaSupportCache* supportCache) {
   if (!decomposeOutputBad || problem.observedOutputExprs0.size() <= 1 ||
       problem.observedOutputExprs0.size() != problem.observedOutputExprs1.size()) {
     return findBadCubeForFormula(
-        problem, solverType, initFormula, frameInvariant, frames, badFormula,
+        problem, solverType, transitionByState, initFormula, frameInvariant,
+        frames, badFormula,
         preciseBadStateSupport, level,
-        complementPartners, badCubeAssumptionCache, supportCache);
+        complementPartners, badCubeAssumptionCache, predecessorAssumptionCache,
+        supportCache);
   }
 
   // This is an exact decomposition of R[N] & !P: each query uses the complete
@@ -4436,9 +4521,10 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
     const auto outputStateSupport = collectBoundedStateSupportSymbols(
         outputBad, kMaxPreciseBadCubeSupportNodes, 0, stateSymbols);
     if (auto cube = findBadCubeForFormula(
-            problem, solverType, initFormula, frameInvariant, frames,
-            outputBad, outputStateSupport, level,
-            complementPartners, badCubeAssumptionCache, supportCache);
+            problem, solverType, transitionByState, initFormula, frameInvariant,
+            frames, outputBad, outputStateSupport, level,
+            complementPartners, badCubeAssumptionCache,
+            predecessorAssumptionCache, supportCache);
         cube.has_value()) {
       return cube;
     }
@@ -4907,13 +4993,8 @@ InitIntersectionAssumptionSolver& getInitIntersectionAssumptionSolver(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     BoolExpr* initFormula) {
-  auto& solver = cache.sharedInitIntersectionSolver != nullptr
-                     ? *cache.sharedInitIntersectionSolver
-                     : cache.initIntersectionSolver;
-  const KInductionProblem* problemIdentity =
-      cache.sharedInitIntersectionProblem != nullptr
-          ? cache.sharedInitIntersectionProblem
-          : &problem;
+  auto& solver = cache.initIntersectionSolver;
+  const KInductionProblem* problemIdentity = &problem;
   if (solver != nullptr && solver->problem == problemIdentity &&
       solver->initFormula == initFormula &&
       solver->requestedSolverType == solverType) {
@@ -4948,6 +5029,59 @@ InitIntersectionAssumptionSolver& getInitIntersectionAssumptionSolver(
   return *solver;
 }
 
+PredecessorAssumptionSolver* exactFrameZeroSolverForInitIntersection(
+    PredecessorAssumptionCache& cache,
+    BoolExpr* initFormula,
+    const StateCube& cube) {
+  PredecessorAssumptionSolver* solver = nullptr;
+  if (cache.sharedFrameZeroPredecessorSolver != nullptr) {
+    solver = cache.sharedFrameZeroPredecessorSolver->get();
+  } else if (const auto local = cache.solversByLevel.find(0);
+             local != cache.solversByLevel.end()) {
+    solver = local->second.get();
+  }
+  if (solver == nullptr || solver->key.level != 0 ||
+      solver->key.initFormula != initFormula) {
+    return nullptr;
+  }
+  for (const auto& literal : cube) {
+    if (!solver->variables->hasSymbol(literal.symbol)) {
+      return nullptr;
+    }
+  }
+  return solver;
+}
+
+bool solveInitIntersectionWithAssumptions(
+    SATSolverWrapper& solver,
+    const FrameVariableStore& variables,
+    std::unordered_map<StateCube, bool, StateCubeHash>& resultByCube,
+    const StateCube& cube) {
+  const auto cachedResult = resultByCube.find(cube);
+  if (cachedResult != resultByCube.end()) {
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: exact F[0] init intersection cache reused cube=",
+          cube.size());
+    }
+    return cachedResult->second;
+  }
+  std::vector<int> assumptions;
+  assumptions.reserve(cube.size());
+  for (const auto& literal : cube) {
+    if (!variables.hasSymbol(literal.symbol)) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR init-intersection encoding missing state symbol " +
+          std::to_string(literal.symbol));  // LCOV_EXCL_LINE
+    }
+    const int satLiteral = variables.getLiteral(literal.symbol, 0);
+    assumptions.push_back(literal.value ? satLiteral : -satLiteral);
+  }
+  const bool intersects = solver.solveWithAssumptions(assumptions);
+  resultByCube.emplace(cube, intersects);
+  return intersects;
+}
+
 bool cubeIntersectsInit(const KInductionProblem& problem,
                         KEPLER_FORMAL::Config::SolverType solverType,
                         BoolExpr* initFormula,
@@ -4963,32 +5097,23 @@ bool cubeIntersectsInit(const KInductionProblem& problem,
   PredecessorAssumptionCache localCache;
   PredecessorAssumptionCache& activeCache =
       cache != nullptr ? *cache : localCache;
+  if (auto* frameZeroSolver = exactFrameZeroSolverForInitIntersection(
+          activeCache, initFormula, cube);
+      frameZeroSolver != nullptr) {
+    if (shouldEmitFrequentPdrStats()) {
+      emitSecDiag(
+          "SEC PDR stats: shared exact F[0] solver used for init intersection");
+    }
+    return solveInitIntersectionWithAssumptions(
+        *frameZeroSolver->solver,
+        *frameZeroSolver->variables,
+        frameZeroSolver->initIntersectionResultByCube,
+        cube);
+  }
   auto& cached = getInitIntersectionAssumptionSolver(
       activeCache, problem, solverType, initFormula);
-  const auto cachedResult = cached.resultByCube.find(cube);
-  if (cachedResult != cached.resultByCube.end()) {
-    if (pdrStatsEnabled()) {
-      emitSecDiag(
-          "SEC PDR stats: exact F[0] init intersection cache reused cube=",
-          cube.size());
-    }
-    return cachedResult->second;
-  }
-  std::vector<int> assumptions;
-  assumptions.reserve(cube.size());
-  for (const auto& literal : cube) {
-    if (!cached.variables->hasSymbol(literal.symbol)) {
-      throw std::runtime_error(  // LCOV_EXCL_LINE
-          "PDR init-intersection encoding missing state symbol " +
-          std::to_string(literal.symbol));  // LCOV_EXCL_LINE
-    }
-    const int satLiteral =
-        cached.variables->getLiteral(literal.symbol, 0);
-    assumptions.push_back(literal.value ? satLiteral : -satLiteral);
-  }
-  const bool intersects = cached.solver->solveWithAssumptions(assumptions);
-  cached.resultByCube.emplace(cube, intersects);
-  return intersects;
+  return solveInitIntersectionWithAssumptions(
+      *cached.solver, *cached.variables, cached.resultByCube, cube);
 }
 
 std::optional<StateCube> growCoreOutsideInit(
@@ -6110,10 +6235,6 @@ PDRResult PDREngine::run(size_t maxFrames, BoolExpr* property) const {
   if (sharedExactInit != nullptr) {
     predecessorAssumptionCache.sharedTargetSurfaces =
         &sharedExactInit->targetSurfaces;
-    predecessorAssumptionCache.sharedInitIntersectionSolver =
-        &sharedExactInit->initIntersectionSolver;
-    predecessorAssumptionCache.sharedInitIntersectionProblem =
-        sharedExactInit->sourceProblem;
     predecessorAssumptionCache.sharedFrameZeroPredecessorSolver =
         &sharedExactInit->frameZeroPredecessorSolver;
     predecessorAssumptionCache.sharedFrameZeroPredecessorSymbols =
@@ -6137,15 +6258,12 @@ PDRResult PDREngine::run(size_t maxFrames, BoolExpr* property) const {
 
   // Before growing any frame sequence, check whether exact Init itself already
   // contains a bad state.
-  BadCubeAssumptionCache* initialBadCubeCache =
-      sharedExactInit != nullptr
-          ? &sharedExactInit->frameZeroBadCubeCache
-          : &badCubeAssumptionCache;
   if (auto badCube = findBadCube(
-          *runProblem, solverType_, initFormula, frameInvariant, frames,
-          runProblem->bad, usesDefaultProperty, preciseBadStateSupport,
-          transitionByState.stateSymbols(), 0, complementPartners,
-          initialBadCubeCache, &formulaSupportCache);
+          *runProblem, solverType_, transitionByState, initFormula,
+          frameInvariant, frames, runProblem->bad, usesDefaultProperty,
+          preciseBadStateSupport, transitionByState.stateSymbols(), 0,
+          complementPartners, &badCubeAssumptionCache,
+          &predecessorAssumptionCache, &formulaSupportCache);
       badCube.has_value()) {
     emitPdrTrace("bad_cube@F0", formatCubeForPdrTrace(*badCube));
     return {PDRStatus::Different, 0};
@@ -6183,10 +6301,11 @@ PDRResult PDREngine::run(size_t maxFrames, BoolExpr* property) const {
     // survive in the current frontier.
     while (true) {
       const auto badCube = findBadCube(
-          *runProblem, solverType_, initFormula, frameInvariant, frames,
-          runProblem->bad, usesDefaultProperty, preciseBadStateSupport,
-          transitionByState.stateSymbols(), level, complementPartners,
-          &badCubeAssumptionCache, &formulaSupportCache);
+          *runProblem, solverType_, transitionByState, initFormula,
+          frameInvariant, frames, runProblem->bad, usesDefaultProperty,
+          preciseBadStateSupport, transitionByState.stateSymbols(), level,
+          complementPartners, &badCubeAssumptionCache,
+          &predecessorAssumptionCache, &formulaSupportCache);
       if (hasPdrBudgetExhaustion()) {
         return {PDRStatus::Inconclusive, level};  // LCOV_EXCL_LINE
       }
