@@ -220,33 +220,32 @@ inline bool isBroadDualRailResidualOutputSurface(
          originalObservedOutputCount > broadOutputLimit; // LCOV_EXCL_LINE
 }
 
+inline size_t dualRailPredecessorEncodingLimitForSurface(
+    bool broadResidualOutputSurface,
+    size_t configuredLimit,
+    size_t residualMinimum) {
+  // The exact transition cone, rather than the enclosing design's state count,
+  // determines whether a residual predecessor encoding is local.
+  if (!broadResidualOutputSurface || configuredLimit == 0) {
+    return configuredLimit;
+  }
+  return std::max(configuredLimit, residualMinimum);
+}
+
 inline bool shouldUseResidualDualRailPredecessorBudget( // LCOV_EXCL_LINE
     bool usesDualRailStateEncoding,
     size_t observedOutputCount,
-    size_t level,
     size_t targetCubeSize,
     size_t solverSymbolCount) {
-  constexpr size_t kMaxOriginalResidualTargetCubeLiterals = 16; // LCOV_EXCL_LINE
-  constexpr size_t kMaxOriginalResidualSolverSymbols = 8192; // LCOV_EXCL_LINE
-  constexpr size_t kMaxResidualTargetCubeLiterals = 32; // LCOV_EXCL_LINE
-  constexpr size_t kMaxResidualSolverSymbols = 16 * 1024; // LCOV_EXCL_LINE
-  // Residual one-output dual-rail leaves are still local proof obligations even
-  // when a rail-expanded output predicate reaches 28-32 literals. Keep broad
-  // batches on the cheap limit, but let these local leaves spend the intended
-  // residual predecessor budget instead of stopping at the 10k query cap. The
-  // wider Swerv shape is startup-only; higher PDR levels can enumerate many
-  // sibling cubes, so they keep the historical small residual guard.
-  const bool originalSmallResidualShape = // LCOV_EXCL_LINE
-      targetCubeSize <= kMaxOriginalResidualTargetCubeLiterals && // LCOV_EXCL_LINE
-      solverSymbolCount <= kMaxOriginalResidualSolverSymbols; // LCOV_EXCL_LINE
-  const bool localStartupResidualShape = // LCOV_EXCL_LINE
-      level == 0 && // LCOV_EXCL_LINE
-      targetCubeSize <= kMaxResidualTargetCubeLiterals && // LCOV_EXCL_LINE
-      solverSymbolCount <= kMaxResidualSolverSymbols; // LCOV_EXCL_LINE
+  constexpr size_t kMaxOriginalResidualSolverSymbols = 68 * 1024; // LCOV_EXCL_LINE
+  // The exact SAT surface is the relevant resource measure. IC3 can grow a
+  // local cube past an arbitrary literal-count threshold while its complete
+  // predecessor cone remains bounded, so do not stop a one-output residual on
+  // target count alone.
   return usesDualRailStateEncoding && // LCOV_EXCL_LINE
          observedOutputCount == 1 && // LCOV_EXCL_LINE
          targetCubeSize != 0 && // LCOV_EXCL_LINE
-         (originalSmallResidualShape || localStartupResidualShape); // LCOV_EXCL_LINE
+         solverSymbolCount <= kMaxOriginalResidualSolverSymbols; // LCOV_EXCL_LINE
 }
 
 inline bool shouldSharePredecessorUnsatCore( // LCOV_EXCL_LINE

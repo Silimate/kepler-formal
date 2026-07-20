@@ -6166,44 +6166,42 @@ TEST_F(SequentialEquivalenceStrategyTests,
 
 TEST_F(SequentialEquivalenceStrategyTests,
        PdrResidualDualRailPredecessorBudgetCoversLocalLeafShape) {
-  // Swerv final dual-rail leaves can produce 28-32 literal residual targets
-  // with a local 9k-15k symbol solver surface. Those are not broad batches, so
-  // they should use the residual predecessor budget instead of the lightweight
-  // batch query cap.
+  // Residual budgets are selected from the exact SAT cone, not an arbitrary
+  // cube-size threshold. BlackParrot reaches a 65,904-symbol local surface.
   EXPECT_TRUE(
       detail::shouldUseResidualDualRailPredecessorBudget(
-          true, /*observedOutputCount=*/1, /*level=*/0,
+          true, /*observedOutputCount=*/1,
           /*targetCubeSize=*/32,
           /*solverSymbolCount=*/16 * 1024));
   EXPECT_TRUE(
       detail::shouldUseResidualDualRailPredecessorBudget(
-          true, /*observedOutputCount=*/1, /*level=*/1,
-          /*targetCubeSize=*/16,
-          /*solverSymbolCount=*/8192));
+          true, /*observedOutputCount=*/1,
+          /*targetCubeSize=*/2,
+          /*solverSymbolCount=*/65904));
+  EXPECT_TRUE(
+      detail::shouldUseResidualDualRailPredecessorBudget(
+          true, /*observedOutputCount=*/1,
+          /*targetCubeSize=*/1000000,
+          /*solverSymbolCount=*/68 * 1024));
 
   EXPECT_FALSE(
       detail::shouldUseResidualDualRailPredecessorBudget(
-          true, /*observedOutputCount=*/2, /*level=*/0,
+          true, /*observedOutputCount=*/2,
           /*targetCubeSize=*/32,
           /*solverSymbolCount=*/16 * 1024));
   EXPECT_FALSE(
       detail::shouldUseResidualDualRailPredecessorBudget(
-          true, /*observedOutputCount=*/1, /*level=*/1,
-          /*targetCubeSize=*/32,
+          true, /*observedOutputCount=*/1,
+          /*targetCubeSize=*/0,
           /*solverSymbolCount=*/16 * 1024));
   EXPECT_FALSE(
       detail::shouldUseResidualDualRailPredecessorBudget(
-          true, /*observedOutputCount=*/1, /*level=*/0,
-          /*targetCubeSize=*/33,
-          /*solverSymbolCount=*/16 * 1024));
-  EXPECT_FALSE(
-      detail::shouldUseResidualDualRailPredecessorBudget(
-          true, /*observedOutputCount=*/1, /*level=*/0,
+          true, /*observedOutputCount=*/1,
           /*targetCubeSize=*/32,
-          /*solverSymbolCount=*/16 * 1024 + 1));
+          /*solverSymbolCount=*/68 * 1024 + 1));
   EXPECT_FALSE(
       detail::shouldUseResidualDualRailPredecessorBudget(
-          false, /*observedOutputCount=*/1, /*level=*/0,
+          false, /*observedOutputCount=*/1,
           /*targetCubeSize=*/32,
           /*solverSymbolCount=*/16 * 1024));
 }
@@ -6239,6 +6237,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
           /*observedOutputCount=*/1,
           /*originalObservedOutputCount=*/1266,
           kDualRailMediumOutputLimit));
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PdrBroadDualRailResidualEncodingSupportUsesLocalConeBudget) {
+  constexpr size_t kBroadSupportLimit = 8192;
+  constexpr size_t kResidualSupportLimit = 64 * 1024;
+
+  // A one-output leaf split from a broad public bus is bounded by its exact
+  // transition cone, not by the total number of state rails in the design.
+  EXPECT_EQ(
+      detail::dualRailPredecessorEncodingLimitForSurface(
+          true, kBroadSupportLimit, kResidualSupportLimit),
+      kResidualSupportLimit);
+  EXPECT_EQ(
+      detail::dualRailPredecessorEncodingLimitForSurface(
+          false, kBroadSupportLimit, kResidualSupportLimit),
+      kBroadSupportLimit);
+  EXPECT_EQ(
+      detail::dualRailPredecessorEncodingLimitForSurface(
+          true, 0, kResidualSupportLimit),
+      0);
+  EXPECT_EQ(
+      detail::dualRailPredecessorEncodingLimitForSurface(
+          true, 1000000, 3000000),
+      3000000);
+  EXPECT_EQ(
+      detail::dualRailPredecessorEncodingLimitForSurface(
+          false, 1000000, 3000000),
+      1000000);
+  EXPECT_EQ(
+      detail::dualRailPredecessorEncodingLimitForSurface(
+          true, 512, std::numeric_limits<size_t>::max()),
+      std::numeric_limits<size_t>::max());
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -6501,6 +6532,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(formattedProblem.find("state0_symbols: [FALSE, TRUE]"),
             std::string::npos);
   EXPECT_NE(formattedProblem.find("FALSE' = <invalid>"), std::string::npos);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       ProofProblemDebugFormatsDeepExpressionsWithoutCallStackRecursion) {
+  constexpr size_t kExpressionDepth = 60000;
+  BoolExpr* property = BoolExpr::Var(2);
+  for (size_t index = 0; index < kExpressionDepth; ++index) {
+    property = BoolExpr::And(property, BoolExpr::Var(index + 3));
+  }
+
+  KInductionProblem problem;
+  problem.description = "deep debug expression";
+  problem.property = property;
+
+  // Full PDR tracing formats production ASIC DAGs deeper than the native
+  // thread stack. The formatter must traverse that exact DAG iteratively.
+  const std::string formattedProblem = formatKInductionProblemForDebug(problem);
+
+  EXPECT_NE(formattedProblem.find("property:"), std::string::npos);
+  EXPECT_NE(formattedProblem.find("x2"), std::string::npos);
+  EXPECT_NE(
+      formattedProblem.find("x" + std::to_string(kExpressionDepth + 2)),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -12362,7 +12416,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsPdrDualRailDisabledAgePreservesStrictPermanentXEquality) {
   const auto models = makeHeldRailModelsForTest(
       "dualRailPermanentX", std::nullopt, std::nullopt);
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
 
+  testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
       nullptr,
       nullptr,
@@ -12372,12 +12428,25 @@ TEST_F(SequentialEquivalenceStrategyTests,
       PdrAgeOptions{/*automatic=*/false, /*minimum=*/10, /*maximum=*/20});
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // Disabling age discovery must preserve the historical flow exactly: the
   // guarded property and strict rail equality are both proved from F[0].
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR strict output batch begin index=0 pending_batches=1 "
+          "output_range=0..1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR strict output batch end index=0 output_range=0..1 "
+          "status=equivalent"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14391,6 +14460,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(stderrOutput.find("cached_assumptions=1"), std::string::npos)
       << stderrOutput;
+  EXPECT_NE(stderrOutput.find("target_cube="), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("observed_outputs=1"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("residual_budget="), std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14547,10 +14622,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("conflict_limit=200000"),
       std::string::npos)
       << stderrOutput;
-  // The default propagation/decision budget is independent of the larger
-  // residual conflict budget and must allow ordinary incremental SAT progress.
+  // The same exact residual query is not cut off by an arbitrary decision cap;
+  // its scoped conflict and encoding guards still bound resource use.
   EXPECT_NE(
-      stderrOutput.find("decision_limit=150000"),
+      stderrOutput.find(
+          "decision_limit=" +
+          std::to_string(std::numeric_limits<unsigned>::max())),
       std::string::npos)
       << stderrOutput;
 }

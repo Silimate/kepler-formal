@@ -3661,6 +3661,17 @@ SequentialEquivalenceResult runPdrSecEngine(
         const size_t endOutput = batch.endOutput;
         configureOutputBatchProblem(
             strictBatchProblem, strictProblem, firstOutput, endOutput);
+        if (isSecDiagEnabled()) {
+          emitSecDiag(
+              "SEC diag: PDR strict output batch begin index=",
+              batchIndex,
+              " pending_batches=",
+              strictBatches.size(),
+              " output_range=",
+              firstOutput,
+              "..",
+              endOutput);
+        }
         PDRResult strictResult;
         if (batch.ageGate.has_value()) {
           strictResult = ageSession->runFromAge(
@@ -3669,6 +3680,19 @@ SequentialEquivalenceResult runPdrSecEngine(
           PDREngine strictPdrEngine(
               strictBatchProblem, solverType, 0, exactInitCache);
           strictResult = strictPdrEngine.run(maxK);
+        }
+        if (isSecDiagEnabled()) {
+          emitSecDiag(
+              "SEC diag: PDR strict output batch end index=",
+              batchIndex,
+              " output_range=",
+              firstOutput,
+              "..",
+              endOutput,
+              " status=",
+              pdrStatusName(strictResult.status),
+              " bound=",
+              strictResult.bound);
         }
         provedBound = std::max(provedBound, strictResult.bound);
         if (strictResult.status == PDRStatus::Equivalent) {

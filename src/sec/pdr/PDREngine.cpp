@@ -97,7 +97,10 @@ constexpr size_t kMaxExactTransitionNodeCountHintTargets = 512;
 // Local residual leaves can use larger exact SAT-query budgets while broad
 // batches remain bounded.
 constexpr size_t kMaxLocalDualRailFinalLeafStateSymbols = 128 * 1024;
-constexpr size_t kMinLocalDualRailFinalLeafPredecessorSupport = 16 * 1024;
+constexpr size_t kMinLocalDualRailFinalLeafPredecessorSupport = 64 * 1024;
+constexpr size_t kMinLocalDualRailFinalLeafPredecessorNodes = 5 * 1000 * 1000;
+constexpr size_t kMinLocalDualRailFinalLeafNodeHintTargets =
+    std::numeric_limits<size_t>::max();
 // Full-state bad cubes require discovering the complete state support. If the
 // formula walk exceeds this resource bound, PDR returns inconclusive.
 constexpr size_t kMaxPreciseBadCubeSupportNodes = 262144;
@@ -112,6 +115,8 @@ constexpr unsigned kDefaultDualRailPredecessorDecisionLimit = 150000;
 // report inconclusive before the residual repair has had its intended search
 // budget.
 constexpr unsigned kDefaultDualRailResidualPredecessorConflictLimit = 200000;
+constexpr unsigned kDefaultDualRailResidualPredecessorDecisionLimit =
+    std::numeric_limits<unsigned>::max();
 constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
 constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 8192;
 constexpr const char* kDualRailPredecessorConflictLimitEnv =
@@ -1253,13 +1258,12 @@ bool hasLocalDualRailFinalLeafSurface(const KInductionProblem& problem) {
              kMaxLocalDualRailFinalLeafStateSymbols;
 }
 
-size_t effectiveLocalDualRailFinalLeafEncodingSupportLimit(
-    size_t configuredLimit) {
-  if (configuredLimit == 0) {
-    return 0; // LCOV_EXCL_LINE
-  }
-  return std::max(configuredLimit,
-                  kMinLocalDualRailFinalLeafPredecessorSupport);
+size_t exactTransitionNodeCountHintTargetLimit(
+    const KInductionProblem& problem) {
+  return detail::dualRailPredecessorEncodingLimitForSurface(
+      hasBroadDualRailResidualOutputSurface(problem),
+      kMaxExactTransitionNodeCountHintTargets,
+      kMinLocalDualRailFinalLeafNodeHintTargets);
 }
 
 size_t envSizeLimitOrDefault(const char* name, size_t defaultValue);
@@ -1312,7 +1316,6 @@ unsigned dualRailPredecessorConflictLimit() {
 unsigned dualRailPredecessorConflictLimitForQuery(
     const KInductionProblem& problem,
     const StateCube& targetCube,
-    size_t level,
     size_t solverSymbolCount) {
   const unsigned configuredLimit = dualRailPredecessorConflictLimit();
   if (std::getenv(kDualRailPredecessorConflictLimitEnv) != nullptr) {
@@ -1320,12 +1323,11 @@ unsigned dualRailPredecessorConflictLimitForQuery(
   }
   // BlackParrot leaves with one residual output need a deeper predecessor SAT
   // search, but broad multi-output batches should keep the cheaper default.
-  // Keep this scoped to small target cubes and local solver cones so it repairs
-  // isolated handshake leaves without opening whole-SoC predecessor searches.
+  // Keep this scoped to one-output local solver cones so it repairs residual
+  // leaves without opening whole-SoC predecessor searches.
   if (detail::shouldUseResidualDualRailPredecessorBudget(
           problem.usesDualRailStateEncoding,
           problem.observedOutputExprs0.size(),
-          level,
           targetCube.size(),
           solverSymbolCount)) {
     return std::max(
@@ -1339,6 +1341,30 @@ unsigned dualRailPredecessorDecisionLimit() {
   return envUnsignedLimitOrDefaultAllowZero(
       "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT",
       kDefaultDualRailPredecessorDecisionLimit);
+}
+
+unsigned dualRailPredecessorDecisionLimitForQuery(
+    const KInductionProblem& problem,
+    const StateCube& targetCube,
+    size_t solverSymbolCount) {
+  const unsigned configuredLimit = dualRailPredecessorDecisionLimit();
+  if (std::getenv(
+          "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT") != nullptr) {
+    return configuredLimit; // LCOV_EXCL_LINE
+  }
+  // This changes only the resource allowance for the same exact Section V
+  // predecessor query. Single-output strict leaves need more decisions than
+  // broad batches even when they do not accumulate many SAT conflicts.
+  if (detail::shouldUseResidualDualRailPredecessorBudget(
+          problem.usesDualRailStateEncoding,
+          problem.observedOutputExprs0.size(),
+          targetCube.size(),
+          solverSymbolCount)) {
+    return std::max(
+        configuredLimit,
+        kDefaultDualRailResidualPredecessorDecisionLimit);
+  }
+  return configuredLimit;
 }
 
 size_t dualRailPredecessorEncodingNodeLimit() {
@@ -1704,8 +1730,9 @@ std::vector<size_t> collectTransitionSupportSymbols(
 
 size_t estimateTransitionEncodingNodes(
     const TransitionExprResolver& transitionByState,
-    const std::vector<size_t>& encodedTargets) {
-  if (encodedTargets.size() > kMaxExactTransitionNodeCountHintTargets) {
+    const std::vector<size_t>& encodedTargets,
+    size_t targetCountLimit = kMaxExactTransitionNodeCountHintTargets) {
+  if (encodedTargets.size() > targetCountLimit) {
     return 0;  // LCOV_EXCL_LINE
   }
   size_t estimate = 0;
@@ -1758,7 +1785,10 @@ PredecessorTargetSurface buildPredecessorTargetSurface(
     }
   }
   surface.transitionEncodingNodes =
-      estimateTransitionEncodingNodes(transitionByState, surface.encodedTargets);
+      estimateTransitionEncodingNodes(
+          transitionByState,
+          surface.encodedTargets,
+          exactTransitionNodeCountHintTargetLimit(problem));
   return surface;
 }
 
@@ -4529,20 +4559,28 @@ std::optional<StateCube> findPredecessorCube(
   const size_t transitionEncodingNodes =
       targetSurface->transitionEncodingNodes;
   if (problem.usesDualRailStateEncoding) {
-    const size_t encodingNodeLimit = dualRailPredecessorEncodingNodeLimit();
+    const bool broadResidualOutputSurface =
+        hasBroadDualRailResidualOutputSurface(problem);
+    const size_t encodingNodeLimit =
+        detail::dualRailPredecessorEncodingLimitForSurface(
+            broadResidualOutputSurface,
+            dualRailPredecessorEncodingNodeLimit(),
+            kMinLocalDualRailFinalLeafPredecessorNodes);
     const size_t configuredEncodingSupportLimit =
         dualRailPredecessorEncodingSupportLimit();
-    // Isolated Swerv leaves measured predecessor supports slightly above the
-    // broad 8k dual-rail cap. Raise only this local guard so whole-chip
-    // surfaces still fail fast before materializing broad transition cones.
+    // A residual leaf can have a local exact transition cone even when its
+    // enclosing ASIC has millions of state rails. Raise only that one-output
+    // cone's guard; broad output batches retain the configured 8k cap.
     const size_t encodingSupportLimit =
-        hasLocalDualRailFinalLeafSurface(problem)
-            ? effectiveLocalDualRailFinalLeafEncodingSupportLimit(
-                  configuredEncodingSupportLimit)
-            : configuredEncodingSupportLimit;
+        detail::dualRailPredecessorEncodingLimitForSurface(
+            broadResidualOutputSurface,
+            configuredEncodingSupportLimit,
+            kMinLocalDualRailFinalLeafPredecessorSupport);
+    const size_t nodeCountHintTargetLimit =
+        exactTransitionNodeCountHintTargetLimit(problem);
     const bool unknownNodeCount =
         transitionEncodingNodes == 0 &&
-        encodedTargets.size() > kMaxExactTransitionNodeCountHintTargets;  // LCOV_EXCL_LINE
+        encodedTargets.size() > nodeCountHintTargetLimit;  // LCOV_EXCL_LINE
     if (unknownNodeCount ||
         transitionEncodingNodes > encodingNodeLimit ||
         transitionSupportSymbols.size() > encodingSupportLimit) {
@@ -4554,6 +4592,8 @@ std::optional<StateCube> findPredecessorCube(
             transitionEncodingNodes,
             " node_limit=",
             encodingNodeLimit,
+            " node_hint_target_limit=",
+            nodeCountHintTargetLimit,
             " transition_support=",
             transitionSupportSymbols.size(),
             " support_limit=",
@@ -4627,11 +4667,12 @@ std::optional<StateCube> findPredecessorCube(
   const unsigned predecessorConflictLimit =
       problem.usesDualRailStateEncoding
           ? dualRailPredecessorConflictLimitForQuery(
-                problem, targetCube, level, cachedSolverSymbols.size())
+                problem, targetCube, cachedSolverSymbols.size())
           : 0;
   const unsigned predecessorDecisionLimit =
       problem.usesDualRailStateEncoding
-          ? dualRailPredecessorDecisionLimit()
+          ? dualRailPredecessorDecisionLimitForQuery(
+                problem, targetCube, cachedSolverSymbols.size())
           : std::numeric_limits<unsigned>::max();
   if (emitStatsForQuery) {
     emitSecDiag(
@@ -4683,6 +4724,18 @@ std::optional<StateCube> findPredecessorCube(
             predecessorDecisionLimit,
             " symbols=",
             cachedSolverSymbols.size(),
+            " target_cube=",
+            targetCube.size(),
+            " observed_outputs=",
+            problem.observedOutputExprs0.size(),
+            " residual_budget=",
+            detail::shouldUseResidualDualRailPredecessorBudget(
+                problem.usesDualRailStateEncoding,
+                problem.observedOutputExprs0.size(),
+                targetCube.size(),
+                cachedSolverSymbols.size())
+                ? 1
+                : 0,
             " level=",
             level,
             " cached_assumptions=1");
@@ -4787,6 +4840,18 @@ std::optional<StateCube> findPredecessorCube(
           predecessorDecisionLimit,
           " symbols=",
           solverSymbols.size(),
+          " target_cube=",
+          targetCube.size(),
+          " observed_outputs=",
+          problem.observedOutputExprs0.size(),
+          " residual_budget=",
+          detail::shouldUseResidualDualRailPredecessorBudget(
+              problem.usesDualRailStateEncoding,
+              problem.observedOutputExprs0.size(),
+              targetCube.size(),
+              solverSymbols.size())
+              ? 1
+              : 0,
           " level=",
           level);
     }  // LCOV_EXCL_LINE
