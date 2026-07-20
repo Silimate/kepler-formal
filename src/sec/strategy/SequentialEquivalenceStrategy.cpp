@@ -1181,6 +1181,20 @@ KInductionProblem makeOutputSubsetProblem(
   return subset;
 }
 
+bool configureStrictDualRailOutputProperty(KInductionProblem& problem) {
+  if (problem.dualRailOutputStrictEqualityExprs.size() !=
+      problem.observedOutputExprs0.size()) {
+    return false;
+  }
+  problem.observedOutputExprs0 =
+      problem.dualRailOutputStrictEqualityExprs;
+  problem.observedOutputExprs1.assign(
+      problem.observedOutputExprs0.size(), BoolExpr::createTrue());
+  rebuildSelectedOutputProperty(problem);
+  problem.description += " strict three-valued equality";
+  return true;
+}
+
 OutputCoverageSelection buildCoverageSkippingOutputIndices( // LCOV_EXCL_LINE
     const OutputCoverageSelection& baseCoverage,
     const KInductionProblem& problem,
@@ -1418,9 +1432,13 @@ bool secSummaryStatsEnabled() {
 constexpr size_t kMaxDualRailResidualOutputs = 128;
 constexpr size_t kMaxDualRailResidualProofStateSymbols = 4096;
 constexpr size_t kMaxDualRailResidualConcretePrecheckOutputs = 16;
+constexpr const char* kDualRailXInconclusiveReason =
+    "affected by X propagated from uninitialized sequential logic; "
+    "no concrete 0/1 mismatch was found";
 
 enum class DualRailResidualEngine {
   KInduction,
+  Imc,
 };
 
 struct DualRailResidualProofState {
@@ -1430,10 +1448,24 @@ struct DualRailResidualProofState {
   size_t provedBound = 0;
 };
 
+enum class DualRailStrictProofStatus {
+  Equivalent,
+  XMismatch,
+  Inconclusive,
+};
+
+struct DualRailStrictProofResult {
+  DualRailStrictProofStatus status =
+      DualRailStrictProofStatus::Inconclusive;
+  size_t bound = 0;
+};
+
 const char* dualRailResidualEngineName(DualRailResidualEngine engine) {
   switch (engine) {
     case DualRailResidualEngine::KInduction:
       return "k-induction";
+    case DualRailResidualEngine::Imc:
+      return "IMC";
   }
   return "selected engine";  // LCOV_EXCL_LINE
 }
@@ -1470,6 +1502,39 @@ void markDualRailResidualOutputSkipped(
         " leaves residual output uncovered: ",
         outputNameForProblemIndex(problem, outputIndex));
   }
+}
+
+void markDualRailResidualOutputsSkipped(
+    const std::vector<size_t>& outputIndices,
+    const KInductionProblem& problem,
+    DualRailResidualEngine engine,
+    DualRailResidualProofState& proofState,
+    const std::string& reason) {
+  for (const size_t outputIndex : outputIndices) {
+    markDualRailResidualOutputSkipped(
+        outputIndex, problem, engine, proofState, reason);
+  }
+}
+
+std::string buildDualRailXInconclusiveSummary(
+    const KInductionProblem& problem,
+    const std::unordered_map<size_t, std::string>& skipReasons) {
+  std::vector<std::string> xAffectedOutputNames;
+  for (size_t outputIndex = 0;
+       outputIndex < problem.observedOutputExprs0.size();
+       ++outputIndex) {
+    const auto reason = skipReasons.find(outputIndex);
+    if (reason != skipReasons.end() &&
+        reason->second == kDualRailXInconclusiveReason) {
+      xAffectedOutputNames.push_back(
+          outputNameForProblemIndex(problem, outputIndex));
+    }
+  }
+  return xAffectedOutputNames.empty()
+             ? std::string{}
+             : "X propagated from uninitialized sequential logic affects "
+               "output(s): " +
+                   joinReasons(xAffectedOutputNames);
 }
 
 size_t dualRailResidualStateSymbolCount(const KInductionProblem& problem) {
@@ -1669,6 +1734,78 @@ void recordDualRailResidualCounterexample(
       extractedBoundaryReports);
 }
 
+DualRailStrictProofResult runDualRailStrictKInduction(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType) {
+  KInductionProblem strictProblem =
+      makeOutputSubsetProblem(problem, outputIndices);
+  if (!configureStrictDualRailOutputProperty(strictProblem)) {
+    return {};
+  }
+
+  // The guarded obligation is already proved for this output set. Run normal
+  // k-induction on strict rail equality, including its concrete base case,
+  // before accepting any output as equivalent.
+  strictProblem.deferBaseCaseChecks = false;
+  KInductionEngine strictEngine(strictProblem, solverType);
+  const KInductionResult result = strictEngine.run(maxK);
+  if (result.status == KInductionStatus::Different) {
+    return {DualRailStrictProofStatus::XMismatch, result.bound};
+  }
+  if (result.status == KInductionStatus::Equivalent) {
+    return {DualRailStrictProofStatus::Equivalent, result.bound};
+  }
+  return {DualRailStrictProofStatus::Inconclusive, result.bound};
+}
+
+void proveDualRailStrictKInductionOutputSet(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    DualRailResidualProofState& proofState) {
+  if (outputIndices.empty()) {
+    return;  // LCOV_EXCL_LINE
+  }
+
+  const DualRailStrictProofResult strictResult =
+      runDualRailStrictKInduction(
+          problem, outputIndices, maxK, solverType);
+  proofState.provedBound =
+      std::max(proofState.provedBound, strictResult.bound);
+  if (strictResult.status == DualRailStrictProofStatus::Equivalent) {
+    markDualRailResidualOutputsCovered(outputIndices, proofState);
+    return;
+  }
+
+  // A failed strict conjunction may contain independent clean outputs. Split
+  // only that strict obligation; the parent guarded proof remains valid for
+  // both children and therefore cannot turn an X mismatch into a counterexample.
+  if (outputIndices.size() > 1) {
+    const size_t mid = outputIndices.size() / 2;
+    const std::vector<size_t> left(
+        outputIndices.begin(), outputIndices.begin() + mid);
+    const std::vector<size_t> right(
+        outputIndices.begin() + mid, outputIndices.end());
+    proveDualRailStrictKInductionOutputSet(
+        problem, left, maxK, solverType, proofState);
+    proveDualRailStrictKInductionOutputSet(
+        problem, right, maxK, solverType, proofState);
+    return;
+  }
+
+  markDualRailResidualOutputSkipped(
+      outputIndices.front(),
+      problem,
+      DualRailResidualEngine::KInduction,
+      proofState,
+      strictResult.status == DualRailStrictProofStatus::XMismatch
+          ? kDualRailXInconclusiveReason
+          : "strict dual-rail equality k-induction was inconclusive");
+}
+
 void proveDualRailResidualOutputSet(
     const KInductionProblem& problem,
     const std::vector<size_t>& outputIndices,
@@ -1745,7 +1882,8 @@ void proveDualRailResidualOutputSet(
         return;
       }  // LCOV_EXCL_LINE
       if (baseCheck.status == SEC::BaseCounterexampleCheckStatus::NoCounterexample) {
-        markDualRailResidualOutputsCovered(outputIndices, proofState);
+        proveDualRailStrictKInductionOutputSet(
+            problem, outputIndices, maxK, solverType, proofState);
         return;
       }
       if (outputIndices.size() == 1) {  // LCOV_EXCL_LINE
@@ -2002,12 +2140,33 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
       buildCoverageWithDualRailOutputSkips(
           outputCoverage, problem, proofState.coveredOutputs,
           proofState.skipReasons);
+  const std::string xInconclusiveSummary =
+      buildDualRailXInconclusiveSummary(problem, proofState.skipReasons);
   if (coveredCount == 0) {
     return makeSecResult(
         SequentialEquivalenceStatus::Inconclusive,
         proofState.provedBound,
+        !xInconclusiveSummary.empty()
+            ? xInconclusiveSummary
+            : std::string("Dual-rail ") +
+                  dualRailResidualEngineName(engine) +
+                  " did not prove any output",
+        finalCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
+
+  if (coveredCount != proofState.coveredOutputs.size()) {
+    return makeSecResult(
+        SequentialEquivalenceStatus::PartiallyProved,
+        proofState.provedBound,
         std::string("Dual-rail ") + dualRailResidualEngineName(engine) +
-            " did not prove any output",
+            " proved " + std::to_string(coveredCount) + " of " +
+            std::to_string(proofState.coveredOutputs.size()) +
+            " observed outputs; remaining outputs are inconclusive" +
+            (xInconclusiveSummary.empty()
+                 ? std::string{}
+                 : "; " + xInconclusiveSummary),
         finalCoverage,
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
@@ -2612,8 +2771,8 @@ DualRailOutputProperties buildDualRailOutputProperties(
       makeEqualityExpr(value0.mayBeOne, value1.mayBeOne),
       makeEqualityExpr(value0.mayBeZero, value1.mayBeZero)));
   // The paper's steady-state property guards the concrete mismatch. Its full
-  // three-valued property is strict equality of both rails; PDR proves these as
-  // two exact safety obligations instead of using a bounded definedness probe.
+  // three-valued property is strict equality of both rails; every dual-rail SEC
+  // engine proves these as two exact safety obligations.
   BoolExpr* binaryMismatch = BoolExpr::And(
       bothValuesDefined,
       BoolExpr::Xor(value0.mayBeOne, value1.mayBeOne));
@@ -3164,6 +3323,26 @@ void setSecEngineProofProgress(
       provenOutputCount);
 }
 
+void setExactSecEngineProofProgress(
+    SequentialEquivalenceResult& result,
+    const KInductionProblem& problem,
+    const std::string& engineLabel,
+    const std::vector<bool>& coveredOutputs) {
+  SequentialEquivalenceProofProgress progress;
+  progress.engineLabel = engineLabel;
+  progress.totalOutputs = coveredOutputs.size();
+  progress.provenOutputs = static_cast<size_t>(
+      std::count(coveredOutputs.begin(), coveredOutputs.end(), true));
+  for (size_t outputIndex = 0; outputIndex < coveredOutputs.size();
+       ++outputIndex) {
+    if (!coveredOutputs[outputIndex]) {
+      progress.unprovenOutputs.push_back(
+          {outputIndex, outputNameForProblemIndex(problem, outputIndex)});
+    }
+  }
+  result.proofProgress = std::move(progress);
+}
+
 SequentialEquivalenceResult runPdrSecEngine(
     // LCOV_DISABLED_START
     const KInductionProblem& problem,
@@ -3468,14 +3647,7 @@ SequentialEquivalenceResult runPdrSecEngine(
       }
     } else {
       KInductionProblem strictProblem = problem;
-      strictProblem.observedOutputExprs0 =
-          problem.dualRailOutputStrictEqualityExprs;
-      strictProblem.observedOutputExprs1.assign(
-          strictProblem.observedOutputExprs0.size(),
-          BoolExpr::createTrue());
-      rebuildSelectedOutputProperty(strictProblem);
-      strictProblem.description =
-          problem.description + " strict three-valued equality";
+      configureStrictDualRailOutputProperty(strictProblem);
 
       // Round one has already proved that these batches cannot contain a
       // binary 01/10 mismatch. A strict rail mismatch in round two therefore
@@ -3535,15 +3707,12 @@ SequentialEquivalenceResult runPdrSecEngine(
           continue;
         }
         if (strictResult.status == PDRStatus::Different) {
-          constexpr const char* kXInconclusiveReason =
-              "affected by X propagated from uninitialized sequential logic; "
-              "no concrete 0/1 mismatch was found";
           markPdrOutputRangeSkipped(
               strictCoveredOutputs,
               pdrSkippedOutputReasons,
               firstOutput,
               endOutput,
-              kXInconclusiveReason);
+              kDualRailXInconclusiveReason);
           xAffectedOutputNames.push_back(
               outputNameForProblemIndex(problem, firstOutput));
           continue;
@@ -3686,6 +3855,167 @@ SequentialEquivalenceResult runKInductionSecEngine(
   }
 }
 
+void proveDualRailStrictImcOutputSet(
+    const KInductionProblem& problem,
+    const std::vector<size_t>& outputIndices,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    DualRailResidualProofState& proofState) {
+  if (outputIndices.empty()) {
+    return;
+  }
+
+  KInductionProblem strictProblem =
+      makeOutputSubsetProblem(problem, outputIndices);
+  if (!configureStrictDualRailOutputProperty(strictProblem)) {
+    markDualRailResidualOutputsSkipped(
+        outputIndices,
+        problem,
+        DualRailResidualEngine::Imc,
+        proofState,
+        "strict dual-rail equality obligation is unavailable");
+    return;
+  }
+
+  // Guarded IMC has already ruled out a concrete 01/10 mismatch for this set.
+  // Strict IMC now decides whether both complete rail values are equal.
+  IMCEngine strictEngine(strictProblem, solverType);
+  const IMCResult result = strictEngine.run(maxK);
+  proofState.provedBound = std::max(proofState.provedBound, result.bound);
+  if (result.status == IMCStatus::Equivalent) {
+    markDualRailResidualOutputsCovered(outputIndices, proofState);
+    return;
+  }
+
+  if (result.status == IMCStatus::Inconclusive) {
+    const size_t provedPrefix = std::min(
+        result.firstUnprovenOutput.value_or(0), outputIndices.size());
+    markDualRailResidualOutputsCovered(
+        std::vector<size_t>(
+            outputIndices.begin(), outputIndices.begin() + provedPrefix),
+        proofState);
+    markDualRailResidualOutputsSkipped(
+        std::vector<size_t>(
+            outputIndices.begin() + provedPrefix, outputIndices.end()),
+        problem,
+        DualRailResidualEngine::Imc,
+        proofState,
+        "strict dual-rail equality IMC was inconclusive");
+    return;
+  }
+
+  // A strict counterexample after guarded equality can only involve X. Split
+  // the strict conjunction so unrelated outputs can retain their IMC proof.
+  if (outputIndices.size() > 1) {
+    const size_t mid = outputIndices.size() / 2;
+    const std::vector<size_t> left(
+        outputIndices.begin(), outputIndices.begin() + mid);
+    const std::vector<size_t> right(
+        outputIndices.begin() + mid, outputIndices.end());
+    proveDualRailStrictImcOutputSet(
+        problem, left, maxK, solverType, proofState);
+    proveDualRailStrictImcOutputSet(
+        problem, right, maxK, solverType, proofState);
+    return;
+  }
+
+  markDualRailResidualOutputSkipped(
+      outputIndices.front(),
+      problem,
+      DualRailResidualEngine::Imc,
+      proofState,
+      kDualRailXInconclusiveReason);
+}
+
+SequentialEquivalenceResult finishDualRailImcProof(
+    const KInductionProblem& problem,
+    const IMCResult& guardedResult,
+    size_t maxK,
+    KEPLER_FORMAL::Config::SolverType solverType,
+    const OutputCoverageSelection& outputCoverage,
+    const std::vector<std::string>& abstractedSequentialBoundaries,
+    const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
+  DualRailResidualProofState proofState;
+  proofState.coveredOutputs.assign(
+      problem.observedOutputExprs0.size(), false);
+  proofState.provedBound = guardedResult.bound;
+
+  size_t guardedProvedPrefix = 0;
+  if (guardedResult.status == IMCStatus::Equivalent) {
+    guardedProvedPrefix = problem.observedOutputExprs0.size();
+  } else if (guardedResult.firstUnprovenOutput.has_value()) {
+    guardedProvedPrefix = std::min(
+        *guardedResult.firstUnprovenOutput,
+        problem.observedOutputExprs0.size());
+  }
+
+  std::vector<size_t> strictOutputIndices;
+  strictOutputIndices.reserve(guardedProvedPrefix);
+  for (size_t outputIndex = 0;
+       outputIndex < problem.observedOutputExprs0.size();
+       ++outputIndex) {
+    if (problem.dualRailOutputSkipReasons.size() ==
+            problem.observedOutputExprs0.size() &&
+        !problem.dualRailOutputSkipReasons[outputIndex].empty()) {
+      proofState.skipReasons.emplace(
+          outputIndex, problem.dualRailOutputSkipReasons[outputIndex]);
+      continue;
+    }
+    if (outputIndex < guardedProvedPrefix) {
+      strictOutputIndices.push_back(outputIndex);
+    } else {
+      proofState.skipReasons.emplace(
+          outputIndex,
+          "dual-rail IMC guarded equality proof was inconclusive");
+    }
+  }
+
+  proveDualRailStrictImcOutputSet(
+      problem, strictOutputIndices, maxK, solverType, proofState);
+
+  const size_t coveredCount = static_cast<size_t>(std::count(
+      proofState.coveredOutputs.begin(),
+      proofState.coveredOutputs.end(),
+      true));
+  const OutputCoverageSelection finalCoverage =
+      buildCoverageWithDualRailOutputSkips(
+          outputCoverage,
+          problem,
+          proofState.coveredOutputs,
+          proofState.skipReasons);
+  const std::string xInconclusiveSummary =
+      buildDualRailXInconclusiveSummary(problem, proofState.skipReasons);
+
+  SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Equivalent;
+  std::string reason;
+  if (coveredCount == 0) {
+    status = SequentialEquivalenceStatus::Inconclusive;
+    reason = !xInconclusiveSummary.empty()
+                 ? xInconclusiveSummary
+                 : "Dual-rail IMC did not prove any observed output";
+  } else if (coveredCount != proofState.coveredOutputs.size()) {
+    status = SequentialEquivalenceStatus::PartiallyProved;
+    reason =
+        "Dual-rail IMC proved " + std::to_string(coveredCount) + " of " +
+        std::to_string(proofState.coveredOutputs.size()) +
+        " observed outputs; remaining outputs are inconclusive" +
+        (xInconclusiveSummary.empty()
+             ? std::string{}
+             : "; " + xInconclusiveSummary);
+  }
+
+  SequentialEquivalenceResult secResult = makeSecResult(
+      status,
+      proofState.provedBound,
+      std::move(reason),
+      finalCoverage,
+      abstractedSequentialBoundaries,
+      extractedBoundaryReports);
+  setExactSecEngineProofProgress(
+      secResult, problem, "IMC", proofState.coveredOutputs);
+  return secResult;
+}
+
 SequentialEquivalenceResult runImcSecEngine(
     const KInductionProblem& problem,
     size_t maxK,
@@ -3701,6 +4031,17 @@ SequentialEquivalenceResult runImcSecEngine(
   // residuals through the KI residual helper before the IMC engine runs.
   IMCEngine engine(problem, solverType);
   const auto result = engine.run(maxK);
+  if (problem.usesDualRailStateEncoding &&
+      result.status != IMCStatus::Different) {
+    return finishDualRailImcProof(
+        problem,
+        result,
+        maxK,
+        solverType,
+        outputCoverage,
+        abstractedSequentialBoundaries,
+        extractedBoundaryReports);
+  }
   switch (result.status) {
     case IMCStatus::Equivalent: {
       emitSecEngineProofProgress(

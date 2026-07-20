@@ -11816,11 +11816,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // IMC must enter its own interpolation engine directly. The removed bounded
-  // definedness probe must not rewrite the selected engine's proof result.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.coveredOutputs, 1u);
+  // IMC must enter its own interpolation engine directly. Guarded equality for
+  // the held X versus constant 0 is not enough to claim output equivalence.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
+  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
   EXPECT_NE(
       stderrOutput.find("SEC diag: entering imc engine"),
       std::string::npos);
@@ -12288,7 +12289,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailDoesNotReportXVersusBinaryAsDifferent) {
+       RunExtractedModelsDualRailDoesNotProveXVersusBinaryAsEqual) {
   auto models = makeHeldRailModelsForTest(
       "dualRailXVersusBinary", std::nullopt, false);
   const SignalKey concreteEqual =
@@ -12301,33 +12302,37 @@ TEST_F(SequentialEquivalenceStrategyTests,
         concreteEqual, BoolExpr::createFalse());
   }
 
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 2);
+  for (const SecEngine engine :
+       {SecEngine::Pdr, SecEngine::KInduction, SecEngine::Imc}) {
+    SCOPED_TRACE(static_cast<int>(engine));
+    SequentialEquivalenceStrategy strategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        engine,
+        SecEncoding::DualRailSteady);
+    const auto result =
+        strategy.runExtractedModels(models.model0, models.model1, 2);
 
-  // The guarded round rules out a concrete mismatch. The strict rail round
-  // then isolates only the X-versus-0 output and preserves the clean proof.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, 2u);
-  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
-  EXPECT_NE(
-      result.skippedObservedOutputs.front().find(
-          "dualRailXVersusBinary_out[0]"),
-      std::string::npos);
-  EXPECT_NE(
-      result.skippedObservedOutputs.front().find(
-          "uninitialized sequential logic"),
-      std::string::npos);
-  EXPECT_NE(
-      result.reason.find("dualRailXVersusBinary_out[0]"),
-      std::string::npos);
-  EXPECT_EQ(result.reason.find("concrete_equal[0]"), std::string::npos);
+    // Every dual-rail engine must first rule out a concrete mismatch and then
+    // prove strict rail equality before counting an output as equivalent.
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
+    EXPECT_EQ(result.coveredOutputs, 1u);
+    EXPECT_EQ(result.totalOutputs, 2u);
+    ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+    EXPECT_NE(
+        result.skippedObservedOutputs.front().find(
+            "dualRailXVersusBinary_out[0]"),
+        std::string::npos);
+    EXPECT_NE(
+        result.skippedObservedOutputs.front().find(
+            "uninitialized sequential logic"),
+        std::string::npos);
+    EXPECT_NE(
+        result.reason.find("dualRailXVersusBinary_out[0]"),
+        std::string::npos);
+    EXPECT_EQ(result.reason.find("concrete_equal[0]"), std::string::npos);
+  }
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13060,12 +13065,14 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto dualRailImcResult =
       dualRailImcStrategy.runExtractedModels(model0, model1, 1);
   // Without an initial predicate, IMC must not turn an X-only startup relation
-  // into an equivalence proof.
+  // into an equivalence proof or count guarded equality as output coverage.
   EXPECT_EQ(dualRailImcResult.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(dualRailImcResult.bound, 1u);
-  EXPECT_EQ(dualRailImcResult.coveredOutputs, kWideStartupRelationOutputs);
+  EXPECT_EQ(dualRailImcResult.coveredOutputs, 0u);
   EXPECT_EQ(dualRailImcResult.totalOutputs, kWideStartupRelationOutputs);
-  EXPECT_TRUE(dualRailImcResult.skippedObservedOutputs.empty());
+  EXPECT_EQ(
+      dualRailImcResult.skippedObservedOutputs.size(),
+      kWideStartupRelationOutputs);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
