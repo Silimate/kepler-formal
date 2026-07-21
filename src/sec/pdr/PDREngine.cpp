@@ -3,6 +3,7 @@
 #include "pdr/PDREngine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -94,33 +95,28 @@ constexpr size_t kMaxComplementPairsForCheapInitCheck = 1024;
 // Node counts are reserve hints only. Use exact hints for local groups and rely
 // on the encoder's bounded growth for ASIC-sized groups.
 constexpr size_t kMaxExactTransitionNodeCountHintTargets = 512;
-// Local residual leaves can use larger exact SAT-query budgets while broad
-// batches remain bounded.
-constexpr size_t kMaxLocalDualRailFinalLeafStateSymbols = 128 * 1024;
-constexpr size_t kMinLocalDualRailFinalLeafPredecessorSupport = 64 * 1024;
-constexpr size_t kMinLocalDualRailFinalLeafPredecessorNodes = 5 * 1000 * 1000;
-constexpr size_t kMinLocalDualRailFinalLeafNodeHintTargets =
-    std::numeric_limits<size_t>::max();
 // Full-state bad cubes require discovering the complete state support. If the
 // formula walk exceeds this resource bound, PDR returns inconclusive.
 constexpr size_t kMaxPreciseBadCubeSupportNodes = 262144;
-constexpr size_t kMaxMediumDualRailObservedOutputs = 384;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
 constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
 // Incremental assumption solving counts this as a propagation budget, so it
 // needs more room than the conflict cap for ordinary exact predecessor queries.
 constexpr unsigned kDefaultDualRailPredecessorDecisionLimit = 150000;
-// Residual one-output leaves need more search than broad batch queries.  Do not
-// lower this bound to save runtime; doing so can make a legal PDR obligation
-// report inconclusive before the residual repair has had its intended search
-// budget.
-constexpr unsigned kDefaultDualRailResidualPredecessorConflictLimit = 200000;
-constexpr unsigned kDefaultDualRailResidualPredecessorDecisionLimit =
-    std::numeric_limits<unsigned>::max();
-constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 1000000;
-constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 8192;
+// Blocking a proof obligation is the mandatory relative-induction query in
+// Figure 6. Give that exact query a deeper but still finite allowance while
+// keeping optional Figure 9 propagation at the inexpensive default.
+constexpr unsigned kDefaultDualRailBlockingConflictLimit = 200000;
+constexpr unsigned kDefaultDualRailBlockingDecisionLimit = 4 * 1000 * 1000;
+// Encoding guards are based only on the exact predecessor cone. Every output
+// batch receives the same finite limits; enclosing design or port counts never
+// select a different PDR problem or resource policy.
+constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 5 * 1000 * 1000;
+constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 64 * 1024;
 constexpr const char* kDualRailPredecessorConflictLimitEnv =
     "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT";
+constexpr const char* kDualRailPredecessorDecisionLimitEnv =
+    "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT";
 constexpr size_t kMaxInitExcludedCubeGeneralizationAttempts = 2;
 constexpr size_t kDefaultPdrStatsInterval = 1000;
 constexpr size_t kInitialPdrStatsQueries = 20;
@@ -136,6 +132,16 @@ constexpr size_t kMaxPredecessorTargetSurfaceCacheBytes = 64 * 1024 * 1024;
 // relation are immutable across obligations and output batches; retaining that
 // single solver avoids re-encoding the full startup frontier for every cube.
 constexpr size_t kMaxDualRailPredecessorSolverCacheStateSymbols = 256 * 1024;
+// Keep a small set of higher-frame SAT contexts per IC3 level. A single
+// monotonically widened context eventually carries unrelated output cones;
+// a bounded five-way cache retains nearby broad/strict passes while LRU
+// eviction still caps ASIC-sized solver ownership.
+constexpr size_t kMaxSharedPredecessorSolversPerLevel = 5;
+// Retired property selectors leave satisfied clauses in a shared SAT solver.
+// Rebuild the cache after a bounded window so unrelated guarded output leaves
+// do not spend their query budget traversing an ever-growing inactive history.
+// This discards cached SAT state only; PDR frames and every query stay exact.
+constexpr size_t kMaxRetiredGuardedPredecessorContexts = 16;
 // Higher-frame bad-cube solvers permanently absorb learned frame clauses.
 // Keep those caches bounded on giant dual-rail leaves. Exact F[0] is immutable,
 // however, and is shared across output batches without accumulating PDR frame
@@ -143,6 +149,27 @@ constexpr size_t kMaxDualRailPredecessorSolverCacheStateSymbols = 256 * 1024;
 // frontier for every output.
 constexpr size_t kMaxDualRailBadCubeSolverCacheStateSymbols =
     kMaxDualRailPredecessorSolverCacheStateSymbols;
+
+enum class PredecessorQueryPurpose {
+  BlockObligation,
+  GeneralizeBlocker,
+  LiftBlocker,
+  PropagateClause,
+};
+
+const char* predecessorQueryPurposeName(PredecessorQueryPurpose purpose) {
+  switch (purpose) {
+    case PredecessorQueryPurpose::BlockObligation:
+      return "block";
+    case PredecessorQueryPurpose::GeneralizeBlocker:
+      return "generalize";
+    case PredecessorQueryPurpose::LiftBlocker:
+      return "lift";
+    case PredecessorQueryPurpose::PropagateClause:
+      return "propagate";
+  }
+  return "unknown";  // LCOV_EXCL_LINE
+}
 // FrameFormulaEncoder already makes a small generic Tseitin reservation, but
 // sampled dual-rail PDR leaves still spent most time growing CaDiCaL variable
 // vectors while streaming known-large transition cones. Reserve a larger,
@@ -884,6 +911,16 @@ struct PreparedPredecessorTargetAssumptions {
   std::unordered_map<int, CubeLiteral> literalByAssumption;
 };
 
+struct GuardedPredecessorFrameContext {
+  size_t runId = 0;
+  int activationLiteral = 0;
+  const BoolExpr* property = nullptr;
+  const BoolExpr* frameInvariant = nullptr;
+  std::unordered_set<StateClause, StateClauseHash> emittedFrameClauses;
+  size_t emittedFrameFingerprint = 0;
+  size_t emittedFrameLogOffset = 0;
+};
+
 struct PredecessorAssumptionSolver {
   PredecessorAssumptionCacheKey key;
   std::unique_ptr<SATSolverWrapper> solver;
@@ -932,6 +969,12 @@ struct PredecessorAssumptionSolver {
   // Identity of the shared exact F[0] surface used to build this solver. The
   // vector may only widen; its size therefore detects when extension is needed.
   const std::vector<size_t>* sharedFrameZeroSolverSymbols = nullptr;
+  // Higher-frame output batches share this SAT instance. Property and frame
+  // clauses are guarded by the active context literal, so only CaDiCaL's
+  // context-independent learned clauses can affect a later batch.
+  GuardedPredecessorFrameContext guardedContext;
+  size_t guardedContextCount = 0;
+  size_t satisfyingModelReuseCount = 0;
 
   bool canExtendTo(const PredecessorAssumptionCacheKey& candidate) const {
     return key.hasSameReusableContext(candidate) &&
@@ -965,6 +1008,13 @@ struct PredecessorAssumptionSolver {
       const StateClause& targetIdentity,
       const std::vector<TransitionEncodingLiteralGroup>& groups);
 
+  bool currentModelSatisfiesPredecessorQuery(
+      const PreparedPredecessorTargetAssumptions& preparedTarget,
+      const StateClause& exclusionClause,
+      size_t frame,
+      bool requireGuardedContext,
+      bool excludeTargetOnCurrentFrame) const;
+
 };
 
 struct InitIntersectionAssumptionSolver {
@@ -978,6 +1028,154 @@ struct InitIntersectionAssumptionSolver {
   // incremental SAT solver so repeated obligation/generalization checks do not
   // solve the same assumptions again.
   std::unordered_map<StateCube, bool, StateCubeHash> resultByCube;
+};
+
+struct SharedPredecessorAssumptionSolverPool {
+  struct Selection {
+    std::unique_ptr<PredecessorAssumptionSolver>* solver = nullptr;
+    size_t entryIndex = 0;
+    bool selectedNewRun = false;
+    bool cacheHit = false;
+    bool evicted = false;
+    size_t closestEntry = 0;
+    size_t closestOverlap = 0;
+    bool restarted = false;
+    size_t retiredContexts = 0;
+  };
+
+  Selection select(size_t runId,
+                   const std::vector<size_t>& familySolverSymbols,
+                   bool usePathLocalReuse) {
+    if (selectedRunId == runId && selectedEntry.has_value()) {
+      return {&entries[*selectedEntry].solver,
+              *selectedEntry,
+              false,
+              true,
+              false,
+              *selectedEntry,
+              familySolverSymbols.size(),
+              false,
+              0};
+    }
+
+    size_t entryIndex = entries.size();
+    bool cacheHit = false;
+    size_t closestEntry = 0;
+    size_t closestOverlap = 0;
+    for (size_t index = 0; index < entries.size(); ++index) {
+      const std::vector<size_t>& reusableFamily =
+          usePathLocalReuse ? entries[index].lastPathFamilySolverSymbols
+                            : entries[index].rootFamilySolverSymbols;
+      const size_t overlap = sortedIntersectionSize(
+          reusableFamily, familySolverSymbols);
+      if (overlap > closestOverlap) {
+        closestEntry = index;
+        closestOverlap = overlap;
+      }
+      // Strict equality follows one nested depth-first path. Guarded equality
+      // reuses only an exact family: distinct siblings otherwise accumulate
+      // inactive property contexts that make later SAT calls much slower.
+      const bool canReuseFamily =
+          usePathLocalReuse
+              ? overlap == familySolverSymbols.size()
+              : reusableFamily == familySolverSymbols;
+      if (canReuseFamily &&
+          (entryIndex == entries.size() ||
+           reusableFamily.size() <
+               (usePathLocalReuse
+                    ? entries[entryIndex].lastPathFamilySolverSymbols.size()
+                    : entries[entryIndex].rootFamilySolverSymbols.size()) ||
+           (reusableFamily.size() ==
+                (usePathLocalReuse
+                     ? entries[entryIndex].lastPathFamilySolverSymbols.size()
+                     : entries[entryIndex].rootFamilySolverSymbols.size()) &&
+            entries[index].lastUse > entries[entryIndex].lastUse))) {
+        entryIndex = index;
+        cacheHit = true;
+      }
+    }
+
+    bool evicted = false;
+    if (entryIndex == entries.size()) {
+      if (entries.size() < kMaxSharedPredecessorSolversPerLevel) {
+        entries.push_back(
+            {familySolverSymbols, familySolverSymbols, nullptr, 0});
+      } else {
+        entryIndex = 0;
+        for (size_t index = 1; index < entries.size(); ++index) {
+          if (entries[index].lastUse < entries[entryIndex].lastUse) {
+            entryIndex = index;
+          }
+        }
+        evicted = entries[entryIndex].solver != nullptr;
+        entries[entryIndex].rootFamilySolverSymbols = familySolverSymbols;
+        entries[entryIndex].lastPathFamilySolverSymbols = familySolverSymbols;
+        entries[entryIndex].solver.reset();
+      }
+    }
+
+    if (usePathLocalReuse) {
+      entries[entryIndex].lastPathFamilySolverSymbols = familySolverSymbols;
+    }
+    bool restarted = false;
+    size_t retiredContexts = 0;
+    if (!usePathLocalReuse && entries[entryIndex].solver != nullptr &&
+        entries[entryIndex].solver->guardedContextCount >=
+            kMaxRetiredGuardedPredecessorContexts) {
+      // The model and property-family key remain reusable. Only retire the SAT
+      // cache whose disabled guarded contexts have reached the bounded window.
+      retiredContexts = entries[entryIndex].solver->guardedContextCount;
+      entries[entryIndex].solver.reset();
+      restarted = true;
+    }
+    entries[entryIndex].lastUse = ++useSequence;
+    selectedRunId = runId;
+    selectedEntry = entryIndex;
+    return {&entries[entryIndex].solver,
+            entryIndex,
+            true,
+            cacheHit,
+            evicted,
+            closestEntry,
+            closestOverlap,
+            restarted,
+            retiredContexts};
+  }
+
+ private:
+  struct Entry {
+    // Guarded equality uses the exact root family. Strict equality tracks the
+    // most recent nested child so sibling cones do not accumulate in one
+    // solver while parent-to-child learned clauses remain available.
+    std::vector<size_t> rootFamilySolverSymbols;
+    std::vector<size_t> lastPathFamilySolverSymbols;
+    std::unique_ptr<PredecessorAssumptionSolver> solver;
+    size_t lastUse = 0;
+  };
+
+  static size_t sortedIntersectionSize(const std::vector<size_t>& lhs,
+                                       const std::vector<size_t>& rhs) {
+    size_t lhsIndex = 0;
+    size_t rhsIndex = 0;
+    size_t intersection = 0;
+    while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
+      if (lhs[lhsIndex] < rhs[rhsIndex]) {
+        ++lhsIndex;
+      } else if (rhs[rhsIndex] < lhs[lhsIndex]) {
+        ++rhsIndex;
+      } else {
+        ++intersection;
+        ++lhsIndex;
+        ++rhsIndex;
+      }
+    }
+    return intersection;
+  }
+
+  std::vector<Entry> entries;
+  size_t selectedRunId = 0;
+  std::optional<size_t> selectedEntry;
+  size_t useSequence = 0;
 };
 
 struct PredecessorAssumptionCache {
@@ -996,6 +1194,18 @@ struct PredecessorAssumptionCache {
   std::vector<size_t>* sharedFrameZeroPredecessorSymbols = nullptr;
   const KInductionProblem* sharedFrameZeroPredecessorProblem = nullptr;
   const void* sharedFrameZeroTransitionModel = nullptr;
+  // Higher PDR frames are property-specific, but their immutable transition
+  // solver can cross serial output batches when every local fact is guarded.
+  std::unordered_map<size_t, SharedPredecessorAssumptionSolverPool>*
+      sharedHigherFrameSolverPools = nullptr;
+  const KInductionProblem* sharedHigherFrameProblem = nullptr;
+  const void* sharedHigherFrameTransitionModel = nullptr;
+  size_t sharedHigherFrameRunId = 0;
+  // Select a persistent solver by the complete property family, not by the
+  // first predecessor cube. Unrelated outputs often share reset/control bits;
+  // using that small first cube would merge their otherwise distinct cones.
+  const std::vector<size_t>* sharedHigherFrameFamilySymbols = nullptr;
+  bool usePathLocalHigherFrameSolverReuse = false;
   // Full predecessor-query result cache. SAT entries are keyed by the exact
   // frame fingerprint; UNSAT entries also get a fingerprint-free key because
   // PDR frames only strengthen over time, so a proven-empty predecessor set
@@ -1150,6 +1360,9 @@ struct PDRExactInitCache::Impl {
   std::unique_ptr<PredecessorAssumptionSolver> frameZeroPredecessorSolver;
   std::vector<size_t> frameZeroPredecessorSymbols;
   PredecessorQueryResultStore frameZeroPredecessorResults;
+  std::unordered_map<size_t, SharedPredecessorAssumptionSolverPool>
+      higherFramePredecessorSolverPools;
+  size_t nextHigherFrameRunId = 1;
   // These structures depend only on the validated transition model. SEC runs
   // output batches serially, so every batch can reuse their exact contents
   // without sharing property-specific proof state or changing query order.
@@ -1224,10 +1437,6 @@ bool pdrStatsEnabled() {
   return std::getenv("KEPLER_SEC_PDR_STATS") != nullptr;
 }
 
-size_t pdrDualRailStateSymbolCount(const KInductionProblem& problem) {
-  return problem.dualRailStatePairs.size() * 2;
-}
-
 size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
   size_t count = problem.transitions0.size() + problem.transitions1.size() +
                  problem.auxiliaryTransitions.size();
@@ -1235,34 +1444,6 @@ size_t pdrTransitionSourceCount(const KInductionProblem& problem) {
     count += problem.lazyTransitions->sourceByStateSymbol.size();
   }
   return count;
-}
-
-size_t pdrOriginalObservedOutputCount(const KInductionProblem& problem) {
-  return problem.originalObservedOutputCount == 0
-             ? problem.observedOutputExprs0.size()
-             : problem.originalObservedOutputCount;
-}
-
-bool hasBroadDualRailResidualOutputSurface(const KInductionProblem& problem) {
-  return detail::isBroadDualRailResidualOutputSurface(
-      problem.usesDualRailStateEncoding,
-      problem.observedOutputExprs0.size(),
-      pdrOriginalObservedOutputCount(problem),
-      kMaxMediumDualRailObservedOutputs);
-}
-
-bool hasLocalDualRailFinalLeafSurface(const KInductionProblem& problem) {
-  return hasBroadDualRailResidualOutputSurface(problem) &&
-         pdrDualRailStateSymbolCount(problem) <=
-             kMaxLocalDualRailFinalLeafStateSymbols;
-}
-
-size_t exactTransitionNodeCountHintTargetLimit(
-    const KInductionProblem& problem) {
-  return detail::dualRailPredecessorEncodingLimitForSurface(
-      hasBroadDualRailResidualOutputSurface(problem),
-      kMaxExactTransitionNodeCountHintTargets,
-      kMinLocalDualRailFinalLeafNodeHintTargets);
 }
 
 size_t envSizeLimitOrDefault(const char* name, size_t defaultValue);
@@ -1306,64 +1487,26 @@ unsigned dualRailBadCubeConflictLimit() {
       kDefaultDualRailBadCubeConflictLimit);
 }
 
-unsigned dualRailPredecessorConflictLimit() {
-  return envUnsignedLimitOrDefaultAllowZero(
+unsigned dualRailPredecessorConflictLimit(PredecessorQueryPurpose purpose) {
+  const unsigned configuredLimit = envUnsignedLimitOrDefaultAllowZero(
       kDualRailPredecessorConflictLimitEnv,
       kDefaultDualRailPredecessorConflictLimit);
+  if (std::getenv(kDualRailPredecessorConflictLimitEnv) != nullptr ||
+      purpose != PredecessorQueryPurpose::BlockObligation) {
+    return configuredLimit;
+  }
+  return std::max(configuredLimit, kDefaultDualRailBlockingConflictLimit);
 }
 
-unsigned dualRailPredecessorConflictLimitForQuery(
-    const KInductionProblem& problem,
-    const StateCube& targetCube,
-    size_t solverSymbolCount) {
-  const unsigned configuredLimit = dualRailPredecessorConflictLimit();
-  if (std::getenv(kDualRailPredecessorConflictLimitEnv) != nullptr) {
-    return configuredLimit; // LCOV_EXCL_LINE
-  }
-  // BlackParrot leaves with one residual output need a deeper predecessor SAT
-  // search, but broad multi-output batches should keep the cheaper default.
-  // Keep this scoped to one-output local solver cones so it repairs residual
-  // leaves without opening whole-SoC predecessor searches.
-  if (detail::shouldUseResidualDualRailPredecessorBudget(
-          problem.usesDualRailStateEncoding,
-          problem.observedOutputExprs0.size(),
-          targetCube.size(),
-          solverSymbolCount)) {
-    return std::max(
-        configuredLimit,
-        kDefaultDualRailResidualPredecessorConflictLimit);
-  }
-  return configuredLimit;
-}
-
-unsigned dualRailPredecessorDecisionLimit() {
-  return envUnsignedLimitOrDefaultAllowZero(
-      "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT",
+unsigned dualRailPredecessorDecisionLimit(PredecessorQueryPurpose purpose) {
+  const unsigned configuredLimit = envUnsignedLimitOrDefaultAllowZero(
+      kDualRailPredecessorDecisionLimitEnv,
       kDefaultDualRailPredecessorDecisionLimit);
-}
-
-unsigned dualRailPredecessorDecisionLimitForQuery(
-    const KInductionProblem& problem,
-    const StateCube& targetCube,
-    size_t solverSymbolCount) {
-  const unsigned configuredLimit = dualRailPredecessorDecisionLimit();
-  if (std::getenv(
-          "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_DECISION_LIMIT") != nullptr) {
-    return configuredLimit; // LCOV_EXCL_LINE
+  if (std::getenv(kDualRailPredecessorDecisionLimitEnv) != nullptr ||
+      purpose != PredecessorQueryPurpose::BlockObligation) {
+    return configuredLimit;
   }
-  // This changes only the resource allowance for the same exact Section V
-  // predecessor query. Single-output strict leaves need more decisions than
-  // broad batches even when they do not accumulate many SAT conflicts.
-  if (detail::shouldUseResidualDualRailPredecessorBudget(
-          problem.usesDualRailStateEncoding,
-          problem.observedOutputExprs0.size(),
-          targetCube.size(),
-          solverSymbolCount)) {
-    return std::max(
-        configuredLimit,
-        kDefaultDualRailResidualPredecessorDecisionLimit);
-  }
-  return configuredLimit;
+  return std::max(configuredLimit, kDefaultDualRailBlockingDecisionLimit);
 }
 
 size_t dualRailPredecessorEncodingNodeLimit() {
@@ -1430,6 +1573,7 @@ class PdrFormulaSupportCache {
 
   struct TernaryEvaluationMemoEntry {
     size_t generation = 0;
+    size_t queuedGeneration = 0;
     std::optional<bool> value;
   };
 
@@ -1514,15 +1658,37 @@ class PdrFormulaSupportCache {
     ternaryNodes_.push_back(
         {formula->getOp(), formula->getId(), kInvalidTernaryNode,
          kInvalidTernaryNode});
+    ternaryParentNodes_.emplace_back();
+    if (formula->getOp() == Op::VAR) {
+      ternaryVariableNodesBySymbol_[formula->getId()].push_back(index);
+    }
     const size_t left = ternaryNodeIndex(formula->getLeft());
     const size_t right = ternaryNodeIndex(formula->getRight());
     ternaryNodes_[index].left = left;
     ternaryNodes_[index].right = right;
+    if (left != kInvalidTernaryNode) {
+      ternaryParentNodes_[left].push_back(index);
+    }
+    if (right != kInvalidTernaryNode && right != left) {
+      ternaryParentNodes_[right].push_back(index);
+    }
     return index;
   }
 
   const TernaryNode& ternaryNode(size_t index) const {
     return ternaryNodes_[index];
+  }
+
+  const std::vector<size_t>& ternaryParentNodes(size_t index) const {
+    return ternaryParentNodes_[index];
+  }
+
+  const std::vector<size_t>& ternaryVariableNodes(size_t symbol) const {
+    static const std::vector<size_t> noNodes;
+    const auto nodes = ternaryVariableNodesBySymbol_.find(symbol);
+    return nodes == ternaryVariableNodesBySymbol_.end()
+               ? noNodes
+               : nodes->second;
   }
 
   size_t ternaryNodeCount() const { return ternaryNodes_.size(); }
@@ -1577,6 +1743,13 @@ class PdrFormulaSupportCache {
   std::unordered_map<BoolExpr*, std::vector<size_t>> closedSupportByExpr_;
   std::unordered_map<BoolExpr*, size_t> ternaryNodeIndexByExpr_;
   std::vector<TernaryNode> ternaryNodes_;
+  // Parent links let a changed model literal propagate its exact ternary value
+  // only through computed ancestors. This is a cache dependency graph over
+  // immutable BoolExpr nodes; it does not alter the paper's simulation or
+  // literal-trial order.
+  std::vector<std::vector<size_t>> ternaryParentNodes_;
+  std::unordered_map<size_t, std::vector<size_t>>
+      ternaryVariableNodesBySymbol_;
   // Transition roots and same-design symbol maps are immutable for the life
   // of a PDR run. Retain their exact mapped support instead of rebuilding an
   // unordered set for every SAT predecessor model.
@@ -1787,7 +1960,7 @@ PredecessorTargetSurface buildPredecessorTargetSurface(
       estimateTransitionEncodingNodes(
           transitionByState,
           surface.encodedTargets,
-          exactTransitionNodeCountHintTargetLimit(problem));
+          kMaxExactTransitionNodeCountHintTargets);
   return surface;
 }
 
@@ -2688,6 +2861,47 @@ PredecessorAssumptionSolver::prepareTargetAssumptions(
   return inserted->second;
 }
 
+bool PredecessorAssumptionSolver::currentModelSatisfiesPredecessorQuery(
+    const PreparedPredecessorTargetAssumptions& preparedTarget,
+    const StateClause& exclusionClause,
+    size_t frame,
+    bool requireGuardedContext,
+    bool excludeTargetOnCurrentFrame) const {
+  if (!solver->hasSatisfyingModel()) {
+    return false;
+  }
+  for (const int assumption : preparedTarget.assumptions) {
+    if (!solver->getLiteralValue(assumption)) {
+      return false;
+    }
+  }
+  if (requireGuardedContext &&
+      !solver->getLiteralValue(guardedContext.activationLiteral)) {
+    return false;
+  }
+  if (!excludeTargetOnCurrentFrame) {
+    return true;
+  }
+
+  // The exclusion clause is exactly the negation of the target cube. Check it
+  // directly in the retained concrete model before allocating a query-local
+  // selector; one true clause literal proves that the model is outside target.
+  for (const auto& literal : exclusionClause) {
+    if (!variables->hasSymbol(literal.symbol)) {
+      throw std::runtime_error( // LCOV_EXCL_LINE
+          "PDR cached model check missing symbol " + // LCOV_EXCL_LINE
+          std::to_string(literal.symbol) + " at frame " + // LCOV_EXCL_LINE
+          std::to_string(frame)); // LCOV_EXCL_LINE
+    }
+    const int stateLiteral = variables->getLiteral(literal.symbol, frame);
+    const int clauseLiteral = literal.positive ? stateLiteral : -stateLiteral;
+    if (solver->getLiteralValue(clauseLiteral)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 StateCube failedAssumptionCubeFromTargetContext(
     const SATSolverWrapper& solver,
     const PreparedPredecessorTargetAssumptions& targetContext) {
@@ -3007,6 +3221,26 @@ void addStateClause(SATSolverWrapper& solver,
   solver.addClause(satClause);
 }
 
+void addGuardedStateClause(SATSolverWrapper& solver,
+                           const FrameVariableStore& variables,
+                           const StateClause& clause,
+                           size_t frame,
+                           int activationLiteral) {
+  std::vector<int> satClause;
+  satClause.reserve(clause.size() + 1);
+  satClause.push_back(-activationLiteral);
+  for (const auto& literal : clause) {
+    if (!variables.hasSymbol(literal.symbol)) {
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR guarded frame-clause encoding missing symbol " +  // LCOV_EXCL_LINE
+          std::to_string(literal.symbol));  // LCOV_EXCL_LINE
+    }
+    const int satLiteral = variables.getLiteral(literal.symbol, frame);
+    satClause.push_back(literal.positive ? satLiteral : -satLiteral);
+  }
+  solver.addClause(satClause);
+}
+
 bool clauseCoveredByVariables(const FrameVariableStore& variables,
                               const StateClause& clause) {
   for (const auto& literal : clause) {
@@ -3171,6 +3405,113 @@ void addSafeFramePropertyConstraint(SATSolverWrapper& solver,
 
 bool predecessorFrameClauseApplies(
     const PredecessorAssumptionSolver& cachedSolver,
+    const StateClause& clause);
+
+void addGuardedFormulaConstraint(
+    PredecessorAssumptionSolver& cachedSolver,
+    BoolExpr* formula,
+    PdrFormulaSupportCache* supportCache,
+    int activationLiteral) {
+  if (formula == nullptr) {
+    return;
+  }
+  const std::set<size_t> uncachedSupport =
+      supportCache == nullptr ? formula->getSupportVars() : std::set<size_t>{};
+  const std::set<size_t>& formulaSupport =
+      supportCache != nullptr ? supportCache->support(formula)
+                              : uncachedSupport;
+  FrameFormulaEncoder encoder(
+      *cachedSolver.solver,
+      cachedSolver.variables->makeLeafLits(0, formulaSupport));
+  cachedSolver.solver->addClause(
+      {-activationLiteral, encoder.encode(formula)});
+}
+
+int prepareGuardedPredecessorFrameContext(
+    PredecessorAssumptionSolver& cachedSolver,
+    size_t runId,
+    const KInductionProblem& problem,
+    BoolExpr* frameInvariant,
+    const std::vector<FrameClauses>& frames,
+    size_t level,
+    PdrFormulaSupportCache* supportCache,
+    bool scanCompleteFrame) {
+  auto& context = cachedSolver.guardedContext;
+  const bool newContext = context.runId != runId;
+  if (newContext) {
+    if (context.activationLiteral != 0) {
+      // The previous batch has completed. Permanently retire its guarded facts;
+      // learned clauses independent of that activation remain available.
+      cachedSolver.solver->addClause({-context.activationLiteral});
+    }
+    context = GuardedPredecessorFrameContext{};
+    context.runId = runId;
+    context.activationLiteral = cachedSolver.solver->newVar() + 2;
+    context.property = problem.property;
+    context.frameInvariant = frameInvariant;
+    ++cachedSolver.guardedContextCount;
+
+    addGuardedFormulaConstraint(
+        cachedSolver,
+        frameInvariant,
+        supportCache,
+        context.activationLiteral);
+    if (predecessorSourceFrameIsKnownSafe(level)) {
+      addGuardedFormulaConstraint(
+          cachedSolver,
+          problem.property,
+          supportCache,
+          context.activationLiteral);
+    }
+    scanCompleteFrame = true;
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: shared predecessor context activated run=",
+          runId,
+          " level=",
+          level,
+          " retained_contexts=",
+          cachedSolver.guardedContextCount);
+    }
+  } else if (context.property != problem.property ||
+             context.frameInvariant != frameInvariant) {
+    throw std::runtime_error(  // LCOV_EXCL_LINE
+        "PDR shared predecessor context changed within one run");  // LCOV_EXCL_LINE
+  }
+
+  const size_t frameFingerprint = frameClausesFingerprint(frames, level);
+  if (!scanCompleteFrame &&
+      context.emittedFrameFingerprint == frameFingerprint) {
+    return context.activationLiteral;
+  }
+
+  const std::vector<StateClause>* clauses = &frames[level].addedClauseLog;
+  size_t beginIndex = context.emittedFrameLogOffset;
+  if (scanCompleteFrame || beginIndex > clauses->size()) {
+    clauses = &frames[level].clauses;
+    beginIndex = 0;
+  }
+  for (size_t clauseIndex = beginIndex; clauseIndex < clauses->size();
+       ++clauseIndex) {
+    const StateClause& clause = (*clauses)[clauseIndex];
+    if (!predecessorFrameClauseApplies(cachedSolver, clause) ||
+        !context.emittedFrameClauses.insert(clause).second) {
+      continue;
+    }
+    addGuardedStateClause(
+        *cachedSolver.solver,
+        *cachedSolver.variables,
+        clause,
+        0,
+        context.activationLiteral);
+  }
+  context.emittedFrameLogOffset = frames[level].addedClauseLog.size();
+  context.emittedFrameFingerprint = frameFingerprint;
+  return context.activationLiteral;
+}
+
+bool predecessorFrameClauseApplies(
+    const PredecessorAssumptionSolver& cachedSolver,
     const StateClause& clause) {
   return clauseCoveredByVariables(*cachedSolver.variables, clause);
 }
@@ -3302,16 +3643,66 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
     PdrFormulaSupportCache* supportCache) {
   const bool useSharedFrameZeroSolver =
       level == 0 && cache.sharedFrameZeroPredecessorSolver != nullptr;
-  auto& solver = useSharedFrameZeroSolver
-                     ? *cache.sharedFrameZeroPredecessorSolver
-                     : cache.solversByLevel[level];
+  const bool useSharedHigherFrameSolver =
+      level > 0 && cache.sharedHigherFrameSolverPools != nullptr &&
+      cache.sharedHigherFrameRunId != 0;
+  SharedPredecessorAssumptionSolverPool::Selection sharedSelection;
+  if (useSharedHigherFrameSolver) {
+    if (cache.sharedHigherFrameFamilySymbols == nullptr) {  // LCOV_EXCL_LINE
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR shared predecessor property family is unavailable");  // LCOV_EXCL_LINE
+    }
+    sharedSelection =
+        (*cache.sharedHigherFrameSolverPools)[level].select(
+            cache.sharedHigherFrameRunId,
+            *cache.sharedHigherFrameFamilySymbols,
+            cache.usePathLocalHigherFrameSolverReuse);
+    if (sharedSelection.selectedNewRun && pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: shared predecessor solver pool selected level=",
+          level,
+          " run=",
+          cache.sharedHigherFrameRunId,
+          " entry=",
+          sharedSelection.entryIndex,
+          " cache_hit=",
+          sharedSelection.cacheHit ? 1 : 0,
+          " evicted=",
+          sharedSelection.evicted ? 1 : 0,
+          " family_symbols=",
+          cache.sharedHigherFrameFamilySymbols->size(),
+          " initial_symbols=",
+          solverSymbols.size(),
+          " closest_entry=",
+          sharedSelection.closestEntry,
+          " closest_overlap=",
+          sharedSelection.closestOverlap,
+          " path_local=",
+          cache.usePathLocalHigherFrameSolverReuse ? 1 : 0,
+          " restarted=",
+          sharedSelection.restarted ? 1 : 0,
+          " retired_contexts=",
+          sharedSelection.retiredContexts);
+    }
+  }
+  auto& solver =
+      useSharedFrameZeroSolver
+          ? *cache.sharedFrameZeroPredecessorSolver
+          : useSharedHigherFrameSolver
+                ? *sharedSelection.solver
+                : cache.solversByLevel[level];
   const KInductionProblem* keyProblem =
-      useSharedFrameZeroSolver ? cache.sharedFrameZeroPredecessorProblem
-                               : &problem;
+      useSharedFrameZeroSolver
+          ? cache.sharedFrameZeroPredecessorProblem
+          : useSharedHigherFrameSolver
+                ? cache.sharedHigherFrameProblem
+                : &problem;
   const void* keyTransitionModel =
       useSharedFrameZeroSolver
           ? cache.sharedFrameZeroTransitionModel
-          : static_cast<const void*>(&transitionByState);
+          : useSharedHigherFrameSolver
+                ? cache.sharedHigherFrameTransitionModel
+                : static_cast<const void*>(&transitionByState);
   const size_t currentFrameFingerprint =
       frameClausesFingerprint(frames, level);
   if (useSharedFrameZeroSolver && solver != nullptr &&
@@ -3346,14 +3737,21 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
     }
     return *solver;
   }
+  std::vector<size_t> sharedSolverSymbols;
+  const std::vector<size_t>* keySolverSymbols = &solverSymbols;
+  if (useSharedHigherFrameSolver && solver != nullptr) {
+    sharedSolverSymbols = detail::mergeSortedPdrSymbolVectors(
+        solver->key.solverSymbols, solverSymbols);
+    keySolverSymbols = &sharedSolverSymbols;
+  }
   PredecessorAssumptionCacheKey key{
       keyProblem,
       keyTransitionModel,
       initFormula,
-      level == 0 ? nullptr : frameInvariant,
+      level == 0 || useSharedHigherFrameSolver ? nullptr : frameInvariant,
       level,
       currentFrameFingerprint,
-      solverSymbols};
+      *keySolverSymbols};
   if (solver != nullptr && solver->canExtendTo(key)) {
     const size_t previousSymbolCount = solver->key.solverSymbols.size();
     solver->extendSymbolSurface(stateRelations, key.solverSymbols);
@@ -3368,15 +3766,28 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
           " level=",
           level);
     }
-    // PDR frames strengthen monotonically. Reuse the expensive transition and
-    // frame prefix solver, then stream only newly learned frame clauses into it.
-    const size_t addedClauses = addNewPredecessorFrameClauses(
-        *solver,
-        frames[level],
-        0,
-        currentFrameFingerprint,
-        surfaceWidened);
-    solver->key.frameFingerprint = key.frameFingerprint;
+    size_t addedClauses = 0;
+    if (useSharedHigherFrameSolver) {
+      prepareGuardedPredecessorFrameContext(
+          *solver,
+          cache.sharedHigherFrameRunId,
+          problem,
+          frameInvariant,
+          frames,
+          level,
+          supportCache,
+          surfaceWidened);
+    } else {
+      // PDR frames strengthen monotonically. Reuse the expensive transition
+      // solver, then stream only newly learned frame clauses into it.
+      addedClauses = addNewPredecessorFrameClauses(
+          *solver,
+          frames[level],
+          0,
+          currentFrameFingerprint,
+          surfaceWidened);
+      solver->key.frameFingerprint = key.frameFingerprint;
+    }
     if (useSharedFrameZeroSolver && shouldEmitFrequentPdrStats()) {
       emitSecDiag("SEC PDR stats: shared exact F[0] predecessor solver reused");
     }
@@ -3400,18 +3811,38 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
           : nullptr;
   next->solver = std::make_unique<SATSolverWrapper>(
       SATSolverWrapper::assumptionSolverTypeFor(solverType));
-  next->solver->configureForSecPdrQuery(solverSymbols.size());
+  if (useSharedHigherFrameSolver) {
+    next->solver->configureForSecPdrPersistentQuery(
+        next->key.solverSymbols.size());
+  } else {
+    next->solver->configureForSecPdrQuery(next->key.solverSymbols.size());
+  }
   next->variables =
-      std::make_unique<FrameVariableStore>(*next->solver, solverSymbols, 1);
-  next->querySymbolSet.insert(solverSymbols.begin(), solverSymbols.end());
-  stateRelations.addClauses(*next->solver, *next->variables, solverSymbols, 1);
-  addFrameConstraints(*next->solver, *next->variables, initFormula,
-                      frameInvariant, frames, level, 0);
-  addSafeFramePropertyConstraint(
-      *next->solver, *next->variables, problem, level, supportCache, 0);
+      std::make_unique<FrameVariableStore>(
+          *next->solver, next->key.solverSymbols, 1);
+  next->querySymbolSet.insert(
+      next->key.solverSymbols.begin(), next->key.solverSymbols.end());
+  stateRelations.addClauses(
+      *next->solver, *next->variables, next->key.solverSymbols, 1);
+  if (useSharedHigherFrameSolver) {
+    prepareGuardedPredecessorFrameContext(
+        *next,
+        cache.sharedHigherFrameRunId,
+        problem,
+        frameInvariant,
+        frames,
+        level,
+        supportCache,
+        /*scanCompleteFrame=*/true);
+  } else {
+    addFrameConstraints(*next->solver, *next->variables, initFormula,
+                        frameInvariant, frames, level, 0);
+    addSafeFramePropertyConstraint(
+        *next->solver, *next->variables, problem, level, supportCache, 0);
+  }
   addPostBootstrapResetInputConstraints(*next->solver, *next->variables,
                                         problem, 0);
-  if (level < frames.size()) {
+  if (!useSharedHigherFrameSolver && level < frames.size()) {
     rememberPredecessorFrameClauses(*next, frames[level]);
     next->emittedFrameFingerprint = currentFrameFingerprint;
   }
@@ -3420,11 +3851,11 @@ PredecessorAssumptionSolver& getOrCreatePredecessorAssumptionSolver(
         "SEC PDR stats: predecessor cached solver created level=",
         level,
         " symbols=",
-        solverSymbols.size(),
+        next->key.solverSymbols.size(),
         " frame_clauses=",
         level < frames.size() ? frames[level].clauses.size() : 0,
-        " local_leaf=",
-        hasLocalDualRailFinalLeafSurface(problem) ? 1 : 0);
+        " shared_batches=",
+        useSharedHigherFrameSolver ? 1 : 0);
   }
   solver = std::move(next);
   return *solver;
@@ -3857,17 +4288,52 @@ solvePredecessorCubeWithCachedAssumptions(
       targetSurface.exclusionClause,
       targetSurface.transitionGroups);
   const std::vector<int>* queryAssumptions = &preparedTarget.assumptions;
-  if (excludeTargetOnCurrentFrame) {
-    cachedSolver.targetAssumptions = preparedTarget.assumptions;
-    cachedSolver.targetAssumptions.push_back(
-        cachedTargetExclusionAssumption(
-            cachedSolver, targetSurface.exclusionClause, 0));
-    queryAssumptions = &cachedSolver.targetAssumptions;
-  }
-  if (queryAssumptions->empty()) {
+  const bool useGuardedBatchContext =
+      level > 0 && cache.sharedHigherFrameSolverPools != nullptr &&
+      cachedSolver.guardedContext.runId == cache.sharedHigherFrameRunId;
+  if (preparedTarget.assumptions.empty() && !useGuardedBatchContext &&
+      !excludeTargetOnCurrentFrame) {
     return std::nullopt; // LCOV_EXCL_LINE
   }
-
+  // Reuse only a concrete model that satisfies the complete new predecessor
+  // query. This is the same exact SAT witness the next assumption solve seeks;
+  // it changes neither the IC3 obligation nor any learned frame clause.
+  if (cachedSolver.currentModelSatisfiesPredecessorQuery(
+          preparedTarget,
+          targetSurface.exclusionClause,
+          0,
+          useGuardedBatchContext,
+          excludeTargetOnCurrentFrame)) {
+    ++cachedSolver.satisfyingModelReuseCount;
+    if (solvedCache != nullptr) {
+      *solvedCache = &cachedSolver;
+    }
+    if (shouldEmitFrequentPdrStats()) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor cached SAT model reused hits=",
+          cachedSolver.satisfyingModelReuseCount,
+          " target_assumptions=",
+          preparedTarget.assumptions.size(),
+          " guarded_context=",
+          useGuardedBatchContext ? 1 : 0,
+          " exclude_target=",
+          excludeTargetOnCurrentFrame ? 1 : 0);
+    }
+    return SATSolverWrapper::SolveStatus::Sat;
+  }
+  if (useGuardedBatchContext || excludeTargetOnCurrentFrame) {
+    cachedSolver.targetAssumptions = preparedTarget.assumptions;
+    if (useGuardedBatchContext) {
+      cachedSolver.targetAssumptions.push_back(
+          cachedSolver.guardedContext.activationLiteral);
+    }
+    if (excludeTargetOnCurrentFrame) {
+      cachedSolver.targetAssumptions.push_back(
+          cachedTargetExclusionAssumption(
+              cachedSolver, targetSurface.exclusionClause, 0));
+    }
+    queryAssumptions = &cachedSolver.targetAssumptions;
+  }
   if (solvedCache != nullptr) {
     *solvedCache = &cachedSolver;
   }
@@ -4003,12 +4469,15 @@ class PdrTernaryModelReducer {
       const StateCube& modelCube,
       PdrFormulaSupportCache* supportCache) {
     supportCache_ = supportCache != nullptr ? supportCache : &localSupportCache_;
+    memoGeneration_ = supportCache_->nextTernaryEvaluationGeneration();
     roots_.reserve(roots.size());
     assignments_.reserve(modelCube.size());
     for (const auto& spec : roots) {
-      Root root{supportCache_->ternaryNodeIndex(spec.formula),
-                spec.symbolMap,
-                spec.expectedValue};
+      Root root;
+      root.formula = supportCache_->ternaryNodeIndex(spec.formula);
+      root.symbolMap = spec.symbolMap;
+      root.expectedValue = spec.expectedValue;
+      root.localSupport = &supportCache_->support(spec.formula);
       root.support = &supportCache_->mappedTernarySupport(
           spec.formula, spec.symbolMap);
       roots_.push_back(std::move(root));
@@ -4016,9 +4485,31 @@ class PdrTernaryModelReducer {
       for (const size_t symbol : *roots_.back().support) {
         rootIndicesBySymbol_[symbol].push_back(rootIndex);
       }
+      Root& insertedRoot = roots_.back();
+      insertedRoot.memo =
+          &supportCache_->ternaryEvaluationMemo(insertedRoot.symbolMap);
+      auto& dependencies =
+          memoDependenciesBySymbolMap_[insertedRoot.symbolMap];
+      dependencies.memo = insertedRoot.memo;
+      for (const size_t localSymbol : *insertedRoot.localSupport) {
+        const auto symbol = mappedSymbol(insertedRoot, localSymbol);
+        if (symbol.has_value() && *symbol >= 2) {
+          dependencies.localSymbolsByMappedSymbol[*symbol].push_back(
+              localSymbol);
+        }
+      }
     }
-    for (auto& root : roots_) {
-      root.memo = &supportCache_->ternaryEvaluationMemo(root.symbolMap);
+    for (auto& [symbolMap, dependencies] :
+         memoDependenciesBySymbolMap_) {
+      (void)symbolMap;
+      for (auto& [mappedSymbol, localSymbols] :
+           dependencies.localSymbolsByMappedSymbol) {
+        (void)mappedSymbol;
+        std::sort(localSymbols.begin(), localSymbols.end());
+        localSymbols.erase(
+            std::unique(localSymbols.begin(), localSymbols.end()),
+            localSymbols.end());
+      }
     }
 
     for (const auto& literal : modelCube) {
@@ -4051,15 +4542,14 @@ class PdrTernaryModelReducer {
         continue;
       }
 
-      auto& assignment = assignments_.at(literal.symbol);
       // FMCAD'11 Section III-B keeps successfully removed literals at X while
       // probing later literals. Store that cumulative X state beside the
       // concrete value so variable evaluation needs only one hash lookup.
-      assignment.unknown = true;
+      setAssignmentUnknown(literal.symbol, true);
       if (rootsHaveExpectedValues(literal.symbol)) {
         continue;
       }
-      assignment.unknown = false;
+      setAssignmentUnknown(literal.symbol, false);
       reduced.push_back(literal);
     }
     if (reusedEvaluationMemoEntries_ != 0 &&
@@ -4069,6 +4559,16 @@ class PdrTernaryModelReducer {
           reusedEvaluationMemoEntries_,
           " root_index_symbols=",
           rootIndicesBySymbol_.size());
+    }
+    if (recomputedEvaluationParents_ != 0 &&
+        shouldEmitFrequentPdrStats()) {
+      emitSecDiag(
+          "SEC PDR stats: ternary incremental propagation changed_values=",
+          propagatedEvaluationValueChanges_,
+          " recomputed_parents=",
+          recomputedEvaluationParents_,
+          " stable_parents=",
+          stableEvaluationParents_);
     }
     return reduced;
   }
@@ -4087,9 +4587,171 @@ class PdrTernaryModelReducer {
     size_t formula = PdrFormulaSupportCache::kInvalidTernaryNode;
     const std::unordered_map<size_t, size_t>* symbolMap = nullptr;
     bool expectedValue = false;
+    const std::set<size_t>* localSupport = nullptr;
     const std::vector<size_t>* support = nullptr;
     EvaluationMemo* memo = nullptr;
   };
+
+  struct MemoDependencies {
+    EvaluationMemo* memo = nullptr;
+    std::unordered_map<size_t, std::vector<size_t>>
+        localSymbolsByMappedSymbol;
+  };
+
+  void setAssignmentUnknown(size_t symbol, bool unknown) {
+    auto& assignment = assignments_.at(symbol);
+    if (assignment.unknown == unknown) {
+      return;
+    }
+    assignment.unknown = unknown;
+    if (std::find(
+            changedAssignmentSymbols_.begin(),
+            changedAssignmentSymbols_.end(),
+            symbol) == changedAssignmentSymbols_.end()) {
+      changedAssignmentSymbols_.push_back(symbol);
+    }
+  }
+
+  std::optional<bool> assignmentValue(size_t symbol) const {
+    if (symbol < 2) {
+      return symbol == 1;
+    }
+    const auto assignment = assignments_.find(symbol);
+    if (assignment == assignments_.end() || assignment->second.unknown) {
+      return std::nullopt;
+    }
+    return assignment->second.value;
+  }
+
+  std::optional<bool> evaluatedValue(
+      size_t nodeIndex,
+      const EvaluationMemo& memo) const {
+    if (nodeIndex == PdrFormulaSupportCache::kInvalidTernaryNode) {
+      return std::nullopt;
+    }
+    const EvaluationMemoEntry& entry = memo[nodeIndex];
+    if (entry.generation != memoGeneration_) {
+      return std::nullopt;
+    }
+    return entry.value;
+  }
+
+  std::optional<bool> evaluateOperator(
+      Op op,
+      std::optional<bool> lhs,
+      std::optional<bool> rhs) const {
+    switch (op) {
+      case Op::NOT:
+        return lhs.has_value() ? std::optional<bool>(!*lhs) : std::nullopt;
+      case Op::AND:
+        if ((lhs.has_value() && !*lhs) ||
+            (rhs.has_value() && !*rhs)) {
+          return false;
+        }
+        return lhs.has_value() && rhs.has_value()
+                   ? std::optional<bool>(*lhs && *rhs)
+                   : std::nullopt;
+      case Op::OR:
+        if ((lhs.has_value() && *lhs) ||
+            (rhs.has_value() && *rhs)) {
+          return true;
+        }
+        return lhs.has_value() && rhs.has_value()
+                   ? std::optional<bool>(*lhs || *rhs)
+                   : std::nullopt;
+      case Op::XOR:
+        return lhs.has_value() && rhs.has_value()
+                   ? std::optional<bool>(*lhs != *rhs)
+                   : std::nullopt;
+      case Op::VAR:
+      case Op::NONE:
+      default:
+        return std::nullopt;
+    }
+  }
+
+  std::optional<bool> recomputeNodeValue(
+      size_t nodeIndex,
+      const EvaluationMemo& memo) const {
+    const auto& node = supportCache_->ternaryNode(nodeIndex);
+    return evaluateOperator(
+        node.op,
+        evaluatedValue(node.left, memo),
+        evaluatedValue(node.right, memo));
+  }
+
+  void enqueueComputedParents(
+      MemoDependencies& dependencies,
+      size_t nodeIndex) {
+    for (const size_t parent :
+         supportCache_->ternaryParentNodes(nodeIndex)) {
+      EvaluationMemoEntry& parentEntry = (*dependencies.memo)[parent];
+      if (parentEntry.generation != memoGeneration_ ||
+          parentEntry.queuedGeneration == memoGeneration_) {
+        continue;
+      }
+      parentEntry.queuedGeneration = memoGeneration_;
+      propagationWorklist_.push(parent);
+    }
+  }
+
+  void propagateChangedAssignments() {
+    if (changedAssignmentSymbols_.empty()) {
+      return;
+    }
+
+    for (auto& [symbolMap, dependencies] :
+         memoDependenciesBySymbolMap_) {
+      (void)symbolMap;
+      for (const size_t changedSymbol : changedAssignmentSymbols_) {
+        const auto localSymbols =
+            dependencies.localSymbolsByMappedSymbol.find(changedSymbol);
+        if (localSymbols ==
+            dependencies.localSymbolsByMappedSymbol.end()) {
+          continue;
+        }
+        for (const size_t localSymbol : localSymbols->second) {
+          const auto& variableNodes =
+              supportCache_->ternaryVariableNodes(localSymbol);
+          for (const size_t variableNode : variableNodes) {
+            EvaluationMemoEntry& entry =
+                (*dependencies.memo)[variableNode];
+            if (entry.generation != memoGeneration_) {
+              continue;
+            }
+            const auto value = assignmentValue(changedSymbol);
+            if (entry.value == value) {
+              continue;
+            }
+            entry.value = value;
+            ++propagatedEvaluationValueChanges_;
+            enqueueComputedParents(dependencies, variableNode);
+          }
+        }
+      }
+
+      // Initial root evaluation computes both children of every operator. The
+      // worklist can therefore update parents directly from their current
+      // child values. A parent is requeued if another child changes later, and
+      // propagation stops as soon as the exact ternary value remains stable.
+      while (!propagationWorklist_.empty()) {
+        const size_t nodeIndex = propagationWorklist_.front();
+        propagationWorklist_.pop();
+        EvaluationMemoEntry& entry = (*dependencies.memo)[nodeIndex];
+        entry.queuedGeneration = 0;
+        const auto value = recomputeNodeValue(nodeIndex, *dependencies.memo);
+        ++recomputedEvaluationParents_;
+        if (entry.value == value) {
+          ++stableEvaluationParents_;
+          continue;
+        }
+        entry.value = value;
+        ++propagatedEvaluationValueChanges_;
+        enqueueComputedParents(dependencies, nodeIndex);
+      }
+    }
+    changedAssignmentSymbols_.clear();
+  }
 
   std::optional<size_t> mappedSymbol(const Root& root,
                                      size_t symbol) const {
@@ -4111,13 +4773,9 @@ class PdrTernaryModelReducer {
       return std::nullopt;
     }
     EvaluationMemoEntry& entry = memo[nodeIndex];
-    if (entry.generation == evaluationGeneration_) {
-      return entry.value;
-    }
-    if (entry.generation != 0) {
-      // The BoolExpr node is being recomputed for a new tentative X value.
-      // Keep its dense memo slot, but never reuse the previous value.
+    if (entry.generation == memoGeneration_) {
       ++reusedEvaluationMemoEntries_;
+      return entry.value;
     }
 
     const auto& node = supportCache_->ternaryNode(nodeIndex);
@@ -4128,47 +4786,25 @@ class PdrTernaryModelReducer {
         if (!symbol.has_value()) {
           break;
         }
-        if (*symbol < 2) {
-          result = *symbol == 1;
-        } else if (const auto assignment = assignments_.find(*symbol);
-                   assignment != assignments_.end() &&
-                   !assignment->second.unknown) {
-          result = assignment->second.value;
-        }
+        result = assignmentValue(*symbol);
         break;
       }
-      case Op::NOT: {
-        const auto value = evaluate(node.left, root, memo);
-        if (value.has_value()) {
-          result = !*value;
-        }
-        break;
-      }
+      case Op::NOT:
       case Op::AND:
       case Op::OR:
       case Op::XOR: {
+        // Evaluate the complete immutable DAG once. Later literal trials use
+        // parent links to update only values changed by the new X assignment.
         const auto lhs = evaluate(node.left, root, memo);
         const auto rhs = evaluate(node.right, root, memo);
-        if (node.op == Op::AND &&
-            ((lhs.has_value() && !*lhs) ||
-             (rhs.has_value() && !*rhs))) {
-          result = false;
-        } else if (node.op == Op::OR &&
-                   ((lhs.has_value() && *lhs) ||
-                    (rhs.has_value() && *rhs))) {
-          result = true;
-        } else if (lhs.has_value() && rhs.has_value()) {
-          result = node.op == Op::AND
-                       ? *lhs && *rhs
-                       : node.op == Op::OR ? *lhs || *rhs : *lhs != *rhs;
-        }
+        result = evaluateOperator(node.op, lhs, rhs);
         break;
       }
       case Op::NONE:
       default:
         break;
     }
-    entry.generation = evaluationGeneration_;
+    entry.generation = memoGeneration_;
     entry.value = result;
     return result;
   }
@@ -4179,10 +4815,7 @@ class PdrTernaryModelReducer {
   }
 
   bool rootsHaveExpectedValues(std::optional<size_t> changedSymbol) {
-    // Transition roots from one design share both a symbol map and BoolExpr
-    // subgraphs. A generation invalidates every value between tentative X
-    // assignments while retaining the memo nodes allocated by earlier trials.
-    evaluationGeneration_ = supportCache_->nextTernaryEvaluationGeneration();
+    propagateChangedAssignments();
     if (!changedSymbol.has_value()) {
       for (const auto& root : roots_) {
         if (!rootHasExpectedValue(root)) {
@@ -4219,8 +4852,16 @@ class PdrTernaryModelReducer {
   PdrFormulaSupportCache* supportCache_ = nullptr;
   std::unordered_map<size_t, TernaryAssignment> assignments_;
   std::unordered_map<size_t, std::vector<size_t>> rootIndicesBySymbol_;
-  size_t evaluationGeneration_ = 0;
+  std::unordered_map<const std::unordered_map<size_t, size_t>*,
+                     MemoDependencies>
+      memoDependenciesBySymbolMap_;
+  std::vector<size_t> changedAssignmentSymbols_;
+  std::queue<size_t> propagationWorklist_;
+  size_t memoGeneration_ = 0;
   size_t reusedEvaluationMemoEntries_ = 0;
+  size_t propagatedEvaluationValueChanges_ = 0;
+  size_t recomputedEvaluationParents_ = 0;
+  size_t stableEvaluationParents_ = 0;
 };
 
 StateCube reduceSolvedCubeByTernarySimulation(
@@ -4231,9 +4872,26 @@ StateCube reduceSolvedCubeByTernarySimulation(
     PdrFormulaSupportCache* supportCache) {
   // Section III-B of the FMCAD'11 PDR paper removes a state literal only when
   // replacing it by X leaves every target value concrete and unchanged.
+  const auto setupStart = std::chrono::steady_clock::now();
   PdrTernaryModelReducer reducer(
       solver, variables, roots, modelCube, supportCache);
-  return reducer.reduce(modelCube);
+  const auto reductionStart = std::chrono::steady_clock::now();
+  StateCube reduced = reducer.reduce(modelCube);
+  if (shouldEmitFrequentPdrStats()) {
+    const auto reductionEnd = std::chrono::steady_clock::now();
+    emitSecDiag(
+        "SEC PDR stats: ternary reducer timing setup_us=",
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            reductionStart - setupStart).count(),
+        " reduction_us=",
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            reductionEnd - reductionStart).count(),
+        " roots=",
+        roots.size(),
+        " model_cube=",
+        modelCube.size());
+  }
+  return reduced;
 }
 
 StateCube extractSolvedPredecessorCube(
@@ -4545,6 +5203,7 @@ std::optional<StateCube> findPredecessorCube(
     size_t level,
     const StateCube& targetCube,
     bool excludeTargetOnCurrentFrame,
+    PredecessorQueryPurpose purpose,
     const ComplementPartnerIndex& complementPartners,
     PredecessorAssumptionCache* predecessorAssumptionCache = nullptr,
     size_t* predecessorQueryBudget = nullptr,
@@ -4645,28 +5304,13 @@ std::optional<StateCube> findPredecessorCube(
   const size_t transitionEncodingNodes =
       targetSurface->transitionEncodingNodes;
   if (problem.usesDualRailStateEncoding) {
-    const bool broadResidualOutputSurface =
-        hasBroadDualRailResidualOutputSurface(problem);
-    const size_t encodingNodeLimit =
-        detail::dualRailPredecessorEncodingLimitForSurface(
-            broadResidualOutputSurface,
-            dualRailPredecessorEncodingNodeLimit(),
-            kMinLocalDualRailFinalLeafPredecessorNodes);
-    const size_t configuredEncodingSupportLimit =
-        dualRailPredecessorEncodingSupportLimit();
-    // A residual leaf can have a local exact transition cone even when its
-    // enclosing ASIC has millions of state rails. Raise only that one-output
-    // cone's guard; broad output batches retain the configured 8k cap.
+    const size_t encodingNodeLimit = dualRailPredecessorEncodingNodeLimit();
     const size_t encodingSupportLimit =
-        detail::dualRailPredecessorEncodingLimitForSurface(
-            broadResidualOutputSurface,
-            configuredEncodingSupportLimit,
-            kMinLocalDualRailFinalLeafPredecessorSupport);
-    const size_t nodeCountHintTargetLimit =
-        exactTransitionNodeCountHintTargetLimit(problem);
+        dualRailPredecessorEncodingSupportLimit();
     const bool unknownNodeCount =
         transitionEncodingNodes == 0 &&
-        encodedTargets.size() > nodeCountHintTargetLimit;  // LCOV_EXCL_LINE
+        encodedTargets.size() >
+            kMaxExactTransitionNodeCountHintTargets;  // LCOV_EXCL_LINE
     if (unknownNodeCount ||
         transitionEncodingNodes > encodingNodeLimit ||
         transitionSupportSymbols.size() > encodingSupportLimit) {
@@ -4679,7 +5323,7 @@ std::optional<StateCube> findPredecessorCube(
             " node_limit=",
             encodingNodeLimit,
             " node_hint_target_limit=",
-            nodeCountHintTargetLimit,
+            kMaxExactTransitionNodeCountHintTargets,
             " transition_support=",
             transitionSupportSymbols.size(),
             " support_limit=",
@@ -4752,13 +5396,11 @@ std::optional<StateCube> findPredecessorCube(
           solverCache);
   const unsigned predecessorConflictLimit =
       problem.usesDualRailStateEncoding
-          ? dualRailPredecessorConflictLimitForQuery(
-                problem, targetCube, cachedSolverSymbols.size())
+          ? dualRailPredecessorConflictLimit(purpose)
           : 0;
   const unsigned predecessorDecisionLimit =
       problem.usesDualRailStateEncoding
-          ? dualRailPredecessorDecisionLimitForQuery(
-                problem, targetCube, cachedSolverSymbols.size())
+          ? dualRailPredecessorDecisionLimit(purpose)
           : std::numeric_limits<unsigned>::max();
   if (emitStatsForQuery) {
     emitSecDiag(
@@ -4775,7 +5417,8 @@ std::optional<StateCube> findPredecessorCube(
         " decision_limit=", predecessorDecisionLimit,
         " frame_clauses=",
         level < frames.size() ? frames[level].clauses.size() : 0,
-        " exclude_target=", excludeTargetOnCurrentFrame ? 1 : 0);
+        " exclude_target=", excludeTargetOnCurrentFrame ? 1 : 0,
+        " purpose=", predecessorQueryPurposeName(purpose));
   }
   if (problem.usesDualRailStateEncoding && predecessorAssumptionCache != nullptr &&
       solverCache == nullptr && emitStatsForQuery) {
@@ -4792,6 +5435,7 @@ std::optional<StateCube> findPredecessorCube(
   if (solverCache != nullptr) {
     PredecessorAssumptionSolver* solvedPredecessorCache = nullptr;
     StateCube cachedUnsatCore;
+    const auto solveStart = std::chrono::steady_clock::now();
     const auto cachedStatus = solvePredecessorCubeWithCachedAssumptions(
         *solverCache, problem, solverType, transitionByState,
         complementPartners, initFormula, frameInvariant, frames, level,
@@ -4800,6 +5444,16 @@ std::optional<StateCube> findPredecessorCube(
         predecessorConflictLimit, predecessorDecisionLimit,
         supportCache,
         &solvedPredecessorCache, &cachedUnsatCore);
+    if (emitStatsForQuery) {
+      const auto solveMicros =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - solveStart)
+              .count();
+      emitSecDiag(
+          "SEC PDR stats: predecessor #", statsQueryNumber,
+          " cached_query_us=", solveMicros,
+          " cached_assumptions=1");
+    }
     if (cachedStatus.has_value() &&
         *cachedStatus == SATSolverWrapper::SolveStatus::Unknown) {
       if (pdrStatsEnabled()) {
@@ -4814,14 +5468,8 @@ std::optional<StateCube> findPredecessorCube(
             targetCube.size(),
             " observed_outputs=",
             problem.observedOutputExprs0.size(),
-            " residual_budget=",
-            detail::shouldUseResidualDualRailPredecessorBudget(
-                problem.usesDualRailStateEncoding,
-                problem.observedOutputExprs0.size(),
-                targetCube.size(),
-                cachedSolverSymbols.size())
-                ? 1
-                : 0,
+            " purpose=",
+            predecessorQueryPurposeName(purpose),
             " level=",
             level,
             " cached_assumptions=1");
@@ -4930,14 +5578,8 @@ std::optional<StateCube> findPredecessorCube(
           targetCube.size(),
           " observed_outputs=",
           problem.observedOutputExprs0.size(),
-          " residual_budget=",
-          detail::shouldUseResidualDualRailPredecessorBudget(
-              problem.usesDualRailStateEncoding,
-              problem.observedOutputExprs0.size(),
-              targetCube.size(),
-              solverSymbols.size())
-              ? 1
-              : 0,
+          " purpose=",
+          predecessorQueryPurposeName(purpose),
           " level=",
           level);
     }  // LCOV_EXCL_LINE
@@ -5228,6 +5870,7 @@ class BlockedCubeReductionChecker {
         level_ - 1,
         reduced,
         /*excludeTargetOnCurrentFrame=*/true,
+        PredecessorQueryPurpose::GeneralizeBlocker,
         complementPartners_,
         predecessorAssumptionCache_,
         predecessorQueryBudget_,
@@ -5473,7 +6116,9 @@ void learnBlockedObligation(
     const auto predecessor = findPredecessorCube(
         problem, solverType, transitionByState, initFormula, frameInvariant,
         frames, learnedLevel, cube,
-        /*excludeTargetOnCurrentFrame=*/true, complementPartners,
+        /*excludeTargetOnCurrentFrame=*/true,
+        PredecessorQueryPurpose::LiftBlocker,
+        complementPartners,
         &predecessorAssumptionCache, predecessorQueryBudget,
         supportCache);
     if (hasPdrBudgetExhaustion() || predecessor.has_value()) {
@@ -5600,6 +6245,7 @@ bool blockProofObligations(const KInductionProblem& problem,
         obligation.level - 1,
         obligation.cube,
         /*excludeTargetOnCurrentFrame=*/true,
+        PredecessorQueryPurpose::BlockObligation,
         complementPartners,
         &predecessorAssumptionCache,
         predecessorQueryBudget,
@@ -5720,6 +6366,7 @@ void propagateClauses(const KInductionProblem& problem,
           level,
           violatingCube,
           false,
+          PredecessorQueryPurpose::PropagateClause,
           complementPartners,
           predecessorAssumptionCache,
           predecessorQueryBudget,
@@ -6233,6 +6880,10 @@ PDRResult PDREngine::run(size_t maxFrames, BoolExpr* property) const {
   PredecessorAssumptionCache predecessorAssumptionCache;
   predecessorAssumptionCache.stateRelations = &complementPartners;
   if (sharedExactInit != nullptr) {
+    const size_t sharedRunId = sharedExactInit->nextHigherFrameRunId++;
+    if (sharedExactInit->nextHigherFrameRunId == 0) {  // LCOV_EXCL_LINE
+      sharedExactInit->nextHigherFrameRunId = 1;  // LCOV_EXCL_LINE
+    }
     predecessorAssumptionCache.sharedTargetSurfaces =
         &sharedExactInit->targetSurfaces;
     predecessorAssumptionCache.sharedFrameZeroPredecessorSolver =
@@ -6249,6 +6900,18 @@ PDRResult PDREngine::run(size_t maxFrames, BoolExpr* property) const {
         sharedExactInit->sourceProblem;
     predecessorAssumptionCache.sharedFrameZeroQueryTransition =
         &sharedExactInit->transitionByState;
+    predecessorAssumptionCache.sharedHigherFrameSolverPools =
+        &sharedExactInit->higherFramePredecessorSolverPools;
+    predecessorAssumptionCache.sharedHigherFrameProblem =
+        sharedExactInit->sourceProblem;
+    predecessorAssumptionCache.sharedHigherFrameTransitionModel =
+        sharedExactInit->sourceProblem;
+    predecessorAssumptionCache.sharedHigherFrameRunId = sharedRunId;
+    predecessorAssumptionCache.sharedHigherFrameFamilySymbols =
+        &formulaSupportCache.relationClosedSupport(
+            runProblem->property, complementPartners);
+    predecessorAssumptionCache.usePathLocalHigherFrameSolverReuse =
+        runProblem->usesStrictDualRailEqualityProperty;
   }
   size_t remainingPredecessorQueries = maxPredecessorQueries_;
   size_t* predecessorQueryBudget =

@@ -233,6 +233,9 @@ struct KInductionProblem {
   // the normal reset-bootstrap prefix so reset controls are driven exactly as
   // they are in the binary SEC flow.
   bool usesDualRailStateEncoding = false;
+  // The second dual-rail SEC round proves strict equality of both rails. Its
+  // recursive output splits use path-local incremental PDR solver contexts.
+  bool usesStrictDualRailEqualityProperty = false;
   // Output-batched dual-rail KI proves each output slice independently.  When
   // this flag is set, the slice skips local base checks because the caller will
   // validate the shared full-output base prefix once after all slices prove.

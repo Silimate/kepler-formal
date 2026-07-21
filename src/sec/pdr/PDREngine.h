@@ -207,47 +207,6 @@ inline bool shouldResetPdrStableUnsatCache(size_t stableUnsatEntries,
   return stableUnsatEntries >= maxEntries;
 }
 
-inline bool isBroadDualRailResidualOutputSurface(
-    bool usesDualRailStateEncoding,
-    size_t observedOutputCount,
-    size_t originalObservedOutputCount,
-    size_t broadOutputLimit) {
-  // A one-output residual leaf split from a broad public bus may use the local
-  // memory/perf shortcuts. AES-sized leaves also have one output after
-  // splitting, but keep the reference PDR route.
-  return usesDualRailStateEncoding &&
-         observedOutputCount == 1 && // LCOV_EXCL_LINE
-         originalObservedOutputCount > broadOutputLimit; // LCOV_EXCL_LINE
-}
-
-inline size_t dualRailPredecessorEncodingLimitForSurface(
-    bool broadResidualOutputSurface,
-    size_t configuredLimit,
-    size_t residualMinimum) {
-  // The exact transition cone, rather than the enclosing design's state count,
-  // determines whether a residual predecessor encoding is local.
-  if (!broadResidualOutputSurface || configuredLimit == 0) {
-    return configuredLimit;
-  }
-  return std::max(configuredLimit, residualMinimum);
-}
-
-inline bool shouldUseResidualDualRailPredecessorBudget( // LCOV_EXCL_LINE
-    bool usesDualRailStateEncoding,
-    size_t observedOutputCount,
-    size_t targetCubeSize,
-    size_t solverSymbolCount) {
-  constexpr size_t kMaxOriginalResidualSolverSymbols = 68 * 1024; // LCOV_EXCL_LINE
-  // The exact SAT surface is the relevant resource measure. IC3 can grow a
-  // local cube past an arbitrary literal-count threshold while its complete
-  // predecessor cone remains bounded, so do not stop a one-output residual on
-  // target count alone.
-  return usesDualRailStateEncoding && // LCOV_EXCL_LINE
-         observedOutputCount == 1 && // LCOV_EXCL_LINE
-         targetCubeSize != 0 && // LCOV_EXCL_LINE
-         solverSymbolCount <= kMaxOriginalResidualSolverSymbols; // LCOV_EXCL_LINE
-}
-
 inline bool shouldSharePredecessorUnsatCore( // LCOV_EXCL_LINE
     size_t frameFingerprint,
     bool excludeTargetOnCurrentFrame) {

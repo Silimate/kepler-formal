@@ -1191,6 +1191,7 @@ bool configureStrictDualRailOutputProperty(KInductionProblem& problem) {
   problem.observedOutputExprs1.assign(
       problem.observedOutputExprs0.size(), BoolExpr::createTrue());
   rebuildSelectedOutputProperty(problem);
+  problem.usesStrictDualRailEqualityProperty = true;
   problem.description += " strict three-valued equality";
   return true;
 }

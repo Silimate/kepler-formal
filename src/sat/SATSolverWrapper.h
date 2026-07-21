@@ -368,6 +368,14 @@ public:
     return solveStatus() == SolveStatus::Sat;
   }
 
+  bool hasSatisfyingModel() const {
+    // CaDiCaL keeps its concrete model valid only while the solver remains in
+    // SATISFIED state. Adding a clause, declaring variables, or starting a new
+    // assumption query moves it back to a non-satisfied state automatically.
+    return solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL &&
+           cadicalSolver_->status() == 10;
+  }
+
   SolveStatus solveStatus() {
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       return glucoseSolver_->solve() ? SolveStatus::Sat : SolveStatus::Unsat;
@@ -840,10 +848,9 @@ public:
       auto* solver = cadicalSolver_.get();
       // LCOV_EXCL_STOP
       // CaDiCaL is the default local solver for assumption-capable validation
-      // queries.  These SEC/PDR validators are rebuilt from scratch and only
-      // need a quick SAT/UNSAT answer, so avoid expensive inprocessing and
-      // recursive clause polishing that samples showed dominating deeper
-      // sky130hs_ibex frontier checks.
+      // queries. Short-lived callers only need a quick SAT/UNSAT answer, so
+      // avoid expensive inprocessing and recursive clause polishing that
+      // samples showed dominating deeper sky130hs_ibex frontier checks.
       // LCOV_EXCL_START
       setCadicalOptionIfSupported(solver, "inprocessing", 0);
       setCadicalOptionIfSupported(solver, "compact", 0);
@@ -917,6 +924,20 @@ public:
     setKissatOptionOrThrow(solver, "probeinit", 0);
     setKissatOptionOrThrow(solver, "eliminate", 0);
     setKissatOptionOrThrow(solver, "eliminateinit", 0);
+  }
+
+  void configureForSecPdrPersistentQuery(size_t coneSymbols = 0) {
+    configureForSecPdrQuery(coneSymbols);
+    if (solverType_ != KEPLER_FORMAL::Config::SolverType::CADICAL) {
+      return;  // LCOV_EXCL_LINE
+    }
+    // A shared PDR solver receives permanent units that retire old property
+    // selectors. Re-enable CaDiCaL's exact clause/variable compaction so those
+    // satisfied contexts do not accumulate across output batches. All other
+    // PDR query settings and every logical clause remain unchanged.
+    auto* solver = cadicalSolver_.get();
+    setCadicalOptionIfSupported(solver, "compact", 1);
+    setCadicalOptionIfSupported(solver, "arenacompact", 1);
   }
 
   void configureForSecLocalBooleanCheck(size_t coneSymbols = 0) {
