@@ -12463,11 +12463,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailDefaultsToExactSingletonOutputBatches) {
+       RunExtractedModelsPdrDualRailStartsWithExactAdaptiveOutputBatch) {
   auto models = makeHeldRailModelsForTest(
-      "dualRailSingletonBatches", false, false);
+      "dualRailAdaptiveBatches", false, false);
   const SignalKey secondOutput =
-      makeSignalKey("dualRailSingletonBatchesSecondOutput");
+      makeSignalKey("dualRailAdaptiveBatchesSecondOutput");
   for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
     model->allObservedOutputs.push_back(secondOutput);
     model->observedOutputs.push_back(secondOutput);
@@ -12492,29 +12492,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.coveredOutputs, 2u);
   EXPECT_NE(
       stderrOutput.find(
-          "PDR output batch begin index=0 pending_batches=2 "
-          "output_range=0..1"),
+          "PDR output batch begin index=0 pending_batches=1 "
+          "output_range=0..2"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "PDR output batch begin index=1 pending_batches=2 "
-          "output_range=1..2"),
+          "PDR strict output batch begin index=0 pending_batches=1 "
+          "output_range=0..2"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR strict output batch begin index=0 pending_batches=2 "
-          "output_range=0..1"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR strict output batch begin index=1 pending_batches=2 "
-          "output_range=1..2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("output_range=0..2"), std::string::npos)
+  EXPECT_EQ(stderrOutput.find("output_range=0..1"), std::string::npos)
       << stderrOutput;
 }
 
@@ -14927,6 +14915,49 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(stderrOutput.find("purpose=block"), std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("residual_budget="), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineExplicitBatchProbeLimitsOverrideFullRoleBudget) {
+  KInductionProblem problem;
+  constexpr size_t targetState = 2;
+  constexpr size_t stateA = 3;
+  constexpr size_t stateB = 4;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {targetState, stateA, stateB};
+  problem.allSymbols = problem.state0Symbols;
+  problem.totalStateCount = problem.state0Symbols.size();
+  problem.transitions0 = {
+      {targetState, BoolExpr::Or(BoolExpr::Var(stateA), BoolExpr::Var(stateB))},
+      {stateA, BoolExpr::Var(stateA)},
+      {stateB, BoolExpr::Var(stateB)}};
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(targetState));
+  problem.bad = BoolExpr::Var(targetState);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(targetState)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"explicit_batch_probe_budget"};
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  (void)engine.run(
+      1, problem.property,
+      PDRQueryLimits{/*predecessorConflictLimit=*/10000,
+                     /*predecessorDecisionLimit=*/150000});
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(stderrOutput.find("conflict_limit=10000"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("decision_limit=150000"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("purpose=block"), std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("conflict_limit=250000"), std::string::npos)
       << stderrOutput;
 }
 

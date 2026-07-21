@@ -28,6 +28,11 @@ struct PDRResult {
   size_t bound = 0;
 };
 
+struct PDRQueryLimits {
+  unsigned predecessorConflictLimit = 0;
+  unsigned predecessorDecisionLimit = 0;
+};
+
 // Output batches from one SEC problem have the same immutable transition and
 // startup model. This serial, scoped cache keeps exact model preparation and
 // F[0] work across PDR runs; learned frames, SAT answers, and proof obligations
@@ -234,8 +239,15 @@ class PDREngine {
   // The target is deliberately separate from the model so it cannot alter
   // exact F[0]; the corresponding bad predicate is derived internally.
   PDRResult run(size_t maxFrames, BoolExpr* property) const;
+  PDRResult run(size_t maxFrames,
+                BoolExpr* property,
+                const PDRQueryLimits& queryLimits) const;
 
  private:
+  PDRResult runWithQueryLimits(size_t maxFrames,
+                               BoolExpr* property,
+                               const PDRQueryLimits* queryLimits) const;
+
   const KInductionProblem& problem_;
   KEPLER_FORMAL::Config::SolverType solverType_;
   size_t maxPredecessorQueries_ = 0;

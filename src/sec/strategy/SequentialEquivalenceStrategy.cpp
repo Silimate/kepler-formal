@@ -2915,6 +2915,22 @@ const char* pdrStatusName(PDRStatus status) {
   }
 }
 
+constexpr PDRQueryLimits kDualRailPdrBatchProbeLimits{
+    /*predecessorConflictLimit=*/10 * 1000,
+    /*predecessorDecisionLimit=*/150 * 1000};
+
+PDRResult runPdrOutputBatch(const PDREngine& engine,
+                            size_t maxFrames,
+                            BoolExpr* property,
+                            size_t outputCount) {
+  if (outputCount == 1) {
+    return engine.run(maxFrames, property);
+  }
+  // A broad UNKNOWN only schedules exact child properties. Full query limits
+  // are reserved for singleton leaves, so failed probes cannot dominate them.
+  return engine.run(maxFrames, property, kDualRailPdrBatchProbeLimits);
+}
+
 PdrAgeOptions capPdrAgeOptionsToMaxFrames(
     const PdrAgeOptions& options,
     size_t maxFrames) {
@@ -2988,8 +3004,12 @@ class PdrAgeProofSession {
     return search;
   }
 
-  PDRResult runFromAge(BoolExpr* property, size_t age) const {
-    return engine_.run(maxFrames_, monitor_.propertyFromAge(age, property));
+  PDRResult runFromAge(BoolExpr* property,
+                       size_t age,
+                       size_t outputCount) const {
+    return runPdrOutputBatch(
+        engine_, maxFrames_, monitor_.propertyFromAge(age, property),
+        outputCount);
   }
 
   BoolExpr* propertyFromAge(size_t age, BoolExpr* property) const {
@@ -3000,9 +3020,10 @@ class PdrAgeProofSession {
   PDRResult probeDefinedAge(size_t firstOutput,
                             size_t endOutput,
                             size_t age) const {
-    return engine_.run(
-        maxFrames_,
-        monitor_.outputsDefinedFromAge(firstOutput, endOutput, age));
+    return runPdrOutputBatch(
+        engine_, maxFrames_,
+        monitor_.outputsDefinedFromAge(firstOutput, endOutput, age),
+        endOutput - firstOutput);
   }
 
   PdrAgeMonitor monitor_;
@@ -3411,13 +3432,11 @@ SequentialEquivalenceResult runPdrSecEngine(
   // still uses the complete transition system and exact F[0].
   // LCOV_DISABLED_STOP
   //
-  // Keep binary PDR batches bounded; dual rail uses exact singleton properties.
+  // Keep PDR batches bounded. A resource-limited dual-rail batch is split
+  // recursively, and only singleton leaves receive the full query budget.
   constexpr size_t kMinOutputsForBatchedPdrProof = 129;
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
-  // Dual-rail ASIC outputs can have disjoint cones. Start with exact singleton
-  // properties so failed wide probes do not retain unrelated SAT contexts
-  // before the existing split-to-singleton fallback reaches the same leaves.
-  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{1, 8192};
+  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{128, 8192};
   const OutputBatchingLimits pdrOutputBatchingLimits =
       // LCOV_DISABLED_START
       problem.usesDualRailStateEncoding ? dualRailPdrOutputBatchingLimits(
@@ -3546,11 +3565,13 @@ SequentialEquivalenceResult runPdrSecEngine(
     PDRResult pdrResult;
     if (useAutomaticAge) {
       pdrResult = ageSession->runFromAge(
-          exactBatchProblem.property, *selectedAge);
+          exactBatchProblem.property, *selectedAge, endOutput - firstOutput);
     } else {
       PDREngine pdrEngine(
           exactBatchProblem, solverType, 0, exactInitCache);
-      pdrResult = pdrEngine.run(maxK);
+      pdrResult = runPdrOutputBatch(
+          pdrEngine, maxK, exactBatchProblem.property,
+          endOutput - firstOutput);
     }
     if (isSecDiagEnabled()) {
       emitSecDiag(
@@ -3679,11 +3700,14 @@ SequentialEquivalenceResult runPdrSecEngine(
         PDRResult strictResult;
         if (batch.ageGate.has_value()) {
           strictResult = ageSession->runFromAge(
-              strictBatchProblem.property, *batch.ageGate);
+              strictBatchProblem.property, *batch.ageGate,
+              endOutput - firstOutput);
         } else {
           PDREngine strictPdrEngine(
               strictBatchProblem, solverType, 0, exactInitCache);
-          strictResult = strictPdrEngine.run(maxK);
+          strictResult = runPdrOutputBatch(
+              strictPdrEngine, maxK, strictBatchProblem.property,
+              endOutput - firstOutput);
         }
         if (isSecDiagEnabled()) {
           emitSecDiag(

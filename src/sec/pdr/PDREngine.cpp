@@ -1398,6 +1398,20 @@ enum class PdrBudgetExhaustion {
 thread_local PdrBudgetExhaustion pdrBudgetExhaustion =
     PdrBudgetExhaustion::None;
 thread_local size_t pdrPredecessorQueryLimit = 0;
+thread_local const PDRQueryLimits* activePdrQueryLimits = nullptr;
+
+class ScopedPdrQueryLimits {
+ public:
+  explicit ScopedPdrQueryLimits(const PDRQueryLimits* limits)
+      : previous_(activePdrQueryLimits) {
+    activePdrQueryLimits = limits;
+  }
+
+  ~ScopedPdrQueryLimits() { activePdrQueryLimits = previous_; }
+
+ private:
+  const PDRQueryLimits* previous_ = nullptr;
+};
 
 bool pdrStatsEnabled();
 
@@ -1491,6 +1505,9 @@ unsigned dualRailBadCubeConflictLimit() {
 }
 
 unsigned dualRailPredecessorConflictLimit(PredecessorQueryPurpose purpose) {
+  if (activePdrQueryLimits != nullptr) {
+    return activePdrQueryLimits->predecessorConflictLimit;
+  }
   const unsigned configuredLimit = envUnsignedLimitOrDefaultAllowZero(
       kDualRailPredecessorConflictLimitEnv,
       kDefaultDualRailPredecessorConflictLimit);
@@ -1502,6 +1519,9 @@ unsigned dualRailPredecessorConflictLimit(PredecessorQueryPurpose purpose) {
 }
 
 unsigned dualRailPredecessorDecisionLimit(PredecessorQueryPurpose purpose) {
+  if (activePdrQueryLimits != nullptr) {
+    return activePdrQueryLimits->predecessorDecisionLimit;
+  }
   const unsigned configuredLimit = envUnsignedLimitOrDefaultAllowZero(
       kDualRailPredecessorDecisionLimitEnv,
       kDefaultDualRailPredecessorDecisionLimit);
@@ -6765,13 +6785,29 @@ PDREngine::PDREngine(const KInductionProblem& problem,
       exactInitCache_(std::move(exactInitCache)) {}
 
 PDRResult PDREngine::run(size_t maxFrames) const {
-  return run(maxFrames, problem_.property);
+  return runWithQueryLimits(maxFrames, problem_.property, nullptr);
 }
 
 PDRResult PDREngine::run(size_t maxFrames, BoolExpr* property) const {
+  return runWithQueryLimits(maxFrames, property, nullptr);
+}
+
+PDRResult PDREngine::run(size_t maxFrames,
+                         BoolExpr* property,
+                         const PDRQueryLimits& queryLimits) const {
+  return runWithQueryLimits(maxFrames, property, &queryLimits);
+}
+
+PDRResult PDREngine::runWithQueryLimits(
+    size_t maxFrames,
+    BoolExpr* property,
+    const PDRQueryLimits* queryLimits) const {
   if (property == nullptr) {
     return {PDRStatus::Inconclusive, 0};  // LCOV_EXCL_LINE
   }
+  // Batch probes use smaller SAT limits only to decide whether to split. A
+  // limit hit remains UNKNOWN, and singleton leaves run with the normal limits.
+  const ScopedPdrQueryLimits scopedQueryLimits(queryLimits);
   const bool usesDefaultProperty = property == problem_.property;
   BoolExpr* normalizedProperty = BoolExpr::simplify(property);
   BoolExpr* normalizedBad =
