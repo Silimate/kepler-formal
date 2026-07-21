@@ -3411,10 +3411,13 @@ SequentialEquivalenceResult runPdrSecEngine(
   // still uses the complete transition system and exact F[0].
   // LCOV_DISABLED_STOP
   //
-  // Keep each PDR batch bounded, but do not prove one output per engine run.
+  // Keep binary PDR batches bounded; dual rail uses exact singleton properties.
   constexpr size_t kMinOutputsForBatchedPdrProof = 129;
   constexpr OutputBatchingLimits kPdrOutputBatchingLimits{32, 1024};
-  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{128, 8192};
+  // Dual-rail ASIC outputs can have disjoint cones. Start with exact singleton
+  // properties so failed wide probes do not retain unrelated SAT contexts
+  // before the existing split-to-singleton fallback reaches the same leaves.
+  constexpr OutputBatchingLimits kDualRailPdrOutputBatchingLimits{1, 8192};
   const OutputBatchingLimits pdrOutputBatchingLimits =
       // LCOV_DISABLED_START
       problem.usesDualRailStateEncoding ? dualRailPdrOutputBatchingLimits(

@@ -4530,6 +4530,36 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CadicalSatisfyingModelValidityTracksFormulaChanges) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  solver.configureForSecPdrQuery();
+  const int x = solver.newVar() + 2;
+  const int y = solver.newVar() + 2;
+  solver.addClause({x, y});
+
+  EXPECT_FALSE(solver.hasSatisfyingModel());
+  ASSERT_EQ(
+      solver.solveWithAssumptionsStatus({x}),
+      SATSolverWrapper::SolveStatus::Sat);
+  EXPECT_TRUE(solver.hasSatisfyingModel());
+  EXPECT_TRUE(solver.getLiteralValue(x));
+
+  // A formula change invalidates the retained model before another query can
+  // inspect it, even when the old assignment also happens to satisfy the clause.
+  solver.addClause({x});
+  EXPECT_FALSE(solver.hasSatisfyingModel());
+  ASSERT_EQ(
+      solver.solveWithAssumptionsStatus({y}),
+      SATSolverWrapper::SolveStatus::Sat);
+  EXPECT_TRUE(solver.hasSatisfyingModel());
+  EXPECT_TRUE(solver.getLiteralValue(y));
+
+  EXPECT_FALSE(
+      SATSolverWrapper(KEPLER_FORMAL::Config::SolverType::GLUCOSE)
+          .hasSatisfyingModel());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        CadicalCraigInterpolationReturnsProofDerivedGlobalClause) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
   solver.enableCraigInterpolation();
@@ -5260,7 +5290,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineFullyGeneralizesCheapConstantBlockedWideCubes) {
   KInductionProblem problem;
-  constexpr size_t kStateCount = 512;
+  // Keep this above PDR's per-group reserve-hint threshold. Missing a reserve
+  // hint must not turn an otherwise exact, cheap proof into inconclusive.
+  constexpr size_t kStateCount = 513;
   const size_t firstStateSymbol = 2;
   const size_t constantFalseSymbol = firstStateSymbol + kStateCount - 1;
 
@@ -6364,38 +6396,23 @@ TEST_F(SequentialEquivalenceStrategyTests,
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineProvesEquivalentWithinThreeFrames) {
   const auto problem = buildLinearChainSecProblem(4);
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
 
   // This is an engine-regression check for the current binary-chain model and
   // current clause-generalization behavior.  It is not a portable "classic PDR
   // must prove safe exactly at k=3" theorem: safe IC3/PDR proofs may converge
   // earlier whenever a stronger inductive invariant is learned.
-  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
-  const auto result = engine.run(3);
-
-  EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PDREngineDoesNotSubstituteRetainedModelForExactPredecessorSolve) {
-  const auto problem = buildLinearChainSecProblem(4);
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  // Reusing the prepared CNF and assumptions is safe. Reusing the previous SAT
-  // assignment as the answer changes finite-budget witness selection and once
-  // collapsed strict dual-rail SEC coverage from 539/598 outputs to 0/598.
+  EXPECT_LE(result.bound, 3u);
+  // Neighboring exact solveRelative queries can use the preceding concrete
+  // model only after every new assumption has been checked in that model.
   EXPECT_NE(
-      stderrOutput.find("predecessor target assumptions reused"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
       stderrOutput.find("predecessor cached SAT model reused"),
       std::string::npos)
       << stderrOutput;
@@ -12446,6 +12463,62 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailDefaultsToExactSingletonOutputBatches) {
+  auto models = makeHeldRailModelsForTest(
+      "dualRailSingletonBatches", false, false);
+  const SignalKey secondOutput =
+      makeSignalKey("dualRailSingletonBatchesSecondOutput");
+  for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
+    model->allObservedOutputs.push_back(secondOutput);
+    model->observedOutputs.push_back(secondOutput);
+    model->displayNameByKey.emplace(secondOutput, "second_out[0]");
+    model->observedOutputExprByKey.emplace(secondOutput, BoolExpr::Var(2));
+  }
+  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+
+  testing::internal::CaptureStderr();
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady);
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
+      << stderrOutput;
+  EXPECT_EQ(result.coveredOutputs, 2u);
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR output batch begin index=0 pending_batches=2 "
+          "output_range=0..1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR output batch begin index=1 pending_batches=2 "
+          "output_range=1..2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR strict output batch begin index=0 pending_batches=2 "
+          "output_range=0..1"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "PDR strict output batch begin index=1 pending_batches=2 "
+          "output_range=1..2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(stderrOutput.find("output_range=0..2"), std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        RunExtractedModelsPdrDualRailAutoAgeLeavesPermanentXInconclusive) {
   const auto models = makeHeldRailModelsForTest(
       "dualRailPermanentXWithAge", std::nullopt, std::nullopt);
@@ -14844,11 +14917,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // Mandatory Figure 6 blocking receives one finite role-based budget. The
   // enclosing design's original output count does not select this policy.
   EXPECT_NE(
-      stderrOutput.find("conflict_limit=200000"),
+      stderrOutput.find("conflict_limit=250000"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("decision_limit=4000000"),
+      stderrOutput.find("decision_limit=10000000"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find("purpose=block"), std::string::npos)

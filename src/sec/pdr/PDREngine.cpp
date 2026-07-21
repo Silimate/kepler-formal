@@ -92,26 +92,29 @@ namespace {
 // it was meant to avoid. Above this limit we skip only the cheap contradiction
 // shortcut; the exact Init SAT query still decides intersection.
 constexpr size_t kMaxComplementPairsForCheapInitCheck = 1024;
-// Node counts are reserve hints only. Use exact hints for local groups and rely
-// on the encoder's bounded growth for ASIC-sized groups.
+// Per-group node counts are reserve hints only. Skip expensive reserve sizing
+// for very wide groups; the exact whole-query resource guard is counted
+// independently and must never treat a missing hint as proof exhaustion.
 constexpr size_t kMaxExactTransitionNodeCountHintTargets = 512;
 // Full-state bad cubes require discovering the complete state support. If the
 // formula walk exceeds this resource bound, PDR returns inconclusive.
 constexpr size_t kMaxPreciseBadCubeSupportNodes = 262144;
 constexpr unsigned kDefaultDualRailBadCubeConflictLimit = 20000;
-constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 10000;
+constexpr unsigned kDefaultDualRailPredecessorConflictLimit = 250 * 1000;
 // Incremental assumption solving counts this as a propagation budget, so it
 // needs more room than the conflict cap for ordinary exact predecessor queries.
-constexpr unsigned kDefaultDualRailPredecessorDecisionLimit = 150000;
+constexpr unsigned kDefaultDualRailPredecessorDecisionLimit =
+    10 * 1000 * 1000;
 // Blocking a proof obligation is the mandatory relative-induction query in
-// Figure 6. Give that exact query a deeper but still finite allowance while
-// keeping optional Figure 9 propagation at the inexpensive default.
-constexpr unsigned kDefaultDualRailBlockingConflictLimit = 200000;
-constexpr unsigned kDefaultDualRailBlockingDecisionLimit = 4 * 1000 * 1000;
+// Figure 6. Keep its role-specific floor equal to the measured exact-query
+// default so an explicit lower user limit can still override both values.
+constexpr unsigned kDefaultDualRailBlockingConflictLimit = 250 * 1000;
+constexpr unsigned kDefaultDualRailBlockingDecisionLimit = 10 * 1000 * 1000;
 // Encoding guards are based only on the exact predecessor cone. Every output
 // batch receives the same finite limits; enclosing design or port counts never
 // select a different PDR problem or resource policy.
-constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit = 5 * 1000 * 1000;
+constexpr size_t kDefaultDualRailPredecessorEncodingNodeLimit =
+    7500 * 1000;
 constexpr size_t kDefaultDualRailPredecessorEncodingSupportLimit = 64 * 1024;
 constexpr const char* kDualRailPredecessorConflictLimitEnv =
     "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_CONFLICT_LIMIT";
@@ -974,6 +977,7 @@ struct PredecessorAssumptionSolver {
   // context-independent learned clauses can affect a later batch.
   GuardedPredecessorFrameContext guardedContext;
   size_t guardedContextCount = 0;
+  size_t satisfyingModelReuseCount = 0;
 
   bool canExtendTo(const PredecessorAssumptionCacheKey& candidate) const {
     return key.hasSameReusableContext(candidate) &&
@@ -1006,6 +1010,13 @@ struct PredecessorAssumptionSolver {
       size_t frame,
       const StateClause& targetIdentity,
       const std::vector<TransitionEncodingLiteralGroup>& groups);
+
+  bool currentModelSatisfiesPredecessorQuery(
+      const PreparedPredecessorTargetAssumptions& preparedTarget,
+      const StateClause& exclusionClause,
+      size_t frame,
+      bool requireGuardedContext,
+      bool excludeTargetOnCurrentFrame) const;
 
 };
 
@@ -1952,7 +1963,7 @@ PredecessorTargetSurface buildPredecessorTargetSurface(
       estimateTransitionEncodingNodes(
           transitionByState,
           surface.encodedTargets,
-          kMaxExactTransitionNodeCountHintTargets);
+          std::numeric_limits<size_t>::max());
   return surface;
 }
 
@@ -2851,6 +2862,47 @@ PredecessorAssumptionSolver::prepareTargetAssumptions(
       targetIdentity, std::move(prepared));
   (void)insertedNew;
   return inserted->second;
+}
+
+bool PredecessorAssumptionSolver::currentModelSatisfiesPredecessorQuery(
+    const PreparedPredecessorTargetAssumptions& preparedTarget,
+    const StateClause& exclusionClause,
+    size_t frame,
+    bool requireGuardedContext,
+    bool excludeTargetOnCurrentFrame) const {
+  if (!solver->hasSatisfyingModel()) {
+    return false;
+  }
+  for (const int assumption : preparedTarget.assumptions) {
+    if (!solver->getLiteralValue(assumption)) {
+      return false;
+    }
+  }
+  if (requireGuardedContext &&
+      !solver->getLiteralValue(guardedContext.activationLiteral)) {
+    return false;
+  }
+  if (!excludeTargetOnCurrentFrame) {
+    return true;
+  }
+
+  // The exclusion clause is exactly the negation of the target cube. Check it
+  // directly in the retained concrete model before allocating a query-local
+  // selector; one true clause literal proves that the model is outside target.
+  for (const auto& literal : exclusionClause) {
+    if (!variables->hasSymbol(literal.symbol)) {
+      throw std::runtime_error( // LCOV_EXCL_LINE
+          "PDR cached model check missing symbol " + // LCOV_EXCL_LINE
+          std::to_string(literal.symbol) + " at frame " + // LCOV_EXCL_LINE
+          std::to_string(frame)); // LCOV_EXCL_LINE
+    }
+    const int stateLiteral = variables->getLiteral(literal.symbol, frame);
+    const int clauseLiteral = literal.positive ? stateLiteral : -stateLiteral;
+    if (solver->getLiteralValue(clauseLiteral)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 StateCube failedAssumptionCubeFromTargetContext(
@@ -4242,6 +4294,36 @@ solvePredecessorCubeWithCachedAssumptions(
   const bool useGuardedBatchContext =
       level > 0 && cache.sharedHigherFrameSolverPools != nullptr &&
       cachedSolver.guardedContext.runId == cache.sharedHigherFrameRunId;
+  if (preparedTarget.assumptions.empty() && !useGuardedBatchContext &&
+      !excludeTargetOnCurrentFrame) {
+    return std::nullopt; // LCOV_EXCL_LINE
+  }
+  // Reuse only a concrete model that satisfies the complete new predecessor
+  // query. This is the same exact SAT witness the next assumption solve seeks;
+  // it changes neither the IC3 obligation nor any learned frame clause.
+  if (cachedSolver.currentModelSatisfiesPredecessorQuery(
+          preparedTarget,
+          targetSurface.exclusionClause,
+          0,
+          useGuardedBatchContext,
+          excludeTargetOnCurrentFrame)) {
+    ++cachedSolver.satisfyingModelReuseCount;
+    if (solvedCache != nullptr) {
+      *solvedCache = &cachedSolver;
+    }
+    if (shouldEmitFrequentPdrStats()) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor cached SAT model reused hits=",
+          cachedSolver.satisfyingModelReuseCount,
+          " target_assumptions=",
+          preparedTarget.assumptions.size(),
+          " guarded_context=",
+          useGuardedBatchContext ? 1 : 0,
+          " exclude_target=",
+          excludeTargetOnCurrentFrame ? 1 : 0);
+    }
+    return SATSolverWrapper::SolveStatus::Sat;
+  }
   if (useGuardedBatchContext || excludeTargetOnCurrentFrame) {
     cachedSolver.targetAssumptions = preparedTarget.assumptions;
     if (useGuardedBatchContext) {
@@ -4255,10 +4337,6 @@ solvePredecessorCubeWithCachedAssumptions(
     }
     queryAssumptions = &cachedSolver.targetAssumptions;
   }
-  if (queryAssumptions->empty()) {
-    return std::nullopt; // LCOV_EXCL_LINE
-  }
-
   if (solvedCache != nullptr) {
     *solvedCache = &cachedSolver;
   }
@@ -5232,12 +5310,7 @@ std::optional<StateCube> findPredecessorCube(
     const size_t encodingNodeLimit = dualRailPredecessorEncodingNodeLimit();
     const size_t encodingSupportLimit =
         dualRailPredecessorEncodingSupportLimit();
-    const bool unknownNodeCount =
-        transitionEncodingNodes == 0 &&
-        encodedTargets.size() >
-            kMaxExactTransitionNodeCountHintTargets;  // LCOV_EXCL_LINE
-    if (unknownNodeCount ||
-        transitionEncodingNodes > encodingNodeLimit ||
+    if (transitionEncodingNodes > encodingNodeLimit ||
         transitionSupportSymbols.size() > encodingSupportLimit) {
       if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
@@ -5247,8 +5320,6 @@ std::optional<StateCube> findPredecessorCube(
             transitionEncodingNodes,
             " node_limit=",
             encodingNodeLimit,
-            " node_hint_target_limit=",
-            kMaxExactTransitionNodeCountHintTargets,
             " transition_support=",
             transitionSupportSymbols.size(),
             " support_limit=",
