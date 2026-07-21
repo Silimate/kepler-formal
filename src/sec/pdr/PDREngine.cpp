@@ -974,7 +974,6 @@ struct PredecessorAssumptionSolver {
   // context-independent learned clauses can affect a later batch.
   GuardedPredecessorFrameContext guardedContext;
   size_t guardedContextCount = 0;
-  size_t satisfyingModelReuseCount = 0;
 
   bool canExtendTo(const PredecessorAssumptionCacheKey& candidate) const {
     return key.hasSameReusableContext(candidate) &&
@@ -1007,13 +1006,6 @@ struct PredecessorAssumptionSolver {
       size_t frame,
       const StateClause& targetIdentity,
       const std::vector<TransitionEncodingLiteralGroup>& groups);
-
-  bool currentModelSatisfiesPredecessorQuery(
-      const PreparedPredecessorTargetAssumptions& preparedTarget,
-      const StateClause& exclusionClause,
-      size_t frame,
-      bool requireGuardedContext,
-      bool excludeTargetOnCurrentFrame) const;
 
 };
 
@@ -2861,47 +2853,6 @@ PredecessorAssumptionSolver::prepareTargetAssumptions(
   return inserted->second;
 }
 
-bool PredecessorAssumptionSolver::currentModelSatisfiesPredecessorQuery(
-    const PreparedPredecessorTargetAssumptions& preparedTarget,
-    const StateClause& exclusionClause,
-    size_t frame,
-    bool requireGuardedContext,
-    bool excludeTargetOnCurrentFrame) const {
-  if (!solver->hasSatisfyingModel()) {
-    return false;
-  }
-  for (const int assumption : preparedTarget.assumptions) {
-    if (!solver->getLiteralValue(assumption)) {
-      return false;
-    }
-  }
-  if (requireGuardedContext &&
-      !solver->getLiteralValue(guardedContext.activationLiteral)) {
-    return false;
-  }
-  if (!excludeTargetOnCurrentFrame) {
-    return true;
-  }
-
-  // The exclusion clause is exactly the negation of the target cube. Check it
-  // directly in the retained concrete model before allocating a query-local
-  // selector; one true clause literal proves that the model is outside target.
-  for (const auto& literal : exclusionClause) {
-    if (!variables->hasSymbol(literal.symbol)) {
-      throw std::runtime_error( // LCOV_EXCL_LINE
-          "PDR cached model check missing symbol " + // LCOV_EXCL_LINE
-          std::to_string(literal.symbol) + " at frame " + // LCOV_EXCL_LINE
-          std::to_string(frame)); // LCOV_EXCL_LINE
-    }
-    const int stateLiteral = variables->getLiteral(literal.symbol, frame);
-    const int clauseLiteral = literal.positive ? stateLiteral : -stateLiteral;
-    if (solver->getLiteralValue(clauseLiteral)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 StateCube failedAssumptionCubeFromTargetContext(
     const SATSolverWrapper& solver,
     const PreparedPredecessorTargetAssumptions& targetContext) {
@@ -4291,36 +4242,6 @@ solvePredecessorCubeWithCachedAssumptions(
   const bool useGuardedBatchContext =
       level > 0 && cache.sharedHigherFrameSolverPools != nullptr &&
       cachedSolver.guardedContext.runId == cache.sharedHigherFrameRunId;
-  if (preparedTarget.assumptions.empty() && !useGuardedBatchContext &&
-      !excludeTargetOnCurrentFrame) {
-    return std::nullopt; // LCOV_EXCL_LINE
-  }
-  // Reuse only a concrete model that satisfies the complete new predecessor
-  // query. This is the same exact SAT witness the next assumption solve seeks;
-  // it changes neither the IC3 obligation nor any learned frame clause.
-  if (cachedSolver.currentModelSatisfiesPredecessorQuery(
-          preparedTarget,
-          targetSurface.exclusionClause,
-          0,
-          useGuardedBatchContext,
-          excludeTargetOnCurrentFrame)) {
-    ++cachedSolver.satisfyingModelReuseCount;
-    if (solvedCache != nullptr) {
-      *solvedCache = &cachedSolver;
-    }
-    if (shouldEmitFrequentPdrStats()) {
-      emitSecDiag(
-          "SEC PDR stats: predecessor cached SAT model reused hits=",
-          cachedSolver.satisfyingModelReuseCount,
-          " target_assumptions=",
-          preparedTarget.assumptions.size(),
-          " guarded_context=",
-          useGuardedBatchContext ? 1 : 0,
-          " exclude_target=",
-          excludeTargetOnCurrentFrame ? 1 : 0);
-    }
-    return SATSolverWrapper::SolveStatus::Sat;
-  }
   if (useGuardedBatchContext || excludeTargetOnCurrentFrame) {
     cachedSolver.targetAssumptions = preparedTarget.assumptions;
     if (useGuardedBatchContext) {
@@ -4334,6 +4255,10 @@ solvePredecessorCubeWithCachedAssumptions(
     }
     queryAssumptions = &cachedSolver.targetAssumptions;
   }
+  if (queryAssumptions->empty()) {
+    return std::nullopt; // LCOV_EXCL_LINE
+  }
+
   if (solvedCache != nullptr) {
     *solvedCache = &cachedSolver;
   }

@@ -21,6 +21,7 @@
 #include "NLDB0.h"
 #include "NLUniverse.h"
 #include "SNLCapnP.h"
+#include "SNLDumpManifest.h"
 #include "SNLDesign.h"
 #include "SNLDesignModeling.h"
 #include "SNLLibertyConstructor.h"
@@ -57,6 +58,18 @@ std::filesystem::path makeUniqueTempDir(const std::string& prefix) {
   const auto dir = std::filesystem::temp_directory_path() / uniqueName;
   std::filesystem::create_directories(dir);
   return dir;
+}
+
+std::filesystem::path copyNajaIfForCurrentBuild(
+    const std::filesystem::path& source,
+    const std::string& prefix) {
+  const auto tempDir = makeUniqueTempDir(prefix);
+  const auto copy = tempDir / source.filename();
+  std::filesystem::copy(source, copy, std::filesystem::copy_options::recursive);
+  // The payload was produced by this Naja revision, but Git may choose a
+  // different unambiguous short-hash length in another checkout.
+  naja::NL::SNLDumpManifest::dump(copy);
+  return copy;
 }
 
 int runWithConfigFile(const std::filesystem::path& cfgPath) {
@@ -2007,7 +2020,8 @@ TEST_F(KeplerFormalCliTests, MissingSecondNajaIfFails) {
 TEST_F(KeplerFormalCliTests, ConfigCompactNajaIfAccepted) {
   const auto root = repoRoot();
   const auto exampleDir = root / "example";
-  const auto design = exampleDir / "tinyrocket_naja.if";
+  const auto design = copyNajaIfForCurrentBuild(
+      exampleDir / "tinyrocket_naja.if", "kepler_compact_naja_if");
   const auto lib0 = exampleDir / "NangateOpenCellLibrary_typical.lib";
   const auto lib1 = exampleDir / "fakeram45_1024x32.lib";
   const auto lib2 = exampleDir / "fakeram45_64x32.lib";
@@ -2030,6 +2044,7 @@ TEST_F(KeplerFormalCliTests, ConfigCompactNajaIfAccepted) {
 
   EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
   std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(design.parent_path());
 }
 
 TEST_F(KeplerFormalCliTests, CliUnknownOptionFails) {
@@ -4276,7 +4291,8 @@ TEST_F(KeplerFormalCliTests, VerilogNoLibertyCreatesDbAndFailsOnSecondParse) {
 TEST_F(KeplerFormalCliTests, SnlScopesNoDifference) {
   const auto root = repoRoot();
   const auto exampleDir = root / "example";
-  const auto design0 = exampleDir / "tinyrocket_naja.if";
+  const auto design0 = copyNajaIfForCurrentBuild(
+      exampleDir / "tinyrocket_naja.if", "kepler_scoped_naja_if");
   const auto lib0 = exampleDir / "NangateOpenCellLibrary_typical.lib";
   const auto lib1 = exampleDir / "fakeram45_1024x32.lib";
   const auto lib2 = exampleDir / "fakeram45_64x32.lib";
@@ -4300,6 +4316,7 @@ TEST_F(KeplerFormalCliTests, SnlScopesNoDifference) {
   int rc = runWithConfigFile(cfgPath);
   EXPECT_EQ(rc, EXIT_SUCCESS);
   std::filesystem::remove(cfgPath);
+  std::filesystem::remove_all(design0.parent_path());
 }
 
 TEST_F(KeplerFormalCliTests, SnlScopesEquivalentEditedScopeNoDifference) {

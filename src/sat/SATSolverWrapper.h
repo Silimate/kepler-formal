@@ -368,14 +368,6 @@ public:
     return solveStatus() == SolveStatus::Sat;
   }
 
-  bool hasSatisfyingModel() const {
-    // CaDiCaL keeps its concrete model valid only while the solver remains in
-    // SATISFIED state. Adding a clause, declaring variables, or starting a new
-    // assumption query moves it back to a non-satisfied state automatically.
-    return solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL &&
-           cadicalSolver_->status() == 10;
-  }
-
   SolveStatus solveStatus() {
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) {
       return glucoseSolver_->solve() ? SolveStatus::Sat : SolveStatus::Unsat;
