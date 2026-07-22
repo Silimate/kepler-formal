@@ -2341,6 +2341,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAccepted) {
       "format: naja_if\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2365,7 +2366,8 @@ TEST_F(KeplerFormalCliTests, ConfigSecDefaultsToDualRailEncoding) {
       "  - " + fixture.design1IfPath.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), EXIT_SUCCESS);
+  // The default keeps discovery disabled, so cycle-0 X cannot be a proof.
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecInconclusiveExitCode);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(contents.find("SEC encoding: dual_rail_steady"), std::string::npos);
@@ -2426,7 +2428,8 @@ TEST_F(KeplerFormalCliTests, ConfigSecPdrCanDisableAutomaticAgeDiscovery) {
       "  - " + fixture.design1IfPath.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), kSecProvedExitCode);
+  // Disabling discovery leaves this resetless observed flop undefined at F[0].
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecInconclusiveExitCode);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(
@@ -2463,6 +2466,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithPdrEngine) {
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
       "sec_engine: pdr\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2577,6 +2581,7 @@ TEST_F(KeplerFormalCliTests,
       "format: naja_if\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 2\n"
       "sec_uncomputable_seq_as_boundary: false\n"
       "input_paths:\n"
@@ -2596,6 +2601,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecIgnoresRenamedInternalState) {
       "format: naja_if\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -2625,6 +2631,7 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecVerificationAccepted) {
       "format: systemverilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2755,6 +2762,7 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesMo
       "format: systemverilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "compact_mode: true\n"
       "max_k: 4\n"
       "sv_design1_top: top\n"
@@ -2787,6 +2795,7 @@ TEST_F(KeplerFormalCliTests, ConfigSystemVerilogSecCompactIdenticalInputReusesMo
       "format: systemverilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "compact_mode: true\n"
       "max_k: 4\n"
       "sv_design1_flist: " + flistPath.string() + "\n"
@@ -2853,6 +2862,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationWritesDefaultLog) {
       "format: systemverilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -2953,7 +2963,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecDifferenceLogIncludesWitnessDetails) {
   const auto contents = readFileContents(logPath);
   EXPECT_NE(contents.find("SEC counterexample details:"), std::string::npos);
   EXPECT_NE(
-      contents.find("Exact PDR found a counterexample at k = "),
+      contents.find("Exact PDR found a defined-value counterexample at k = "),
       std::string::npos);
 
   std::filesystem::remove(cfgPath);
@@ -2999,6 +3009,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecCompactModeAccepted) {
       "format: naja_if\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "compact_mode: true\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -3015,6 +3026,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecCompactIdenticalInputReusesExtractedModel)
       "format: naja_if\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "compact_mode: true\n"
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
@@ -3072,6 +3084,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecAcceptsSkippedPoReporting) {
       "format: naja_if\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "report_skipped_pos: true\n"
       "input_paths:\n"
@@ -3221,6 +3234,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecFallsBackWhenLogParentCannotBeCreated) {
       "format: systemverilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "log_file: " + (blockedParent / "sec.log").string() + "\n"
       "input_paths:\n"
@@ -3252,6 +3266,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecContinuesWhenLogFilePathIsDirectory) {
       "format: systemverilog\n"
       "verification: sec\n"
       "sec_encoding: dual_rail_steady\n"
+      "sec_pdr_auto_age: true\n"
       "max_k: 4\n"
       "log_file: " + fixture.tmpDir.string() + "\n"
       "input_paths:\n"
@@ -3273,13 +3288,14 @@ TEST_F(KeplerFormalCliTests, CliSecVerificationAcceptedBeforeFormat) {
   std::string argv4 = "4";
   std::string argv5 = "--sec-encoding";
   std::string argv6 = "dual_rail_steady";
-  std::string argv7 = "-naja_if";
-  std::string argv8 = fixture.design0IfPath.string();
-  std::string argv9 = fixture.design1IfPath.string();
+  std::string argv7 = "--sec-pdr-auto-age";
+  std::string argv8 = "-naja_if";
+  std::string argv9 = fixture.design0IfPath.string();
+  std::string argv10 = fixture.design1IfPath.string();
   char* argv[] = {argv0.data(), argv1.data(), argv2.data(), argv3.data(),
                   argv4.data(), argv5.data(), argv6.data(), argv7.data(),
-                  argv8.data(), argv9.data()};
-  int argc = 10;
+                  argv8.data(), argv9.data(), argv10.data()};
+  int argc = 11;
 
   EXPECT_EQ(KeplerFormalMain(argc, argv), kSecProvedExitCode);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -3298,6 +3314,7 @@ TEST_F(KeplerFormalCliTests, CliSecEngineAcceptedBeforeFormat) {
                    "dual_rail_steady",
                    "--sec-engine",
                    "pdr",
+                   "--sec-pdr-auto-age",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -3463,6 +3480,7 @@ TEST_F(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedBeforeFormat) {
                    "--sec-encoding",
                    "dual_rail_steady",
                    "--sec-uncomputable-seq-boundary",
+                   "--sec-pdr-auto-age",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -3484,6 +3502,7 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedBeforeFormat) {
                    "--sec-encoding",
                    "dual_rail_steady",
                    "--no-sec-uncomputable-seq-boundary",
+                   "--sec-pdr-auto-age",
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
@@ -3567,6 +3586,7 @@ TEST_F(KeplerFormalCliTests, CliSecBoundaryFlagAcceptedAfterFormat) {
                    "--sec-encoding",
                    "dual_rail_steady",
                    "--sec-uncomputable-seq-boundary",
+                   "--sec-pdr-auto-age",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
       kSecProvedExitCode);
@@ -3588,6 +3608,7 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedAfterFormat) {
                    "--sec-encoding",
                    "dual_rail_steady",
                    "--no-sec-uncomputable-seq-boundary",
+                   "--sec-pdr-auto-age",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
       kSecProvedExitCode);
