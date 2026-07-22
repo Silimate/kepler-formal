@@ -31,6 +31,16 @@ struct PDRResult {
 struct PDRQueryLimits {
   unsigned predecessorConflictLimit = 0;
   unsigned predecessorDecisionLimit = 0;
+  // Blocking is the mandatory relative-induction query in IC3/PDR. A caller
+  // may give it a deeper allowance while keeping optional generalization and
+  // propagation queries inexpensive. Two-field aggregate initializers retain
+  // one uniform limit for every query role.
+  unsigned blockingConflictLimit = predecessorConflictLimit;
+  unsigned blockingDecisionLimit = predecessorDecisionLimit;
+  // Broad probes can bound transition-size estimation and return UNKNOWN so
+  // the caller splits the exact property. Zero retains the engine defaults.
+  size_t predecessorEncodingNodeLimit = 0;
+  size_t predecessorNodeHintTargetLimit = 0;
 };
 
 // Output batches from one SEC problem have the same immutable transition and

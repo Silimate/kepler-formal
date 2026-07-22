@@ -4530,36 +4530,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       CadicalSatisfyingModelValidityTracksFormulaChanges) {
-  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
-  solver.configureForSecPdrQuery();
-  const int x = solver.newVar() + 2;
-  const int y = solver.newVar() + 2;
-  solver.addClause({x, y});
-
-  EXPECT_FALSE(solver.hasSatisfyingModel());
-  ASSERT_EQ(
-      solver.solveWithAssumptionsStatus({x}),
-      SATSolverWrapper::SolveStatus::Sat);
-  EXPECT_TRUE(solver.hasSatisfyingModel());
-  EXPECT_TRUE(solver.getLiteralValue(x));
-
-  // A formula change invalidates the retained model before another query can
-  // inspect it, even when the old assignment also happens to satisfy the clause.
-  solver.addClause({x});
-  EXPECT_FALSE(solver.hasSatisfyingModel());
-  ASSERT_EQ(
-      solver.solveWithAssumptionsStatus({y}),
-      SATSolverWrapper::SolveStatus::Sat);
-  EXPECT_TRUE(solver.hasSatisfyingModel());
-  EXPECT_TRUE(solver.getLiteralValue(y));
-
-  EXPECT_FALSE(
-      SATSolverWrapper(KEPLER_FORMAL::Config::SolverType::GLUCOSE)
-          .hasSatisfyingModel());
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
        CadicalCraigInterpolationReturnsProofDerivedGlobalClause) {
   SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
   solver.enableCraigInterpolation();
@@ -5335,6 +5305,34 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("(!x" + std::to_string(constantFalseSymbol) + ")\n"),
       std::string::npos)
       << stderrOutput;
+
+  // A broad scheduling probe may decline the same exact query before walking
+  // more than 512 target transitions. UNKNOWN causes the caller to split; a
+  // singleton/full run above still performs the exact proof.
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  KInductionProblem probeProblem = problem;
+  probeProblem.usesDualRailStateEncoding = true;
+  testing::internal::CaptureStderr();
+  PDREngine probeEngine(
+      probeProblem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto probeResult = probeEngine.run(
+      2, probeProblem.property,
+      PDRQueryLimits{/*predecessorConflictLimit=*/10000,
+                     /*predecessorDecisionLimit=*/150000,
+                     /*blockingConflictLimit=*/10000,
+                     /*blockingDecisionLimit=*/150000,
+                     /*predecessorEncodingNodeLimit=*/5 * 1000 * 1000,
+                     /*predecessorNodeHintTargetLimit=*/512});
+  const std::string probeStderr = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(probeResult.status, PDRStatus::Inconclusive) << probeStderr;
+  EXPECT_NE(
+      probeStderr.find(
+          "predecessor encoding budget exhausted targets=513 nodes=0 "
+          "node_limit=5000000 node_hint_target_limit=512"),
+      std::string::npos)
+      << probeStderr;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -6396,23 +6394,38 @@ TEST_F(SequentialEquivalenceStrategyTests,
 TEST_F(SequentialEquivalenceStrategyTests,
        PDREngineProvesEquivalentWithinThreeFrames) {
   const auto problem = buildLinearChainSecProblem(4);
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
 
   // This is an engine-regression check for the current binary-chain model and
   // current clause-generalization behavior.  It is not a portable "classic PDR
   // must prove safe exactly at k=3" theorem: safe IC3/PDR proofs may converge
   // earlier whenever a stronger inductive invariant is learned.
+  PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto result = engine.run(3);
+
+  EXPECT_EQ(result.status, PDRStatus::Equivalent);
+  EXPECT_LE(result.bound, 3u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDoesNotSubstituteRetainedModelForExactPredecessorSolve) {
+  const auto problem = buildLinearChainSecProblem(4);
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+
   testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
-  EXPECT_LE(result.bound, 3u);
-  // Neighboring exact solveRelative queries can use the preceding concrete
-  // model only after every new assumption has been checked in that model.
+  // Reusing the prepared CNF and assumptions is safe. Reusing the previous SAT
+  // assignment as the answer changes finite-budget witness selection and once
+  // collapsed strict dual-rail SEC coverage from 539/598 outputs to 0/598.
   EXPECT_NE(
+      stderrOutput.find("predecessor target assumptions reused"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
       stderrOutput.find("predecessor cached SAT model reused"),
       std::string::npos)
       << stderrOutput;
@@ -12475,6 +12488,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
     model->observedOutputExprByKey.emplace(secondOutput, BoolExpr::Var(2));
   }
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
 
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
@@ -12500,6 +12515,34 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find(
           "PDR strict output batch begin index=0 pending_batches=1 "
           "output_range=0..2"),
+      std::string::npos)
+      << stderrOutput;
+  // Normal conjunctions use cheap split probes. Strict equality retains the
+  // former role-specific schedule: mandatory blocking gets the deeper exact
+  // allowance while optional generalization and propagation remain bounded.
+  const size_t strictBatchBegin = stderrOutput.find(
+      "PDR strict output batch begin index=0 pending_batches=1 ");
+  const size_t strictOrdinaryQuery = stderrOutput.find(
+      "conflict_limit=10000 decision_limit=150000", strictBatchBegin);
+  ASSERT_NE(strictOrdinaryQuery, std::string::npos) << stderrOutput;
+  const size_t strictOrdinaryQueryEnd =
+      stderrOutput.find('\n', strictOrdinaryQuery);
+  EXPECT_EQ(
+      stderrOutput.substr(
+          strictOrdinaryQuery, strictOrdinaryQueryEnd - strictOrdinaryQuery)
+          .find("purpose=block"),
+      std::string::npos)
+      << stderrOutput;
+
+  const size_t strictBlockingQuery = stderrOutput.find(
+      "conflict_limit=200000 decision_limit=4000000", strictBatchBegin);
+  ASSERT_NE(strictBlockingQuery, std::string::npos) << stderrOutput;
+  const size_t strictBlockingQueryEnd =
+      stderrOutput.find('\n', strictBlockingQuery);
+  EXPECT_NE(
+      stderrOutput.substr(
+          strictBlockingQuery, strictBlockingQueryEnd - strictBlockingQuery)
+          .find("purpose=block"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("output_range=0..1"), std::string::npos)

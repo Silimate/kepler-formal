@@ -977,7 +977,6 @@ struct PredecessorAssumptionSolver {
   // context-independent learned clauses can affect a later batch.
   GuardedPredecessorFrameContext guardedContext;
   size_t guardedContextCount = 0;
-  size_t satisfyingModelReuseCount = 0;
 
   bool canExtendTo(const PredecessorAssumptionCacheKey& candidate) const {
     return key.hasSameReusableContext(candidate) &&
@@ -1010,13 +1009,6 @@ struct PredecessorAssumptionSolver {
       size_t frame,
       const StateClause& targetIdentity,
       const std::vector<TransitionEncodingLiteralGroup>& groups);
-
-  bool currentModelSatisfiesPredecessorQuery(
-      const PreparedPredecessorTargetAssumptions& preparedTarget,
-      const StateClause& exclusionClause,
-      size_t frame,
-      bool requireGuardedContext,
-      bool excludeTargetOnCurrentFrame) const;
 
 };
 
@@ -1506,7 +1498,9 @@ unsigned dualRailBadCubeConflictLimit() {
 
 unsigned dualRailPredecessorConflictLimit(PredecessorQueryPurpose purpose) {
   if (activePdrQueryLimits != nullptr) {
-    return activePdrQueryLimits->predecessorConflictLimit;
+    return purpose == PredecessorQueryPurpose::BlockObligation
+               ? activePdrQueryLimits->blockingConflictLimit
+               : activePdrQueryLimits->predecessorConflictLimit;
   }
   const unsigned configuredLimit = envUnsignedLimitOrDefaultAllowZero(
       kDualRailPredecessorConflictLimitEnv,
@@ -1520,7 +1514,9 @@ unsigned dualRailPredecessorConflictLimit(PredecessorQueryPurpose purpose) {
 
 unsigned dualRailPredecessorDecisionLimit(PredecessorQueryPurpose purpose) {
   if (activePdrQueryLimits != nullptr) {
-    return activePdrQueryLimits->predecessorDecisionLimit;
+    return purpose == PredecessorQueryPurpose::BlockObligation
+               ? activePdrQueryLimits->blockingDecisionLimit
+               : activePdrQueryLimits->predecessorDecisionLimit;
   }
   const unsigned configuredLimit = envUnsignedLimitOrDefaultAllowZero(
       kDualRailPredecessorDecisionLimitEnv,
@@ -1533,9 +1529,21 @@ unsigned dualRailPredecessorDecisionLimit(PredecessorQueryPurpose purpose) {
 }
 
 size_t dualRailPredecessorEncodingNodeLimit() {
+  if (activePdrQueryLimits != nullptr &&
+      activePdrQueryLimits->predecessorEncodingNodeLimit != 0) {
+    return activePdrQueryLimits->predecessorEncodingNodeLimit;
+  }
   return envSizeLimitOrDefault(
       "KEPLER_SEC_PDR_DUAL_RAIL_PREDECESSOR_ENCODING_NODE_LIMIT",
       kDefaultDualRailPredecessorEncodingNodeLimit);
+}
+
+size_t dualRailPredecessorNodeHintTargetLimit() {
+  if (activePdrQueryLimits != nullptr &&
+      activePdrQueryLimits->predecessorNodeHintTargetLimit != 0) {
+    return activePdrQueryLimits->predecessorNodeHintTargetLimit;
+  }
+  return std::numeric_limits<size_t>::max();
 }
 
 size_t dualRailPredecessorEncodingSupportLimit() {
@@ -1983,7 +1991,7 @@ PredecessorTargetSurface buildPredecessorTargetSurface(
       estimateTransitionEncodingNodes(
           transitionByState,
           surface.encodedTargets,
-          std::numeric_limits<size_t>::max());
+          dualRailPredecessorNodeHintTargetLimit());
   return surface;
 }
 
@@ -2882,47 +2890,6 @@ PredecessorAssumptionSolver::prepareTargetAssumptions(
       targetIdentity, std::move(prepared));
   (void)insertedNew;
   return inserted->second;
-}
-
-bool PredecessorAssumptionSolver::currentModelSatisfiesPredecessorQuery(
-    const PreparedPredecessorTargetAssumptions& preparedTarget,
-    const StateClause& exclusionClause,
-    size_t frame,
-    bool requireGuardedContext,
-    bool excludeTargetOnCurrentFrame) const {
-  if (!solver->hasSatisfyingModel()) {
-    return false;
-  }
-  for (const int assumption : preparedTarget.assumptions) {
-    if (!solver->getLiteralValue(assumption)) {
-      return false;
-    }
-  }
-  if (requireGuardedContext &&
-      !solver->getLiteralValue(guardedContext.activationLiteral)) {
-    return false;
-  }
-  if (!excludeTargetOnCurrentFrame) {
-    return true;
-  }
-
-  // The exclusion clause is exactly the negation of the target cube. Check it
-  // directly in the retained concrete model before allocating a query-local
-  // selector; one true clause literal proves that the model is outside target.
-  for (const auto& literal : exclusionClause) {
-    if (!variables->hasSymbol(literal.symbol)) {
-      throw std::runtime_error( // LCOV_EXCL_LINE
-          "PDR cached model check missing symbol " + // LCOV_EXCL_LINE
-          std::to_string(literal.symbol) + " at frame " + // LCOV_EXCL_LINE
-          std::to_string(frame)); // LCOV_EXCL_LINE
-    }
-    const int stateLiteral = variables->getLiteral(literal.symbol, frame);
-    const int clauseLiteral = literal.positive ? stateLiteral : -stateLiteral;
-    if (solver->getLiteralValue(clauseLiteral)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 StateCube failedAssumptionCubeFromTargetContext(
@@ -4314,36 +4281,6 @@ solvePredecessorCubeWithCachedAssumptions(
   const bool useGuardedBatchContext =
       level > 0 && cache.sharedHigherFrameSolverPools != nullptr &&
       cachedSolver.guardedContext.runId == cache.sharedHigherFrameRunId;
-  if (preparedTarget.assumptions.empty() && !useGuardedBatchContext &&
-      !excludeTargetOnCurrentFrame) {
-    return std::nullopt; // LCOV_EXCL_LINE
-  }
-  // Reuse only a concrete model that satisfies the complete new predecessor
-  // query. This is the same exact SAT witness the next assumption solve seeks;
-  // it changes neither the IC3 obligation nor any learned frame clause.
-  if (cachedSolver.currentModelSatisfiesPredecessorQuery(
-          preparedTarget,
-          targetSurface.exclusionClause,
-          0,
-          useGuardedBatchContext,
-          excludeTargetOnCurrentFrame)) {
-    ++cachedSolver.satisfyingModelReuseCount;
-    if (solvedCache != nullptr) {
-      *solvedCache = &cachedSolver;
-    }
-    if (shouldEmitFrequentPdrStats()) {
-      emitSecDiag(
-          "SEC PDR stats: predecessor cached SAT model reused hits=",
-          cachedSolver.satisfyingModelReuseCount,
-          " target_assumptions=",
-          preparedTarget.assumptions.size(),
-          " guarded_context=",
-          useGuardedBatchContext ? 1 : 0,
-          " exclude_target=",
-          excludeTargetOnCurrentFrame ? 1 : 0);
-    }
-    return SATSolverWrapper::SolveStatus::Sat;
-  }
   if (useGuardedBatchContext || excludeTargetOnCurrentFrame) {
     cachedSolver.targetAssumptions = preparedTarget.assumptions;
     if (useGuardedBatchContext) {
@@ -4356,6 +4293,9 @@ solvePredecessorCubeWithCachedAssumptions(
               cachedSolver, targetSurface.exclusionClause, 0));
     }
     queryAssumptions = &cachedSolver.targetAssumptions;
+  }
+  if (queryAssumptions->empty()) {
+    return std::nullopt; // LCOV_EXCL_LINE
   }
   if (solvedCache != nullptr) {
     *solvedCache = &cachedSolver;
@@ -5328,9 +5268,14 @@ std::optional<StateCube> findPredecessorCube(
       targetSurface->transitionEncodingNodes;
   if (problem.usesDualRailStateEncoding) {
     const size_t encodingNodeLimit = dualRailPredecessorEncodingNodeLimit();
+    const size_t nodeHintTargetLimit =
+        dualRailPredecessorNodeHintTargetLimit();
     const size_t encodingSupportLimit =
         dualRailPredecessorEncodingSupportLimit();
-    if (transitionEncodingNodes > encodingNodeLimit ||
+    const bool unknownNodeCount =
+        transitionEncodingNodes == 0 &&
+        encodedTargets.size() > nodeHintTargetLimit;
+    if (unknownNodeCount || transitionEncodingNodes > encodingNodeLimit ||
         transitionSupportSymbols.size() > encodingSupportLimit) {
       if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
         emitSecDiag(  // LCOV_EXCL_LINE
@@ -5340,6 +5285,8 @@ std::optional<StateCube> findPredecessorCube(
             transitionEncodingNodes,
             " node_limit=",
             encodingNodeLimit,
+            " node_hint_target_limit=",
+            nodeHintTargetLimit,
             " transition_support=",
             transitionSupportSymbols.size(),
             " support_limit=",

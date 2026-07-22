@@ -2917,7 +2917,21 @@ const char* pdrStatusName(PDRStatus status) {
 
 constexpr PDRQueryLimits kDualRailPdrBatchProbeLimits{
     /*predecessorConflictLimit=*/10 * 1000,
-    /*predecessorDecisionLimit=*/150 * 1000};
+    /*predecessorDecisionLimit=*/150 * 1000,
+    /*blockingConflictLimit=*/10 * 1000,
+    /*blockingDecisionLimit=*/150 * 1000,
+    /*predecessorEncodingNodeLimit=*/5 * 1000 * 1000,
+    /*predecessorNodeHintTargetLimit=*/512};
+// Strict equality is the second, proof-only pass over outputs that already
+// have no concrete mismatch. Retain the exact pre-adaptive PDR allowance so a
+// useful output group can converge without being split into costly leaves.
+constexpr PDRQueryLimits kDualRailPdrStrictBatchLimits{
+    /*predecessorConflictLimit=*/10 * 1000,
+    /*predecessorDecisionLimit=*/150 * 1000,
+    /*blockingConflictLimit=*/200 * 1000,
+    /*blockingDecisionLimit=*/4 * 1000 * 1000,
+    /*predecessorEncodingNodeLimit=*/5 * 1000 * 1000,
+    /*predecessorNodeHintTargetLimit=*/512};
 
 PDRResult runPdrOutputBatch(const PDREngine& engine,
                             size_t maxFrames,
@@ -2929,6 +2943,12 @@ PDRResult runPdrOutputBatch(const PDREngine& engine,
   // A broad UNKNOWN only schedules exact child properties. Full query limits
   // are reserved for singleton leaves, so failed probes cannot dominate them.
   return engine.run(maxFrames, property, kDualRailPdrBatchProbeLimits);
+}
+
+PDRResult runStrictPdrOutputBatch(const PDREngine& engine,
+                                  size_t maxFrames,
+                                  BoolExpr* property) {
+  return engine.run(maxFrames, property, kDualRailPdrStrictBatchLimits);
 }
 
 PdrAgeOptions capPdrAgeOptionsToMaxFrames(
@@ -3010,6 +3030,11 @@ class PdrAgeProofSession {
     return runPdrOutputBatch(
         engine_, maxFrames_, monitor_.propertyFromAge(age, property),
         outputCount);
+  }
+
+  PDRResult runStrictFromAge(BoolExpr* property, size_t age) const {
+    return runStrictPdrOutputBatch(
+        engine_, maxFrames_, monitor_.propertyFromAge(age, property));
   }
 
   BoolExpr* propertyFromAge(size_t age, BoolExpr* property) const {
@@ -3699,15 +3724,13 @@ SequentialEquivalenceResult runPdrSecEngine(
         }
         PDRResult strictResult;
         if (batch.ageGate.has_value()) {
-          strictResult = ageSession->runFromAge(
-              strictBatchProblem.property, *batch.ageGate,
-              endOutput - firstOutput);
+          strictResult = ageSession->runStrictFromAge(
+              strictBatchProblem.property, *batch.ageGate);
         } else {
           PDREngine strictPdrEngine(
               strictBatchProblem, solverType, 0, exactInitCache);
-          strictResult = runPdrOutputBatch(
-              strictPdrEngine, maxK, strictBatchProblem.property,
-              endOutput - firstOutput);
+          strictResult = runStrictPdrOutputBatch(
+              strictPdrEngine, maxK, strictBatchProblem.property);
         }
         if (isSecDiagEnabled()) {
           emitSecDiag(
