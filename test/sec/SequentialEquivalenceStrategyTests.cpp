@@ -12268,10 +12268,22 @@ TEST_F(SequentialEquivalenceStrategyTests,
         SecEncoding::DualRailSteady);
     const auto pdrResult = pdrStrategy.runExtractedModels(model0, model1, 1);
 
-    EXPECT_EQ(pdrResult.status, SequentialEquivalenceStatus::Equivalent);
-    EXPECT_EQ(pdrResult.coveredOutputs, 3u);
+    // The constant output is proved. The resetless state outputs have no
+    // defined-value mismatch, but they never satisfy PDR's binary-definedness
+    // property and therefore remain inconclusive.
+    EXPECT_EQ(
+        pdrResult.status, SequentialEquivalenceStatus::PartiallyProved);
+    EXPECT_EQ(pdrResult.coveredOutputs, 1u);
     EXPECT_EQ(pdrResult.totalOutputs, 3u);
-    EXPECT_TRUE(pdrResult.skippedObservedOutputs.empty());
+    ASSERT_EQ(pdrResult.skippedObservedOutputs.size(), 2u);
+    EXPECT_NE(
+        pdrResult.skippedObservedOutputs[0].find(
+            "uninitialized sequential logic"),
+        std::string::npos);
+    EXPECT_NE(
+        pdrResult.skippedObservedOutputs[1].find(
+            "uninitialized sequential logic"),
+        std::string::npos);
 
     SequentialEquivalenceStrategy imcStrategy(
         nullptr,
@@ -12394,8 +12406,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
     const auto result =
         strategy.runExtractedModels(models.model0, models.model1, 2);
 
-    // Every dual-rail engine must first rule out a concrete mismatch and then
-    // prove strict rail equality before counting an output as equivalent.
+    // PDR requires binary definedness after ruling out a defined-value
+    // mismatch. KI and IMC retain their strict residual checks.
     EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
     EXPECT_EQ(result.coveredOutputs, 1u);
     EXPECT_EQ(result.totalOutputs, 2u);
@@ -12439,7 +12451,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailDisabledAgePreservesStrictPermanentXEquality) {
+       RunExtractedModelsPdrDualRailDisabledAgeRejectsPermanentXEquality) {
   const auto models = makeHeldRailModelsForTest(
       "dualRailPermanentX", std::nullopt, std::nullopt);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -12456,27 +12468,27 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(models.model0, models.model1, 2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Disabling age discovery must preserve the historical flow exactly: the
-  // guarded property and strict rail equality are both proved from F[0].
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(result.coveredOutputs, 1u);
+  // Without age discovery, both outputs must be binary at cycle zero. Equal X
+  // rails cannot turn the defined-value check into an equivalence verdict.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+  EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
       stderrOutput.find(
-          "PDR strict output batch begin index=0 pending_batches=1 "
-          "output_range=0..1"),
+          "PDR defined-value check end index=0 output_range=0..1 "
+          "status=equivalent"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "PDR strict output batch end index=0 output_range=0..1 "
-          "status=equivalent"),
+          "PDR age definedness output range=0..1 "
+          "minimum_status=different maximum_status=different"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailStartsWithExactAdaptiveOutputBatch) {
+       RunExtractedModelsPdrDualRailUsesDefinedValueAndDefinednessProperties) {
   auto models = makeHeldRailModelsForTest(
       "dualRailAdaptiveBatches", false, false);
   const SignalKey secondOutput =
@@ -12507,43 +12519,17 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_EQ(result.coveredOutputs, 2u);
   EXPECT_NE(
       stderrOutput.find(
-          "PDR output batch begin index=0 pending_batches=1 "
+          "PDR defined-value check begin index=0 pending_batches=1 "
           "output_range=0..2"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "PDR strict output batch begin index=0 pending_batches=1 "
-          "output_range=0..2"),
+          "PDR age definedness output range=0..2 "
+          "minimum_status=equivalent maximum_status=equivalent"),
       std::string::npos)
       << stderrOutput;
-  // Normal conjunctions use cheap split probes. Strict equality retains the
-  // former role-specific schedule: mandatory blocking gets the deeper exact
-  // allowance while optional generalization and propagation remain bounded.
-  const size_t strictBatchBegin = stderrOutput.find(
-      "PDR strict output batch begin index=0 pending_batches=1 ");
-  const size_t strictOrdinaryQuery = stderrOutput.find(
-      "conflict_limit=10000 decision_limit=150000", strictBatchBegin);
-  ASSERT_NE(strictOrdinaryQuery, std::string::npos) << stderrOutput;
-  const size_t strictOrdinaryQueryEnd =
-      stderrOutput.find('\n', strictOrdinaryQuery);
-  EXPECT_EQ(
-      stderrOutput.substr(
-          strictOrdinaryQuery, strictOrdinaryQueryEnd - strictOrdinaryQuery)
-          .find("purpose=block"),
-      std::string::npos)
-      << stderrOutput;
-
-  const size_t strictBlockingQuery = stderrOutput.find(
-      "conflict_limit=200000 decision_limit=4000000", strictBatchBegin);
-  ASSERT_NE(strictBlockingQuery, std::string::npos) << stderrOutput;
-  const size_t strictBlockingQueryEnd =
-      stderrOutput.find('\n', strictBlockingQuery);
-  EXPECT_NE(
-      stderrOutput.substr(
-          strictBlockingQuery, strictBlockingQueryEnd - strictBlockingQuery)
-          .find("purpose=block"),
-      std::string::npos)
+  EXPECT_EQ(stderrOutput.find("PDR strict output batch"), std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("output_range=0..1"), std::string::npos)
       << stderrOutput;
@@ -12564,8 +12550,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 2);
 
-  // Strict X==X is retained as the fallback check, but it cannot establish
-  // concrete equivalence when no age proves that both outputs are defined.
+  // No candidate age proves both outputs binary-defined.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
@@ -12608,12 +12593,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "PDR output batch begin index=0 pending_batches=1 "
+          "PDR defined-value check begin index=0 pending_batches=1 "
           "output_range=0..1"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("PDR output batch end index=0 output_range=0..1"),
+      stderrOutput.find(
+          "PDR defined-value check end index=0 output_range=0..1"),
       std::string::npos)
       << stderrOutput;
 }
@@ -12693,26 +12679,26 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(models.model0, models.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // A two-cycle flush cannot be certified from a one-frame PDR run. The age
-  // monitor must remain inside the caller's frame budget and fall back at 1.
+  // The defined-value property itself cannot converge within one PDR frame.
+  // An unresolved first property must not be hidden by a later age check.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive)
       << stderrOutput;
   EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
       stderrOutput.find(
-          "PDR age definedness output range=0..1 "
-          "minimum_status=different maximum_status=different"),
+          "PDR defined-value check end index=0 output_range=0..1 "
+          "status=inconclusive"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find("PDR age fallback output range=0..1 age=1"),
+  EXPECT_EQ(
+      stderrOutput.find("PDR age definedness output range=0..1"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailAgeGatesOnlyEnabledFlow) {
+       RunExtractedModelsPdrDualRailAutoAgeDoesNotHideDefinedMismatch) {
   constexpr const char* kPrefix = "dualRailTransientStartupMismatch";
   auto models = makeHeldRailModelsForTest(kPrefix, false, true);
   const SignalKey state0 = makeSignalKey(std::string(kPrefix) + "State0");
@@ -12740,12 +12726,48 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto enabledResult = enabledStrategy.runExtractedModels(
       models.model0, models.model1, 2);
 
-  // The original flow still sees the concrete F[0] mismatch. Only the enabled
-  // monitor gates startup; both designs hold binary zero from age 1 onward.
+  // Both configurations must report the defined cycle-zero mismatch. Age
+  // discovery applies only to the separate binary-definedness property.
   EXPECT_EQ(disabledResult.status, SequentialEquivalenceStatus::Different);
   EXPECT_EQ(disabledResult.bound, 0u);
-  EXPECT_EQ(enabledResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(enabledResult.coveredOutputs, 1u);
+  EXPECT_EQ(enabledResult.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(enabledResult.bound, 0u);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsPdrDualRailFindsMismatchAlongsideXTrace) {
+  constexpr const char* kPrefix = "dualRailMixedStartup";
+  auto models = makeHeldRailModelsForTest(kPrefix, std::nullopt, true);
+  const SignalKey input = makeSignalKey("dualRailMixedStartupInput");
+  const SignalKey output = makeSignalKey(std::string(kPrefix) + "Output");
+  const SignalKey state0 = makeSignalKey(std::string(kPrefix) + "State0");
+  const SignalKey state1 = makeSignalKey(std::string(kPrefix) + "State1");
+  for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
+    model->environmentInputs = {input};
+    model->inputVarByKey.emplace(input, 3);
+    model->displayNameByKey.emplace(input, "select[0]");
+  }
+  models.model0.nextStateExprByStateKey.at(state0) = BoolExpr::createFalse();
+  models.model1.nextStateExprByStateKey.at(state1) = BoolExpr::createFalse();
+  models.model0.observedOutputExprByKey.at(output) =
+      BoolExpr::Or(BoolExpr::Var(2), BoolExpr::Var(3));
+  models.model1.observedOutputExprByKey.at(output) =
+      BoolExpr::And(BoolExpr::Var(3), BoolExpr::Not(BoolExpr::Var(2)));
+
+  SequentialEquivalenceStrategy strategy(
+      nullptr,
+      nullptr,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      SecEngine::Pdr,
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/2});
+  const auto result =
+      strategy.runExtractedModels(models.model0, models.model1, 2);
+
+  // At cycle zero select=0 exposes X/0, while select=1 produces the defined
+  // mismatch 1/0. The X trace must not hide the real counterexample.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17243,7 +17265,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
       top1,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
+      SecEncoding::DualRailSteady,
+      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/3});
   const auto result = strategy.run(3);
   const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();

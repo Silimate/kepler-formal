@@ -109,9 +109,9 @@ liberty_files:
 | `--sec-engine <engine>` | `sec_engine: <engine>` | `pdr` | `k_induction`, `imc`, `pdr` | Selects the top-level SEC proof engine. Engine names are lowercase. |
 | `--sec-encoding <mode>` | `sec_encoding: <mode>` | `dual_rail_steady` | `binary`, `dual_rail_steady` | Selects how SEC models unknown or reset-unanchored state values. Omit the key/flag to use the dual-rail default. |
 | `--sec-pdr-auto-age` | `sec_pdr_auto_age: true` | `false` | boolean | Enables verifier-owned age discovery for dual-rail PDR. |
-| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | `false` | boolean | Disables age discovery and preserves the existing PDR behavior. |
+| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | `false` | boolean | Disables age search and requires dual-rail PDR outputs to be binary-defined from cycle zero. |
 | `--sec-pdr-age-min <n>` | `sec_pdr_age_min: <n>` | `10` | Non-negative integer | Sets the first candidate definedness age. |
-| `--sec-pdr-age-max <n>` | `sec_pdr_age_max: <n>` | `20` | Non-negative integer | Sets the last candidate and uncertified fallback age. Must be at least the minimum. |
+| `--sec-pdr-age-max <n>` | `sec_pdr_age_max: <n>` | `20` | Non-negative integer | Sets the last candidate definedness age. Must be at least the minimum. |
 | `--sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: true` | `true` | boolean | Abstracts unsupported sequential instances as SEC boundaries instead of failing immediately. |
 | `--no-sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: false` | `true` | boolean | Uses strict mode: unsupported sequential interfaces cause SEC to fail as unsupported. |
 | `--compact` | `compact_mode: true` | `false` | boolean | Enables compact SEC extraction: design 1 is extracted and released before design 2 is loaded; identical SEC inputs can reuse the extracted design 1 model. |

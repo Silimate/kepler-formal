@@ -2783,6 +2783,20 @@ DualRailOutputProperties buildDualRailOutputProperties(
       bothValuesDefined};
 }
 
+BoolExpr* buildDualRailOutputRangeDefinedExpr(
+    const KInductionProblem& problem,
+    size_t firstOutput,
+    size_t endOutput) {
+  BoolExpr* allDefined = BoolExpr::createTrue();
+  const size_t cappedEnd = std::min(
+      endOutput, problem.dualRailOutputBothDefinedExprs.size());
+  for (size_t output = firstOutput; output < cappedEnd; ++output) {
+    allDefined = BoolExpr::And(
+        allDefined, problem.dualRailOutputBothDefinedExprs[output]);
+  }
+  return BoolExpr::simplify(allDefined);
+}
+
 class PdrAgeMonitor {
  public:
   PdrAgeMonitor(const KInductionProblem& source, size_t maximumAge)
@@ -2799,14 +2813,10 @@ class PdrAgeMonitor {
   BoolExpr* outputsDefinedFromAge(size_t firstOutput,
                                   size_t endOutput,
                                   size_t age) const {
-    BoolExpr* allDefined = BoolExpr::createTrue();
-    const size_t cappedEnd = std::min(
-        endOutput, problem_.dualRailOutputBothDefinedExprs.size());
-    for (size_t output = firstOutput; output < cappedEnd; ++output) {
-      allDefined = BoolExpr::And(
-          allDefined, problem_.dualRailOutputBothDefinedExprs[output]);
-    }
-    return propertyFromAge(age, BoolExpr::simplify(allDefined));
+    return propertyFromAge(
+        age,
+        buildDualRailOutputRangeDefinedExpr(
+            problem_, firstOutput, endOutput));
   }
 
  private:
@@ -2922,16 +2932,6 @@ constexpr PDRQueryLimits kDualRailPdrBatchProbeLimits{
     /*blockingDecisionLimit=*/150 * 1000,
     /*predecessorEncodingNodeLimit=*/5 * 1000 * 1000,
     /*predecessorNodeHintTargetLimit=*/512};
-// Strict equality is the second, proof-only pass over outputs that already
-// have no concrete mismatch. Retain the exact pre-adaptive PDR allowance so a
-// useful output group can converge without being split into costly leaves.
-constexpr PDRQueryLimits kDualRailPdrStrictBatchLimits{
-    /*predecessorConflictLimit=*/10 * 1000,
-    /*predecessorDecisionLimit=*/150 * 1000,
-    /*blockingConflictLimit=*/200 * 1000,
-    /*blockingDecisionLimit=*/4 * 1000 * 1000,
-    /*predecessorEncodingNodeLimit=*/5 * 1000 * 1000,
-    /*predecessorNodeHintTargetLimit=*/512};
 
 PDRResult runPdrOutputBatch(const PDREngine& engine,
                             size_t maxFrames,
@@ -2943,12 +2943,6 @@ PDRResult runPdrOutputBatch(const PDREngine& engine,
   // A broad UNKNOWN only schedules exact child properties. Full query limits
   // are reserved for singleton leaves, so failed probes cannot dominate them.
   return engine.run(maxFrames, property, kDualRailPdrBatchProbeLimits);
-}
-
-PDRResult runStrictPdrOutputBatch(const PDREngine& engine,
-                                  size_t maxFrames,
-                                  BoolExpr* property) {
-  return engine.run(maxFrames, property, kDualRailPdrStrictBatchLimits);
 }
 
 PdrAgeOptions capPdrAgeOptionsToMaxFrames(
@@ -3022,23 +3016,6 @@ class PdrAgeProofSession {
     }
     search.certifiedAge = upper;
     return search;
-  }
-
-  PDRResult runFromAge(BoolExpr* property,
-                       size_t age,
-                       size_t outputCount) const {
-    return runPdrOutputBatch(
-        engine_, maxFrames_, monitor_.propertyFromAge(age, property),
-        outputCount);
-  }
-
-  PDRResult runStrictFromAge(BoolExpr* property, size_t age) const {
-    return runStrictPdrOutputBatch(
-        engine_, maxFrames_, monitor_.propertyFromAge(age, property));
-  }
-
-  BoolExpr* propertyFromAge(size_t age, BoolExpr* property) const {
-    return monitor_.propertyFromAge(age, property);
   }
 
  private:
@@ -3476,11 +3453,9 @@ SequentialEquivalenceResult runPdrSecEngine(
     size_t endOutput = 0;
   // LCOV_DISABLED_START
   };
-  struct PdrStrictBatch {
+  struct PdrDefinednessBatch {
     size_t firstOutput = 0;
     size_t endOutput = 0;
-    std::optional<size_t> ageGate;
-    bool mayCover = true;
   };
   std::vector<PdrOutputBatch> outputBatches;
   const bool useSupportBoundedPdrBatches =
@@ -3505,21 +3480,27 @@ SequentialEquivalenceResult runPdrSecEngine(
       makeInitialPdrCoveredOutputs(problem);
   std::unordered_map<size_t, std::string> pdrSkippedOutputReasons =
       presetDualRailSkipReasons;
-  std::vector<PdrStrictBatch> strictBatches;
+  std::vector<PdrDefinednessBatch> definednessBatches;
   std::vector<std::string> xAffectedOutputNames;
   size_t provedBound = 0;
   bool stopAfterInconclusiveBatch = false;
-  const bool useAutomaticAge =
-      problem.usesDualRailStateEncoding && effectiveAgeOptions.automatic &&
+  const bool hasDualRailDefinednessProperty =
+      !problem.usesDualRailStateEncoding ||
       problem.dualRailOutputBothDefinedExprs.size() ==
           problem.observedOutputExprs0.size();
-  std::unique_ptr<PdrAgeProofSession> ageSession;
-  if (useAutomaticAge) {
-    ageSession = std::make_unique<PdrAgeProofSession>(
-        problem, solverType, maxK, effectiveAgeOptions);
+  PdrAgeOptions definednessAgeOptions = effectiveAgeOptions;
+  if (!definednessAgeOptions.automatic) {
+    // With discovery disabled, require binary outputs from the initial cycle.
+    definednessAgeOptions.minimum = 0;
+    definednessAgeOptions.maximum = 0;
   }
+  const bool useAutomaticAge =
+      problem.usesDualRailStateEncoding &&
+      hasDualRailDefinednessProperty &&
+      definednessAgeOptions.automatic;
+  std::unique_ptr<PdrAgeProofSession> ageSession;
   std::shared_ptr<PDRExactInitCache> exactInitCache;
-  if (problem.usesDualRailStateEncoding && !useAutomaticAge) {
+  if (problem.usesDualRailStateEncoding) {
     exactInitCache =
         std::make_shared<PDRExactInitCache>(problem, solverType);
   }
@@ -3528,57 +3509,12 @@ SequentialEquivalenceResult runPdrSecEngine(
     const auto [firstOutput, endOutput] = outputBatches[batchIndex];
     configureOutputBatchProblem(
         exactBatchProblem, problem, firstOutput, endOutput);
-    std::optional<size_t> selectedAge;
-    bool usesUnflushedFallback = false;
-    if (useAutomaticAge) {
-      const PdrAgeSearchResult ageResult =
-          ageSession->findDefinedAge(firstOutput, endOutput);
-      provedBound = std::max(provedBound, ageResult.reachedBound);
-      if (isSecDiagEnabled()) {
-        emitSecDiag(
-            "SEC diag: PDR age definedness output range=",
-            firstOutput,
-            "..",
-            endOutput,
-            " minimum_status=",
-            pdrStatusName(ageResult.minimumStatus),
-            " maximum_status=",
-            pdrStatusName(ageResult.maximumStatus));
-      }
-      selectedAge = ageResult.certifiedAge;
-      if (!selectedAge.has_value()) {
-        if (endOutput - firstOutput > 1) {
-          const size_t midOutput =
-              firstOutput + (endOutput - firstOutput) / 2;
-          outputBatches.insert(
-              outputBatches.begin() +
-                  static_cast<std::ptrdiff_t>(batchIndex + 1),
-              {PdrOutputBatch{firstOutput, midOutput},
-               PdrOutputBatch{midOutput, endOutput}});
-          continue;
-        }
-        selectedAge = effectiveAgeOptions.maximum;
-        usesUnflushedFallback = true;
-      }
-      if (isSecDiagEnabled()) {
-        emitSecDiag(
-            usesUnflushedFallback
-                ? "SEC diag: PDR age fallback output range="
-                : "SEC diag: PDR certified age output range=",
-            firstOutput,
-            "..",
-            endOutput,
-            " age=",
-            *selectedAge);
-      }
-    }
-
     if (isSecDiagEnabled()) {
       // Output batches may split after an inconclusive result. Record the live
       // range so one fully diagnostic performance run identifies the slow PDR
       // slice without changing batching or proof order.
       emitSecDiag(
-          "SEC diag: PDR output batch begin index=",
+          "SEC diag: PDR defined-value check begin index=",
           batchIndex,
           " pending_batches=",
           outputBatches.size(),
@@ -3587,20 +3523,14 @@ SequentialEquivalenceResult runPdrSecEngine(
           "..",
           endOutput);
     }
-    PDRResult pdrResult;
-    if (useAutomaticAge) {
-      pdrResult = ageSession->runFromAge(
-          exactBatchProblem.property, *selectedAge, endOutput - firstOutput);
-    } else {
-      PDREngine pdrEngine(
-          exactBatchProblem, solverType, 0, exactInitCache);
-      pdrResult = runPdrOutputBatch(
-          pdrEngine, maxK, exactBatchProblem.property,
-          endOutput - firstOutput);
-    }
+    PDREngine pdrEngine(
+        exactBatchProblem, solverType, 0, exactInitCache);
+    const PDRResult pdrResult = runPdrOutputBatch(
+        pdrEngine, maxK, exactBatchProblem.property,
+        endOutput - firstOutput);
     if (isSecDiagEnabled()) {
       emitSecDiag(
-          "SEC diag: PDR output batch end index=",
+          "SEC diag: PDR defined-value check end index=",
           batchIndex,
           " output_range=",
           firstOutput,
@@ -3614,20 +3544,8 @@ SequentialEquivalenceResult runPdrSecEngine(
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:
         provedBound = std::max(provedBound, pdrResult.bound);
-        if (problem.usesDualRailStateEncoding &&
-            (!useAutomaticAge || usesUnflushedFallback)) {
-          strictBatches.push_back(
-              {firstOutput,
-               endOutput,
-               useAutomaticAge ? selectedAge : std::nullopt,
-               !usesUnflushedFallback});
-          if (!usesUnflushedFallback) {
-            markPdrOutputRangeCovered(
-                pdrCoveredOutputs,
-                pdrSkippedOutputReasons,
-                firstOutput,
-                endOutput);
-          }
+        if (problem.usesDualRailStateEncoding) {
+          definednessBatches.push_back({firstOutput, endOutput});
         } else {
           markPdrOutputRangeCovered(
               pdrCoveredOutputs,
@@ -3640,7 +3558,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         return makeSecResult(
             SequentialEquivalenceStatus::Different,
             pdrResult.bound,
-            "Exact PDR found a counterexample at k = " +
+            "Exact PDR found a defined-value counterexample at k = " +
                 std::to_string(pdrResult.bound),
             outputCoverage,
             abstractedSequentialBoundaries,
@@ -3664,7 +3582,8 @@ SequentialEquivalenceResult runPdrSecEngine(
               pdrSkippedOutputReasons,
               firstOutput,
               endOutput,
-              "dual-rail PDR was inconclusive on the exact output slice");
+              "dual-rail PDR was inconclusive while checking defined-value "
+              "differences");
           break;
         }
         for (size_t outputIndex = 0;
@@ -3684,131 +3603,115 @@ SequentialEquivalenceResult runPdrSecEngine(
   }
 
   if (problem.usesDualRailStateEncoding) {
-    std::vector<bool> strictCoveredOutputs = pdrCoveredOutputs;
-    if (problem.dualRailOutputStrictEqualityExprs.size() !=
-        problem.observedOutputExprs0.size()) {
-      for (const PdrStrictBatch& batch : strictBatches) {
+    if (useAutomaticAge) {
+      // The monitor has a different transition system. Release the original
+      // exact-init cache before constructing its cache so both large SAT
+      // surfaces are not retained at once.
+      exactInitCache.reset();
+      ageSession = std::make_unique<PdrAgeProofSession>(
+          problem, solverType, maxK, definednessAgeOptions);
+    }
+    if (!hasDualRailDefinednessProperty) {
+      for (const PdrDefinednessBatch& batch : definednessBatches) {
         markPdrOutputRangeSkipped(
-            strictCoveredOutputs,
+            pdrCoveredOutputs,
             pdrSkippedOutputReasons,
             batch.firstOutput,
             batch.endOutput,
-            "strict dual-rail equality obligation is unavailable");
+            "dual-rail output definedness obligation is unavailable");
       }
     } else {
-      KInductionProblem strictProblem = problem;
-      configureStrictDualRailOutputProperty(strictProblem);
-
-      // Round one has already proved that these batches cannot contain a
-      // binary 01/10 mismatch. A strict rail mismatch in round two therefore
-      // identifies an X-only difference, not a concrete counterexample.
-      KInductionProblem strictBatchProblem = strictProblem;
+      // The first pass has proved that no reachable 01/10 mismatch exists.
+      // This pass prevents a vacuous proof by requiring both outputs to become
+      // and remain binary-defined.
       for (size_t batchIndex = 0;
-           batchIndex < strictBatches.size();
+           batchIndex < definednessBatches.size();
            ++batchIndex) {
-        const PdrStrictBatch batch = strictBatches[batchIndex];
+        const PdrDefinednessBatch batch = definednessBatches[batchIndex];
         const size_t firstOutput = batch.firstOutput;
         const size_t endOutput = batch.endOutput;
-        configureOutputBatchProblem(
-            strictBatchProblem, strictProblem, firstOutput, endOutput);
-        if (isSecDiagEnabled()) {
-          emitSecDiag(
-              "SEC diag: PDR strict output batch begin index=",
-              batchIndex,
-              " pending_batches=",
-              strictBatches.size(),
-              " output_range=",
-              firstOutput,
-              "..",
-              endOutput);
-        }
-        PDRResult strictResult;
-        if (batch.ageGate.has_value()) {
-          strictResult = ageSession->runStrictFromAge(
-              strictBatchProblem.property, *batch.ageGate);
+        PdrAgeSearchResult ageResult;
+        if (useAutomaticAge) {
+          ageResult = ageSession->findDefinedAge(firstOutput, endOutput);
         } else {
-          PDREngine strictPdrEngine(
-              strictBatchProblem, solverType, 0, exactInitCache);
-          strictResult = runStrictPdrOutputBatch(
-              strictPdrEngine, maxK, strictBatchProblem.property);
+          PDREngine definednessEngine(
+              problem, solverType, 0, exactInitCache);
+          const PDRResult definednessResult = runPdrOutputBatch(
+              definednessEngine,
+              maxK,
+              buildDualRailOutputRangeDefinedExpr(
+                  problem, firstOutput, endOutput),
+              endOutput - firstOutput);
+          ageResult.reachedBound = definednessResult.bound;
+          ageResult.minimumStatus = definednessResult.status;
+          ageResult.maximumStatus = definednessResult.status;
+          if (definednessResult.status == PDRStatus::Equivalent) {
+            ageResult.certifiedAge = 0;
+          }
         }
+        provedBound = std::max(provedBound, ageResult.reachedBound);
         if (isSecDiagEnabled()) {
           emitSecDiag(
-              "SEC diag: PDR strict output batch end index=",
-              batchIndex,
-              " output_range=",
+              "SEC diag: PDR age definedness output range=",
               firstOutput,
               "..",
               endOutput,
-              " status=",
-              pdrStatusName(strictResult.status),
-              " bound=",
-              strictResult.bound);
+              " minimum_status=",
+              pdrStatusName(ageResult.minimumStatus),
+              " maximum_status=",
+              pdrStatusName(ageResult.maximumStatus));
         }
-        provedBound = std::max(provedBound, strictResult.bound);
-        if (strictResult.status == PDRStatus::Equivalent) {
-          if (batch.mayCover) {
-            markPdrOutputRangeCovered(
-                strictCoveredOutputs,
-                pdrSkippedOutputReasons,
+        if (ageResult.certifiedAge.has_value()) {
+          markPdrOutputRangeCovered(
+              pdrCoveredOutputs,
+              pdrSkippedOutputReasons,
+              firstOutput,
+              endOutput);
+          if (isSecDiagEnabled()) {
+            emitSecDiag(
+                "SEC diag: PDR certified age output range=",
                 firstOutput,
-                endOutput);
-          } else {
-            const std::string reason =
-                "affected by X propagated from uninitialized sequential "
-                "logic; definedness was not certified through age " +
-                std::to_string(effectiveAgeOptions.maximum);
-            markPdrOutputRangeSkipped(
-                strictCoveredOutputs,
-                pdrSkippedOutputReasons,
-                firstOutput,
+                "..",
                 endOutput,
-                reason);
-            xAffectedOutputNames.push_back(
-                outputNameForProblemIndex(problem, firstOutput));
+                " age=",
+                *ageResult.certifiedAge);
           }
           continue;
         }
         if (endOutput - firstOutput > 1) {
           const size_t midOutput =
               firstOutput + (endOutput - firstOutput) / 2;
-          strictBatches.insert(
-              strictBatches.begin() +
+          definednessBatches.insert(
+              definednessBatches.begin() +
                   static_cast<std::ptrdiff_t>(batchIndex + 1),
-              {PdrStrictBatch{
-                   firstOutput, midOutput, batch.ageGate, batch.mayCover},
-               PdrStrictBatch{
-                   midOutput, endOutput, batch.ageGate, batch.mayCover}});
+              {PdrDefinednessBatch{firstOutput, midOutput},
+               PdrDefinednessBatch{midOutput, endOutput}});
           continue;
         }
-        if (strictResult.status == PDRStatus::Different) {
-          markPdrOutputRangeSkipped(
-              strictCoveredOutputs,
-              pdrSkippedOutputReasons,
-              firstOutput,
-              endOutput,
-              kDualRailXInconclusiveReason);
-          xAffectedOutputNames.push_back(
-              outputNameForProblemIndex(problem, firstOutput));
-          continue;
-        }
+        const bool witnessedX =
+            ageResult.minimumStatus == PDRStatus::Different ||
+            ageResult.maximumStatus == PDRStatus::Different;
+        const std::string reason =
+            witnessedX
+                ? std::string(kDualRailXInconclusiveReason) +
+                      (definednessAgeOptions.automatic
+                           ? "; definedness was not certified through age " +
+                                 std::to_string(definednessAgeOptions.maximum)
+                           : " at cycle 0")
+                : "dual-rail PDR was inconclusive while proving binary "
+                  "output definedness";
         markPdrOutputRangeSkipped(
-            strictCoveredOutputs,
+            pdrCoveredOutputs,
             pdrSkippedOutputReasons,
             firstOutput,
             endOutput,
-            batch.mayCover
-                ? "strict dual-rail equality PDR was inconclusive"
-                : "affected by X propagated from uninitialized sequential "
-                  "logic; definedness was not certified through age " +
-                      std::to_string(effectiveAgeOptions.maximum));
-        if (!batch.mayCover) {
+            reason);
+        if (witnessedX) {
           xAffectedOutputNames.push_back(
               outputNameForProblemIndex(problem, firstOutput));
         }
       }
     }
-    pdrCoveredOutputs = std::move(strictCoveredOutputs);
   }
 
   {

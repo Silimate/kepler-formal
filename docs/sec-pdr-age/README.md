@@ -7,8 +7,8 @@ then prove concrete output equality without treating a persistent unknown value
 as a concrete proof.
 
 The feature is disabled by default. Enable it explicitly with
-`--sec-pdr-auto-age` or `sec_pdr_auto_age: true`. Without that opt-in, SEC uses
-the existing PDR flow unchanged.
+`--sec-pdr-auto-age` or `sec_pdr_auto_age: true`. Without that opt-in, SEC
+requires both outputs to be binary-defined starting at cycle zero.
 
 ## Scope And Invariants
 
@@ -26,6 +26,8 @@ The implementation preserves these rules:
 - No internal name matching is used across designs.
 - Every age probe starts fresh IC3/PDR frames and proof obligations.
 - A solver `UNKNOWN` result is never interpreted as SAT, UNSAT, or coverage.
+- The defined-value difference property always starts at the exact initial
+  state and is never moved by age discovery.
 
 ## Dual-Rail Values
 
@@ -46,6 +48,20 @@ defined(o) = o.may_be_one XOR o.may_be_zero
 
 A concrete mismatch exists only when both designs are defined and their binary
 values are opposite.
+
+## Defined-Value Difference Property
+
+PDR first checks this safety property once for each output batch:
+
+```text
+NOT (both designs are binary-defined AND their values are opposite)
+```
+
+This property starts at cycle zero and covers every reachable cycle. An X value
+does not violate it. `Different` therefore identifies a real `01` versus `10`
+counterexample. `Equivalent` proves that no such counterexample is reachable.
+`Inconclusive` leaves the affected output unresolved and cannot be repaired by
+moving the definedness age.
 
 ## Verifier-Owned Age Monitor
 
@@ -93,57 +109,35 @@ For each output batch, the search is:
    upper age. Never infer a result from `UNKNOWN`.
 5. If the maximum is not proved for a multi-output batch, split the batch and
    repeat the search.
-6. If the maximum is not proved for a single output, use the fallback flow at
-   the configured maximum.
+6. If the maximum is not proved for a single output, report that output as
+   inconclusive.
 
 Each age property is monotone: once all selected outputs are proved defined from
 age `N`, the same certificate holds for any larger candidate age.
 
-## Final SEC Property
+## Final Verdict
 
-When age `N` is certified, PDR checks the existing guarded mismatch property
-starting at that age:
+An output is proved only when both independent safety obligations converge:
 
-```text
-age < N OR no selected output is binary-defined and opposite
-```
+1. No defined-value difference is reachable from cycle zero.
+2. Both outputs are binary-defined from a certified age `N` onward.
 
-The definedness certificate and guarded mismatch proof together establish
-concrete equality from age `N` onward. A reachable defined-and-opposite output
-is reported as `Different`.
-
-Startup behavior before the selected age is intentionally outside this
-steady-state property. The age monitor makes that boundary explicit in the
-product FSM instead of confusing it with a PDR frame number.
-
-## Uncertified Fallback
-
-If a single output is not certified as defined by the maximum age, SEC retains
-the existing two checks, both gated at the maximum age:
-
-1. Guarded binary mismatch checks for a concrete `01` versus `10` difference.
-2. Strict rail equality checks whether the two three-valued rail pairs differ.
-
-A guarded binary mismatch is a concrete counterexample. Otherwise, the output
-remains `Inconclusive`, even if strict `X == X` rail equality is proved, because
-definedness was not certified. The result names every affected public output
-and explains that unknown data propagated from uninitialized sequential logic.
+A defined-value counterexample reports `Different`. If definedness is not
+certified, the output remains `Inconclusive`; equal `X/X` rails are not accepted
+as a proof. The result names affected public outputs and explains when unknown
+data propagated from uninitialized sequential logic.
 
 ## Disabled Flow
 
 With automatic age discovery disabled, the monitor and all age probes are
-absent. SEC runs the existing behavior unchanged:
-
-1. Run guarded dual-rail PDR from the original `F[0]` with the requested
-   `max_k`.
-2. Run the existing strict rail-equality pass for guarded-proved batches.
-3. Use the existing batching, output coverage, diagnostics, and verdict rules.
-
-No age gating or effective frame-budget adjustment occurs on this path.
+absent. SEC checks the defined-value difference property from the original
+`F[0]`, then requires both outputs to be binary-defined from cycle zero. A
+persistent or initial X therefore yields `Inconclusive`, not `Proved`.
 
 ## Reused Work
 
-Age probes share only property-independent model work:
+Output batches and age probes share only property-independent model work within
+the same transition system:
 
 - The exact `F[0]` formula.
 - The incremental `F[0]`-intersection SAT solver.
@@ -169,9 +163,9 @@ change a verdict.
 | CLI | YAML | Default | Meaning |
 | --- | --- | ---: | --- |
 | `--sec-pdr-auto-age` | `sec_pdr_auto_age: true` | disabled | Enable automatic age discovery. |
-| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | disabled | Disable age discovery and preserve the existing PDR flow. |
+| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | disabled | Disable age search and require definedness from cycle zero. |
 | `--sec-pdr-age-min N` | `sec_pdr_age_min: N` | `10` | First candidate age. |
-| `--sec-pdr-age-max N` | `sec_pdr_age_max: N` | `20` | Last candidate and fallback age. |
+| `--sec-pdr-age-max N` | `sec_pdr_age_max: N` | `20` | Last candidate age. |
 
 Both ages are non-negative integers and the minimum must not exceed the
 maximum. Explicit age options are rejected unless PDR and dual-rail steady-state
@@ -181,5 +175,5 @@ encoding are selected.
 properties. If either configured age exceeds `max_k`, SEC caps it to `max_k`
 and emits a warning. Age discovery never silently deepens the requested run.
 
-Set `KEPLER_SEC_DIAG=1` to print the certified or fallback age selected for each
-output range.
+Set `KEPLER_SEC_DIAG=1` to print the defined-value and definedness result for
+each output range, including any certified age.
