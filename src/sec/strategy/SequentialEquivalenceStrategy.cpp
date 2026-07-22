@@ -1181,18 +1181,17 @@ KInductionProblem makeOutputSubsetProblem(
   return subset;
 }
 
-bool configureStrictDualRailOutputProperty(KInductionProblem& problem) {
-  if (problem.dualRailOutputStrictEqualityExprs.size() !=
+bool configureDualRailDefinednessProperty(KInductionProblem& problem) {
+  if (problem.dualRailOutputBothDefinedExprs.size() !=
       problem.observedOutputExprs0.size()) {
     return false;
   }
   problem.observedOutputExprs0 =
-      problem.dualRailOutputStrictEqualityExprs;
+      problem.dualRailOutputBothDefinedExprs;
   problem.observedOutputExprs1.assign(
       problem.observedOutputExprs0.size(), BoolExpr::createTrue());
   rebuildSelectedOutputProperty(problem);
-  problem.usesStrictDualRailEqualityProperty = true;
-  problem.description += " strict three-valued equality";
+  problem.description += " binary definedness";
   return true;
 }
 
@@ -1449,15 +1448,15 @@ struct DualRailResidualProofState {
   size_t provedBound = 0;
 };
 
-enum class DualRailStrictProofStatus {
-  Equivalent,
-  XMismatch,
+enum class DualRailDefinednessProofStatus {
+  Defined,
+  XWitness,
   Inconclusive,
 };
 
-struct DualRailStrictProofResult {
-  DualRailStrictProofStatus status =
-      DualRailStrictProofStatus::Inconclusive;
+struct DualRailDefinednessProofResult {
+  DualRailDefinednessProofStatus status =
+      DualRailDefinednessProofStatus::Inconclusive;
   size_t bound = 0;
 };
 
@@ -1735,33 +1734,33 @@ void recordDualRailResidualCounterexample(
       extractedBoundaryReports);
 }
 
-DualRailStrictProofResult runDualRailStrictKInduction(
+DualRailDefinednessProofResult runDualRailDefinednessKInduction(
     const KInductionProblem& problem,
     const std::vector<size_t>& outputIndices,
     size_t maxK,
     KEPLER_FORMAL::Config::SolverType solverType) {
-  KInductionProblem strictProblem =
+  KInductionProblem definednessProblem =
       makeOutputSubsetProblem(problem, outputIndices);
-  if (!configureStrictDualRailOutputProperty(strictProblem)) {
+  if (!configureDualRailDefinednessProperty(definednessProblem)) {
     return {};
   }
 
   // The guarded obligation is already proved for this output set. Run normal
-  // k-induction on strict rail equality, including its concrete base case,
-  // before accepting any output as equivalent.
-  strictProblem.deferBaseCaseChecks = false;
-  KInductionEngine strictEngine(strictProblem, solverType);
-  const KInductionResult result = strictEngine.run(maxK);
+  // k-induction on binary definedness, including its concrete base case,
+  // before accepting any output as concretely equivalent.
+  definednessProblem.deferBaseCaseChecks = false;
+  KInductionEngine definednessEngine(definednessProblem, solverType);
+  const KInductionResult result = definednessEngine.run(maxK);
   if (result.status == KInductionStatus::Different) {
-    return {DualRailStrictProofStatus::XMismatch, result.bound};
+    return {DualRailDefinednessProofStatus::XWitness, result.bound};
   }
   if (result.status == KInductionStatus::Equivalent) {
-    return {DualRailStrictProofStatus::Equivalent, result.bound};
+    return {DualRailDefinednessProofStatus::Defined, result.bound};
   }
-  return {DualRailStrictProofStatus::Inconclusive, result.bound};
+  return {DualRailDefinednessProofStatus::Inconclusive, result.bound};
 }
 
-void proveDualRailStrictKInductionOutputSet(
+void proveDualRailDefinednessKInductionOutputSet(
     const KInductionProblem& problem,
     const std::vector<size_t>& outputIndices,
     size_t maxK,
@@ -1771,28 +1770,28 @@ void proveDualRailStrictKInductionOutputSet(
     return;  // LCOV_EXCL_LINE
   }
 
-  const DualRailStrictProofResult strictResult =
-      runDualRailStrictKInduction(
+  const DualRailDefinednessProofResult definednessResult =
+      runDualRailDefinednessKInduction(
           problem, outputIndices, maxK, solverType);
   proofState.provedBound =
-      std::max(proofState.provedBound, strictResult.bound);
-  if (strictResult.status == DualRailStrictProofStatus::Equivalent) {
+      std::max(proofState.provedBound, definednessResult.bound);
+  if (definednessResult.status == DualRailDefinednessProofStatus::Defined) {
     markDualRailResidualOutputsCovered(outputIndices, proofState);
     return;
   }
 
-  // A failed strict conjunction may contain independent clean outputs. Split
-  // only that strict obligation; the parent guarded proof remains valid for
-  // both children and therefore cannot turn an X mismatch into a counterexample.
+  // A failed definedness conjunction may contain independent binary outputs.
+  // Split only this obligation; the parent guarded proof remains valid for
+  // both children and therefore cannot turn an X witness into a mismatch.
   if (outputIndices.size() > 1) {
     const size_t mid = outputIndices.size() / 2;
     const std::vector<size_t> left(
         outputIndices.begin(), outputIndices.begin() + mid);
     const std::vector<size_t> right(
         outputIndices.begin() + mid, outputIndices.end());
-    proveDualRailStrictKInductionOutputSet(
+    proveDualRailDefinednessKInductionOutputSet(
         problem, left, maxK, solverType, proofState);
-    proveDualRailStrictKInductionOutputSet(
+    proveDualRailDefinednessKInductionOutputSet(
         problem, right, maxK, solverType, proofState);
     return;
   }
@@ -1802,9 +1801,9 @@ void proveDualRailStrictKInductionOutputSet(
       problem,
       DualRailResidualEngine::KInduction,
       proofState,
-      strictResult.status == DualRailStrictProofStatus::XMismatch
+      definednessResult.status == DualRailDefinednessProofStatus::XWitness
           ? kDualRailXInconclusiveReason
-          : "strict dual-rail equality k-induction was inconclusive");
+          : "dual-rail binary-definedness k-induction was inconclusive");
 }
 
 void proveDualRailResidualOutputSet(
@@ -1883,7 +1882,7 @@ void proveDualRailResidualOutputSet(
         return;
       }  // LCOV_EXCL_LINE
       if (baseCheck.status == SEC::BaseCounterexampleCheckStatus::NoCounterexample) {
-        proveDualRailStrictKInductionOutputSet(
+        proveDualRailDefinednessKInductionOutputSet(
             problem, outputIndices, maxK, solverType, proofState);
         return;
       }
@@ -2771,9 +2770,9 @@ DualRailOutputProperties buildDualRailOutputProperties(
   BoolExpr* strictEquality = BoolExpr::simplify(BoolExpr::And(
       makeEqualityExpr(value0.mayBeOne, value1.mayBeOne),
       makeEqualityExpr(value0.mayBeZero, value1.mayBeZero)));
-  // The paper's steady-state property guards the concrete mismatch. Its full
-  // three-valued property is strict equality of both rails; every dual-rail SEC
-  // engine proves these as two exact safety obligations.
+  // Concrete dual-rail SEC has two obligations: no defined binary mismatch and
+  // binary definedness in both designs. Strict rail equality remains metadata
+  // for shared exact query surfaces; it is not a proof because 11 == 11 is X.
   BoolExpr* binaryMismatch = BoolExpr::And(
       bothValuesDefined,
       BoolExpr::Xor(value0.mayBeOne, value1.mayBeOne));
@@ -2797,33 +2796,33 @@ BoolExpr* buildDualRailOutputRangeDefinedExpr(
   return BoolExpr::simplify(allDefined);
 }
 
-class PdrAgeMonitor {
+class PdrDefinednessMonitor {
  public:
-  PdrAgeMonitor(const KInductionProblem& source, size_t maximumAge)
-      : problem_(source), maximumAge_(maximumAge) {
+  PdrDefinednessMonitor(const KInductionProblem& source, size_t maximumCycle)
+      : problem_(source), maximumCycle_(maximumCycle) {
     addCounterState();
   }
 
   const KInductionProblem& problem() const { return problem_; }
 
-  BoolExpr* propertyFromAge(size_t age, BoolExpr* property) const {
-    return BoolExpr::simplify(BoolExpr::Or(ageLessThan(age), property));
+  BoolExpr* propertyFromCycle(size_t cycle, BoolExpr* property) const {
+    return BoolExpr::simplify(BoolExpr::Or(cycleLessThan(cycle), property));
   }
 
-  BoolExpr* outputsDefinedFromAge(size_t firstOutput,
-                                  size_t endOutput,
-                                  size_t age) const {
-    return propertyFromAge(
-        age,
+  BoolExpr* outputsDefinedFromCycle(size_t firstOutput,
+                                    size_t endOutput,
+                                    size_t cycle) const {
+    return propertyFromCycle(
+        cycle,
         buildDualRailOutputRangeDefinedExpr(
             problem_, firstOutput, endOutput));
   }
 
  private:
-  static size_t counterWidth(size_t maximumAge) {
+  static size_t counterWidth(size_t maximumCycle) {
     size_t width = 1;
     while (width < std::numeric_limits<size_t>::digits &&
-           (maximumAge >> width) != 0) {
+           (maximumCycle >> width) != 0) {
       ++width;
     }
     return width;
@@ -2837,12 +2836,12 @@ class PdrAgeMonitor {
         BoolExpr::And(BoolExpr::Not(condition), whenFalse));
   }
 
-  BoolExpr* ageLessThan(size_t value) const {
+  BoolExpr* cycleLessThan(size_t value) const {
     if (value == 0) {
       return BoolExpr::createFalse();
     }
-    if (const auto cached = ageLessThanByValue_.find(value);
-        cached != ageLessThanByValue_.end()) {
+    if (const auto cached = cycleLessThanByValue_.find(value);
+        cached != cycleLessThanByValue_.end()) {
       return cached->second;
     }
 
@@ -2861,12 +2860,12 @@ class PdrAgeMonitor {
       }
     }
     BoolExpr* result = BoolExpr::simplify(less);
-    ageLessThanByValue_.emplace(value, result);
+    cycleLessThanByValue_.emplace(value, result);
     return result;
   }
 
   void addCounterState() {
-    const size_t width = counterWidth(maximumAge_);
+    const size_t width = counterWidth(maximumCycle_);
     size_t nextSymbol = nextUnusedProofSymbol(problem_);
     counterSymbols_.reserve(width);
     for (size_t bit = 0; bit < width; ++bit) {
@@ -2879,18 +2878,17 @@ class PdrAgeMonitor {
     problem_.totalStateCount += width;
     problem_.initializedStateCount += width;
 
-    // Values above the configured maximum are unreachable. Defining them to
-    // move to the maximum keeps the monitor transition total without adding a
-    // domain assumption to PDR.
+    // Values above max_k are unreachable. Defining them to move to max_k keeps
+    // the monitor transition total without adding a domain assumption to PDR.
     BoolExpr* atOrAboveMaximum =
-        BoolExpr::Not(ageLessThan(maximumAge_));
+        BoolExpr::Not(cycleLessThan(maximumCycle_));
     BoolExpr* carry = BoolExpr::createTrue();
     for (size_t bit = 0; bit < width; ++bit) {
       BoolExpr* current = BoolExpr::Var(counterSymbols_[bit]);
       BoolExpr* incremented = BoolExpr::Xor(current, carry);
       carry = BoolExpr::And(carry, current);
       BoolExpr* maximumBit =
-          ((maximumAge_ >> bit) & size_t{1}) != 0
+          ((maximumCycle_ >> bit) & size_t{1}) != 0
               ? BoolExpr::createTrue()
               : BoolExpr::createFalse();
       problem_.auxiliaryTransitions.emplace_back(
@@ -2901,16 +2899,16 @@ class PdrAgeMonitor {
   }
 
   KInductionProblem problem_;
-  size_t maximumAge_ = 0;
+  size_t maximumCycle_ = 0;
   std::vector<size_t> counterSymbols_;
-  mutable std::unordered_map<size_t, BoolExpr*> ageLessThanByValue_;
+  mutable std::unordered_map<size_t, BoolExpr*> cycleLessThanByValue_;
 };
 
-struct PdrAgeSearchResult {
-  std::optional<size_t> certifiedAge;
+struct PdrDefinednessSearchResult {
+  std::optional<size_t> certifiedCycle;
   size_t reachedBound = 0;
-  PDRStatus minimumStatus = PDRStatus::Inconclusive;
-  PDRStatus maximumStatus = PDRStatus::Inconclusive;
+  PDRStatus status = PDRStatus::Inconclusive;
+  bool witnessedX = false;
 };
 
 const char* pdrStatusName(PDRStatus status) {
@@ -2945,94 +2943,97 @@ PDRResult runPdrOutputBatch(const PDREngine& engine,
   return engine.run(maxFrames, property, kDualRailPdrBatchProbeLimits);
 }
 
-PdrAgeOptions capPdrAgeOptionsToMaxFrames(
-    const PdrAgeOptions& options,
-    size_t maxFrames) {
-  PdrAgeOptions effective = options;
-  // An age outside the PDR frame budget cannot be checked. Keep the monitor
-  // within the caller's existing resource bound instead of deepening PDR.
-  effective.minimum = std::min(effective.minimum, maxFrames);
-  effective.maximum = std::min(effective.maximum, maxFrames);
-  return effective;
-}
-
-class PdrAgeProofSession {
+class PdrDefinednessProofSession {
  public:
-  PdrAgeProofSession(const KInductionProblem& problem,
-                     KEPLER_FORMAL::Config::SolverType solverType,
-                     size_t maxFrames,
-                     const PdrAgeOptions& options)
-      : monitor_(problem, options.maximum),
-        exactInitCache_(std::make_shared<PDRExactInitCache>(
-            monitor_.problem(), solverType)),
-        engine_(monitor_.problem(), solverType, 0, exactInitCache_),
-        maxFrames_(maxFrames),
-        options_(options) {}
+  PdrDefinednessProofSession(
+      const KInductionProblem& problem,
+      KEPLER_FORMAL::Config::SolverType solverType,
+      size_t maxFrames)
+      : problem_(problem),
+        solverType_(solverType),
+        maxFrames_(maxFrames) {}
 
-  PdrAgeSearchResult findDefinedAge(size_t firstOutput,
-                                    size_t endOutput) const {
-    PdrAgeSearchResult search;
-    const PDRResult minimum = probeDefinedAge(
-        firstOutput, endOutput, options_.minimum);
-    search.reachedBound = minimum.bound;
-    search.minimumStatus = minimum.status;
-    search.maximumStatus = minimum.status;
-    if (minimum.status == PDRStatus::Equivalent) {
-      search.certifiedAge = options_.minimum;
-      return search;
-    }
-
-    if (options_.minimum == options_.maximum) {
-      return search;
-    }
-    const PDRResult maximum = probeDefinedAge(
-        firstOutput, endOutput, options_.maximum);
-    search.reachedBound = std::max(search.reachedBound, maximum.bound);
-    search.maximumStatus = maximum.status;
-    if (maximum.status != PDRStatus::Equivalent) {
-      return search;
-    }
-
-    size_t lower = minimum.status == PDRStatus::Different
-                       ? options_.minimum + 1
-                       : options_.minimum;
-    size_t upper = options_.maximum;
-    while (lower < upper) {
-      const size_t middle = lower + (upper - lower) / 2;
-      const PDRResult probe = probeDefinedAge(firstOutput, endOutput, middle);
+  PdrDefinednessSearchResult findDefinedCycle(
+      size_t firstOutput,
+      size_t endOutput) const {
+    PdrDefinednessSearchResult search;
+    std::vector<CycleRange> pending{{0, maxFrames_}};
+    while (!pending.empty()) {
+      const CycleRange range = pending.back();
+      pending.pop_back();
+      const size_t cycle = range.first + (range.last - range.first) / 2;
+      const PDRResult probe =
+          probeDefinedCycle(firstOutput, endOutput, cycle);
       search.reachedBound = std::max(search.reachedBound, probe.bound);
       if (probe.status == PDRStatus::Equivalent) {
-        upper = middle;
-        continue;
+        search.status = PDRStatus::Equivalent;
+        search.certifiedCycle = cycle;
+        return search;
       }
       if (probe.status == PDRStatus::Different) {
-        lower = middle + 1;
+        search.witnessedX = true;
+        // Definedness from a later cycle is weaker. This X witness also rules
+        // out every earlier threshold, so only the upper interval remains.
+        if (cycle < range.last) {
+          pending.push_back({cycle + 1, range.last});
+        }
         continue;
       }
-      // UNKNOWN cannot establish either side of the monotone search. Keep the
-      // already-proved upper age rather than treating a resource limit as SAT
-      // or UNSAT.
-      break;
+      // UNKNOWN is only a resource result. Preserve both untested intervals
+      // and prefer the weaker, later thresholds on the next iteration.
+      if (range.first < cycle) {
+        pending.push_back({range.first, cycle - 1});
+      }
+      if (cycle < range.last) {
+        pending.push_back({cycle + 1, range.last});
+      }
     }
-    search.certifiedAge = upper;
+    if (search.witnessedX) {
+      search.status = PDRStatus::Different;
+    }
     return search;
   }
 
  private:
-  PDRResult probeDefinedAge(size_t firstOutput,
-                            size_t endOutput,
-                            size_t age) const {
-    return runPdrOutputBatch(
-        engine_, maxFrames_,
-        monitor_.outputsDefinedFromAge(firstOutput, endOutput, age),
+  struct CycleRange {
+    size_t first = 0;
+    size_t last = 0;
+  };
+
+  PDRResult probeDefinedCycle(size_t firstOutput,
+                              size_t endOutput,
+                              size_t cycle) const {
+    // Each threshold gets the smallest saturating monitor that represents its
+    // property. This avoids making an early proof carry irrelevant later
+    // counter states while preserving the complete SEC transition system.
+    PdrDefinednessMonitor monitor(problem_, cycle);
+    auto exactInitCache = std::make_shared<PDRExactInitCache>(
+        monitor.problem(), solverType_);
+    PDREngine engine(
+        monitor.problem(), solverType_, 0, exactInitCache);
+    const PDRResult result = runPdrOutputBatch(
+        engine, maxFrames_,
+        monitor.outputsDefinedFromCycle(firstOutput, endOutput, cycle),
         endOutput - firstOutput);
+    if (isSecDiagEnabled()) {
+      emitSecDiag(
+          "SEC diag: PDR definedness probe output range=",
+          firstOutput,
+          "..",
+          endOutput,
+          " cycle=",
+          cycle,
+          " status=",
+          pdrStatusName(result.status),
+          " bound=",
+          result.bound);
+    }
+    return result;
   }
 
-  PdrAgeMonitor monitor_;
-  std::shared_ptr<PDRExactInitCache> exactInitCache_;
-  PDREngine engine_;
+  const KInductionProblem& problem_;
+  KEPLER_FORMAL::Config::SolverType solverType_;
   size_t maxFrames_ = 0;
-  PdrAgeOptions options_;
 };
 
 void applyInitialStateAssignments(
@@ -3376,7 +3377,6 @@ SequentialEquivalenceResult runPdrSecEngine(
     const SequentialDesignModel& model1,
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
-    const PdrAgeOptions& ageOptions,
     // LCOV_DISABLED_STOP
     const OutputCoverageSelection& outputCoverage,
     // LCOV_DISABLED_START
@@ -3393,10 +3393,6 @@ SequentialEquivalenceResult runPdrSecEngine(
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
   }
-
-  const PdrAgeOptions effectiveAgeOptions =
-      capPdrAgeOptionsToMaxFrames(ageOptions, maxK);
-
 
 // LCOV_DISABLED_STOP
   const std::vector<size_t> dualRailEngineOutputIndices =
@@ -3488,17 +3484,7 @@ SequentialEquivalenceResult runPdrSecEngine(
       !problem.usesDualRailStateEncoding ||
       problem.dualRailOutputBothDefinedExprs.size() ==
           problem.observedOutputExprs0.size();
-  PdrAgeOptions definednessAgeOptions = effectiveAgeOptions;
-  if (!definednessAgeOptions.automatic) {
-    // With discovery disabled, require binary outputs from the initial cycle.
-    definednessAgeOptions.minimum = 0;
-    definednessAgeOptions.maximum = 0;
-  }
-  const bool useAutomaticAge =
-      problem.usesDualRailStateEncoding &&
-      hasDualRailDefinednessProperty &&
-      definednessAgeOptions.automatic;
-  std::unique_ptr<PdrAgeProofSession> ageSession;
+  std::unique_ptr<PdrDefinednessProofSession> definednessSession;
   std::shared_ptr<PDRExactInitCache> exactInitCache;
   if (problem.usesDualRailStateEncoding) {
     exactInitCache =
@@ -3603,13 +3589,13 @@ SequentialEquivalenceResult runPdrSecEngine(
   }
 
   if (problem.usesDualRailStateEncoding) {
-    if (useAutomaticAge) {
+    if (hasDualRailDefinednessProperty) {
       // The monitor has a different transition system. Release the original
       // exact-init cache before constructing its cache so both large SAT
       // surfaces are not retained at once.
       exactInitCache.reset();
-      ageSession = std::make_unique<PdrAgeProofSession>(
-          problem, solverType, maxK, definednessAgeOptions);
+      definednessSession = std::make_unique<PdrDefinednessProofSession>(
+          problem, solverType, maxK);
     }
     if (!hasDualRailDefinednessProperty) {
       for (const PdrDefinednessBatch& batch : definednessBatches) {
@@ -3630,38 +3616,20 @@ SequentialEquivalenceResult runPdrSecEngine(
         const PdrDefinednessBatch batch = definednessBatches[batchIndex];
         const size_t firstOutput = batch.firstOutput;
         const size_t endOutput = batch.endOutput;
-        PdrAgeSearchResult ageResult;
-        if (useAutomaticAge) {
-          ageResult = ageSession->findDefinedAge(firstOutput, endOutput);
-        } else {
-          PDREngine definednessEngine(
-              problem, solverType, 0, exactInitCache);
-          const PDRResult definednessResult = runPdrOutputBatch(
-              definednessEngine,
-              maxK,
-              buildDualRailOutputRangeDefinedExpr(
-                  problem, firstOutput, endOutput),
-              endOutput - firstOutput);
-          ageResult.reachedBound = definednessResult.bound;
-          ageResult.minimumStatus = definednessResult.status;
-          ageResult.maximumStatus = definednessResult.status;
-          if (definednessResult.status == PDRStatus::Equivalent) {
-            ageResult.certifiedAge = 0;
-          }
-        }
-        provedBound = std::max(provedBound, ageResult.reachedBound);
+        const PdrDefinednessSearchResult definednessResult =
+            definednessSession->findDefinedCycle(firstOutput, endOutput);
+        provedBound =
+            std::max(provedBound, definednessResult.reachedBound);
         if (isSecDiagEnabled()) {
           emitSecDiag(
-              "SEC diag: PDR age definedness output range=",
+              "SEC diag: PDR definedness search output range=",
               firstOutput,
               "..",
               endOutput,
-              " minimum_status=",
-              pdrStatusName(ageResult.minimumStatus),
-              " maximum_status=",
-              pdrStatusName(ageResult.maximumStatus));
+              " status=",
+              pdrStatusName(definednessResult.status));
         }
-        if (ageResult.certifiedAge.has_value()) {
+        if (definednessResult.certifiedCycle.has_value()) {
           markPdrOutputRangeCovered(
               pdrCoveredOutputs,
               pdrSkippedOutputReasons,
@@ -3669,12 +3637,12 @@ SequentialEquivalenceResult runPdrSecEngine(
               endOutput);
           if (isSecDiagEnabled()) {
             emitSecDiag(
-                "SEC diag: PDR certified age output range=",
+                "SEC diag: PDR certified definedness output range=",
                 firstOutput,
                 "..",
                 endOutput,
-                " age=",
-                *ageResult.certifiedAge);
+                " cycle=",
+                *definednessResult.certifiedCycle);
           }
           continue;
         }
@@ -3688,16 +3656,12 @@ SequentialEquivalenceResult runPdrSecEngine(
                PdrDefinednessBatch{midOutput, endOutput}});
           continue;
         }
-        const bool witnessedX =
-            ageResult.minimumStatus == PDRStatus::Different ||
-            ageResult.maximumStatus == PDRStatus::Different;
+        const bool witnessedX = definednessResult.witnessedX;
         const std::string reason =
             witnessedX
                 ? std::string(kDualRailXInconclusiveReason) +
-                      (definednessAgeOptions.automatic
-                           ? "; definedness was not certified through age " +
-                                 std::to_string(definednessAgeOptions.maximum)
-                           : " at cycle 0")
+                      "; definedness was not certified through cycle " +
+                      std::to_string(maxK)
                 : "dual-rail PDR was inconclusive while proving binary "
                   "output definedness";
         markPdrOutputRangeSkipped(
@@ -3833,7 +3797,7 @@ SequentialEquivalenceResult runKInductionSecEngine(
   }
 }
 
-void proveDualRailStrictImcOutputSet(
+void proveDualRailDefinednessImcOutputSet(
     const KInductionProblem& problem,
     const std::vector<size_t>& outputIndices,
     size_t maxK,
@@ -3843,22 +3807,22 @@ void proveDualRailStrictImcOutputSet(
     return;
   }
 
-  KInductionProblem strictProblem =
+  KInductionProblem definednessProblem =
       makeOutputSubsetProblem(problem, outputIndices);
-  if (!configureStrictDualRailOutputProperty(strictProblem)) {
+  if (!configureDualRailDefinednessProperty(definednessProblem)) {
     markDualRailResidualOutputsSkipped(
         outputIndices,
         problem,
         DualRailResidualEngine::Imc,
         proofState,
-        "strict dual-rail equality obligation is unavailable");
+        "dual-rail binary-definedness obligation is unavailable");
     return;
   }
 
   // Guarded IMC has already ruled out a concrete 01/10 mismatch for this set.
-  // Strict IMC now decides whether both complete rail values are equal.
-  IMCEngine strictEngine(strictProblem, solverType);
-  const IMCResult result = strictEngine.run(maxK);
+  // Definedness IMC now proves that both complete rail values are 01 or 10.
+  IMCEngine definednessEngine(definednessProblem, solverType);
+  const IMCResult result = definednessEngine.run(maxK);
   proofState.provedBound = std::max(proofState.provedBound, result.bound);
   if (result.status == IMCStatus::Equivalent) {
     markDualRailResidualOutputsCovered(outputIndices, proofState);
@@ -3878,21 +3842,21 @@ void proveDualRailStrictImcOutputSet(
         problem,
         DualRailResidualEngine::Imc,
         proofState,
-        "strict dual-rail equality IMC was inconclusive");
+        "dual-rail binary-definedness IMC was inconclusive");
     return;
   }
 
-  // A strict counterexample after guarded equality can only involve X. Split
-  // the strict conjunction so unrelated outputs can retain their IMC proof.
+  // A definedness counterexample after guarded equality is an X witness. Split
+  // the conjunction so unrelated binary outputs can retain their IMC proof.
   if (outputIndices.size() > 1) {
     const size_t mid = outputIndices.size() / 2;
     const std::vector<size_t> left(
         outputIndices.begin(), outputIndices.begin() + mid);
     const std::vector<size_t> right(
         outputIndices.begin() + mid, outputIndices.end());
-    proveDualRailStrictImcOutputSet(
+    proveDualRailDefinednessImcOutputSet(
         problem, left, maxK, solverType, proofState);
-    proveDualRailStrictImcOutputSet(
+    proveDualRailDefinednessImcOutputSet(
         problem, right, maxK, solverType, proofState);
     return;
   }
@@ -3927,8 +3891,8 @@ SequentialEquivalenceResult finishDualRailImcProof(
         problem.observedOutputExprs0.size());
   }
 
-  std::vector<size_t> strictOutputIndices;
-  strictOutputIndices.reserve(guardedProvedPrefix);
+  std::vector<size_t> definednessOutputIndices;
+  definednessOutputIndices.reserve(guardedProvedPrefix);
   for (size_t outputIndex = 0;
        outputIndex < problem.observedOutputExprs0.size();
        ++outputIndex) {
@@ -3940,7 +3904,7 @@ SequentialEquivalenceResult finishDualRailImcProof(
       continue;
     }
     if (outputIndex < guardedProvedPrefix) {
-      strictOutputIndices.push_back(outputIndex);
+      definednessOutputIndices.push_back(outputIndex);
     } else {
       proofState.skipReasons.emplace(
           outputIndex,
@@ -3948,8 +3912,8 @@ SequentialEquivalenceResult finishDualRailImcProof(
     }
   }
 
-  proveDualRailStrictImcOutputSet(
-      problem, strictOutputIndices, maxK, solverType, proofState);
+  proveDualRailDefinednessImcOutputSet(
+      problem, definednessOutputIndices, maxK, solverType, proofState);
 
   const size_t coveredCount = static_cast<size_t>(std::count(
       proofState.coveredOutputs.begin(),
@@ -4088,7 +4052,6 @@ SequentialEquivalenceResult runSelectedSecEngine(
     const SequentialDesignModel& model1,
     naja::NL::SNLDesign* top0,
     naja::NL::SNLDesign* top1,
-    const PdrAgeOptions& pdrAgeOptions,
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
@@ -4102,7 +4065,6 @@ SequentialEquivalenceResult runSelectedSecEngine(
           model1,
           top0,
           top1,
-          pdrAgeOptions,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -4142,7 +4104,6 @@ SequentialEquivalenceResult runSelectedSecEngine(
           model1,
           top0,
           top1,
-          pdrAgeOptions,
           outputCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -4242,19 +4203,12 @@ SequentialEquivalenceStrategy::SequentialEquivalenceStrategy(
     naja::NL::SNLDesign* top1,
     KEPLER_FORMAL::Config::SolverType solverType,
     SecEngine secEngine,
-    SecEncoding encoding,
-    PdrAgeOptions pdrAgeOptions)
+    SecEncoding encoding)
     : top0_(top0),
       top1_(top1),
       solverType_(solverType),
       secEngine_(secEngine),
-      encoding_(encoding),
-      pdrAgeOptions_(pdrAgeOptions) {
-  if (pdrAgeOptions_.minimum > pdrAgeOptions_.maximum) {
-    throw std::invalid_argument(
-        "PDR age minimum must not exceed PDR age maximum");
-  }
-}
+      encoding_(encoding) {}
 
 SequentialEquivalenceResult SequentialEquivalenceStrategy::run(size_t maxK) const {
   const bool secDiagEnabled = std::getenv("KEPLER_SEC_DIAG") != nullptr;
@@ -4455,7 +4409,6 @@ SequentialEquivalenceResult SequentialEquivalenceStrategy::runExtractedModels(
       model1,
       top0_,
       top1_,
-      pdrAgeOptions_,
       aligned.outputCoverage,
       abstractedSequentialBoundaries,
       extractedBoundaryReports);

@@ -12121,7 +12121,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsDualRailCoversMatchingResetlessResidualWithoutPdrFallback) {
+       RunExtractedModelsKiDualRailDoesNotCoverMatchingPermanentXResidual) {
   const SignalKey good = makeSignalKey("dualRailResetlessGood");
   const SignalKey out = makeSignalKey("dualRailResetlessOut");
   const SignalKey rst = makeSignalKey("dualRailResetlessRst");
@@ -12160,8 +12160,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   model1.displayNameByKey.emplace(out, "resetless_out[0]");
   model1.displayNameByKey.emplace(state1, "right_state_q[0]");
   // Binary SEC cannot use a cross-design state equality here: one side holds
-  // the resetless state while the other toggles it.  Dual-rail mode proves the
-  // top-output rail equality directly with KI, without invoking PDR.
+  // the resetless state while the other toggles it. Both remain X forever in
+  // dual-rail mode, so equal 11 rails must not count as concrete equivalence.
   model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
   model1.observedOutputExprByKey.emplace(good, BoolExpr::Var(7));
   model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(3));
@@ -12185,10 +12185,18 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto dualRailResult =
       dualRailStrategy.runExtractedModels(model0, model1, 2);
 
-  EXPECT_EQ(dualRailResult.status, SequentialEquivalenceStatus::Equivalent);
-  EXPECT_EQ(dualRailResult.coveredOutputs, 2u);
+  EXPECT_EQ(
+      dualRailResult.status, SequentialEquivalenceStatus::PartiallyProved);
+  EXPECT_EQ(dualRailResult.coveredOutputs, 1u);
   EXPECT_EQ(dualRailResult.totalOutputs, 2u);
-  EXPECT_TRUE(dualRailResult.skippedObservedOutputs.empty());
+  ASSERT_EQ(dualRailResult.skippedObservedOutputs.size(), 1u);
+  EXPECT_NE(
+      dualRailResult.skippedObservedOutputs.front().find("resetless_out[0]"),
+      std::string::npos);
+  EXPECT_NE(
+      dualRailResult.skippedObservedOutputs.front().find(
+          "uninitialized sequential logic"),
+      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -12293,10 +12301,21 @@ TEST_F(SequentialEquivalenceStrategyTests,
         SecEncoding::DualRailSteady);
     const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 1);
 
-    EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Equivalent);
-    EXPECT_EQ(imcResult.coveredOutputs, 3u);
+    // IMC also requires both rails to be binary-defined. Equal permanent X
+    // values on the two residual outputs are therefore inconclusive.
+    EXPECT_EQ(
+        imcResult.status, SequentialEquivalenceStatus::PartiallyProved);
+    EXPECT_EQ(imcResult.coveredOutputs, 1u);
     EXPECT_EQ(imcResult.totalOutputs, 3u);
-    EXPECT_TRUE(imcResult.skippedObservedOutputs.empty());
+    ASSERT_EQ(imcResult.skippedObservedOutputs.size(), 2u);
+    EXPECT_NE(
+        imcResult.skippedObservedOutputs[0].find(
+            "uninitialized sequential logic"),
+        std::string::npos);
+    EXPECT_NE(
+        imcResult.skippedObservedOutputs[1].find(
+            "uninitialized sequential logic"),
+        std::string::npos);
   }
 
   {
@@ -12406,8 +12425,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
     const auto result =
         strategy.runExtractedModels(models.model0, models.model1, 2);
 
-    // PDR requires binary definedness after ruling out a defined-value
-    // mismatch. KI and IMC retain their strict residual checks.
+    // Every dual-rail engine requires binary definedness after ruling out a
+    // defined-value mismatch.
     EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
     EXPECT_EQ(result.coveredOutputs, 1u);
     EXPECT_EQ(result.totalOutputs, 2u);
@@ -12424,6 +12443,41 @@ TEST_F(SequentialEquivalenceStrategyTests,
         result.reason.find("dualRailXVersusBinary_out[0]"),
         std::string::npos);
     EXPECT_EQ(result.reason.find("concrete_equal[0]"), std::string::npos);
+  }
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       RunExtractedModelsKiAndImcDualRailRejectPermanentXEquality) {
+  const auto models = makeHeldRailModelsForTest(
+      "dualRailPermanentXSelectedEngine", std::nullopt, std::nullopt);
+
+  for (const SecEngine engine : {SecEngine::KInduction, SecEngine::Imc}) {
+    SCOPED_TRACE(static_cast<int>(engine));
+    SequentialEquivalenceStrategy strategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        engine,
+        SecEncoding::DualRailSteady);
+    const auto result =
+        strategy.runExtractedModels(models.model0, models.model1, 2);
+
+    // Matching 11 rails mean both outputs are still X, not that their concrete
+    // binary values are equivalent.
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
+    EXPECT_EQ(result.coveredOutputs, 0u);
+    EXPECT_EQ(result.totalOutputs, 1u);
+    EXPECT_EQ(result.skippedObservedOutputs.size(), 1u);
+    if (!result.skippedObservedOutputs.empty()) {
+      EXPECT_NE(
+          result.skippedObservedOutputs.front().find(
+              "dualRailPermanentXSelectedEngine_out[0]"),
+          std::string::npos);
+      EXPECT_NE(
+          result.skippedObservedOutputs.front().find(
+              "uninitialized sequential logic"),
+          std::string::npos);
+    }
   }
 }
 
@@ -12451,7 +12505,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailDisabledAgeRejectsPermanentXEquality) {
+       RunExtractedModelsPdrDualRailRoundTwoRejectsPermanentXEquality) {
   const auto models = makeHeldRailModelsForTest(
       "dualRailPermanentX", std::nullopt, std::nullopt);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
@@ -12462,14 +12516,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/false, /*minimum=*/10, /*maximum=*/20});
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 2);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Without age discovery, both outputs must be binary at cycle zero. Equal X
-  // rails cannot turn the defined-value check into an equivalence verdict.
+  // Round one proves no concrete mismatch. Round two checks every possible
+  // threshold through max_k and rejects equal X rails that never become binary.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
   EXPECT_EQ(result.coveredOutputs, 0u);
   EXPECT_EQ(result.totalOutputs, 1u);
@@ -12481,8 +12534,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "PDR age definedness output range=0..1 "
-          "minimum_status=different maximum_status=different"),
+          "PDR definedness search output range=0..1 "
+          "status=different"),
       std::string::npos)
       << stderrOutput;
 }
@@ -12525,8 +12578,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_NE(
       stderrOutput.find(
-          "PDR age definedness output range=0..2 "
-          "minimum_status=equivalent maximum_status=equivalent"),
+          "PDR definedness search output range=0..2 "
+          "status=equivalent"),
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(stderrOutput.find("PDR strict output batch"), std::string::npos)
@@ -12536,34 +12589,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailAutoAgeLeavesPermanentXInconclusive) {
-  const auto models = makeHeldRailModelsForTest(
-      "dualRailPermanentXWithAge", std::nullopt, std::nullopt);
-
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/2});
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 2);
-
-  // No candidate age proves both outputs binary-defined.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.coveredOutputs, 0u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      result.reason.find("dualRailPermanentXWithAge_out[0]"),
-      std::string::npos);
-  EXPECT_NE(
-      result.reason.find("uninitialized sequential logic"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailAutoAgeFindsMinimumFlushAge) {
+       RunExtractedModelsPdrDualRailRoundTwoFindsDefinedCycleWithinMaxK) {
   const auto models = makeFlushingRailModelsForTest(/*stages=*/2);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
 
@@ -12573,22 +12599,20 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/0, /*maximum=*/4});
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 4);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The two resetless pipeline stages carry X at ages 0 and 1. At age 2 the
-  // shared binary input has flushed both designs, so the age proof must select
-  // the exact minimum and the final SEC property is concrete.
+  // The two resetless pipeline stages carry X at cycles 0 and 1. The first
+  // midpoint, cycle 2, proves a concrete threshold for round two.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
       << stderrOutput;
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
       stderrOutput.find(
-          "PDR certified age output range=0..1 age=2"),
+          "PDR certified definedness output range=0..1 cycle=2"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
@@ -12605,7 +12629,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailAutoAgeFindsFlushAfterMinimum) {
+       RunExtractedModelsPdrDualRailRoundTwoFindsFlushBeforeMaxK) {
   const auto models = makeFlushingRailModelsForTest(/*stages=*/12);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
 
@@ -12615,26 +12639,26 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/10, /*maximum=*/20});
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 32);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Exercise the configured 10..20 search directly. The pipeline still
-  // carries X at ages 10 and 11 and is binary-defined from age 12 onward.
+  // The pipeline is binary-defined from cycle 12 onward. Round two only needs
+  // one certified threshold, so its first midpoint at cycle 16 is sufficient.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
       << stderrOutput;
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
-      stderrOutput.find("PDR certified age output range=0..1 age=12"),
+      stderrOutput.find(
+          "PDR certified definedness output range=0..1 cycle=16"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailAutoAgeFindsFlushAtMaximum) {
+       RunExtractedModelsPdrDualRailRoundTwoFindsLateFlushCycle) {
   const auto models = makeFlushingRailModelsForTest(/*stages=*/20);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
 
@@ -12644,26 +12668,26 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/10, /*maximum=*/20});
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 32);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The saturating monitor must still check the boundary cycle itself. A
-  // 20-stage pipeline is undefined through age 19 and defined at age 20.
+  // Cycle 16 still has an X witness, while cycle 24 is binary-defined. Round
+  // two may stop at that first certified threshold; it need not find cycle 20.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
       << stderrOutput;
   EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
   EXPECT_NE(
-      stderrOutput.find("PDR certified age output range=0..1 age=20"),
+      stderrOutput.find(
+          "PDR certified definedness output range=0..1 cycle=24"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailCapsAgeToMaxFrames) {
+       RunExtractedModelsPdrDualRailSkipsRoundTwoAfterMismatchInconclusive) {
   const auto models = makeFlushingRailModelsForTest(/*stages=*/2);
   const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
 
@@ -12673,14 +12697,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/2, /*maximum=*/4});
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   // The defined-value property itself cannot converge within one PDR frame.
-  // An unresolved first property must not be hidden by a later age check.
+  // An unresolved first property must not be hidden by round two.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive)
       << stderrOutput;
   EXPECT_EQ(result.coveredOutputs, 0u);
@@ -12692,13 +12715,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_EQ(
-      stderrOutput.find("PDR age definedness output range=0..1"),
+      stderrOutput.find("PDR definedness search output range=0..1"),
       std::string::npos)
       << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailAutoAgeDoesNotHideDefinedMismatch) {
+       RunExtractedModelsPdrDualRailRoundTwoDoesNotHideDefinedMismatch) {
   constexpr const char* kPrefix = "dualRailTransientStartupMismatch";
   auto models = makeHeldRailModelsForTest(kPrefix, false, true);
   const SignalKey state0 = makeSignalKey(std::string(kPrefix) + "State0");
@@ -12706,32 +12729,18 @@ TEST_F(SequentialEquivalenceStrategyTests,
   models.model0.nextStateExprByStateKey.at(state0) = BoolExpr::createFalse();
   models.model1.nextStateExprByStateKey.at(state1) = BoolExpr::createFalse();
 
-  SequentialEquivalenceStrategy disabledStrategy(
+  SequentialEquivalenceStrategy strategy(
       nullptr,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/false, /*minimum=*/1, /*maximum=*/2});
-  const auto disabledResult = disabledStrategy.runExtractedModels(
+      SecEncoding::DualRailSteady);
+  const auto result = strategy.runExtractedModels(
       models.model0, models.model1, 2);
 
-  SequentialEquivalenceStrategy enabledStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/2});
-  const auto enabledResult = enabledStrategy.runExtractedModels(
-      models.model0, models.model1, 2);
-
-  // Both configurations must report the defined cycle-zero mismatch. Age
-  // discovery applies only to the separate binary-definedness property.
-  EXPECT_EQ(disabledResult.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(disabledResult.bound, 0u);
-  EXPECT_EQ(enabledResult.status, SequentialEquivalenceStatus::Different);
-  EXPECT_EQ(enabledResult.bound, 0u);
+  // Round one must report the defined cycle-zero mismatch before round two.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
+  EXPECT_EQ(result.bound, 0u);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -12759,8 +12768,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/2});
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 2);
 
@@ -12771,7 +12779,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailAgeSplitsUncertifiedOutputBatch) {
+       RunExtractedModelsPdrDualRailDefinednessSplitsUncertifiedOutputBatch) {
   auto models = makeFlushingRailModelsForTest(/*stages=*/1);
   const SignalKey heldOutput = makeSignalKey("dualRailAgeHeldOutput");
   const SignalKey heldState0 = makeSignalKey("dualRailAgeHeldState0");
@@ -12800,8 +12808,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       nullptr,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/0, /*maximum=*/2});
+      SecEncoding::DualRailSteady);
   const auto result =
       strategy.runExtractedModels(models.model0, models.model1, 3);
 
@@ -12816,19 +12823,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       result.skippedObservedOutputs.front().find(
           "uninitialized sequential logic"),
       std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       PdrAgeOptionsRejectDescendingSearchRange) {
-  EXPECT_THROW(
-      SequentialEquivalenceStrategy(
-          nullptr,
-          nullptr,
-          KEPLER_FORMAL::Config::SolverType::KISSAT,
-          SecEngine::Pdr,
-          SecEncoding::DualRailSteady,
-          PdrAgeOptions{/*automatic=*/true, /*minimum=*/3, /*maximum=*/2}),
-      std::invalid_argument);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -17265,8 +17259,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
       top1,
       KEPLER_FORMAL::Config::SolverType::KISSAT,
       SecEngine::Pdr,
-      SecEncoding::DualRailSteady,
-      PdrAgeOptions{/*automatic=*/true, /*minimum=*/1, /*maximum=*/3});
+      SecEncoding::DualRailSteady);
   const auto result = strategy.run(3);
   const std::string stdoutOutput = testing::internal::GetCapturedStdout();
   const std::string stderrOutput = testing::internal::GetCapturedStderr();

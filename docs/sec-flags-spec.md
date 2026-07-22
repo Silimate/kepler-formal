@@ -13,8 +13,6 @@ library, logging, solver, CNF export, and LEC flags remain documented in
 [flags-spec.md](flags-spec.md).
 SEC clock extraction and multi-clock-domain coverage handling are documented in
 [sec-clock-handling.md](sec-clock-handling.md).
-The dual-rail PDR age monitor and its proof obligations are documented in
-[sec-pdr-age/README.md](sec-pdr-age/README.md).
 
 Supported SEC flows:
 
@@ -34,8 +32,6 @@ kepler-formal -verilog \
   -k 4 \
   --sec-engine pdr \
   --sec-encoding dual_rail_steady \
-  --sec-pdr-age-min 10 \
-  --sec-pdr-age-max 20 \
   --sec-uncomputable-seq-boundary \
   --report-skipped-pos \
   design0.v design1.v library.lib
@@ -84,9 +80,6 @@ format: systemverilog
 verification: sec
 sec_engine: pdr
 sec_encoding: dual_rail_steady
-sec_pdr_auto_age: true
-sec_pdr_age_min: 10
-sec_pdr_age_max: 20
 max_k: 32
 sec_uncomputable_seq_as_boundary: true
 compact_mode: true
@@ -105,13 +98,9 @@ liberty_files:
 | CLI flag | YAML key | Default | Values | Effect |
 | --- | --- | --- | --- | --- |
 | `-v sec`, `--verification sec` | `verification: sec` | `lec` | `lec`, `sec` | Selects SEC instead of combinational LEC. Values are lowercase. |
-| `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the SEC proof/search bound. Enabled PDR age candidates are capped to this bound with a warning. |
+| `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the SEC proof/search bound and the last cycle considered by dual-rail PDR's definedness round. |
 | `--sec-engine <engine>` | `sec_engine: <engine>` | `pdr` | `k_induction`, `imc`, `pdr` | Selects the top-level SEC proof engine. Engine names are lowercase. |
 | `--sec-encoding <mode>` | `sec_encoding: <mode>` | `dual_rail_steady` | `binary`, `dual_rail_steady` | Selects how SEC models unknown or reset-unanchored state values. Omit the key/flag to use the dual-rail default. |
-| `--sec-pdr-auto-age` | `sec_pdr_auto_age: true` | `false` | boolean | Enables verifier-owned age discovery for dual-rail PDR. |
-| `--no-sec-pdr-auto-age` | `sec_pdr_auto_age: false` | `false` | boolean | Disables age search and requires dual-rail PDR outputs to be binary-defined from cycle zero. |
-| `--sec-pdr-age-min <n>` | `sec_pdr_age_min: <n>` | `10` | Non-negative integer | Sets the first candidate definedness age. |
-| `--sec-pdr-age-max <n>` | `sec_pdr_age_max: <n>` | `20` | Non-negative integer | Sets the last candidate definedness age. Must be at least the minimum. |
 | `--sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: true` | `true` | boolean | Abstracts unsupported sequential instances as SEC boundaries instead of failing immediately. |
 | `--no-sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: false` | `true` | boolean | Uses strict mode: unsupported sequential interfaces cause SEC to fail as unsupported. |
 | `--compact` | `compact_mode: true` | `false` | boolean | Enables compact SEC extraction: design 1 is extracted and released before design 2 is loaded; identical SEC inputs can reuse the extracted design 1 model. |
@@ -143,7 +132,7 @@ flows that require stable behavior should always spell out either `binary` or
 | --- | --- |
 | `k_induction` | Explicit classic k-induction flow: bounded base-case search followed by induction-step proof over the extracted SEC transition system. |
 | `imc` | Interpolation-Based Model Checking flow over the same extracted SEC problem. It uses the shared base-case search and exact interpolant strengthening where applicable. |
-| `pdr` | Property Directed Reachability flow over the extracted SEC transition system. Normal and age-monitor properties use the same `max_k` frame bound. |
+| `pdr` | Property Directed Reachability flow over the extracted SEC transition system. Dual-rail PDR proves concrete mismatch freedom and binary definedness as separate obligations within `max_k`. |
 
 All engines use the same extracted SEC model: aligned environment inputs,
 state bits, observed outputs, next-state formulas, initial-state information,
@@ -158,6 +147,11 @@ heuristics.
 ## Bounds And Results
 
 `max_k` is parsed as a non-negative integer.
+
+Dual-rail PDR first proves that no binary-defined mismatch is reachable. Its
+second round searches cycles `0..max_k` for a threshold after which both
+designs' outputs remain binary-defined. An output is inconclusive if no such
+threshold is proved.
 
 SEC result handling is currently:
 
@@ -175,8 +169,6 @@ The log always prints:
 SEC max_k: <n>
 SEC engine: <engine>
 SEC encoding: binary|dual_rail_steady
-SEC PDR automatic age discovery: enabled|disabled
-SEC PDR age search range: <minimum>..<maximum>
 SEC uncomputable sequentials: boundary abstraction|strict failure
 Compact mode: enabled|disabled
 Skipped PO reports: enabled|disabled
