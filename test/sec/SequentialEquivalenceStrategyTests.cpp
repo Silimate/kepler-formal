@@ -1696,6 +1696,37 @@ KInductionProblem buildLinearChainSecProblem(size_t logicalStateCount) {
   return problem;
 }
 
+KInductionProblem buildSharedPdrNarrowProbeProblem() {
+  KInductionProblem problem = buildLinearChainSecProblem(4);
+  const size_t decoyFirst = problem.allSymbols.back() + 1;
+  const size_t decoyDelayed = decoyFirst + 1;
+  problem.state0Symbols.push_back(decoyFirst);
+  problem.state0Symbols.push_back(decoyDelayed);
+  problem.allSymbols.push_back(decoyFirst);
+  problem.allSymbols.push_back(decoyDelayed);
+  problem.transitions0.emplace_back(decoyFirst, BoolExpr::createTrue());
+  problem.transitions0.emplace_back(decoyDelayed, BoolExpr::Var(decoyFirst));
+  problem.initialCondition = BoolExpr::And(
+      problem.initialCondition,
+      BoolExpr::And(
+          BoolExpr::Not(BoolExpr::Var(decoyFirst)),
+          BoolExpr::Not(BoolExpr::Var(decoyDelayed))));
+  problem.initializedStateCount += 2;
+  problem.totalStateCount += 2;
+  problem.usesDualRailStateEncoding = true;
+  problem.usesStrictDualRailEqualityProperty = true;
+
+  // The broad parent fails when the independent two-cycle decoy rises. It
+  // populates the shared higher-frame context without certifying an invariant
+  // that could bypass the narrower child run.
+  problem.property = BoolExpr::And(
+      problem.property, BoolExpr::Not(BoolExpr::Var(decoyDelayed)));
+  problem.bad = BoolExpr::Not(problem.property);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  return problem;
+}
+
 KInductionProblem buildCraigResetSecProblem(bool equivalent) {
   constexpr size_t reset = 2;
   constexpr size_t data = 3;
@@ -6366,6 +6397,85 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       stderrOutput.find(
           "Q2 status selectors retired after generalization count="),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineDualRailGeneralizationUsesNarrowExactSolver) {
+  const auto problem = buildSharedPdrNarrowProbeProblem();
+  BoolExpr* narrowProperty = makeEqualityExpr(
+      problem.observedOutputExprs0.front(),
+      problem.observedOutputExprs1.front());
+  auto exactInitCache = std::make_shared<PDRExactInitCache>(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*maxPredecessorQueries=*/0,
+      exactInitCache);
+  const auto broadResult = engine.run(3, problem.property);
+  const auto narrowResult = engine.run(3, narrowProperty);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(broadResult.status, PDRStatus::Different) << stderrOutput;
+  EXPECT_EQ(narrowResult.status, PDRStatus::Equivalent) << stderrOutput;
+  // Once the level-local persistent solver has widened, Figure 7 keeps this
+  // cube's exact status-only queries in their own smaller SAT context.
+  EXPECT_NE(
+      stderrOutput.find("narrow_generalization_probe result="),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("persistent_request_symbols="),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineNarrowGeneralizationUnknownFallsBackToPersistentSolver) {
+  const auto problem = buildSharedPdrNarrowProbeProblem();
+  BoolExpr* narrowProperty = makeEqualityExpr(
+      problem.observedOutputExprs0.front(),
+      problem.observedOutputExprs1.front());
+  auto exactInitCache = std::make_shared<PDRExactInitCache>(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*maxPredecessorQueries=*/0,
+      exactInitCache);
+  const auto broadResult = engine.run(3, problem.property);
+  const auto narrowResult = engine.run(
+      3,
+      narrowProperty,
+      PDRQueryLimits{
+          /*predecessorConflictLimit=*/0,
+          /*predecessorDecisionLimit=*/1,
+          /*blockingConflictLimit=*/250 * 1000,
+          /*blockingDecisionLimit=*/10 * 1000 * 1000});
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(broadResult.status, PDRStatus::Different) << stderrOutput;
+  EXPECT_EQ(narrowResult.status, PDRStatus::Inconclusive) << stderrOutput;
+  // UNKNOWN from the bounded narrow attempt is not interpreted as blocked.
+  // The same exact Q2 query must continue through the established solver path.
+  EXPECT_NE(
+      stderrOutput.find(
+          "narrow_generalization_probe result=unknown fallback=persistent"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "predecessor query budget exhausted limit=0 decision_limit=1"),
       std::string::npos)
       << stderrOutput;
 }

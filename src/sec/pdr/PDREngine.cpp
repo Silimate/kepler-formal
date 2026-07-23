@@ -111,6 +111,12 @@ constexpr unsigned kDefaultDualRailPredecessorDecisionLimit =
 // default so an explicit lower user limit can still override both values.
 constexpr unsigned kDefaultDualRailBlockingConflictLimit = 250 * 1000;
 constexpr unsigned kDefaultDualRailBlockingDecisionLimit = 10 * 1000 * 1000;
+// Figure 7 asks a local sequence of status-only Q2 queries while removing
+// literals from one blocked cube. Give its narrow exact solver a small probe
+// budget; UNKNOWN falls through to the existing persistent solver with the
+// original full limits below.
+constexpr unsigned kNarrowGeneralizationProbeConflictLimit = 10 * 1000;
+constexpr unsigned kNarrowGeneralizationProbeDecisionLimit = 150 * 1000;
 // Encoding guards are based only on the exact predecessor cone. Every output
 // batch receives the same finite limits; enclosing design or port counts never
 // select a different PDR problem or resource policy.
@@ -1594,6 +1600,11 @@ unsigned dualRailPredecessorDecisionLimit(PredecessorQueryPurpose purpose) {
     return configuredLimit;
   }
   return std::max(configuredLimit, kDefaultDualRailBlockingDecisionLimit);
+}
+
+unsigned boundedNarrowGeneralizationProbeLimit(unsigned fullLimit,
+                                               unsigned probeLimit) {
+  return fullLimit == 0 ? probeLimit : std::min(fullLimit, probeLimit);
 }
 
 size_t dualRailPredecessorEncodingNodeLimit() {
@@ -5818,7 +5829,8 @@ PredecessorQueryOutcome findPredecessorCube(
     const ComplementPartnerIndex& complementPartners,
     PredecessorAssumptionCache* predecessorAssumptionCache = nullptr,
     size_t* predecessorQueryBudget = nullptr,
-    PdrFormulaSupportCache* supportCache = nullptr) {
+    PdrFormulaSupportCache* supportCache = nullptr,
+    PredecessorAssumptionCache* narrowGeneralizationProbeCache = nullptr) {
   // This is the one-step predecessor query at the heart of PDR: does some
   // state in F[level] transition into the target cube on the next frame?
   std::optional<PredecessorQueryResultKey> exactCacheKey;
@@ -6055,6 +6067,103 @@ PredecessorQueryOutcome findPredecessorCube(
         problem.totalStateCount,
         " level=",
         level);
+  }
+  if (problem.usesDualRailStateEncoding &&
+      purpose == PredecessorQueryPurpose::GeneralizeBlocker &&
+      level > 0 &&
+      solverCache != nullptr &&
+      narrowGeneralizationProbeCache != nullptr) {
+    const std::vector<size_t>& narrowSolverSymbols =
+        predecessorAssumptionCacheSymbols(
+            transitionByState,
+            level,
+            solverSymbols,
+            narrowGeneralizationProbeCache);
+    const unsigned probeConflictLimit =
+        boundedNarrowGeneralizationProbeLimit(
+            predecessorConflictLimit,
+            kNarrowGeneralizationProbeConflictLimit);
+    const unsigned probeDecisionLimit =
+        boundedNarrowGeneralizationProbeLimit(
+            predecessorDecisionLimit,
+            kNarrowGeneralizationProbeDecisionLimit);
+    StateCube narrowUnsatCore;
+    const auto narrowStatus = solvePredecessorCubeWithCachedAssumptions(
+        *narrowGeneralizationProbeCache,
+        problem,
+        solverType,
+        transitionByState,
+        complementPartners,
+        initFormula,
+        frameInvariant,
+        frames,
+        level,
+        *targetSurface,
+        narrowSolverSymbols,
+        excludeTargetOnCurrentFrame,
+        purpose,
+        probeConflictLimit,
+        probeDecisionLimit,
+        supportCache,
+        nullptr,
+        &narrowUnsatCore);
+    if (narrowStatus.has_value() &&
+        *narrowStatus != SATSolverWrapper::SolveStatus::Unknown) {
+      const bool hasPredecessor =
+          *narrowStatus == SATSolverWrapper::SolveStatus::Sat;
+      if (pdrStatsEnabled()) {
+        emitSecDiag(
+            "SEC PDR stats: predecessor #",
+            statsQueryNumber,
+            " narrow_generalization_probe result=",
+            hasPredecessor ? "sat" : "unsat",
+            " symbols=",
+            narrowSolverSymbols.size(),
+            " persistent_request_symbols=",
+            cachedSolverSymbols.size(),
+            " conflict_limit=",
+            probeConflictLimit,
+            " decision_limit=",
+            probeDecisionLimit);
+      }
+      if (exactCacheKey.has_value() &&
+          stableUnsatCacheKey.has_value() &&
+          predecessorAssumptionCache != nullptr) {
+        if (hasPredecessor) {
+          rememberPredecessorQueryResult(
+              *predecessorAssumptionCache,
+              *exactCacheKey,
+              *stableUnsatCacheKey,
+              std::nullopt,
+              nullptr,
+              /*predecessorExistsWithoutModel=*/true);
+        } else {
+          const StateCube* narrowUnsatCorePtr =
+              narrowUnsatCore.empty() ? nullptr : &narrowUnsatCore;
+          rememberPredecessorQueryResult(
+              *predecessorAssumptionCache,
+              *exactCacheKey,
+              *stableUnsatCacheKey,
+              std::nullopt,
+              narrowUnsatCorePtr);
+        }
+      }
+      return {hasPredecessor, std::nullopt};
+    }
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: predecessor #",
+          statsQueryNumber,
+          " narrow_generalization_probe result=unknown "
+          "fallback=persistent symbols=",
+          narrowSolverSymbols.size(),
+          " persistent_request_symbols=",
+          cachedSolverSymbols.size(),
+          " conflict_limit=",
+          probeConflictLimit,
+          " decision_limit=",
+          probeDecisionLimit);
+    }
   }
   if (solverCache != nullptr) {
     PredecessorAssumptionSolver* solvedPredecessorCache = nullptr;
@@ -6468,6 +6577,7 @@ class BlockedCubeReductionChecker {
       const std::vector<FrameClauses>& frames,
       size_t level,
       PredecessorAssumptionCache* predecessorAssumptionCache,
+      PredecessorAssumptionCache* narrowGeneralizationProbeCache,
       const ComplementPartnerIndex& complementPartners,
       size_t* predecessorQueryBudget,
       PdrFormulaSupportCache* supportCache)
@@ -6479,6 +6589,7 @@ class BlockedCubeReductionChecker {
         frames_(frames),
         level_(level),
         predecessorAssumptionCache_(predecessorAssumptionCache),
+        narrowGeneralizationProbeCache_(narrowGeneralizationProbeCache),
         complementPartners_(complementPartners),
         predecessorQueryBudget_(predecessorQueryBudget),
         supportCache_(supportCache) {}
@@ -6534,7 +6645,8 @@ class BlockedCubeReductionChecker {
         complementPartners_,
         predecessorAssumptionCache_,
         predecessorQueryBudget_,
-        supportCache_);
+        supportCache_,
+        narrowGeneralizationProbeCache_);
     if (hasPdrBudgetExhaustion() || predecessor.hasPredecessor) {
       return std::nullopt;
     }
@@ -6553,6 +6665,7 @@ class BlockedCubeReductionChecker {
   const std::vector<FrameClauses>& frames_;
   size_t level_ = 0;
   PredecessorAssumptionCache* predecessorAssumptionCache_ = nullptr;
+  PredecessorAssumptionCache* narrowGeneralizationProbeCache_ = nullptr;
   const ComplementPartnerIndex& complementPartners_;
   size_t* predecessorQueryBudget_ = nullptr;
   PdrFormulaSupportCache* supportCache_ = nullptr;
@@ -6571,6 +6684,10 @@ StateCube generalizeBlockedCube(
     const ComplementPartnerIndex& complementPartners,
     size_t* predecessorQueryBudget,
     PdrFormulaSupportCache* supportCache) {
+  // Figure 7's literal-removal checks share one exact local SAT context. Its
+  // lifetime ends with this cube, so unrelated output cones cannot widen it.
+  PredecessorAssumptionCache narrowGeneralizationProbeCache;
+  narrowGeneralizationProbeCache.stateRelations = &complementPartners;
   BlockedCubeReductionChecker reductionChecker(
       problem,
       solverType,
@@ -6580,6 +6697,7 @@ StateCube generalizeBlockedCube(
       frames,
       level,
       predecessorAssumptionCache,
+      &narrowGeneralizationProbeCache,
       complementPartners,
       predecessorQueryBudget,
       supportCache);
