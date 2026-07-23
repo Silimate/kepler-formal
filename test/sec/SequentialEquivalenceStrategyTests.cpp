@@ -13616,6 +13616,47 @@ TEST_F(SequentialEquivalenceStrategyTests,
           "reusable invariant clauses certified candidates=2"),
       std::string::npos)
       << stderrOutput;
+  // The second disjoint candidate extends the same exact certification
+  // surfaces. Rebuilding either solver would discard the learned clauses that
+  // make recursive output-batch certification incremental.
+  const std::string initSolverCreated =
+      "reusable invariant init solver created";
+  const size_t firstInitSolverCreation =
+      stderrOutput.find(initSolverCreated);
+  ASSERT_NE(firstInitSolverCreation, std::string::npos) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          initSolverCreated,
+          firstInitSolverCreation + initSolverCreated.size()),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("reusable invariant init solver reused"),
+      std::string::npos)
+      << stderrOutput;
+  const std::string inductiveSolverCreated =
+      "reusable invariant inductive solver created";
+  const size_t firstInductiveSolverCreation =
+      stderrOutput.find(inductiveSolverCreated);
+  ASSERT_NE(firstInductiveSolverCreation, std::string::npos) << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          inductiveSolverCreated,
+          firstInductiveSolverCreation + inductiveSolverCreated.size()),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "reusable invariant inductive solver reused symbols=4 "
+          "added_symbols=2"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "reusable invariant certification context created index=2 "
+          "candidates=1"),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

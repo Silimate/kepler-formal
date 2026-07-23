@@ -1338,6 +1338,32 @@ struct BadCubeAssumptionCache {
   std::unique_ptr<BadCubeAssumptionSolver> solver;
 };
 
+struct ReusableInvariantInitialSolverCache {
+  std::unique_ptr<SATSolverWrapper> solver;
+  std::unique_ptr<FrameVariableStore> variables;
+  std::vector<size_t> solverSymbols;
+};
+
+struct ReusableInvariantInductiveSolverCache {
+  std::unique_ptr<SATSolverWrapper> solver;
+  std::unique_ptr<FrameVariableStore> variables;
+  std::vector<size_t> solverSymbols;
+  std::unordered_set<size_t> encodedTransitionTargets;
+  std::unordered_map<const std::unordered_map<size_t, size_t>*,
+                     std::unique_ptr<FrameFormulaEncoder>>
+      transitionEncoderBySymbolMap;
+  std::unordered_set<StateClause, StateClauseHash> emittedInvariantClauses;
+  size_t contextCount = 0;
+};
+
+struct ReusableInvariantCertificationCache {
+  // Both formulas are immutable across output batches. Keep their exact SAT
+  // encodings and globally valid learned clauses while extending only the
+  // candidate-dependent symbol and transition surfaces.
+  ReusableInvariantInitialSolverCache initial;
+  ReusableInvariantInductiveSolverCache inductive;
+};
+
 }  // namespace
 
 struct PDRExactInitCache::Impl {
@@ -1432,6 +1458,7 @@ struct PDRExactInitCache::Impl {
   size_t reusableInvariantCandidateLiteralCount = 0;
   size_t reusableInvariantCandidateRevision = 0;
   size_t reusableInvariantCertifiedRevision = 0;
+  ReusableInvariantCertificationCache reusableInvariantCertification;
   // These structures depend only on the validated transition model. SEC runs
   // output batches serially, so every batch can reuse their exact contents
   // without sharing property-specific proof state or changing query order.
@@ -3670,16 +3697,66 @@ class ReusableInvariantFinder {
     return sortUniqueSymbols(std::move(symbols));
   }
 
+  std::vector<size_t> addedSolverSymbols(
+      const std::vector<size_t>& existing,
+      const std::vector<size_t>& requested) const {
+    std::vector<size_t> added;
+    std::set_difference(
+        requested.begin(), requested.end(),
+        existing.begin(), existing.end(),
+        std::back_inserter(added));
+    return added;
+  }
+
+  void prepareInitialSolver(const std::vector<size_t>& querySymbols) {
+    ReusableInvariantInitialSolverCache& cached =
+        cache_.reusableInvariantCertification.initial;
+    if (cached.solver == nullptr) {
+      cached.solver = std::make_unique<SATSolverWrapper>(
+          SATSolverWrapper::assumptionSolverTypeFor(cache_.solverType));
+      cached.solver->configureForSecPdrPersistentQuery(querySymbols.size());
+      cached.variables = std::make_unique<FrameVariableStore>(
+          *cached.solver, querySymbols, 1);
+      cache_.stateRelations.addClauses(
+          *cached.solver, *cached.variables, querySymbols, 1);
+      FrameFormulaEncoder encoder(
+          *cached.solver, cached.variables->makeLeafLits(0));
+      cached.solver->addClause({encoder.encode(initFormula_)});
+      cached.solverSymbols = querySymbols;
+      if (pdrStatsEnabled()) {
+        emitSecDiag(
+            "SEC PDR stats: reusable invariant init solver created symbols=",
+            querySymbols.size());
+      }
+      return;
+    }
+
+    const std::vector<size_t> mergedSymbols =
+        detail::mergeSortedPdrSymbolVectors(
+            cached.solverSymbols, querySymbols);
+    const std::vector<size_t> addedSymbols =
+        addedSolverSymbols(cached.solverSymbols, mergedSymbols);
+    if (!addedSymbols.empty()) {
+      cached.variables->addSymbols(*cached.solver, addedSymbols);
+      cache_.stateRelations.addClausesForAddedSymbols(
+          *cached.solver, *cached.variables, addedSymbols, 0);
+      cached.solverSymbols = mergedSymbols;
+    }
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: reusable invariant init solver reused "
+          "added_symbols=",
+          addedSymbols.size(),
+          " total_symbols=",
+          cached.solverSymbols.size());
+    }
+  }
+
   std::optional<std::vector<bool>> findInitiallyValidCandidates() {
-    SATSolverWrapper solver(
-        SATSolverWrapper::assumptionSolverTypeFor(cache_.solverType));
     const std::vector<size_t> querySymbols = initialQuerySymbols();
-    solver.configureForSecPdrPersistentQuery(querySymbols.size());
-    FrameVariableStore variables(solver, querySymbols, 1);
-    cache_.stateRelations.addClauses(
-        solver, variables, querySymbols, 1);
-    FrameFormulaEncoder encoder(solver, variables.makeLeafLits(0));
-    solver.addClause({encoder.encode(initFormula_)});
+    prepareInitialSolver(querySymbols);
+    ReusableInvariantInitialSolverCache& cached =
+        cache_.reusableInvariantCertification.initial;
 
     std::vector<bool> initiallyValid(candidates_.size(), false);
     std::vector<int> assumptions;
@@ -3688,13 +3765,13 @@ class ReusableInvariantFinder {
       assumptions.reserve(candidates_[index].size());
       for (const ClauseLiteral& literal : candidates_[index]) {
         const int stateLiteral =
-            variables.getLiteral(literal.symbol, 0);
+            cached.variables->getLiteral(literal.symbol, 0);
         // Init violates a clause only when every one of its literals is false.
         assumptions.push_back(
             literal.positive ? -stateLiteral : stateLiteral);
       }
       const SATSolverWrapper::SolveStatus status =
-          solver.solveWithAssumptionsStatus(assumptions);
+          cached.solver->solveWithAssumptionsStatus(assumptions);
       if (status == SATSolverWrapper::SolveStatus::Unknown) {
         return std::nullopt;  // LCOV_EXCL_LINE
       }
@@ -3748,13 +3825,23 @@ class ReusableInvariantFinder {
     groups.push_back(std::move(group));
   }
 
-  void addTransitionEquations(
-      SATSolverWrapper& solver,
-      const FrameVariableStore& variables,
+  size_t addTransitionEquations(
+      ReusableInvariantInductiveSolverCache& cached,
       const std::vector<size_t>& transitionTargets) {
+    std::vector<size_t> addedTargets;
+    addedTargets.reserve(transitionTargets.size());
+    for (const size_t target : transitionTargets) {
+      if (!cached.encodedTransitionTargets.contains(target)) {
+        addedTargets.push_back(target);
+      }
+    }
+    if (addedTargets.empty()) {
+      return 0;
+    }
+
     std::vector<TransitionTargetGroup> groups;
     groups.reserve(3);
-    for (const size_t target : transitionTargets) {
+    for (const size_t target : addedTargets) {
       const TransitionExprView view =
           cache_.transitionByState.expressionView(target);
       appendTransitionTarget(groups, view.symbolMap, target);
@@ -3765,13 +3852,17 @@ class ReusableInvariantFinder {
       for (const size_t target : group.targets) {
         estimatedNodes += cache_.transitionByState.nodeCount(target);
       }
-      reservePdrTransitionEncodingVars(solver, estimatedNodes);
-      FrameFormulaEncoder encoder(
-          solver,
-          variables.makeLeafLits(0),
-          group.symbolMap,
-          false,
-          estimatedNodes);
+      reservePdrTransitionEncodingVars(*cached.solver, estimatedNodes);
+      auto& encoder =
+          cached.transitionEncoderBySymbolMap[group.symbolMap];
+      if (encoder == nullptr) {
+        encoder = std::make_unique<FrameFormulaEncoder>(
+            *cached.solver,
+            cached.variables->makeLeafLits(0),
+            group.symbolMap,
+            false,
+            estimatedNodes);
+      }
       for (const size_t target : group.targets) {
         const TransitionExprView view =
             cache_.transitionByState.expressionView(target);
@@ -3779,52 +3870,160 @@ class ReusableInvariantFinder {
           throw std::runtime_error(  // LCOV_EXCL_LINE
               "Inconsistent invariant-finder transition symbol map");
         }
-        const int transitionLiteral = encoder.encode(
+        const int transitionLiteral = encoder->encode(
             view.expr,
             cache_.transitionByState.encodingPostorder(target));
         addLiteralEquivalence(
-            solver,
-            variables.getLiteral(target, 1),
+            *cached.solver,
+            cached.variables->getLiteral(target, 1),
             transitionLiteral);
+        cached.encodedTransitionTargets.insert(target);
       }
     }
+    return addedTargets.size();
   }
 
-  void addCandidateSelectors(
-      SATSolverWrapper& solver,
-      const FrameVariableStore& variables,
+  size_t syncBaseInvariant(
+      ReusableInvariantInductiveSolverCache& cached) {
+    size_t added = 0;
+    for (const StateClause& clause : baseInvariant_.clauses) {
+      if (!cached.emittedInvariantClauses.insert(clause).second) {
+        continue;
+      }
+      addStateClause(
+          *cached.solver, *cached.variables, clause, 0);
+      ++added;
+    }
+    return added;
+  }
+
+  void extendInductiveSolverSymbols(
+      ReusableInvariantInductiveSolverCache& cached,
+      const std::vector<size_t>& addedSymbols,
+      const std::vector<size_t>& mergedSymbols) {
+    if (addedSymbols.empty()) {
+      return;
+    }
+    cached.variables->addSymbols(*cached.solver, addedSymbols);
+    for (const size_t symbol : addedSymbols) {
+      const int literal = cached.variables->getLiteral(symbol, 0);
+      for (auto& [symbolMap, encoder] :
+           cached.transitionEncoderBySymbolMap) {
+        (void)symbolMap;
+        encoder->addLeafLiteral(symbol, literal);
+      }
+    }
+    cache_.stateRelations.addClausesForAddedSymbols(
+        *cached.solver, *cached.variables, addedSymbols, 0);
+    cache_.stateRelations.addClausesForAddedSymbols(
+        *cached.solver, *cached.variables, addedSymbols, 1);
+    cached.solverSymbols = mergedSymbols;
+  }
+
+  void prepareInductiveSolver(
+      const std::vector<size_t>& querySymbols,
+      const std::vector<size_t>& transitionTargets) {
+    ReusableInvariantInductiveSolverCache& cached =
+        cache_.reusableInvariantCertification.inductive;
+    bool created = false;
+    size_t addedSymbolCount = 0;
+    if (cached.solver == nullptr) {
+      cached.solver = std::make_unique<SATSolverWrapper>(
+          SATSolverWrapper::assumptionSolverTypeFor(cache_.solverType));
+      cached.solver->configureForSecPdrPersistentQuery(querySymbols.size());
+      cached.variables = std::make_unique<FrameVariableStore>(
+          *cached.solver, querySymbols, 2);
+      cache_.stateRelations.addClauses(
+          *cached.solver, *cached.variables, querySymbols, 2);
+      addPostBootstrapResetInputConstraints(
+          *cached.solver, *cached.variables, problem_, 0);
+      cached.solverSymbols = querySymbols;
+      created = true;
+    } else {
+      const std::vector<size_t> mergedSymbols =
+          detail::mergeSortedPdrSymbolVectors(
+              cached.solverSymbols, querySymbols);
+      const std::vector<size_t> addedSymbols =
+          addedSolverSymbols(cached.solverSymbols, mergedSymbols);
+      addedSymbolCount = addedSymbols.size();
+      extendInductiveSolverSymbols(
+          cached, addedSymbols, mergedSymbols);
+    }
+
+    const size_t addedTargetCount =
+        addTransitionEquations(cached, transitionTargets);
+    const size_t addedInvariantCount = syncBaseInvariant(cached);
+    if (!pdrStatsEnabled()) {
+      return;
+    }
+    emitSecDiag(
+        created
+            ? "SEC PDR stats: reusable invariant inductive solver created "
+            : "SEC PDR stats: reusable invariant inductive solver reused ",
+        "symbols=",
+        cached.solverSymbols.size(),
+        " added_symbols=",
+        addedSymbolCount,
+        " transition_targets_added=",
+        addedTargetCount,
+        " invariant_clauses_added=",
+        addedInvariantCount);
+  }
+
+  int addCandidateSelectors(
+      ReusableInvariantInductiveSolverCache& cached,
       std::vector<int>& currentSelectors,
       std::vector<int>& nextHolds) {
     currentSelectors.reserve(candidates_.size());
     nextHolds.reserve(candidates_.size());
     std::vector<int> someNextClauseFails;
-    someNextClauseFails.reserve(candidates_.size());
+    someNextClauseFails.reserve(candidates_.size() + 1);
     for (const StateClause& clause : candidates_) {
-      const int currentSelector = solver.newVar() + 2;
-      const int nextClauseHolds = solver.newVar() + 2;
+      const int currentSelector = cached.solver->newVar() + 2;
+      const int nextClauseHolds = cached.solver->newVar() + 2;
       currentSelectors.push_back(currentSelector);
       nextHolds.push_back(nextClauseHolds);
       addGuardedStateClause(
-          solver, variables, clause, 0, currentSelector);
+          *cached.solver,
+          *cached.variables,
+          clause,
+          0,
+          currentSelector);
       // For every literal a' in c', add (y OR !a'). Thus c' => y,
       // and a model with y=false identifies a clause violated after one step.
       for (const ClauseLiteral& literal : clause) {
         const int nextLiteral =
-            variables.getLiteral(literal.symbol, 1);
-        solver.addClause(
+            cached.variables->getLiteral(literal.symbol, 1);
+        cached.solver->addClause(
             {nextClauseHolds,
              literal.positive ? -nextLiteral : nextLiteral});
       }
       someNextClauseFails.push_back(-nextClauseHolds);
     }
-    solver.addClause(someNextClauseFails);
+    // Old candidate contexts remain in the incremental solver only to retain
+    // globally valid learned clauses. This guard makes every prior context
+    // optional while the current exact query assumes its own guard.
+    const int contextActivation = cached.solver->newVar() + 2;
+    someNextClauseFails.push_back(-contextActivation);
+    cached.solver->addClause(someNextClauseFails);
+    ++cached.contextCount;
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: reusable invariant certification context created "
+          "index=",
+          cached.contextCount,
+          " candidates=",
+          candidates_.size());
+    }
+    return contextActivation;
   }
 
   std::vector<int> activeAssumptions(
       const std::vector<int>& currentSelectors,
-      const std::vector<int>& nextHolds) const {
+      const std::vector<int>& nextHolds,
+      int contextActivation) const {
     std::vector<int> assumptions;
-    assumptions.reserve(candidates_.size() * 2);
+    assumptions.reserve(candidates_.size() * 2 + 1);
     for (size_t index = 0; index < candidates_.size(); ++index) {
       if (active_[index]) {
         assumptions.push_back(currentSelectors[index]);
@@ -3835,6 +4034,7 @@ class ReusableInvariantFinder {
       assumptions.push_back(-currentSelectors[index]);
       assumptions.push_back(nextHolds[index]);
     }
+    assumptions.push_back(contextActivation);
     return assumptions;
   }
 
@@ -3862,34 +4062,24 @@ class ReusableInvariantFinder {
 
   bool findMaximumInductiveSubset(
       ReusableInvariantFinderResult& result) {
-    SATSolverWrapper solver(
-        SATSolverWrapper::assumptionSolverTypeFor(cache_.solverType));
     std::vector<size_t> transitionTargets;
     const std::vector<size_t> querySymbols =
         inductiveQuerySymbols(transitionTargets);
-    solver.configureForSecPdrPersistentQuery(querySymbols.size());
-    FrameVariableStore variables(solver, querySymbols, 2);
-    cache_.stateRelations.addClauses(
-        solver, variables, querySymbols, 2);
-    addPostBootstrapResetInputConstraints(
-        solver, variables, problem_, 0);
-    addTransitionEquations(solver, variables, transitionTargets);
-    // H is already inductive, so it only constrains the current state. The
-    // exact extension query needs next-state selectors for new candidates.
-    for (const StateClause& clause : baseInvariant_.clauses) {
-      addStateClause(solver, variables, clause, 0);
-    }
+    prepareInductiveSolver(querySymbols, transitionTargets);
+    ReusableInvariantInductiveSolverCache& cached =
+        cache_.reusableInvariantCertification.inductive;
 
     std::vector<int> currentSelectors;
     std::vector<int> nextHolds;
-    addCandidateSelectors(
-        solver, variables, currentSelectors, nextHolds);
+    const int contextActivation = addCandidateSelectors(
+        cached, currentSelectors, nextHolds);
     while (std::find(active_.begin(), active_.end(), true) != active_.end()) {
       const std::vector<int> assumptions =
-          activeAssumptions(currentSelectors, nextHolds);
+          activeAssumptions(
+              currentSelectors, nextHolds, contextActivation);
       ++result.inductiveQueries;
       const SATSolverWrapper::SolveStatus status =
-          solver.solveWithAssumptionsStatus(assumptions);
+          cached.solver->solveWithAssumptionsStatus(assumptions);
       if (status == SATSolverWrapper::SolveStatus::Unknown) {
         return false;  // LCOV_EXCL_LINE
       }
@@ -3898,7 +4088,7 @@ class ReusableInvariantFinder {
         return true;
       }
       const size_t removed =
-          removeViolatedCandidates(solver, nextHolds);
+          removeViolatedCandidates(*cached.solver, nextHolds);
       if (removed == 0) {
         return false;  // LCOV_EXCL_LINE
       }
@@ -3931,6 +4121,9 @@ void refreshReusableInvariant(
     ReusableInvariantFinder finder(cache, initFormula);
     const auto result = finder.run();
     if (!result.has_value()) {
+      // A fresh solver was the previous retry behavior. Drop a partial guarded
+      // context after UNKNOWN so the next batch starts from that same state.
+      cache.reusableInvariantCertification = {};
       if (pdrStatsEnabled()) {
         emitSecDiag(
             "SEC PDR stats: reusable invariant certification unavailable");
@@ -3966,6 +4159,7 @@ void refreshReusableInvariant(
           result->inductiveQueries);
     }
   } catch (...) {  // LCOV_EXCL_LINE
+    cache.reusableInvariantCertification = {};  // LCOV_EXCL_LINE
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: reusable invariant certification failed");  // LCOV_EXCL_LINE
