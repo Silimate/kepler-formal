@@ -130,6 +130,10 @@ constexpr size_t kInitialPdrStatsQueries = 20;
 constexpr size_t kMaxPredecessorQueryResultCacheEntries = 256 * 1024;
 constexpr size_t kMaxPredecessorUnsatCoresPerContext = 4096;
 constexpr size_t kMaxPredecessorTargetSurfaceCacheBytes = 64 * 1024 * 1024;
+// Complete PDR frame sequences remain valid across output properties over the
+// same F[0] and transition relation. Bound this optional cache by literals so
+// it cannot grow with every output batch.
+constexpr size_t kMaxReusableFrameClauseLiterals = 256 * 1024;
 // Higher-frame predecessor solvers absorb learned PDR frame clauses, so keep
 // those caches bounded on giant dual-rail leaves. Exact F[0] and its transition
 // relation are immutable across obligations and output batches; retaining that
@@ -1358,6 +1362,10 @@ struct PDRExactInitCache::Impl {
   std::unordered_map<size_t, SharedPredecessorAssumptionSolverPool>
       higherFramePredecessorSolverPools;
   size_t nextHigherFrameRunId = 1;
+  // Intersecting complete IC3 frame sequences preserves their initial
+  // inclusion, monotonicity, and relative-induction conditions.
+  std::vector<FrameClauses> reusableFrames;
+  size_t reusableFrameLiteralCount = 0;
   // These structures depend only on the validated transition model. SEC runs
   // output batches serially, so every batch can reuse their exact contents
   // without sharing property-specific proof state or changing query order.
@@ -3186,8 +3194,106 @@ bool addClauseToFrames(std::vector<FrameClauses>& frames,
   return addedAny;
 }  // LCOV_EXCL_LINE
 
+size_t importReusableFrameClauses(
+    const PDRExactInitCache::Impl& cache,
+    size_t level,
+    FrameClauses& target) {
+  if (level >= cache.reusableFrames.size()) {
+    return 0;
+  }
+  size_t imported = 0;
+  for (const StateClause& clause : cache.reusableFrames[level].clauses) {
+    if (addClauseToFrame(target, clause)) {
+      ++imported;
+    }
+  }
+  if (imported != 0 && pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: reusable frame clauses imported level=",
+        level,
+        " count=",
+        imported,
+        " retained=",
+        cache.reusableFrames[level].clauses.size());
+  }
+  return imported;
+}
 
+void storeReusableFrameClauses(
+    PDRExactInitCache::Impl& cache,
+    const std::vector<FrameClauses>& frames) {
+  if (frames.size() <= 1) {
+    return;
+  }
+  size_t additionalLiterals = 0;
+  for (size_t level = 1; level < frames.size(); ++level) {
+    for (const StateClause& clause : frames[level].clauses) {
+      if (level >= cache.reusableFrames.size() ||
+          !frameHasSubsumingClause(cache.reusableFrames[level], clause)) {
+        additionalLiterals += clause.size();
+      }
+    }
+  }
+  if (cache.reusableFrameLiteralCount + additionalLiterals >
+      kMaxReusableFrameClauseLiterals) {
+    if (pdrStatsEnabled()) {
+      emitSecDiag(
+          "SEC PDR stats: reusable frame sequence skipped literals=",
+          additionalLiterals,
+          " retained_literal_budget=",
+          cache.reusableFrameLiteralCount);
+    }
+    return;
+  }
 
+  if (cache.reusableFrames.size() < frames.size()) {
+    cache.reusableFrames.resize(frames.size());
+  }
+  size_t stored = 0;
+  for (size_t level = 1; level < frames.size(); ++level) {
+    for (const StateClause& clause : frames[level].clauses) {
+      if (addClauseToFrame(cache.reusableFrames[level], clause)) {
+        cache.reusableFrameLiteralCount += clause.size();
+        ++stored;
+      }
+    }
+    // This cache is never streamed directly into a SAT solver. Discard its
+    // append log so retained clauses have only one owner.
+    cache.reusableFrames[level].addedClauseLog.clear();
+  }
+  if (stored != 0 && pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: reusable frame clauses stored count=",
+        stored,
+        " levels=",
+        frames.size() - 1,
+        " literal_budget_used=",
+        cache.reusableFrameLiteralCount);
+  }
+}
+
+class ReusableFrameClauseRecorder {
+ public:
+  ReusableFrameClauseRecorder(
+      PDRExactInitCache::Impl* cache,
+      const std::vector<FrameClauses>& frames)
+      : cache_(cache), frames_(frames) {}
+
+  ~ReusableFrameClauseRecorder() {
+    if (cache_ == nullptr) {
+      return;
+    }
+    // Reuse is optional. Allocation failure must not change the PDR verdict.
+    try {
+      storeReusableFrameClauses(*cache_, frames_);
+    } catch (...) {  // LCOV_EXCL_LINE
+    }
+  }
+
+ private:
+  PDRExactInitCache::Impl* cache_ = nullptr;
+  const std::vector<FrameClauses>& frames_;
+};
 
 void addStateClause(SATSolverWrapper& solver,
                     const FrameVariableStore& variables,
@@ -6896,6 +7002,13 @@ PDRResult PDREngine::runWithQueryLimits(
   size_t* predecessorQueryBudget =
       maxPredecessorQueries_ == 0 ? nullptr : &remainingPredecessorQueries;
   std::vector<FrameClauses> frames(1);
+  // A one-frame run cannot amortize importing a deeper cached sequence, while
+  // the extra clauses can enlarge its only SAT pass. Keep its original exact
+  // PDR path; normal multi-frame runs reuse the complete sequence.
+  PDRExactInitCache::Impl* reusableFrameCache =
+      maxFrames > 1 ? sharedExactInit : nullptr;
+  ReusableFrameClauseRecorder reusableFrameRecorder(
+      reusableFrameCache, frames);
   emitPdrTraceFrames("initial_frames", frames);
 
   // Before growing any frame sequence, check whether exact Init itself already
@@ -6937,6 +7050,9 @@ PDRResult PDREngine::runWithQueryLimits(
   predecessorAssumptionCache.initFacts = initFactsPtr;
   const auto seedClauses = buildSeedClauses(*runProblem, initFacts);
   frames.emplace_back(FrameClauses{seedClauses});
+  if (reusableFrameCache != nullptr) {
+    importReusableFrameClauses(*reusableFrameCache, 1, frames[1]);
+  }
   emitPdrTraceFrames("seeded_frames", frames);
   for (size_t level = 1; level <= maxFrames; ++level) {
     // Phase 1: exhaust the proof obligations created by bad states that still
@@ -6977,6 +7093,10 @@ PDRResult PDREngine::runWithQueryLimits(
     // Phase 2: create the next frame, seed it with already-known startup
     // facts
     frames.emplace_back(FrameClauses{seedClauses});
+    if (reusableFrameCache != nullptr) {
+      importReusableFrameClauses(
+          *reusableFrameCache, level + 1, frames[level + 1]);
+    }
     // and then push learned clauses forward.
     // We push in order to reach covergence and the condition is that that 
     // the clause is not preventing an actual bad path

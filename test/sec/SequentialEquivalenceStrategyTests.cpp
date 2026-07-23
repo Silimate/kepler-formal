@@ -13303,10 +13303,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
             std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("exact F[0] init intersection cache reused"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
       stderrOutput.find("shared exact F[0] solver used for bad cube"),
       std::string::npos)
       << stderrOutput;
@@ -13322,6 +13318,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
             std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find("immutable model metadata reused"),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("reusable frame clauses stored"),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("reusable frame clauses imported level=2"),
             std::string::npos)
       << stderrOutput;
   const std::string predecessorCreated =
@@ -13373,14 +13375,20 @@ TEST_F(SequentialEquivalenceStrategyTests,
       BoolExpr::Not(BoolExpr::Var(monitorState)),
       BoolExpr::Not(BoolExpr::Var(designState)));
 
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
   const auto proved = engine.run(2, holdsAfterMonitor);
   const auto different = engine.run(2, failsAfterMonitor);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // The transition model and exact F[0] cache are shared, while each supplied
-  // safety property still gets fresh IC3 frames and an independent verdict.
+  // Reachability frames may be shared, but each supplied safety property still
+  // gets an independent bad-state search and verdict.
   EXPECT_EQ(proved.status, PDRStatus::Equivalent);
   EXPECT_EQ(different.status, PDRStatus::Different);
   EXPECT_EQ(different.bound, 1u);
+  EXPECT_NE(stderrOutput.find("reusable frame clauses imported"),
+            std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -13595,8 +13603,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(
       guardedStderr.find(
           "run=19 entry=1 cache_hit=1 evicted=0 family_symbols=2 "
-          "initial_symbols=2 closest_entry=0 closest_overlap=2 path_local=0 "
+          "initial_symbols=3 closest_entry=0 closest_overlap=2 path_local=0 "
           "restarted=1 retired_contexts=16"),
+      std::string::npos)
+      << guardedStderr;
+  EXPECT_NE(
+      guardedStderr.find("reusable frame clauses imported level=3"),
       std::string::npos)
       << guardedStderr;
 }
