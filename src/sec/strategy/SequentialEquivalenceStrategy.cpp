@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
-#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1136,7 +1135,6 @@ KInductionProblem makeOutputSubsetProblem(
   subset.observedOutputExprs0.clear();
   subset.observedOutputExprs1.clear();
   subset.dualRailOutputStrictEqualityExprs.clear();
-  subset.dualRailOutputBothDefinedExprs.clear();
   subset.dualRailOutputSkipReasons.clear();
 
   // LCOV_DISABLED_START
@@ -1148,9 +1146,6 @@ KInductionProblem makeOutputSubsetProblem(
       source.observedOutputExprs0.size();
   const bool copyStrictEqualityExprs =
       source.dualRailOutputStrictEqualityExprs.size() ==
-      source.observedOutputExprs0.size();
-  const bool copyBothDefinedExprs =
-      source.dualRailOutputBothDefinedExprs.size() ==
       source.observedOutputExprs0.size();
   for (const size_t outputIndex : outputIndices) {
     if (copyObservedKeys) {
@@ -1166,10 +1161,6 @@ KInductionProblem makeOutputSubsetProblem(
       subset.dualRailOutputStrictEqualityExprs.push_back(
           source.dualRailOutputStrictEqualityExprs[outputIndex]);
     }
-    if (copyBothDefinedExprs) {
-      subset.dualRailOutputBothDefinedExprs.push_back(
-          source.dualRailOutputBothDefinedExprs[outputIndex]);
-    }
     if (copySkipReasons) {
       subset.dualRailOutputSkipReasons.push_back(
           source.dualRailOutputSkipReasons[outputIndex]);
@@ -1179,20 +1170,6 @@ KInductionProblem makeOutputSubsetProblem(
   subset.description = source.description + " selected output repair";
   // LCOV_DISABLED_START
   return subset;
-}
-
-bool configureDualRailDefinednessProperty(KInductionProblem& problem) {
-  if (problem.dualRailOutputBothDefinedExprs.size() !=
-      problem.observedOutputExprs0.size()) {
-    return false;
-  }
-  problem.observedOutputExprs0 =
-      problem.dualRailOutputBothDefinedExprs;
-  problem.observedOutputExprs1.assign(
-      problem.observedOutputExprs0.size(), BoolExpr::createTrue());
-  rebuildSelectedOutputProperty(problem);
-  problem.description += " binary definedness";
-  return true;
 }
 
 OutputCoverageSelection buildCoverageSkippingOutputIndices( // LCOV_EXCL_LINE
@@ -1432,9 +1409,6 @@ bool secSummaryStatsEnabled() {
 constexpr size_t kMaxDualRailResidualOutputs = 128;
 constexpr size_t kMaxDualRailResidualProofStateSymbols = 4096;
 constexpr size_t kMaxDualRailResidualConcretePrecheckOutputs = 16;
-constexpr const char* kDualRailXInconclusiveReason =
-    "affected by X propagated from uninitialized sequential logic; "
-    "no concrete 0/1 mismatch was found";
 
 enum class DualRailResidualEngine {
   KInduction,
@@ -1446,18 +1420,6 @@ struct DualRailResidualProofState {
   std::unordered_map<size_t, std::string> skipReasons;
   std::optional<SequentialEquivalenceResult> terminalResult;
   size_t provedBound = 0;
-};
-
-enum class DualRailDefinednessProofStatus {
-  Defined,
-  XWitness,
-  Inconclusive,
-};
-
-struct DualRailDefinednessProofResult {
-  DualRailDefinednessProofStatus status =
-      DualRailDefinednessProofStatus::Inconclusive;
-  size_t bound = 0;
 };
 
 const char* dualRailResidualEngineName(DualRailResidualEngine engine) {
@@ -1514,27 +1476,6 @@ void markDualRailResidualOutputsSkipped(
     markDualRailResidualOutputSkipped(
         outputIndex, problem, engine, proofState, reason);
   }
-}
-
-std::string buildDualRailXInconclusiveSummary(
-    const KInductionProblem& problem,
-    const std::unordered_map<size_t, std::string>& skipReasons) {
-  std::vector<std::string> xAffectedOutputNames;
-  for (size_t outputIndex = 0;
-       outputIndex < problem.observedOutputExprs0.size();
-       ++outputIndex) {
-    const auto reason = skipReasons.find(outputIndex);
-    if (reason != skipReasons.end() &&
-        reason->second == kDualRailXInconclusiveReason) {
-      xAffectedOutputNames.push_back(
-          outputNameForProblemIndex(problem, outputIndex));
-    }
-  }
-  return xAffectedOutputNames.empty()
-             ? std::string{}
-             : "X propagated from uninitialized sequential logic affects "
-               "output(s): " +
-                   joinReasons(xAffectedOutputNames);
 }
 
 size_t dualRailResidualStateSymbolCount(const KInductionProblem& problem) {
@@ -1734,78 +1675,6 @@ void recordDualRailResidualCounterexample(
       extractedBoundaryReports);
 }
 
-DualRailDefinednessProofResult runDualRailDefinednessKInduction(
-    const KInductionProblem& problem,
-    const std::vector<size_t>& outputIndices,
-    size_t maxK,
-    KEPLER_FORMAL::Config::SolverType solverType) {
-  KInductionProblem definednessProblem =
-      makeOutputSubsetProblem(problem, outputIndices);
-  if (!configureDualRailDefinednessProperty(definednessProblem)) {
-    return {};
-  }
-
-  // The guarded obligation is already proved for this output set. Run normal
-  // k-induction on binary definedness, including its concrete base case,
-  // before accepting any output as concretely equivalent.
-  definednessProblem.deferBaseCaseChecks = false;
-  KInductionEngine definednessEngine(definednessProblem, solverType);
-  const KInductionResult result = definednessEngine.run(maxK);
-  if (result.status == KInductionStatus::Different) {
-    return {DualRailDefinednessProofStatus::XWitness, result.bound};
-  }
-  if (result.status == KInductionStatus::Equivalent) {
-    return {DualRailDefinednessProofStatus::Defined, result.bound};
-  }
-  return {DualRailDefinednessProofStatus::Inconclusive, result.bound};
-}
-
-void proveDualRailDefinednessKInductionOutputSet(
-    const KInductionProblem& problem,
-    const std::vector<size_t>& outputIndices,
-    size_t maxK,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    DualRailResidualProofState& proofState) {
-  if (outputIndices.empty()) {
-    return;  // LCOV_EXCL_LINE
-  }
-
-  const DualRailDefinednessProofResult definednessResult =
-      runDualRailDefinednessKInduction(
-          problem, outputIndices, maxK, solverType);
-  proofState.provedBound =
-      std::max(proofState.provedBound, definednessResult.bound);
-  if (definednessResult.status == DualRailDefinednessProofStatus::Defined) {
-    markDualRailResidualOutputsCovered(outputIndices, proofState);
-    return;
-  }
-
-  // A failed definedness conjunction may contain independent binary outputs.
-  // Split only this obligation; the parent guarded proof remains valid for
-  // both children and therefore cannot turn an X witness into a mismatch.
-  if (outputIndices.size() > 1) {
-    const size_t mid = outputIndices.size() / 2;
-    const std::vector<size_t> left(
-        outputIndices.begin(), outputIndices.begin() + mid);
-    const std::vector<size_t> right(
-        outputIndices.begin() + mid, outputIndices.end());
-    proveDualRailDefinednessKInductionOutputSet(
-        problem, left, maxK, solverType, proofState);
-    proveDualRailDefinednessKInductionOutputSet(
-        problem, right, maxK, solverType, proofState);
-    return;
-  }
-
-  markDualRailResidualOutputSkipped(
-      outputIndices.front(),
-      problem,
-      DualRailResidualEngine::KInduction,
-      proofState,
-      definednessResult.status == DualRailDefinednessProofStatus::XWitness
-          ? kDualRailXInconclusiveReason
-          : "dual-rail binary-definedness k-induction was inconclusive");
-}
-
 void proveDualRailResidualOutputSet(
     const KInductionProblem& problem,
     const std::vector<size_t>& outputIndices,
@@ -1882,8 +1751,7 @@ void proveDualRailResidualOutputSet(
         return;
       }  // LCOV_EXCL_LINE
       if (baseCheck.status == SEC::BaseCounterexampleCheckStatus::NoCounterexample) {
-        proveDualRailDefinednessKInductionOutputSet(
-            problem, outputIndices, maxK, solverType, proofState);
+        markDualRailResidualOutputsCovered(outputIndices, proofState);
         return;
       }
       if (outputIndices.size() == 1) {  // LCOV_EXCL_LINE
@@ -2140,17 +2008,13 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
       buildCoverageWithDualRailOutputSkips(
           outputCoverage, problem, proofState.coveredOutputs,
           proofState.skipReasons);
-  const std::string xInconclusiveSummary =
-      buildDualRailXInconclusiveSummary(problem, proofState.skipReasons);
   if (coveredCount == 0) {
     return makeSecResult(
         SequentialEquivalenceStatus::Inconclusive,
         proofState.provedBound,
-        !xInconclusiveSummary.empty()
-            ? xInconclusiveSummary
-            : std::string("Dual-rail ") +
-                  dualRailResidualEngineName(engine) +
-                  " did not prove any output",
+        std::string("Dual-rail ") +
+            dualRailResidualEngineName(engine) +
+            " did not prove any output",
         finalCoverage,
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
@@ -2163,10 +2027,7 @@ std::optional<SequentialEquivalenceResult> proveDualRailResidualsWithSelectedEng
         std::string("Dual-rail ") + dualRailResidualEngineName(engine) +
             " proved " + std::to_string(coveredCount) + " of " +
             std::to_string(proofState.coveredOutputs.size()) +
-            " observed outputs; remaining outputs are inconclusive" +
-            (xInconclusiveSummary.empty()
-                 ? std::string{}
-                 : "; " + xInconclusiveSummary),
+            " observed outputs; remaining outputs are inconclusive",
         finalCoverage,
         abstractedSequentialBoundaries,
         extractedBoundaryReports);
@@ -2758,7 +2619,6 @@ BoolExpr* buildDualRailBinaryDefinedExpr(const DualRailBoolExpr& value) {
 struct DualRailOutputProperties {
   BoolExpr* guardedEquality = nullptr;
   BoolExpr* strictEquality = nullptr;
-  BoolExpr* bothValuesDefined = nullptr;
 };
 
 DualRailOutputProperties buildDualRailOutputProperties(
@@ -2770,146 +2630,16 @@ DualRailOutputProperties buildDualRailOutputProperties(
   BoolExpr* strictEquality = BoolExpr::simplify(BoolExpr::And(
       makeEqualityExpr(value0.mayBeOne, value1.mayBeOne),
       makeEqualityExpr(value0.mayBeZero, value1.mayBeZero)));
-  // Concrete dual-rail SEC has two obligations: no defined binary mismatch and
-  // binary definedness in both designs. Strict rail equality remains metadata
-  // for shared exact query surfaces; it is not a proof because 11 == 11 is X.
+  // Steady-state dual-rail SEC ignores cycles where either value is X and
+  // rejects only opposite binary values. Strict rail equality remains metadata
+  // for shared exact query surfaces.
   BoolExpr* binaryMismatch = BoolExpr::And(
       bothValuesDefined,
       BoolExpr::Xor(value0.mayBeOne, value1.mayBeOne));
   return {
       BoolExpr::simplify(BoolExpr::Not(binaryMismatch)),
-      strictEquality,
-      bothValuesDefined};
+      strictEquality};
 }
-
-BoolExpr* buildDualRailOutputRangeDefinedExpr(
-    const KInductionProblem& problem,
-    size_t firstOutput,
-    size_t endOutput) {
-  BoolExpr* allDefined = BoolExpr::createTrue();
-  const size_t cappedEnd = std::min(
-      endOutput, problem.dualRailOutputBothDefinedExprs.size());
-  for (size_t output = firstOutput; output < cappedEnd; ++output) {
-    allDefined = BoolExpr::And(
-        allDefined, problem.dualRailOutputBothDefinedExprs[output]);
-  }
-  return BoolExpr::simplify(allDefined);
-}
-
-class PdrDefinednessMonitor {
- public:
-  PdrDefinednessMonitor(const KInductionProblem& source, size_t maximumCycle)
-      : problem_(source), maximumCycle_(maximumCycle) {
-    addCounterState();
-  }
-
-  const KInductionProblem& problem() const { return problem_; }
-
-  BoolExpr* propertyFromCycle(size_t cycle, BoolExpr* property) const {
-    return BoolExpr::simplify(BoolExpr::Or(cycleLessThan(cycle), property));
-  }
-
-  BoolExpr* outputsDefinedFromCycle(size_t firstOutput,
-                                    size_t endOutput,
-                                    size_t cycle) const {
-    return propertyFromCycle(
-        cycle,
-        buildDualRailOutputRangeDefinedExpr(
-            problem_, firstOutput, endOutput));
-  }
-
- private:
-  static size_t counterWidth(size_t maximumCycle) {
-    size_t width = 1;
-    while (width < std::numeric_limits<size_t>::digits &&
-           (maximumCycle >> width) != 0) {
-      ++width;
-    }
-    return width;
-  }
-
-  static BoolExpr* selectExpr(BoolExpr* condition,
-                              BoolExpr* whenTrue,
-                              BoolExpr* whenFalse) {
-    return BoolExpr::Or(
-        BoolExpr::And(condition, whenTrue),
-        BoolExpr::And(BoolExpr::Not(condition), whenFalse));
-  }
-
-  BoolExpr* cycleLessThan(size_t value) const {
-    if (value == 0) {
-      return BoolExpr::createFalse();
-    }
-    if (const auto cached = cycleLessThanByValue_.find(value);
-        cached != cycleLessThanByValue_.end()) {
-      return cached->second;
-    }
-
-    BoolExpr* less = BoolExpr::createFalse();
-    BoolExpr* equalPrefix = BoolExpr::createTrue();
-    for (size_t offset = 0; offset < counterSymbols_.size(); ++offset) {
-      const size_t bit = counterSymbols_.size() - 1 - offset;
-      BoolExpr* variable = BoolExpr::Var(counterSymbols_[bit]);
-      if (((value >> bit) & size_t{1}) != 0) {
-        less = BoolExpr::Or(
-            less,
-            BoolExpr::And(equalPrefix, BoolExpr::Not(variable)));
-        equalPrefix = BoolExpr::And(equalPrefix, variable);
-      } else {
-        equalPrefix = BoolExpr::And(equalPrefix, BoolExpr::Not(variable));
-      }
-    }
-    BoolExpr* result = BoolExpr::simplify(less);
-    cycleLessThanByValue_.emplace(value, result);
-    return result;
-  }
-
-  void addCounterState() {
-    const size_t width = counterWidth(maximumCycle_);
-    size_t nextSymbol = nextUnusedProofSymbol(problem_);
-    counterSymbols_.reserve(width);
-    for (size_t bit = 0; bit < width; ++bit) {
-      const size_t symbol = nextSymbol++;
-      counterSymbols_.push_back(symbol);
-      problem_.auxiliaryStateSymbols.push_back(symbol);
-      problem_.allSymbols.push_back(symbol);
-      problem_.initialStateAssignments.emplace_back(symbol, false);
-    }
-    problem_.totalStateCount += width;
-    problem_.initializedStateCount += width;
-
-    // Values above max_k are unreachable. Defining them to move to max_k keeps
-    // the monitor transition total without adding a domain assumption to PDR.
-    BoolExpr* atOrAboveMaximum =
-        BoolExpr::Not(cycleLessThan(maximumCycle_));
-    BoolExpr* carry = BoolExpr::createTrue();
-    for (size_t bit = 0; bit < width; ++bit) {
-      BoolExpr* current = BoolExpr::Var(counterSymbols_[bit]);
-      BoolExpr* incremented = BoolExpr::Xor(current, carry);
-      carry = BoolExpr::And(carry, current);
-      BoolExpr* maximumBit =
-          ((maximumCycle_ >> bit) & size_t{1}) != 0
-              ? BoolExpr::createTrue()
-              : BoolExpr::createFalse();
-      problem_.auxiliaryTransitions.emplace_back(
-          counterSymbols_[bit],
-          BoolExpr::simplify(selectExpr(
-              atOrAboveMaximum, maximumBit, incremented)));
-    }
-  }
-
-  KInductionProblem problem_;
-  size_t maximumCycle_ = 0;
-  std::vector<size_t> counterSymbols_;
-  mutable std::unordered_map<size_t, BoolExpr*> cycleLessThanByValue_;
-};
-
-struct PdrDefinednessSearchResult {
-  std::optional<size_t> certifiedCycle;
-  size_t reachedBound = 0;
-  PDRStatus status = PDRStatus::Inconclusive;
-  bool witnessedX = false;
-};
 
 const char* pdrStatusName(PDRStatus status) {
   switch (status) {
@@ -2942,99 +2672,6 @@ PDRResult runPdrOutputBatch(const PDREngine& engine,
   // are reserved for singleton leaves, so failed probes cannot dominate them.
   return engine.run(maxFrames, property, kDualRailPdrBatchProbeLimits);
 }
-
-class PdrDefinednessProofSession {
- public:
-  PdrDefinednessProofSession(
-      const KInductionProblem& problem,
-      KEPLER_FORMAL::Config::SolverType solverType,
-      size_t maxFrames)
-      : problem_(problem),
-        solverType_(solverType),
-        maxFrames_(maxFrames) {}
-
-  PdrDefinednessSearchResult findDefinedCycle(
-      size_t firstOutput,
-      size_t endOutput) const {
-    PdrDefinednessSearchResult search;
-    std::vector<CycleRange> pending{{0, maxFrames_}};
-    while (!pending.empty()) {
-      const CycleRange range = pending.back();
-      pending.pop_back();
-      const size_t cycle = range.first + (range.last - range.first) / 2;
-      const PDRResult probe =
-          probeDefinedCycle(firstOutput, endOutput, cycle);
-      search.reachedBound = std::max(search.reachedBound, probe.bound);
-      if (probe.status == PDRStatus::Equivalent) {
-        search.status = PDRStatus::Equivalent;
-        search.certifiedCycle = cycle;
-        return search;
-      }
-      if (probe.status == PDRStatus::Different) {
-        search.witnessedX = true;
-        // Definedness from a later cycle is weaker. This X witness also rules
-        // out every earlier threshold, so only the upper interval remains.
-        if (cycle < range.last) {
-          pending.push_back({cycle + 1, range.last});
-        }
-        continue;
-      }
-      // UNKNOWN is only a resource result. Preserve both untested intervals
-      // and prefer the weaker, later thresholds on the next iteration.
-      if (range.first < cycle) {
-        pending.push_back({range.first, cycle - 1});
-      }
-      if (cycle < range.last) {
-        pending.push_back({cycle + 1, range.last});
-      }
-    }
-    if (search.witnessedX) {
-      search.status = PDRStatus::Different;
-    }
-    return search;
-  }
-
- private:
-  struct CycleRange {
-    size_t first = 0;
-    size_t last = 0;
-  };
-
-  PDRResult probeDefinedCycle(size_t firstOutput,
-                              size_t endOutput,
-                              size_t cycle) const {
-    // Each threshold gets the smallest saturating monitor that represents its
-    // property. This avoids making an early proof carry irrelevant later
-    // counter states while preserving the complete SEC transition system.
-    PdrDefinednessMonitor monitor(problem_, cycle);
-    auto exactInitCache = std::make_shared<PDRExactInitCache>(
-        monitor.problem(), solverType_);
-    PDREngine engine(
-        monitor.problem(), solverType_, 0, exactInitCache);
-    const PDRResult result = runPdrOutputBatch(
-        engine, maxFrames_,
-        monitor.outputsDefinedFromCycle(firstOutput, endOutput, cycle),
-        endOutput - firstOutput);
-    if (isSecDiagEnabled()) {
-      emitSecDiag(
-          "SEC diag: PDR definedness probe output range=",
-          firstOutput,
-          "..",
-          endOutput,
-          " cycle=",
-          cycle,
-          " status=",
-          pdrStatusName(result.status),
-          " bound=",
-          result.bound);
-    }
-    return result;
-  }
-
-  const KInductionProblem& problem_;
-  KEPLER_FORMAL::Config::SolverType solverType_;
-  size_t maxFrames_ = 0;
-};
 
 void applyInitialStateAssignments(
     const std::unordered_map<SignalKey, bool, SignalKeyHash>& initialValues,
@@ -3209,9 +2846,6 @@ KInductionProblem buildDualRailSecProblem(
   problem.dualRailOutputStrictEqualityExprs.clear();
   problem.dualRailOutputStrictEqualityExprs.reserve(
       alignedOutputs.names.size());
-  problem.dualRailOutputBothDefinedExprs.clear();
-  problem.dualRailOutputBothDefinedExprs.reserve(
-      alignedOutputs.names.size());
   problem.dualRailOutputSkipReasons.clear();
   problem.dualRailOutputSkipReasons.reserve(alignedOutputs.names.size());
   for (size_t i = 0; i < alignedOutputs.names.size(); ++i) {
@@ -3237,8 +2871,6 @@ KInductionProblem buildDualRailSecProblem(
     problem.observedOutputExprs1.push_back(BoolExpr::createTrue());
     problem.dualRailOutputStrictEqualityExprs.push_back(
         outputProperties.strictEquality);
-    problem.dualRailOutputBothDefinedExprs.push_back(
-        outputProperties.bothValuesDefined);
     // LCOV_DISABLED_STOP
     // Dual-rail strategy construction only builds obligations.  The selected
     // engine must prove each top output; no side implication query can mark it
@@ -3449,10 +3081,6 @@ SequentialEquivalenceResult runPdrSecEngine(
     size_t endOutput = 0;
   // LCOV_DISABLED_START
   };
-  struct PdrDefinednessBatch {
-    size_t firstOutput = 0;
-    size_t endOutput = 0;
-  };
   std::vector<PdrOutputBatch> outputBatches;
   const bool useSupportBoundedPdrBatches =
       problem.usesDualRailStateEncoding ||
@@ -3476,15 +3104,8 @@ SequentialEquivalenceResult runPdrSecEngine(
       makeInitialPdrCoveredOutputs(problem);
   std::unordered_map<size_t, std::string> pdrSkippedOutputReasons =
       presetDualRailSkipReasons;
-  std::vector<PdrDefinednessBatch> definednessBatches;
-  std::vector<std::string> xAffectedOutputNames;
   size_t provedBound = 0;
   bool stopAfterInconclusiveBatch = false;
-  const bool hasDualRailDefinednessProperty =
-      !problem.usesDualRailStateEncoding ||
-      problem.dualRailOutputBothDefinedExprs.size() ==
-          problem.observedOutputExprs0.size();
-  std::unique_ptr<PdrDefinednessProofSession> definednessSession;
   std::shared_ptr<PDRExactInitCache> exactInitCache;
   if (problem.usesDualRailStateEncoding) {
     exactInitCache =
@@ -3500,7 +3121,7 @@ SequentialEquivalenceResult runPdrSecEngine(
       // range so one fully diagnostic performance run identifies the slow PDR
       // slice without changing batching or proof order.
       emitSecDiag(
-          "SEC diag: PDR defined-value check begin index=",
+          "SEC diag: PDR steady-state check begin index=",
           batchIndex,
           " pending_batches=",
           outputBatches.size(),
@@ -3516,7 +3137,7 @@ SequentialEquivalenceResult runPdrSecEngine(
         endOutput - firstOutput);
     if (isSecDiagEnabled()) {
       emitSecDiag(
-          "SEC diag: PDR defined-value check end index=",
+          "SEC diag: PDR steady-state check end index=",
           batchIndex,
           " output_range=",
           firstOutput,
@@ -3530,15 +3151,11 @@ SequentialEquivalenceResult runPdrSecEngine(
     switch (pdrResult.status) {
       case PDRStatus::Equivalent:
         provedBound = std::max(provedBound, pdrResult.bound);
-        if (problem.usesDualRailStateEncoding) {
-          definednessBatches.push_back({firstOutput, endOutput});
-        } else {
-          markPdrOutputRangeCovered(
-              pdrCoveredOutputs,
-              pdrSkippedOutputReasons,
-              firstOutput,
-              endOutput);
-        }
+        markPdrOutputRangeCovered(
+            pdrCoveredOutputs,
+            pdrSkippedOutputReasons,
+            firstOutput,
+            endOutput);
         break;
       case PDRStatus::Different:
         return makeSecResult(
@@ -3568,8 +3185,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               pdrSkippedOutputReasons,
               firstOutput,
               endOutput,
-              "dual-rail PDR was inconclusive while checking defined-value "
-              "differences");
+              "dual-rail PDR steady-state proof was inconclusive");
           break;
         }
         for (size_t outputIndex = 0;
@@ -3588,119 +3204,21 @@ SequentialEquivalenceResult runPdrSecEngine(
     }
   }
 
-  if (problem.usesDualRailStateEncoding) {
-    if (hasDualRailDefinednessProperty) {
-      // The monitor has a different transition system. Release the original
-      // exact-init cache before constructing its cache so both large SAT
-      // surfaces are not retained at once.
-      exactInitCache.reset();
-      definednessSession = std::make_unique<PdrDefinednessProofSession>(
-          problem, solverType, maxK);
-    }
-    if (!hasDualRailDefinednessProperty) {
-      for (const PdrDefinednessBatch& batch : definednessBatches) {
-        markPdrOutputRangeSkipped(
-            pdrCoveredOutputs,
-            pdrSkippedOutputReasons,
-            batch.firstOutput,
-            batch.endOutput,
-            "dual-rail output definedness obligation is unavailable");
-      }
-    } else {
-      // The first pass has proved that no reachable 01/10 mismatch exists.
-      // This pass prevents a vacuous proof by requiring both outputs to become
-      // and remain binary-defined.
-      for (size_t batchIndex = 0;
-           batchIndex < definednessBatches.size();
-           ++batchIndex) {
-        const PdrDefinednessBatch batch = definednessBatches[batchIndex];
-        const size_t firstOutput = batch.firstOutput;
-        const size_t endOutput = batch.endOutput;
-        const PdrDefinednessSearchResult definednessResult =
-            definednessSession->findDefinedCycle(firstOutput, endOutput);
-        provedBound =
-            std::max(provedBound, definednessResult.reachedBound);
-        if (isSecDiagEnabled()) {
-          emitSecDiag(
-              "SEC diag: PDR definedness search output range=",
-              firstOutput,
-              "..",
-              endOutput,
-              " status=",
-              pdrStatusName(definednessResult.status));
-        }
-        if (definednessResult.certifiedCycle.has_value()) {
-          markPdrOutputRangeCovered(
-              pdrCoveredOutputs,
-              pdrSkippedOutputReasons,
-              firstOutput,
-              endOutput);
-          if (isSecDiagEnabled()) {
-            emitSecDiag(
-                "SEC diag: PDR certified definedness output range=",
-                firstOutput,
-                "..",
-                endOutput,
-                " cycle=",
-                *definednessResult.certifiedCycle);
-          }
-          continue;
-        }
-        if (endOutput - firstOutput > 1) {
-          const size_t midOutput =
-              firstOutput + (endOutput - firstOutput) / 2;
-          definednessBatches.insert(
-              definednessBatches.begin() +
-                  static_cast<std::ptrdiff_t>(batchIndex + 1),
-              {PdrDefinednessBatch{firstOutput, midOutput},
-               PdrDefinednessBatch{midOutput, endOutput}});
-          continue;
-        }
-        const bool witnessedX = definednessResult.witnessedX;
-        const std::string reason =
-            witnessedX
-                ? std::string(kDualRailXInconclusiveReason) +
-                      "; definedness was not certified through cycle " +
-                      std::to_string(maxK)
-                : "dual-rail PDR was inconclusive while proving binary "
-                  "output definedness";
-        markPdrOutputRangeSkipped(
-            pdrCoveredOutputs,
-            pdrSkippedOutputReasons,
-            firstOutput,
-            endOutput,
-            reason);
-        if (witnessedX) {
-          xAffectedOutputNames.push_back(
-              outputNameForProblemIndex(problem, firstOutput));
-        }
-      }
-    }
-  }
-
   {
     const OutputCoverageSelection finalCoverage =
         buildCoverageWithDualRailOutputSkips(
             outputCoverage, problem, pdrCoveredOutputs, pdrSkippedOutputReasons);
     const size_t coveredOutputCount = static_cast<size_t>(
         std::count(pdrCoveredOutputs.begin(), pdrCoveredOutputs.end(), true));
-    const std::string xInconclusiveSummary =
-        xAffectedOutputNames.empty()
-            ? std::string{}
-            : "X propagated from uninitialized sequential logic affects "
-              "output(s): " +
-                  joinReasons(xAffectedOutputNames);
     if (finalCoverage.checkedOutputs.names.empty()) {
       const OutputCoverageSelection& noProofCoverage =
           problem.usesDualRailStateEncoding ? finalCoverage : outputCoverage;
       return makeSecResult(
           SequentialEquivalenceStatus::Inconclusive,
           provedBound,
-          !xInconclusiveSummary.empty()
-              ? xInconclusiveSummary
-              : (problem.usesDualRailStateEncoding
-                     ? "Exact dual-rail PDR did not prove any observed output"
-                     : "Exact PDR did not prove any observed output"),
+          problem.usesDualRailStateEncoding
+              ? "Exact dual-rail PDR did not prove any observed output"
+              : "Exact PDR did not prove any observed output",
           noProofCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -3714,10 +3232,7 @@ SequentialEquivalenceResult runPdrSecEngine(
               "PDR proved " +
               std::to_string(coveredOutputCount) + " of " +
               std::to_string(pdrCoveredOutputs.size()) +
-              " observed outputs; remaining outputs are inconclusive" +
-              (xInconclusiveSummary.empty()
-                   ? std::string{}
-                   : "; " + xInconclusiveSummary),
+              " observed outputs; remaining outputs are inconclusive",
           finalCoverage,
           abstractedSequentialBoundaries,
           extractedBoundaryReports);
@@ -3732,7 +3247,6 @@ SequentialEquivalenceResult runPdrSecEngine(
   }
 
 }
-
 
 SequentialEquivalenceResult runKInductionSecEngine(
     const KInductionProblem& problem,
@@ -3797,83 +3311,9 @@ SequentialEquivalenceResult runKInductionSecEngine(
   }
 }
 
-void proveDualRailDefinednessImcOutputSet(
-    const KInductionProblem& problem,
-    const std::vector<size_t>& outputIndices,
-    size_t maxK,
-    KEPLER_FORMAL::Config::SolverType solverType,
-    DualRailResidualProofState& proofState) {
-  if (outputIndices.empty()) {
-    return;
-  }
-
-  KInductionProblem definednessProblem =
-      makeOutputSubsetProblem(problem, outputIndices);
-  if (!configureDualRailDefinednessProperty(definednessProblem)) {
-    markDualRailResidualOutputsSkipped(
-        outputIndices,
-        problem,
-        DualRailResidualEngine::Imc,
-        proofState,
-        "dual-rail binary-definedness obligation is unavailable");
-    return;
-  }
-
-  // Guarded IMC has already ruled out a concrete 01/10 mismatch for this set.
-  // Definedness IMC now proves that both complete rail values are 01 or 10.
-  IMCEngine definednessEngine(definednessProblem, solverType);
-  const IMCResult result = definednessEngine.run(maxK);
-  proofState.provedBound = std::max(proofState.provedBound, result.bound);
-  if (result.status == IMCStatus::Equivalent) {
-    markDualRailResidualOutputsCovered(outputIndices, proofState);
-    return;
-  }
-
-  if (result.status == IMCStatus::Inconclusive) {
-    const size_t provedPrefix = std::min(
-        result.firstUnprovenOutput.value_or(0), outputIndices.size());
-    markDualRailResidualOutputsCovered(
-        std::vector<size_t>(
-            outputIndices.begin(), outputIndices.begin() + provedPrefix),
-        proofState);
-    markDualRailResidualOutputsSkipped(
-        std::vector<size_t>(
-            outputIndices.begin() + provedPrefix, outputIndices.end()),
-        problem,
-        DualRailResidualEngine::Imc,
-        proofState,
-        "dual-rail binary-definedness IMC was inconclusive");
-    return;
-  }
-
-  // A definedness counterexample after guarded equality is an X witness. Split
-  // the conjunction so unrelated binary outputs can retain their IMC proof.
-  if (outputIndices.size() > 1) {
-    const size_t mid = outputIndices.size() / 2;
-    const std::vector<size_t> left(
-        outputIndices.begin(), outputIndices.begin() + mid);
-    const std::vector<size_t> right(
-        outputIndices.begin() + mid, outputIndices.end());
-    proveDualRailDefinednessImcOutputSet(
-        problem, left, maxK, solverType, proofState);
-    proveDualRailDefinednessImcOutputSet(
-        problem, right, maxK, solverType, proofState);
-    return;
-  }
-
-  markDualRailResidualOutputSkipped(
-      outputIndices.front(),
-      problem,
-      DualRailResidualEngine::Imc,
-      proofState,
-      kDualRailXInconclusiveReason);
-}
-
 SequentialEquivalenceResult finishDualRailImcProof(
     const KInductionProblem& problem,
     const IMCResult& guardedResult,
-    size_t maxK,
-    KEPLER_FORMAL::Config::SolverType solverType,
     const OutputCoverageSelection& outputCoverage,
     const std::vector<std::string>& abstractedSequentialBoundaries,
     const std::vector<ExtractedBoundaryReportEntry>& extractedBoundaryReports) {
@@ -3891,8 +3331,8 @@ SequentialEquivalenceResult finishDualRailImcProof(
         problem.observedOutputExprs0.size());
   }
 
-  std::vector<size_t> definednessOutputIndices;
-  definednessOutputIndices.reserve(guardedProvedPrefix);
+  std::vector<size_t> provedOutputIndices;
+  provedOutputIndices.reserve(guardedProvedPrefix);
   for (size_t outputIndex = 0;
        outputIndex < problem.observedOutputExprs0.size();
        ++outputIndex) {
@@ -3904,16 +3344,15 @@ SequentialEquivalenceResult finishDualRailImcProof(
       continue;
     }
     if (outputIndex < guardedProvedPrefix) {
-      definednessOutputIndices.push_back(outputIndex);
+      provedOutputIndices.push_back(outputIndex);
     } else {
       proofState.skipReasons.emplace(
           outputIndex,
-          "dual-rail IMC guarded equality proof was inconclusive");
+          "dual-rail IMC steady-state proof was inconclusive");
     }
   }
 
-  proveDualRailDefinednessImcOutputSet(
-      problem, definednessOutputIndices, maxK, solverType, proofState);
+  markDualRailResidualOutputsCovered(provedOutputIndices, proofState);
 
   const size_t coveredCount = static_cast<size_t>(std::count(
       proofState.coveredOutputs.begin(),
@@ -3925,25 +3364,17 @@ SequentialEquivalenceResult finishDualRailImcProof(
           problem,
           proofState.coveredOutputs,
           proofState.skipReasons);
-  const std::string xInconclusiveSummary =
-      buildDualRailXInconclusiveSummary(problem, proofState.skipReasons);
-
   SequentialEquivalenceStatus status = SequentialEquivalenceStatus::Equivalent;
   std::string reason;
   if (coveredCount == 0) {
     status = SequentialEquivalenceStatus::Inconclusive;
-    reason = !xInconclusiveSummary.empty()
-                 ? xInconclusiveSummary
-                 : "Dual-rail IMC did not prove any observed output";
+    reason = "Dual-rail IMC did not prove any observed output";
   } else if (coveredCount != proofState.coveredOutputs.size()) {
     status = SequentialEquivalenceStatus::PartiallyProved;
     reason =
         "Dual-rail IMC proved " + std::to_string(coveredCount) + " of " +
         std::to_string(proofState.coveredOutputs.size()) +
-        " observed outputs; remaining outputs are inconclusive" +
-        (xInconclusiveSummary.empty()
-             ? std::string{}
-             : "; " + xInconclusiveSummary);
+        " observed outputs; remaining outputs are inconclusive";
   }
 
   SequentialEquivalenceResult secResult = makeSecResult(
@@ -3978,8 +3409,6 @@ SequentialEquivalenceResult runImcSecEngine(
     return finishDualRailImcProof(
         problem,
         result,
-        maxK,
-        solverType,
         outputCoverage,
         abstractedSequentialBoundaries,
         extractedBoundaryReports);

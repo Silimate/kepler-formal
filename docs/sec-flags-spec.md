@@ -98,7 +98,7 @@ liberty_files:
 | CLI flag | YAML key | Default | Values | Effect |
 | --- | --- | --- | --- | --- |
 | `-v sec`, `--verification sec` | `verification: sec` | `lec` | `lec`, `sec` | Selects SEC instead of combinational LEC. Values are lowercase. |
-| `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the SEC proof/search bound and the last cycle considered by dual-rail PDR's definedness round. |
+| `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the SEC proof/search bound. |
 | `--sec-engine <engine>` | `sec_engine: <engine>` | `pdr` | `k_induction`, `imc`, `pdr` | Selects the top-level SEC proof engine. Engine names are lowercase. |
 | `--sec-encoding <mode>` | `sec_encoding: <mode>` | `dual_rail_steady` | `binary`, `dual_rail_steady` | Selects how SEC models unknown or reset-unanchored state values. Omit the key/flag to use the dual-rail default. |
 | `--sec-uncomputable-seq-boundary` | `sec_uncomputable_seq_as_boundary: true` | `true` | boolean | Abstracts unsupported sequential instances as SEC boundaries instead of failing immediately. |
@@ -132,7 +132,7 @@ flows that require stable behavior should always spell out either `binary` or
 | --- | --- |
 | `k_induction` | Explicit classic k-induction flow: bounded base-case search followed by induction-step proof over the extracted SEC transition system. |
 | `imc` | Interpolation-Based Model Checking flow over the same extracted SEC problem. It uses the shared base-case search and exact interpolant strengthening where applicable. |
-| `pdr` | Property Directed Reachability flow over the extracted SEC transition system. Dual-rail PDR proves concrete mismatch freedom and binary definedness as separate obligations within `max_k`. |
+| `pdr` | Property Directed Reachability flow over the extracted SEC transition system. |
 
 All engines use the same extracted SEC model: aligned environment inputs,
 state bits, observed outputs, next-state formulas, initial-state information,
@@ -148,10 +148,12 @@ heuristics.
 
 `max_k` is parsed as a non-negative integer.
 
-Dual-rail PDR first proves that no binary-defined mismatch is reachable. Its
-second round searches cycles `0..max_k` for a threshold after which both
-designs' outputs remain binary-defined. An output is inconclusive if no such
-threshold is proved.
+In `dual_rail_steady`, `01` represents binary zero, `10` represents binary one,
+and `11` represents X. All three engines prove the same steady-state property:
+a bad state exists only when both designs' outputs are binary-defined and
+opposite. Cycles where either output is X are outside this property. A proof in
+this encoding therefore establishes equivalence under the steady-state
+abstraction; it does not establish that either output becomes binary-defined.
 
 SEC result handling is currently:
 

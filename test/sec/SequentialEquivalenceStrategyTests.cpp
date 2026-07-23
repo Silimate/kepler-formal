@@ -1607,70 +1607,6 @@ DelayedRailMismatchModels makeHeldRailModelsForTest(
   return models;
 }
 
-SequentialDesignModel makeFlushingRailModelForTest(
-    const std::string& prefix,
-    const SignalKey& input,
-    const SignalKey& output,
-    size_t stages) {
-  SequentialDesignModel model;
-  model.environmentInputs = {input};
-  model.inputVarByKey.emplace(input, 2);
-  model.displayNameByKey.emplace(input, "flush_input[0]");
-
-  size_t previousSymbol = 2;
-  for (size_t stage = 0; stage < stages; ++stage) {
-    const SignalKey state =
-        makeSignalKey(prefix + "FlushState" + std::to_string(stage));
-    const size_t stateSymbol = 3 + stage;
-    addStateBitForTest(
-        model,
-        state,
-        stateSymbol,
-        prefix + ".flush_q[" + std::to_string(stage) + "]",
-        BoolExpr::Var(previousSymbol));
-    previousSymbol = stateSymbol;
-  }
-
-  model.allObservedOutputs = {output};
-  model.observedOutputs = {output};
-  model.displayNameByKey.emplace(output, "flush_output[0]");
-  model.observedOutputExprByKey.emplace(
-      output, BoolExpr::Var(previousSymbol));
-  return model;
-}
-
-DelayedRailMismatchModels makeFlushingRailModelsForTest(size_t stages) {
-  const SignalKey input = makeSignalKey("dualRailFlushInput");
-  const SignalKey output = makeSignalKey("dualRailFlushOutput");
-  DelayedRailMismatchModels models;
-  models.model0 =
-      makeFlushingRailModelForTest("left", input, output, stages);
-  models.model1 =
-      makeFlushingRailModelForTest("right", input, output, stages);
-  return models;
-}
-
-DelayedRailMismatchModels makeResettableHeldRailModelsForTest() {
-  constexpr const char* kPrefix = "noImplicitResetBootstrap";
-  auto models = makeHeldRailModelsForTest(kPrefix, std::nullopt, false);
-  const SignalKey reset = makeSignalKey("noImplicitResetBootstrapReset");
-  const SignalKey state0 = makeSignalKey(std::string(kPrefix) + "State0");
-  const SignalKey state1 = makeSignalKey(std::string(kPrefix) + "State1");
-
-  models.model0.environmentInputs = {reset};
-  models.model0.inputVarByKey.emplace(reset, 3);
-  models.model0.displayNameByKey.emplace(reset, "reset[0]");
-  models.model0.nextStateExprByStateKey.at(state0) = BoolExpr::And(
-      BoolExpr::Not(BoolExpr::Var(3)), BoolExpr::Var(2));
-
-  models.model1.environmentInputs = {reset};
-  models.model1.inputVarByKey.emplace(reset, 3);
-  models.model1.displayNameByKey.emplace(reset, "reset[0]");
-  models.model1.nextStateExprByStateKey.at(state1) = BoolExpr::And(
-      BoolExpr::Not(BoolExpr::Var(3)), BoolExpr::Var(2));
-  return models;
-}
-
 size_t bitCountForPdrChainStateCount(size_t logicalStateCount) {
   size_t bits = 0;
   size_t encodedStates = 1;
@@ -11896,12 +11832,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
       strategy.runExtractedModels(testCase.model0, testCase.model1, 1);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // IMC must enter its own interpolation engine directly. Guarded equality for
-  // the held X versus constant 0 is not enough to claim output equivalence.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.coveredOutputs, 0u);
+  // IMC must enter its own interpolation engine directly. The held X versus
+  // constant 0 is outside the steady-state mismatch predicate.
+  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+  EXPECT_EQ(result.coveredOutputs, 1u);
   EXPECT_EQ(result.totalOutputs, 1u);
-  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
+  EXPECT_TRUE(result.skippedObservedOutputs.empty());
   EXPECT_NE(
       stderrOutput.find("SEC diag: entering imc engine"),
       std::string::npos);
@@ -12121,82 +12057,29 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsKiDualRailDoesNotCoverMatchingPermanentXResidual) {
-  const SignalKey good = makeSignalKey("dualRailResetlessGood");
-  const SignalKey out = makeSignalKey("dualRailResetlessOut");
-  const SignalKey rst = makeSignalKey("dualRailResetlessRst");
-  const SignalKey data = makeSignalKey("dualRailResetlessData");
-  const SignalKey state0 = makeSignalKey("dualRailResetlessState0");
-  const SignalKey state1 = makeSignalKey("dualRailResetlessState1");
+       RunExtractedModelsDualRailSteadyIgnoresXContainingCycles) {
+  const auto models = makeHeldRailModelsForTest(
+      "dualRailXVersusBinary", std::nullopt, false);
 
-  SequentialDesignModel model0;
-  model0.environmentInputs = {rst, data};
-  model0.stateBits = {state0};
-  model0.allObservedOutputs = {good, out};
-  model0.observedOutputs = {good, out};
-  model0.inputVarByKey.emplace(rst, 4);
-  model0.inputVarByKey.emplace(data, 6);
-  model0.inputVarByKey.emplace(state0, 2);
-  model0.displayNameByKey.emplace(rst, "rst");
-  model0.displayNameByKey.emplace(data, "data[0]");
-  model0.displayNameByKey.emplace(good, "good[0]");
-  model0.displayNameByKey.emplace(out, "resetless_out[0]");
-  model0.displayNameByKey.emplace(state0, "left_state_q[0]");
-  model0.nextStateExprByStateKey.emplace(state0, BoolExpr::Var(2));
-  model0.observedOutputExprByKey.emplace(good, BoolExpr::Var(6));
-  model0.observedOutputExprByKey.emplace(out, BoolExpr::Var(2));
+  for (const SecEngine engine :
+       {SecEngine::Pdr, SecEngine::KInduction, SecEngine::Imc}) {
+    SCOPED_TRACE(static_cast<int>(engine));
+    SequentialEquivalenceStrategy strategy(
+        nullptr,
+        nullptr,
+        KEPLER_FORMAL::Config::SolverType::KISSAT,
+        engine,
+        SecEncoding::DualRailSteady);
+    const auto result =
+        strategy.runExtractedModels(models.model0, models.model1, 2);
 
-  SequentialDesignModel model1;
-  model1.environmentInputs = {rst, data};
-  model1.stateBits = {state1};
-  model1.allObservedOutputs = {good, out};
-  model1.observedOutputs = {good, out};
-  model1.inputVarByKey.emplace(rst, 5);
-  model1.inputVarByKey.emplace(data, 7);
-  model1.inputVarByKey.emplace(state1, 3);
-  model1.displayNameByKey.emplace(rst, "rst");
-  model1.displayNameByKey.emplace(data, "data[0]");
-  model1.displayNameByKey.emplace(good, "good[0]");
-  model1.displayNameByKey.emplace(out, "resetless_out[0]");
-  model1.displayNameByKey.emplace(state1, "right_state_q[0]");
-  // Binary SEC cannot use a cross-design state equality here: one side holds
-  // the resetless state while the other toggles it. Both remain X forever in
-  // dual-rail mode, so equal 11 rails must not count as concrete equivalence.
-  model1.nextStateExprByStateKey.emplace(state1, BoolExpr::Not(BoolExpr::Var(3)));
-  model1.observedOutputExprByKey.emplace(good, BoolExpr::Var(7));
-  model1.observedOutputExprByKey.emplace(out, BoolExpr::Var(3));
-
-  auto binaryStrategy = makeBinaryExtractedSecStrategy(SecEngine::KInduction);
-  const auto binaryResult = binaryStrategy.runExtractedModels(model0, model1, 1);
-  EXPECT_EQ(binaryResult.status, SequentialEquivalenceStatus::PartiallyProved);
-  EXPECT_EQ(binaryResult.coveredOutputs, 1u);
-  EXPECT_EQ(binaryResult.totalOutputs, 2u);
-  ASSERT_EQ(binaryResult.resetUnanchoredSkippedOutputs.size(), 1u);
-  EXPECT_NE(
-      binaryResult.resetUnanchoredSkippedOutputs.front().find("resetless_out[0]"),
-      std::string::npos);
-
-  SequentialEquivalenceStrategy dualRailStrategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::KInduction,
-      SecEncoding::DualRailSteady);
-  const auto dualRailResult =
-      dualRailStrategy.runExtractedModels(model0, model1, 2);
-
-  EXPECT_EQ(
-      dualRailResult.status, SequentialEquivalenceStatus::PartiallyProved);
-  EXPECT_EQ(dualRailResult.coveredOutputs, 1u);
-  EXPECT_EQ(dualRailResult.totalOutputs, 2u);
-  ASSERT_EQ(dualRailResult.skippedObservedOutputs.size(), 1u);
-  EXPECT_NE(
-      dualRailResult.skippedObservedOutputs.front().find("resetless_out[0]"),
-      std::string::npos);
-  EXPECT_NE(
-      dualRailResult.skippedObservedOutputs.front().find(
-          "uninitialized sequential logic"),
-      std::string::npos);
+    // The steady-state property checks only cycles where both outputs are
+    // binary-defined. An X-versus-binary cycle is outside that property.
+    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(result.coveredOutputs, 1u);
+    EXPECT_EQ(result.totalOutputs, 1u);
+    EXPECT_TRUE(result.skippedObservedOutputs.empty());
+  }
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -12276,22 +12159,12 @@ TEST_F(SequentialEquivalenceStrategyTests,
         SecEncoding::DualRailSteady);
     const auto pdrResult = pdrStrategy.runExtractedModels(model0, model1, 1);
 
-    // The constant output is proved. The resetless state outputs have no
-    // defined-value mismatch, but they never satisfy PDR's binary-definedness
-    // property and therefore remain inconclusive.
-    EXPECT_EQ(
-        pdrResult.status, SequentialEquivalenceStatus::PartiallyProved);
-    EXPECT_EQ(pdrResult.coveredOutputs, 1u);
+    // PDR proves the steady-state property for all three outputs. Permanent X
+    // values are outside the guarded binary-mismatch predicate.
+    EXPECT_EQ(pdrResult.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(pdrResult.coveredOutputs, 3u);
     EXPECT_EQ(pdrResult.totalOutputs, 3u);
-    ASSERT_EQ(pdrResult.skippedObservedOutputs.size(), 2u);
-    EXPECT_NE(
-        pdrResult.skippedObservedOutputs[0].find(
-            "uninitialized sequential logic"),
-        std::string::npos);
-    EXPECT_NE(
-        pdrResult.skippedObservedOutputs[1].find(
-            "uninitialized sequential logic"),
-        std::string::npos);
+    EXPECT_TRUE(pdrResult.skippedObservedOutputs.empty());
 
     SequentialEquivalenceStrategy imcStrategy(
         nullptr,
@@ -12301,21 +12174,10 @@ TEST_F(SequentialEquivalenceStrategyTests,
         SecEncoding::DualRailSteady);
     const auto imcResult = imcStrategy.runExtractedModels(model0, model1, 1);
 
-    // IMC also requires both rails to be binary-defined. Equal permanent X
-    // values on the two residual outputs are therefore inconclusive.
-    EXPECT_EQ(
-        imcResult.status, SequentialEquivalenceStatus::PartiallyProved);
-    EXPECT_EQ(imcResult.coveredOutputs, 1u);
+    EXPECT_EQ(imcResult.status, SequentialEquivalenceStatus::Equivalent);
+    EXPECT_EQ(imcResult.coveredOutputs, 3u);
     EXPECT_EQ(imcResult.totalOutputs, 3u);
-    ASSERT_EQ(imcResult.skippedObservedOutputs.size(), 2u);
-    EXPECT_NE(
-        imcResult.skippedObservedOutputs[0].find(
-            "uninitialized sequential logic"),
-        std::string::npos);
-    EXPECT_NE(
-        imcResult.skippedObservedOutputs[1].find(
-            "uninitialized sequential logic"),
-        std::string::npos);
+    EXPECT_TRUE(imcResult.skippedObservedOutputs.empty());
   }
 
   {
@@ -12400,328 +12262,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsDualRailDoesNotProveXVersusBinaryAsEqual) {
-  auto models = makeHeldRailModelsForTest(
-      "dualRailXVersusBinary", std::nullopt, false);
-  const SignalKey concreteEqual =
-      makeSignalKey("dualRailXVersusBinaryConcreteEqual");
-  for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
-    model->allObservedOutputs.push_back(concreteEqual);
-    model->observedOutputs.push_back(concreteEqual);
-    model->displayNameByKey.emplace(concreteEqual, "concrete_equal[0]");
-    model->observedOutputExprByKey.emplace(
-        concreteEqual, BoolExpr::createFalse());
-  }
-
-  for (const SecEngine engine :
-       {SecEngine::Pdr, SecEngine::KInduction, SecEngine::Imc}) {
-    SCOPED_TRACE(static_cast<int>(engine));
-    SequentialEquivalenceStrategy strategy(
-        nullptr,
-        nullptr,
-        KEPLER_FORMAL::Config::SolverType::KISSAT,
-        engine,
-        SecEncoding::DualRailSteady);
-    const auto result =
-        strategy.runExtractedModels(models.model0, models.model1, 2);
-
-    // Every dual-rail engine requires binary definedness after ruling out a
-    // defined-value mismatch.
-    EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
-    EXPECT_EQ(result.coveredOutputs, 1u);
-    EXPECT_EQ(result.totalOutputs, 2u);
-    ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
-    EXPECT_NE(
-        result.skippedObservedOutputs.front().find(
-            "dualRailXVersusBinary_out[0]"),
-        std::string::npos);
-    EXPECT_NE(
-        result.skippedObservedOutputs.front().find(
-            "uninitialized sequential logic"),
-        std::string::npos);
-    EXPECT_NE(
-        result.reason.find("dualRailXVersusBinary_out[0]"),
-        std::string::npos);
-    EXPECT_EQ(result.reason.find("concrete_equal[0]"), std::string::npos);
-  }
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsKiAndImcDualRailRejectPermanentXEquality) {
-  const auto models = makeHeldRailModelsForTest(
-      "dualRailPermanentXSelectedEngine", std::nullopt, std::nullopt);
-
-  for (const SecEngine engine : {SecEngine::KInduction, SecEngine::Imc}) {
-    SCOPED_TRACE(static_cast<int>(engine));
-    SequentialEquivalenceStrategy strategy(
-        nullptr,
-        nullptr,
-        KEPLER_FORMAL::Config::SolverType::KISSAT,
-        engine,
-        SecEncoding::DualRailSteady);
-    const auto result =
-        strategy.runExtractedModels(models.model0, models.model1, 2);
-
-    // Matching 11 rails mean both outputs are still X, not that their concrete
-    // binary values are equivalent.
-    EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-    EXPECT_EQ(result.coveredOutputs, 0u);
-    EXPECT_EQ(result.totalOutputs, 1u);
-    EXPECT_EQ(result.skippedObservedOutputs.size(), 1u);
-    if (!result.skippedObservedOutputs.empty()) {
-      EXPECT_NE(
-          result.skippedObservedOutputs.front().find(
-              "dualRailPermanentXSelectedEngine_out[0]"),
-          std::string::npos);
-      EXPECT_NE(
-          result.skippedObservedOutputs.front().find(
-              "uninitialized sequential logic"),
-          std::string::npos);
-    }
-  }
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDoesNotInventResetBootstrapCycles) {
-  const auto models = makeResettableHeldRailModelsForTest();
-
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 2);
-
-  // IC3 starts from the supplied initial predicate. Merely naming an input
-  // reset must not apply hidden transitions before F[0].
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.coveredOutputs, 0u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      result.reason.find("noImplicitResetBootstrap_out[0]"),
-      std::string::npos);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailRoundTwoRejectsPermanentXEquality) {
-  const auto models = makeHeldRailModelsForTest(
-      "dualRailPermanentX", std::nullopt, std::nullopt);
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // Round one proves no concrete mismatch. Round two checks every possible
-  // threshold through max_k and rejects equal X rails that never become binary.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive);
-  EXPECT_EQ(result.coveredOutputs, 0u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR defined-value check end index=0 output_range=0..1 "
-          "status=equivalent"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR definedness search output range=0..1 "
-          "status=different"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailUsesDefinedValueAndDefinednessProperties) {
-  auto models = makeHeldRailModelsForTest(
-      "dualRailAdaptiveBatches", false, false);
-  const SignalKey secondOutput =
-      makeSignalKey("dualRailAdaptiveBatchesSecondOutput");
-  for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
-    model->allObservedOutputs.push_back(secondOutput);
-    model->observedOutputs.push_back(secondOutput);
-    model->displayNameByKey.emplace(secondOutput, "second_out[0]");
-    model->observedOutputExprByKey.emplace(secondOutput, BoolExpr::Var(2));
-  }
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
-  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
-
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 2);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
-      << stderrOutput;
-  EXPECT_EQ(result.coveredOutputs, 2u);
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR defined-value check begin index=0 pending_batches=1 "
-          "output_range=0..2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR definedness search output range=0..2 "
-          "status=equivalent"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("PDR strict output batch"), std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(stderrOutput.find("output_range=0..1"), std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailRoundTwoFindsDefinedCycleWithinMaxK) {
-  const auto models = makeFlushingRailModelsForTest(/*stages=*/2);
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 4);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // The two resetless pipeline stages carry X at cycles 0 and 1. The first
-  // midpoint, cycle 2, proves a concrete threshold for round two.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
-      << stderrOutput;
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR certified definedness output range=0..1 cycle=2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR defined-value check begin index=0 pending_batches=1 "
-          "output_range=0..1"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR defined-value check end index=0 output_range=0..1"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailRoundTwoFindsFlushBeforeMaxK) {
-  const auto models = makeFlushingRailModelsForTest(/*stages=*/12);
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 32);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // The pipeline is binary-defined from cycle 12 onward. Round two only needs
-  // one certified threshold, so its first midpoint at cycle 16 is sufficient.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
-      << stderrOutput;
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR certified definedness output range=0..1 cycle=16"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailRoundTwoFindsLateFlushCycle) {
-  const auto models = makeFlushingRailModelsForTest(/*stages=*/20);
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 32);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // Cycle 16 still has an X witness, while cycle 24 is binary-defined. Round
-  // two may stop at that first certified threshold; it need not find cycle 20.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Equivalent)
-      << stderrOutput;
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR certified definedness output range=0..1 cycle=24"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailSkipsRoundTwoAfterMismatchInconclusive) {
-  const auto models = makeFlushingRailModelsForTest(/*stages=*/2);
-  const ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
-
-  testing::internal::CaptureStderr();
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 1);
-  const std::string stderrOutput = testing::internal::GetCapturedStderr();
-
-  // The defined-value property itself cannot converge within one PDR frame.
-  // An unresolved first property must not be hidden by round two.
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::Inconclusive)
-      << stderrOutput;
-  EXPECT_EQ(result.coveredOutputs, 0u);
-  EXPECT_EQ(result.totalOutputs, 1u);
-  EXPECT_NE(
-      stderrOutput.find(
-          "PDR defined-value check end index=0 output_range=0..1 "
-          "status=inconclusive"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find("PDR definedness search output range=0..1"),
-      std::string::npos)
-      << stderrOutput;
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailRoundTwoDoesNotHideDefinedMismatch) {
+       RunExtractedModelsPdrDualRailReportsTransientFrameZeroMismatch) {
   constexpr const char* kPrefix = "dualRailTransientStartupMismatch";
   auto models = makeHeldRailModelsForTest(kPrefix, false, true);
   const SignalKey state0 = makeSignalKey(std::string(kPrefix) + "State0");
@@ -12738,7 +12279,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto result = strategy.runExtractedModels(
       models.model0, models.model1, 2);
 
-  // Round one must report the defined cycle-zero mismatch before round two.
+  // The cycle-zero values are binary-defined and opposite, even though both
+  // designs transition to the same value afterward.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
   EXPECT_EQ(result.bound, 0u);
 }
@@ -12776,53 +12318,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // mismatch 1/0. The X trace must not hide the real counterexample.
   EXPECT_EQ(result.status, SequentialEquivalenceStatus::Different);
   EXPECT_EQ(result.bound, 0u);
-}
-
-TEST_F(SequentialEquivalenceStrategyTests,
-       RunExtractedModelsPdrDualRailDefinednessSplitsUncertifiedOutputBatch) {
-  auto models = makeFlushingRailModelsForTest(/*stages=*/1);
-  const SignalKey heldOutput = makeSignalKey("dualRailAgeHeldOutput");
-  const SignalKey heldState0 = makeSignalKey("dualRailAgeHeldState0");
-  const SignalKey heldState1 = makeSignalKey("dualRailAgeHeldState1");
-  addStateBitForTest(
-      models.model0,
-      heldState0,
-      /*localVar=*/4,
-      "left.held_q[0]",
-      BoolExpr::Var(4));
-  addStateBitForTest(
-      models.model1,
-      heldState1,
-      /*localVar=*/4,
-      "right.held_q[0]",
-      BoolExpr::Var(4));
-  for (SequentialDesignModel* model : {&models.model0, &models.model1}) {
-    model->allObservedOutputs.push_back(heldOutput);
-    model->observedOutputs.push_back(heldOutput);
-    model->displayNameByKey.emplace(heldOutput, "held_x[0]");
-    model->observedOutputExprByKey.emplace(heldOutput, BoolExpr::Var(4));
-  }
-
-  SequentialEquivalenceStrategy strategy(
-      nullptr,
-      nullptr,
-      KEPLER_FORMAL::Config::SolverType::KISSAT,
-      SecEngine::Pdr,
-      SecEncoding::DualRailSteady);
-  const auto result =
-      strategy.runExtractedModels(models.model0, models.model1, 3);
-
-  EXPECT_EQ(result.status, SequentialEquivalenceStatus::PartiallyProved);
-  EXPECT_EQ(result.coveredOutputs, 1u);
-  EXPECT_EQ(result.totalOutputs, 2u);
-  ASSERT_EQ(result.skippedObservedOutputs.size(), 1u);
-  EXPECT_NE(
-      result.skippedObservedOutputs.front().find("held_x[0]"),
-      std::string::npos);
-  EXPECT_NE(
-      result.skippedObservedOutputs.front().find(
-          "uninitialized sequential logic"),
-      std::string::npos);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,

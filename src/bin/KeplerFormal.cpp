@@ -2001,9 +2001,18 @@ int KeplerFormalMain(int argc, char** argv) {
         // LCOV_EXCL_STOP
         switch (result.status) {
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Equivalent:
-            SPDLOG_INFO(
-                "No difference was found. SEC proved equivalence at k = {}.",
-                result.bound);
+            if (secEncoding ==
+                KEPLER_FORMAL::SEC::SecEncoding::DualRailSteady) {
+              SPDLOG_INFO(
+                  "No binary-defined difference was found. SEC proved "
+                  "equivalence under the dual-rail steady-state abstraction "
+                  "at k = {}.",
+                  result.bound);
+            } else {
+              SPDLOG_INFO(
+                  "No difference was found. SEC proved equivalence at k = {}.",
+                  result.bound);
+            }
             return kSecProvedExitCode;
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::PartiallyProved: {
             const size_t provedOutputs = result.proofProgress.has_value()

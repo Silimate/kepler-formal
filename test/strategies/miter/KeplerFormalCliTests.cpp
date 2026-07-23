@@ -2288,8 +2288,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecDefaultsToDualRailEncoding) {
       "  - " + fixture.design1IfPath.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  // Round two must continue past the cycle-zero X and prove that the shared
-  // input makes both resetless outputs binary-defined by cycle one.
+  // Omitting sec_encoding selects the dual-rail steady-state property.
   EXPECT_EQ(runWithConfigFile(cfgPath), kSecProvedExitCode);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
@@ -2344,9 +2343,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithKInductionEngine) 
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  // The resetless cycle-zero outputs are X. The engine option is accepted,
-  // but equal X rails cannot produce a concrete equivalence proof.
-  EXPECT_EQ(runWithConfigFile(cfgPath), kSecInconclusiveExitCode);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecProvedExitCode);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }
@@ -2363,8 +2360,8 @@ TEST_F(KeplerFormalCliTests, ConfigSecVerificationAcceptedWithImcEngine) {
       "input_paths:\n"
       "  - " + fixture.design0IfPath.string() + "\n"
       "  - " + fixture.design1IfPath.string() + "\n");
-  // This resetless dual-rail fixture is valid input for IMC, but IMC need not
-  // converge within the small bound used by this option-parsing test.
+  // This option-parsing fixture is valid input for IMC, but IMC does not
+  // converge within the small bound.
   EXPECT_EQ(runWithConfigFile(cfgPath), kSecInconclusiveExitCode);
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -2532,7 +2529,7 @@ TEST_F(KeplerFormalCliTests,
 }
 
 TEST_F(KeplerFormalCliTests,
-       ConfigSystemVerilogSecPdrDualRailNamesXAffectedOutput) {
+       ConfigSystemVerilogSecPdrDualRailReportsSteadyStateXProof) {
   const auto fixture = createDesignFixture(
       "sv",
       "module T(input clk, output y);\n"
@@ -2557,23 +2554,15 @@ TEST_F(KeplerFormalCliTests,
       "  - " + fixture.design1Path.string() + "\n"
       "log_file: " + logPath.string() + "\n");
 
-  EXPECT_EQ(runWithConfigFile(cfgPath), kSecInconclusiveExitCode);
+  EXPECT_EQ(runWithConfigFile(cfgPath), kSecProvedExitCode);
   ASSERT_TRUE(std::filesystem::exists(logPath));
   const auto contents = readFileContents(logPath);
   EXPECT_NE(
       contents.find(
-          "y[0]: affected by X propagated from uninitialized sequential logic"),
-      std::string::npos)
-      << contents;
-  EXPECT_NE(
-      contents.find(
-          "X propagated from uninitialized sequential logic affects output(s): y[0]"),
+          "SEC proved equivalence under the dual-rail steady-state abstraction"),
       std::string::npos)
       << contents;
   EXPECT_EQ(contents.find("Difference was found."), std::string::npos);
-  EXPECT_EQ(
-      contents.find("No difference was found. SEC proved equivalence"),
-      std::string::npos);
 
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
@@ -2747,7 +2736,7 @@ TEST_F(KeplerFormalCliTests, ConfigSecReportsPartialObservedOutputCoverage) {
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
-      "sec_encoding: dual_rail_steady\n"
+      "sec_encoding: binary\n"
       "max_k: 2\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
@@ -3160,7 +3149,7 @@ TEST_F(KeplerFormalCliTests, CliKInductionSecEngineAcceptedBeforeFormat) {
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
-      kSecInconclusiveExitCode);
+      kSecProvedExitCode);
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
@@ -3200,7 +3189,7 @@ TEST_F(KeplerFormalCliTests, CliDualRailEncodingAcceptedBeforeFormat) {
                    "-naja_if",
                    fixture.design0IfPath.string(),
                    fixture.design1IfPath.string()}),
-      kSecInconclusiveExitCode);
+      kSecProvedExitCode);
   std::filesystem::remove_all(fixture.tmpDir);
 }
 
@@ -3435,20 +3424,29 @@ TEST_F(KeplerFormalCliTests, CliNoSecBoundaryFlagAcceptedAfterFormat) {
 }
 
 TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
-  const auto fixture = createEquivalentDesignFixture(
+  const auto fixture = createDesignFixture(
       "sv",
       "module top(\n"
       "    input logic clk,\n"
+      "    input logic a,\n"
       "    output logic q\n"
       ");\n"
-      "  always_ff @(posedge clk) q <= q;\n"
+      "  always_ff @(posedge clk) q <= a;\n"
+      "endmodule\n",
+      "module top(\n"
+      "    input logic clk,\n"
+      "    input logic a,\n"
+      "    output logic q\n"
+      ");\n"
+      "  always_ff @(posedge clk) q <= ~a;\n"
       "endmodule\n");
   const auto logPath = fixture.tmpDir / "sec_inconclusive.log";
   const auto cfgPath = writeTempConfig(
       "format: systemverilog\n"
       "verification: sec\n"
+      "sec_engine: pdr\n"
       "sec_encoding: dual_rail_steady\n"
-      "max_k: 1\n"
+      "max_k: 0\n"
       "input_paths:\n"
       "  - " + fixture.design0Path.string() + "\n"
       "  - " + fixture.design1Path.string() + "\n"
@@ -3468,11 +3466,6 @@ TEST_F(KeplerFormalCliTests, ConfigSecInconclusiveFails) {
       "SEC verification did not produce a proof or counterexample.");
   ASSERT_FALSE(warningLine.empty());
   EXPECT_NE(warningLine.find("[warning]"), std::string::npos);
-  EXPECT_NE(
-      contents.find(
-          "q[0]: affected by X propagated from uninitialized sequential logic"),
-      std::string::npos);
-
   std::filesystem::remove(cfgPath);
   std::filesystem::remove_all(fixture.tmpDir);
 }

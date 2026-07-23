@@ -214,9 +214,6 @@ struct KInductionProblem {
   // Exact rail equality is retained for shared SAT query surfaces. It is not
   // an equivalence criterion because matching 11 rails are still X.
   std::vector<BoolExpr*> dualRailOutputStrictEqualityExprs;
-  // Per-output definedness in both designs. Every dual-rail SEC engine proves
-  // this after ruling out a concrete 0/1 mismatch.
-  std::vector<BoolExpr*> dualRailOutputBothDefinedExprs;
   std::vector<std::string> dualRailOutputSkipReasons;
   std::vector<std::pair<size_t, BoolExpr*>> transitions0;
   std::vector<std::pair<size_t, BoolExpr*>> transitions1;
