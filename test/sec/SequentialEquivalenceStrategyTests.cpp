@@ -13320,10 +13320,13 @@ TEST_F(SequentialEquivalenceStrategyTests,
   EXPECT_NE(stderrOutput.find("immutable model metadata reused"),
             std::string::npos)
       << stderrOutput;
-  EXPECT_NE(stderrOutput.find("reusable frame clauses stored"),
+  EXPECT_NE(stderrOutput.find("reusable invariant candidates stored"),
             std::string::npos)
       << stderrOutput;
-  EXPECT_NE(stderrOutput.find("reusable frame clauses imported level=2"),
+  EXPECT_NE(stderrOutput.find("reusable invariant clauses certified"),
+            std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("reusable invariant clauses injected"),
             std::string::npos)
       << stderrOutput;
   const std::string predecessorCreated =
@@ -13381,13 +13384,99 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto different = engine.run(2, failsAfterMonitor);
   const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
-  // Reachability frames may be shared, but each supplied safety property still
-  // gets an independent bad-state search and verdict.
+  // Certified reachability invariants may be shared, but each supplied safety
+  // property still gets an independent bad-state search and verdict.
   EXPECT_EQ(proved.status, PDRStatus::Equivalent);
   EXPECT_EQ(different.status, PDRStatus::Different);
   EXPECT_EQ(different.bound, 1u);
-  EXPECT_NE(stderrOutput.find("reusable frame clauses imported"),
+  EXPECT_NE(stderrOutput.find("reusable invariant clauses certified"),
             std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("reusable invariant clauses injected"),
+            std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineRejectsUnfinishedFrameClausesBeforeCrossPropertyReuse) {
+  KInductionProblem problem;
+  constexpr size_t firstState = 2;
+  constexpr size_t delayedState = 3;
+  constexpr size_t otherFirstState = 4;
+  constexpr size_t otherDelayedState = 5;
+  problem.state0Symbols = {
+      firstState, delayedState, otherFirstState, otherDelayedState};
+  problem.allSymbols = problem.state0Symbols;
+  problem.totalStateCount = 4;
+  problem.initializedStateCount = 4;
+  problem.initialStateAssignments = {
+      {firstState, false},
+      {delayedState, false},
+      {otherFirstState, false},
+      {otherDelayedState, false}};
+  problem.transitions0 = {
+      {firstState, BoolExpr::createTrue()},
+      {delayedState, BoolExpr::Var(firstState)},
+      {otherFirstState, BoolExpr::createTrue()},
+      {otherDelayedState, BoolExpr::Var(otherFirstState)}};
+  BoolExpr* delayedIsFalse = BoolExpr::Not(BoolExpr::Var(delayedState));
+  BoolExpr* otherDelayedIsFalse =
+      BoolExpr::Not(BoolExpr::Var(otherDelayedState));
+  problem.property = delayedIsFalse;
+  problem.bad = BoolExpr::Not(delayedIsFalse);
+
+  auto exactInitCache = std::make_shared<PDRExactInitCache>(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*maxPredecessorQueries=*/0,
+      exactInitCache);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  // !delayed is true initially but is not inductive: first=1, delayed=0
+  // transitions to delayed'=1. The first run therefore leaves it only in F1.
+  const auto unfinished = engine.run(1);
+  const auto proved = engine.run(1, BoolExpr::createTrue());
+  // A second independent unfinished clause must be certified alone. The
+  // FMCAD'11 removal loop permanently discarded the first rejected candidate.
+  const auto otherUnfinished = engine.run(1, otherDelayedIsFalse);
+  const auto otherProved = engine.run(1, BoolExpr::createTrue());
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(unfinished.status, PDRStatus::Inconclusive);
+  EXPECT_EQ(proved.status, PDRStatus::Equivalent);
+  EXPECT_EQ(otherUnfinished.status, PDRStatus::Inconclusive);
+  EXPECT_EQ(otherProved.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find("reusable invariant candidates stored"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("reusable invariant clauses certified"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find("inductive_rejected=1"),
+      std::string::npos)
+      << stderrOutput;
+  const std::string singleRejectedCertification =
+      "reusable invariant clauses certified candidates=1 retained=0 "
+      "initial_rejected=0 inductive_rejected=1";
+  const size_t firstCertification =
+      stderrOutput.find(singleRejectedCertification);
+  ASSERT_NE(firstCertification, std::string::npos) << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          singleRejectedCertification,
+          firstCertification + singleRejectedCertification.size()),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find(
+          "reusable invariant clauses certified candidates=2"),
+      std::string::npos)
       << stderrOutput;
 }
 
@@ -13452,16 +13541,16 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
 
   testing::internal::CaptureStderr();
-  // A nested subset reuses its parent. After the path narrows, returning to a
-  // wider property or moving to a sibling gets a separate bounded entry.
+  // The first property creates a path-local solver. A disjoint property gets a
+  // separate entry, while certified invariants can avoid later solver calls.
   const auto combinedProved = engine.run(3, combinedSafeProperty);
   const auto subsetProved = engine.run(3, safeProperty);
   const auto independentProved = engine.run(3, independentSafeProperty);
   const auto different = engine.run(3, depthTwoFailure);
   std::vector<PDRResult> repeatedSubsetResults;
   repeatedSubsetResults.reserve(20);
-  // Exceed the former context-retirement threshold. Disabled selectors are
-  // compacted by the persistent SAT solver, so useful learned clauses remain.
+  // Repeated proved properties may finish from the certified invariant without
+  // creating or retiring additional guarded SAT contexts.
   for (size_t iteration = 0; iteration < 20; ++iteration) {
     repeatedSubsetResults.push_back(engine.run(3, safeProperty));
   }
@@ -13485,10 +13574,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("shared predecessor context activated run=2 level=1"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
       stderrOutput.find("shared predecessor context activated run=3 level=1"),
       std::string::npos)
       << stderrOutput;
@@ -13497,19 +13582,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
-      stderrOutput.find("shared predecessor context activated run=25 level=1"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
       stderrOutput.find(
           "shared predecessor solver pool selected level=1 run=1 entry=0 "
           "cache_hit=0 evicted=0 family_symbols=4"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "shared predecessor solver pool selected level=1 run=2 entry=0 "
-          "cache_hit=1 evicted=0 family_symbols=2"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(
@@ -13524,18 +13599,6 @@ TEST_F(SequentialEquivalenceStrategyTests,
           "cache_hit=1 evicted=0"),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "shared predecessor solver pool selected level=1 run=5 entry=2 "
-          "cache_hit=0 evicted=0"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "shared predecessor solver pool selected level=1 run=25 entry=3 "
-          "cache_hit=0 evicted=0"),
-      std::string::npos)
-      << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("restarted=1"),
       std::string::npos)
@@ -13547,14 +13610,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const size_t secondCreation = stderrOutput.find(
       createdLevelOne, firstCreation + createdLevelOne.size());
   ASSERT_NE(secondCreation, std::string::npos) << stderrOutput;
-  const size_t thirdCreation = stderrOutput.find(
-      createdLevelOne, secondCreation + createdLevelOne.size());
-  ASSERT_NE(thirdCreation, std::string::npos) << stderrOutput;
-  const size_t fourthCreation = stderrOutput.find(
-      createdLevelOne, thirdCreation + createdLevelOne.size());
-  ASSERT_NE(fourthCreation, std::string::npos) << stderrOutput;
   EXPECT_EQ(stderrOutput.find(
-                createdLevelOne, fourthCreation + createdLevelOne.size()),
+                createdLevelOne, secondCreation + createdLevelOne.size()),
             std::string::npos)
       << stderrOutput;
 
@@ -13573,8 +13630,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   const auto guardedSibling = guardedEngine.run(3, otherSafeProperty);
   std::vector<PDRResult> guardedRepeatedResults;
   guardedRepeatedResults.reserve(16);
-  // A seventeenth guarded property run restarts only the accumulated SAT
-  // cache. The exact same property remains provable after that cache restart.
+  // Repeated guarded properties may finish from the certified invariant
+  // without creating or retiring additional guarded SAT contexts.
   for (size_t iteration = 0; iteration < 16; ++iteration) {
     guardedRepeatedResults.push_back(guardedEngine.run(3, safeProperty));
   }
@@ -13587,28 +13644,11 @@ TEST_F(SequentialEquivalenceStrategyTests,
     EXPECT_EQ(repeatedResult.status, PDRStatus::Equivalent);
   }
   EXPECT_NE(
-      guardedStderr.find(
-          "shared predecessor solver pool selected level=1 run=3 entry=2 "
-          "cache_hit=0 evicted=0"),
+      guardedStderr.find("reusable invariant clauses certified"),
       std::string::npos)
       << guardedStderr;
   EXPECT_NE(
-      guardedStderr.find(
-          "shared predecessor solver pool selected level=1 run=4 entry=1 "
-          "cache_hit=1 evicted=0"),
-      std::string::npos)
-      << guardedStderr;
-  EXPECT_NE(guardedStderr.find("path_local=0"), std::string::npos)
-      << guardedStderr;
-  EXPECT_NE(
-      guardedStderr.find(
-          "run=19 entry=1 cache_hit=1 evicted=0 family_symbols=2 "
-          "initial_symbols=3 closest_entry=0 closest_overlap=2 path_local=0 "
-          "restarted=1 retired_contexts=16"),
-      std::string::npos)
-      << guardedStderr;
-  EXPECT_NE(
-      guardedStderr.find("reusable frame clauses imported level=3"),
+      guardedStderr.find("reusable invariant clauses injected"),
       std::string::npos)
       << guardedStderr;
 }

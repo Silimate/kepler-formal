@@ -45,7 +45,7 @@ struct PDRQueryLimits {
 
 // Output batches from one SEC problem have the same immutable transition and
 // startup model. This serial, scoped cache keeps exact model preparation, F[0]
-// work, and complete proved frame sequences across PDR runs. Property-specific
+// work, and certified inductive clauses across PDR runs. Property-specific
 // bad-state searches and proof obligations remain local to each engine.
 class PDRExactInitCache {
  public:
