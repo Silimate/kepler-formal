@@ -6335,11 +6335,39 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // current clause-generalization behavior.  It is not a portable "classic PDR
   // must prove safe exactly at k=3" theorem: safe IC3/PDR proofs may converge
   // earlier whenever a stronger inductive invariant is learned.
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  const ScopedEnvVar pdrStatsInterval("KEPLER_SEC_PDR_STATS_INTERVAL", "1");
+  testing::internal::CaptureStderr();
   PDREngine engine(problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
   const auto result = engine.run(3);
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
 
   EXPECT_EQ(result.status, PDRStatus::Equivalent);
   EXPECT_LE(result.bound, 3u);
+  // Figure 7 visits each original literal once. A four-literal cube must not
+  // trigger a fifth Q2 probe by retrying an earlier SAT removal after the cube
+  // changes, which is the stronger generalization rejected in Section VI-B.
+  EXPECT_EQ(stderrOutput.find("size=4->2 checks=5"), std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(stderrOutput.find("size=4->2 checks=4"), std::string::npos)
+      << stderrOutput;
+  // Section V's default solveRelative call returns only SAT/UNSAT. Figure 7
+  // does not request EXTRACTMODEL, so generalization must not decode and
+  // ternary-reduce a predecessor cube that its caller immediately discards.
+  EXPECT_NE(
+      stderrOutput.find(
+          "result=sat cached_assumptions=1 model_extracted=0 "
+          "purpose=generalize"),
+      std::string::npos)
+      << stderrOutput;
+  // Once Figure 7 finishes, its temporary Q2 selectors no longer help
+  // recursive blocking. Retire them so long exact runs do not accumulate
+  // inactive generalization contexts in the shared SAT solver.
+  EXPECT_NE(
+      stderrOutput.find(
+          "Q2 status selectors retired after generalization count="),
+      std::string::npos)
+      << stderrOutput;
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -14767,7 +14795,8 @@ TEST_F(SequentialEquivalenceStrategyTests,
   // preparation or invoking the already shared SAT solver.
   EXPECT_NE(
       stderrOutput.find(
-          "predecessor result cache hit level=0 has_predecessor=1 shared_f0=1"),
+          "predecessor result cache hit level=0 has_predecessor=1 "
+          "has_model=1 shared_f0=1"),
       std::string::npos)
       << stderrOutput;
   EXPECT_NE(stderrOutput.find(

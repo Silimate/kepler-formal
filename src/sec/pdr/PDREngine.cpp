@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <list>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -163,6 +164,13 @@ enum class PredecessorQueryPurpose {
   LiftBlocker,
   PropagateClause,
 };
+
+bool predecessorQueryNeedsModel(PredecessorQueryPurpose purpose) {
+  // Figure 6 requests EXTRACTMODEL only while recursively blocking an
+  // obligation. Figure 7 generalization, blocker lifting, and Figure 9
+  // propagation need only the SAT status of the same exact query.
+  return purpose == PredecessorQueryPurpose::BlockObligation;
+}
 
 const char* predecessorQueryPurposeName(PredecessorQueryPurpose purpose) {
   switch (purpose) {
@@ -759,6 +767,7 @@ struct PredecessorQueryResultKeyHash {
 
 struct PredecessorQueryResultEntry {
   bool hasPredecessor = false;
+  bool hasPredecessorModel = false;
   StateCube predecessor;
   bool hasUnsatCore = false;
   StateCube unsatCore;
@@ -968,11 +977,20 @@ struct PredecessorAssumptionSolver {
   std::unordered_set<StateClause, StateClauseHash> emittedFrameClauses;
   size_t emittedFrameFingerprint = 0;
   size_t emittedFrameLogOffset = 0;
-  // Some predecessor checks also need "current state is not the target cube".
-  // Keep those target-specific clauses behind selectors so the base solver can
-  // be reused for neighboring queries without permanently excluding a cube.
-  std::unordered_map<StateClause, int, StateClauseHash>
-      exclusionAssumptionByClause;
+  struct Q2SelectorCacheEntry {
+    int selector = 0;
+    bool blockingQuery = false;
+    std::list<const StateClause*>::iterator recency;
+  };
+  // Q2 target clauses remain exact assumptions. Cache recurring selectors,
+  // but keep their count linear in the SAT state surface so one-off
+  // generalization cubes cannot grow the incremental solver without bound.
+  std::unordered_map<StateClause, Q2SelectorCacheEntry, StateClauseHash>
+      q2SelectorByExclusionClause;
+  std::list<const StateClause*> q2BlockingSelectorRecency;
+  std::list<const StateClause*> q2StatusSelectorRecency;
+  size_t q2SelectorReuseCount = 0;
+  size_t q2SelectorEvictionCount = 0;
   // Identity of the shared exact F[0] surface used to build this solver. The
   // vector may only widen; its size therefore detects when extension is needed.
   const std::vector<size_t>* sharedFrameZeroSolverSymbols = nullptr;
@@ -981,6 +999,11 @@ struct PredecessorAssumptionSolver {
   // context-independent learned clauses can affect a later batch.
   GuardedPredecessorFrameContext guardedContext;
   size_t guardedContextCount = 0;
+
+  int q2SelectorFor(const StateClause& exclusionClause,
+                    size_t frame,
+                    bool blockingQuery);
+  size_t retireStatusQ2Selectors();
 
   bool canExtendTo(const PredecessorAssumptionCacheKey& candidate) const {
     return key.hasSameReusableContext(candidate) &&
@@ -1141,6 +1164,16 @@ struct SharedPredecessorAssumptionSolverPool {
             retiredContexts};
   }
 
+  size_t retireStatusQ2Selectors() {
+    size_t retiredCount = 0;
+    for (auto& entry : entries) {
+      if (entry.solver != nullptr) {
+        retiredCount += entry.solver->retireStatusQ2Selectors();
+      }
+    }
+    return retiredCount;
+  }
+
  private:
   struct Entry {
     // Guarded equality uses the exact root family. Strict equality tracks the
@@ -1240,6 +1273,29 @@ struct PredecessorAssumptionCache {
   // their assignment index for the cheap pre-SAT contradiction check.
   const InitFactIndex* initFacts = nullptr;
 };
+
+void retireGeneralizationStatusQ2Selectors(
+    PredecessorAssumptionCache* cache) {
+  if (cache == nullptr) {
+    return;
+  }
+  for (auto& [level, solver] : cache->solversByLevel) {
+    (void)level;
+    if (solver != nullptr) {
+      solver->retireStatusQ2Selectors();
+    }
+  }
+  if (cache->sharedFrameZeroPredecessorSolver != nullptr &&
+      *cache->sharedFrameZeroPredecessorSolver != nullptr) {
+    (*cache->sharedFrameZeroPredecessorSolver)->retireStatusQ2Selectors();
+  }
+  if (cache->sharedHigherFrameSolverPools != nullptr) {
+    for (auto& [level, pool] : *cache->sharedHigherFrameSolverPools) {
+      (void)level;
+      pool.retireStatusQ2Selectors();
+    }
+  }
+}
 
 struct BadCubeAssumptionCacheKey {
   const KInductionProblem* problem = nullptr;
@@ -2928,23 +2984,44 @@ StateCube cachedPredecessorUnsatCoreFromTargetContext(
   return failedAssumptionCubeFromTargetContext(solver, targetContext);
 }
 
-int cachedTargetExclusionAssumption(
-    PredecessorAssumptionSolver& cachedSolver,
+int PredecessorAssumptionSolver::q2SelectorFor(
     const StateClause& exclusionClause,
-    size_t frame) {
+    size_t frame,
+    bool blockingQuery) {
   const auto cachedIt =
-      cachedSolver.exclusionAssumptionByClause.find(exclusionClause);
-  if (cachedIt != cachedSolver.exclusionAssumptionByClause.end()) {
-    return cachedIt->second; // LCOV_EXCL_LINE
+      q2SelectorByExclusionClause.find(exclusionClause);
+  if (cachedIt != q2SelectorByExclusionClause.end()) {
+    auto& entry = cachedIt->second;
+    if (blockingQuery && !entry.blockingQuery) {
+      q2StatusSelectorRecency.erase(entry.recency);
+      q2BlockingSelectorRecency.push_front(&cachedIt->first);
+      entry.recency = q2BlockingSelectorRecency.begin();
+      entry.blockingQuery = true;
+    } else {
+      auto& recency = entry.blockingQuery
+                          ? q2BlockingSelectorRecency
+                          : q2StatusSelectorRecency;
+      recency.splice(recency.begin(), recency, entry.recency);
+    }
+    ++q2SelectorReuseCount;
+    if (shouldEmitFrequentPdrStats()) {
+      emitSecDiag(
+          "SEC PDR stats: Q2 selector cache reused count=",
+          q2SelectorReuseCount,
+          " cube_literals=",
+          exclusionClause.size());
+    }
+    return entry.selector;
   }
 
-  // SAT literals reserve 0/1 for constants; raw solver variable indices do not.
-  const int selector = cachedSolver.solver->newVar() + 2;
+  // SAT literals reserve 0/1 for constants; raw solver variable indices do
+  // not. This selector guards only the exact temporary Q2 clause.
+  const int selector = solver->newVar() + 2;
   std::vector<int> satClause;
   satClause.reserve(exclusionClause.size() + 1);
   satClause.push_back(-selector);
   for (const auto& literal : exclusionClause) {
-    if (!cachedSolver.variables->hasSymbol(literal.symbol)) {
+    if (!variables->hasSymbol(literal.symbol)) {
       throw std::runtime_error( // LCOV_EXCL_LINE
           "PDR cached negated-cube encoding missing symbol " + // LCOV_EXCL_LINE
           std::to_string(literal.symbol) + " at frame " + // LCOV_EXCL_LINE
@@ -2952,12 +3029,73 @@ int cachedTargetExclusionAssumption(
           std::to_string(exclusionClause.size())); // LCOV_EXCL_LINE
     }
     const int satLiteral =
-        cachedSolver.variables->getLiteral(literal.symbol, frame);
+        variables->getLiteral(literal.symbol, frame);
     satClause.push_back(literal.positive ? satLiteral : -satLiteral);
   }
-  cachedSolver.solver->addClause(satClause);
-  cachedSolver.exclusionAssumptionByClause.emplace(exclusionClause, selector);
+  solver->addClause(satClause);
+
+  auto [inserted, insertedNew] = q2SelectorByExclusionClause.emplace(
+      exclusionClause, Q2SelectorCacheEntry{selector, blockingQuery, {}});
+  (void)insertedNew;
+  auto& insertedRecency = blockingQuery
+                              ? q2BlockingSelectorRecency
+                              : q2StatusSelectorRecency;
+  insertedRecency.push_front(&inserted->first);
+  inserted->second.recency = insertedRecency.begin();
+
+  // Each state symbol has two literal polarities. Retaining at most one exact
+  // target context per possible literal keeps this accelerator linear while
+  // preserving the small recurring cubes that dominate blocking queries.
+  const size_t cacheLimit =
+      2 * std::max<size_t>(key.solverSymbols.size(), 1);
+  while (q2SelectorByExclusionClause.size() > cacheLimit) {
+    // Figure 6 blocking targets recur while obligations move through frames.
+    // Prefer retiring least-recently-used status-only targets from Figures 7
+    // and 9; this changes cache retention only, never the exact SAT query.
+    const bool retireStatusOnly = !q2StatusSelectorRecency.empty();
+    auto& retiredRecency = retireStatusOnly
+                               ? q2StatusSelectorRecency
+                               : q2BlockingSelectorRecency;
+    const StateClause* retiredClause = retiredRecency.back();
+    const auto retired = q2SelectorByExclusionClause.find(*retiredClause);
+    solver->addClause({-retired->second.selector});
+    retiredRecency.pop_back();
+    q2SelectorByExclusionClause.erase(retired);
+    ++q2SelectorEvictionCount;
+    if (shouldEmitFrequentPdrStats()) {
+      emitSecDiag(
+          "SEC PDR stats: Q2 selector cache evicted count=",
+          q2SelectorEvictionCount,
+          " retained=",
+          q2SelectorByExclusionClause.size(),
+          " limit=",
+          cacheLimit,
+          " class=",
+          retireStatusOnly ? "status" : "blocking");
+    }
+  }
   return selector;
+}
+
+size_t PredecessorAssumptionSolver::retireStatusQ2Selectors() {
+  size_t retiredCount = 0;
+  while (!q2StatusSelectorRecency.empty()) {
+    const StateClause* retiredClause = q2StatusSelectorRecency.back();
+    const auto retired = q2SelectorByExclusionClause.find(*retiredClause);
+    solver->addClause({-retired->second.selector});
+    q2StatusSelectorRecency.pop_back();
+    q2SelectorByExclusionClause.erase(retired);
+    ++retiredCount;
+  }
+  q2SelectorEvictionCount += retiredCount;
+  if (retiredCount != 0 && shouldEmitFrequentPdrStats()) {
+    emitSecDiag(
+        "SEC PDR stats: Q2 status selectors retired after generalization count=",
+        retiredCount,
+        " retained_blocking=",
+        q2BlockingSelectorRecency.size());
+  }
+  return retiredCount;
 }
 
 // LCOV_EXCL_START
@@ -4594,13 +4732,17 @@ void rememberPredecessorQueryResult(
     const PredecessorQueryResultKey& exactKey,
     const PredecessorQueryResultKey& stableUnsatKey,
     const std::optional<StateCube>& predecessor,
-    const StateCube* unsatCore = nullptr) {
+    const StateCube* unsatCore = nullptr,
+    bool predecessorExistsWithoutModel = false) {
   trimPredecessorQueryResultCache(cache, exactKey.level);
   auto& store = predecessorQueryResultStoreFor(cache, exactKey.level);
   PredecessorQueryResultEntry entry;
-  if (predecessor.has_value()) {
+  if (predecessor.has_value() || predecessorExistsWithoutModel) {
     entry.hasPredecessor = true;
-    entry.predecessor = *predecessor;
+    entry.hasPredecessorModel = predecessor.has_value();
+    if (predecessor.has_value()) {
+      entry.predecessor = *predecessor;
+    }
   } else {
     if (unsatCore != nullptr && !unsatCore->empty()) {
       entry.hasUnsatCore = true;
@@ -4763,6 +4905,7 @@ solvePredecessorCubeWithCachedAssumptions(
     const PredecessorTargetSurface& targetSurface,
     const std::vector<size_t>& solverSymbols,
     bool excludeTargetOnCurrentFrame,
+    PredecessorQueryPurpose purpose,
     unsigned predecessorConflictLimit,
     unsigned predecessorDecisionLimit,
     PdrFormulaSupportCache* supportCache,
@@ -4787,9 +4930,10 @@ solvePredecessorCubeWithCachedAssumptions(
           cachedSolver.guardedContext.activationLiteral);
     }
     if (excludeTargetOnCurrentFrame) {
-      cachedSolver.targetAssumptions.push_back(
-          cachedTargetExclusionAssumption(
-              cachedSolver, targetSurface.exclusionClause, 0));
+      cachedSolver.targetAssumptions.push_back(cachedSolver.q2SelectorFor(
+          targetSurface.exclusionClause,
+          0,
+          predecessorQueryNeedsModel(purpose)));
     }
     queryAssumptions = &cachedSolver.targetAssumptions;
   }
@@ -5655,7 +5799,12 @@ std::optional<StateCube> findBadCube(const KInductionProblem& problem,
   return std::nullopt;
 }
 
-std::optional<StateCube> findPredecessorCube(
+struct PredecessorQueryOutcome {
+  bool hasPredecessor = false;
+  std::optional<StateCube> predecessor;
+};
+
+PredecessorQueryOutcome findPredecessorCube(
     const KInductionProblem& problem,
     KEPLER_FORMAL::Config::SolverType solverType,
     const TransitionExprResolver& transitionByState,
@@ -5700,6 +5849,8 @@ std::optional<StateCube> findPredecessorCube(
             level,
             " has_predecessor=",
             cached->hasPredecessor ? 1 : 0,
+            " has_model=",
+            cached->hasPredecessorModel ? 1 : 0,
             " shared_f0=",
             level == 0 &&
                     predecessorAssumptionCache
@@ -5708,9 +5859,20 @@ std::optional<StateCube> findPredecessorCube(
                 : 0);
       }
       if (cached->hasPredecessor) {
-        return cached->predecessor;
+        if (!predecessorQueryNeedsModel(purpose) ||
+            cached->hasPredecessorModel) {
+          return {
+              true,
+              cached->hasPredecessorModel
+                  ? std::optional<StateCube>(cached->predecessor)
+                  : std::nullopt};
+        }
+        // A status-only query deliberately did not retain a SAT model. Figure
+        // 6 still performs the exact solve when recursive blocking needs one.
       }
-      return std::nullopt; // LCOV_EXCL_LINE
+      if (!cached->hasPredecessor) {
+        return {}; // LCOV_EXCL_LINE
+      }
     }
     if (const auto cachedCore = cachedPredecessorUnsatCoreForTarget(
             *predecessorAssumptionCache, *stableUnsatCacheKey, targetCube);
@@ -5740,11 +5902,11 @@ std::optional<StateCube> findPredecessorCube(
           *stableUnsatCacheKey,
           std::nullopt,
           &*cachedCore);
-      return std::nullopt;
+      return {};
     }
   }
   if (!consumePdrPredecessorQueryBudget(predecessorQueryBudget)) {
-    return std::nullopt;  // LCOV_EXCL_LINE
+    return {};  // LCOV_EXCL_LINE
   }
   const size_t statsQueryNumber = nextPdrPredecessorQueryNumber();
   const bool emitStatsForQuery = shouldEmitPdrStats(statsQueryNumber);
@@ -5794,7 +5956,7 @@ std::optional<StateCube> findPredecessorCube(
             level);
       }  // LCOV_EXCL_LINE
       markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
-      return std::nullopt;  // LCOV_EXCL_LINE
+      return {};  // LCOV_EXCL_LINE
     }
   }
 
@@ -5903,6 +6065,7 @@ std::optional<StateCube> findPredecessorCube(
         complementPartners, initFormula, frameInvariant, frames, level,
         *targetSurface,
         cachedSolverSymbols, excludeTargetOnCurrentFrame,
+        purpose,
         predecessorConflictLimit, predecessorDecisionLimit,
         supportCache,
         &solvedPredecessorCache, &cachedUnsatCore);
@@ -5937,7 +6100,7 @@ std::optional<StateCube> findPredecessorCube(
             " cached_assumptions=1");
       }
       markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);
-      return std::nullopt;
+      return {};
     }
     if (cachedStatus.has_value()) {
       if (*cachedStatus == SATSolverWrapper::SolveStatus::Unsat) {
@@ -5956,14 +6119,30 @@ std::optional<StateCube> findPredecessorCube(
               std::nullopt,
               cachedUnsatCorePtr);
         }
-        return std::nullopt;
+        return {};
       }
       if (*cachedStatus == SATSolverWrapper::SolveStatus::Sat &&
           solvedPredecessorCache != nullptr) {
+        const bool extractModel = predecessorQueryNeedsModel(purpose);
         if (emitStatsForQuery) {
           emitSecDiag(
               "SEC PDR stats: predecessor #", statsQueryNumber,
-              " result=sat cached_assumptions=1");
+              " result=sat cached_assumptions=1 model_extracted=",
+              extractModel ? 1 : 0,
+              " purpose=",
+              predecessorQueryPurposeName(purpose));
+        }
+        if (!extractModel) {
+          if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value()) {
+            rememberPredecessorQueryResult(
+                *predecessorAssumptionCache,
+                *exactCacheKey,
+                *stableUnsatCacheKey,
+                std::nullopt,
+                nullptr,
+                /*predecessorExistsWithoutModel=*/true);
+          }
+          return {true, std::nullopt};
         }
         StateCube predecessor = extractSolvedPredecessorCube(
             *solvedPredecessorCache->solver,
@@ -5987,7 +6166,7 @@ std::optional<StateCube> findPredecessorCube(
               *stableUnsatCacheKey,
               std::optional<StateCube>(predecessor));
         }
-        return predecessor;
+        return {true, std::move(predecessor)};
       }
     }
   }
@@ -6046,14 +6225,20 @@ std::optional<StateCube> findPredecessorCube(
           level);
     }  // LCOV_EXCL_LINE
     markPdrBudgetExhausted(PdrBudgetExhaustion::LocalQuery);  // LCOV_EXCL_LINE
-    return std::nullopt;  // LCOV_EXCL_LINE
+    return {};  // LCOV_EXCL_LINE
   }
   const bool hasPredecessor =
       predecessorSolveStatus == SATSolverWrapper::SolveStatus::Sat;
   if (emitStatsForQuery) {
     emitSecDiag(
         "SEC PDR stats: predecessor #", statsQueryNumber,
-        " result=", hasPredecessor ? "sat" : "unsat");
+        " result=", hasPredecessor ? "sat" : "unsat",
+        hasPredecessor ? " model_extracted=" : "",
+        hasPredecessor
+            ? (predecessorQueryNeedsModel(purpose) ? "1" : "0")
+            : "",
+        hasPredecessor ? " purpose=" : "",
+        hasPredecessor ? predecessorQueryPurposeName(purpose) : "");
   }
   if (!hasPredecessor) {
     if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() &&
@@ -6064,7 +6249,20 @@ std::optional<StateCube> findPredecessorCube(
           *stableUnsatCacheKey,
           std::nullopt);
     }
-    return std::nullopt;
+    return {};
+  }
+  if (!predecessorQueryNeedsModel(purpose)) {
+    if (exactCacheKey.has_value() && stableUnsatCacheKey.has_value() &&
+        predecessorAssumptionCache != nullptr) {
+      rememberPredecessorQueryResult(
+          *predecessorAssumptionCache,
+          *exactCacheKey,
+          *stableUnsatCacheKey,
+          std::nullopt,
+          nullptr,
+          /*predecessorExistsWithoutModel=*/true);
+    }
+    return {true, std::nullopt};
   }
   StateCube predecessor = extractSolvedPredecessorCube(
       solver,
@@ -6089,7 +6287,7 @@ std::optional<StateCube> findPredecessorCube(
         *stableUnsatCacheKey,
         std::optional<StateCube>(predecessor));
   }
-  return predecessor;
+  return {true, std::move(predecessor)};
 }
 
 InitIntersectionAssumptionSolver& getInitIntersectionAssumptionSolver(
@@ -6337,7 +6535,7 @@ class BlockedCubeReductionChecker {
         predecessorAssumptionCache_,
         predecessorQueryBudget_,
         supportCache_);
-    if (hasPdrBudgetExhaustion() || predecessor.has_value()) {
+    if (hasPdrBudgetExhaustion() || predecessor.hasPredecessor) {
       return std::nullopt;
     }
     if (const auto core = cachedCore(reduced); core.has_value()) {
@@ -6386,32 +6584,40 @@ StateCube generalizeBlockedCube(
       predecessorQueryBudget,
       supportCache);
 
-  // Figure 7 first uses the failed assumptions from solveRelative, then tries
-  // removing each remaining literal with the same Q2 query. A successful query
-  // may return a still smaller core, so restart the static order on that core.
+  // Figure 7 first uses the failed assumptions from solveRelative, then visits
+  // each remaining literal once with the same Q2 query. Keep that original
+  // order while the cube shrinks; retrying an earlier SAT removal would be the
+  // stronger non-monotone generalization that Section VI-B found unhelpful.
   StateCube generalized = cube;
   if (const auto core = reductionChecker.cachedCore(generalized);
       core.has_value()) {
     generalized = *core;
   }
 
+  const StateCube literalsToTry = generalized;
   size_t checks = 0;
-  for (size_t index = 0;
-       generalized.size() > 1 && index < generalized.size();) {
+  for (const auto& literal : literalsToTry) {
+    if (generalized.size() <= 1) {
+      break;
+    }
+    const auto current = std::lower_bound(
+        generalized.begin(), generalized.end(), literal, cubeLiteralLess);
+    if (current == generalized.end() || !(*current == literal)) {
+      continue;
+    }
     StateCube reduced = generalized;
     reduced.erase(
-        reduced.begin() + static_cast<std::ptrdiff_t>(index));
+        reduced.begin() + std::distance(generalized.begin(), current));
     ++checks;
     const auto result = reductionChecker.generalize(reduced);
     if (hasPdrBudgetExhaustion()) {
+      retireGeneralizationStatusQ2Selectors(predecessorAssumptionCache);
       return generalized;
     }
     if (!result.has_value()) {
-      ++index;
       continue;
     }
     generalized = *result;
-    index = 0;
   }
 
   if (generalized.size() != cube.size() &&
@@ -6426,6 +6632,9 @@ StateCube generalizeBlockedCube(
         " checks=",
         checks);
   }
+  // Figure 7 has finished consuming this local family of Q2 assumptions.
+  // Retire only status selectors; recursively blocked cubes remain cached.
+  retireGeneralizationStatusQ2Selectors(predecessorAssumptionCache);
   return generalized;
 }
 
@@ -6583,7 +6792,7 @@ void learnBlockedObligation(
         complementPartners,
         &predecessorAssumptionCache, predecessorQueryBudget,
         supportCache);
-    if (hasPdrBudgetExhaustion() || predecessor.has_value()) {
+    if (hasPdrBudgetExhaustion() || predecessor.hasPredecessor) {
       break;
     }
     ++learnedLevel;
@@ -6715,7 +6924,7 @@ bool blockProofObligations(const KInductionProblem& problem,
     if (hasPdrBudgetExhaustion()) {
       return true;  // LCOV_EXCL_LINE
     }
-    if (!predecessor.has_value()) {
+    if (!predecessor.hasPredecessor) {
       learnBlockedObligation(
           problem, solverType, transitionByState, initFormula, frameInvariant,
           frames, rootLevel, complementPartners, predecessorAssumptionCache,
@@ -6726,8 +6935,13 @@ bool blockProofObligations(const KInductionProblem& problem,
       queue.enqueueNext(obligation, rootLevel);
       continue;
     }
-    ProofObligation predecessorObligation{*predecessor, obligation.level - 1,
-                                          obligation.badFrame};
+    if (!predecessor.predecessor.has_value()) {  // LCOV_EXCL_LINE
+      throw std::runtime_error(  // LCOV_EXCL_LINE
+          "PDR blocking predecessor model was not extracted");  // LCOV_EXCL_LINE
+    }
+    ProofObligation predecessorObligation{
+        *predecessor.predecessor, obligation.level - 1,
+        obligation.badFrame};
     (void)queue.enqueue(obligation);
     (void)queue.enqueue(std::move(predecessorObligation));
   }
@@ -6847,7 +7061,7 @@ void propagateClauses(const KInductionProblem& problem,
         resetPdrBudgetExhaustion();
         continue;
       }
-      if (!predecessor.has_value()) {
+      if (!predecessor.hasPredecessor) {
         addClauseToFrame(frames[level + 1], clause);
       }
     // LCOV_EXCL_START
