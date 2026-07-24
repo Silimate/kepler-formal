@@ -20,6 +20,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include "DNL.h"
 #include "NLUniverse.h"
 #include "SNLPath.h"
@@ -67,6 +73,17 @@ struct PublicInputExprPairHash {
 using PublicInputExprPairMemo =
     std::unordered_map<std::pair<BoolExpr*, BoolExpr*>, bool,
                        PublicInputExprPairHash>;
+
+void releasePdrBatchAllocatorPages() {
+  // Recursive output batching destroys property-local PDR solvers between
+  // ranges. Return their free allocator pages before the next exact range
+  // starts so only the deliberately shared F[0] cache remains resident.
+#if defined(__APPLE__)
+  malloc_zone_pressure_relief(nullptr, 0);
+#elif defined(__GLIBC__)
+  malloc_trim(0);
+#endif
+}
 
 std::string joinReasons(const std::vector<std::string>& reasons) {
   std::ostringstream oss;
@@ -3130,11 +3147,15 @@ SequentialEquivalenceResult runPdrSecEngine(
           "..",
           endOutput);
     }
-    PDREngine pdrEngine(
-        exactBatchProblem, solverType, 0, exactInitCache);
-    const PDRResult pdrResult = runPdrOutputBatch(
-        pdrEngine, maxK, exactBatchProblem.property,
-        endOutput - firstOutput);
+    PDRResult pdrResult;
+    {
+      PDREngine pdrEngine(
+          exactBatchProblem, solverType, 0, exactInitCache);
+      pdrResult = runPdrOutputBatch(
+          pdrEngine, maxK, exactBatchProblem.property,
+          endOutput - firstOutput);
+    }
+    releasePdrBatchAllocatorPages();
     if (isSecDiagEnabled()) {
       emitSecDiag(
           "SEC diag: PDR steady-state check end index=",

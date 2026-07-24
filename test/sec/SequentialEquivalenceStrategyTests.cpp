@@ -13616,45 +13616,34 @@ TEST_F(SequentialEquivalenceStrategyTests,
           "reusable invariant clauses certified candidates=2"),
       std::string::npos)
       << stderrOutput;
-  // The second disjoint candidate extends the same exact certification
-  // surfaces. Rebuilding either solver would discard the learned clauses that
-  // make recursive output-batch certification incremental.
-  const std::string initSolverCreated =
-      "reusable invariant init solver created";
-  const size_t firstInitSolverCreation =
-      stderrOutput.find(initSolverCreated);
-  ASSERT_NE(firstInitSolverCreation, std::string::npos) << stderrOutput;
-  EXPECT_EQ(
-      stderrOutput.find(
-          initSolverCreated,
-          firstInitSolverCreation + initSolverCreated.size()),
-      std::string::npos)
-      << stderrOutput;
+  // Direct Init contradictions do not need to enter the whole-model SAT owner.
+  // Retaining those learned clauses across hundreds of batches once exhausted
+  // CI memory on a large dual-rail design.
   EXPECT_NE(
-      stderrOutput.find("reusable invariant init solver reused"),
+      stderrOutput.find(
+          "reusable invariant initial facts resolved=1 unresolved=0"),
       std::string::npos)
       << stderrOutput;
+  EXPECT_EQ(
+      stderrOutput.find("reusable invariant local init solver created"),
+      std::string::npos)
+      << stderrOutput;
+  // Inductive certification is local to one candidate set. Retaining this SAT
+  // owner across recursive batches caused whole-design transition cones to
+  // accumulate beyond the CI memory limit.
   const std::string inductiveSolverCreated =
-      "reusable invariant inductive solver created";
+      "reusable invariant inductive local solver created";
   const size_t firstInductiveSolverCreation =
       stderrOutput.find(inductiveSolverCreated);
   ASSERT_NE(firstInductiveSolverCreation, std::string::npos) << stderrOutput;
-  EXPECT_EQ(
+  EXPECT_NE(
       stderrOutput.find(
           inductiveSolverCreated,
           firstInductiveSolverCreation + inductiveSolverCreated.size()),
       std::string::npos)
       << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "reusable invariant inductive solver reused symbols=4 "
-          "added_symbols=2"),
-      std::string::npos)
-      << stderrOutput;
-  EXPECT_NE(
-      stderrOutput.find(
-          "reusable invariant certification context created index=2 "
-          "candidates=1"),
+  EXPECT_EQ(
+      stderrOutput.find("reusable invariant inductive solver reused"),
       std::string::npos)
       << stderrOutput;
 }
