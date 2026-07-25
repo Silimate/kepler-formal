@@ -2678,16 +2678,57 @@ constexpr PDRQueryLimits kDualRailPdrBatchProbeLimits{
     /*predecessorEncodingNodeLimit=*/5 * 1000 * 1000,
     /*predecessorNodeHintTargetLimit=*/512};
 
+// Per-call limits alone still allow one hard output to issue thousands of
+// expensive CaDiCaL queries. Four full predecessor allowances give a singleton
+// room to block several hard obligations while bounding its cumulative work.
+constexpr size_t kDefaultDualRailPdrSingletonConflictBudget =
+    1000 * 1000;
+constexpr size_t kDefaultDualRailPdrSingletonDecisionBudget =
+    40 * 1000 * 1000;
+// CaDiCaL ticks count clause-cache-line work, bounding propagation-heavy
+// queries that can do little visible decision or conflict work.
+constexpr size_t kDefaultDualRailPdrSingletonTickBudget =
+    100 * 1000 * 1000;
+
 PDRResult runPdrOutputBatch(const PDREngine& engine,
                             size_t maxFrames,
                             BoolExpr* property,
-                            size_t outputCount) {
-  if (outputCount == 1) {
+                            size_t outputCount,
+                            bool boundSingletonCadicalWork) {
+  if (outputCount != 1) {
+    // A broad UNKNOWN only schedules exact child properties. Full per-query
+    // limits are reserved for singleton leaves, so failed probes cannot
+    // dominate them.
+    return engine.run(maxFrames, property, kDualRailPdrBatchProbeLimits);
+  }
+  if (!boundSingletonCadicalWork) {
     return engine.run(maxFrames, property);
   }
-  // A broad UNKNOWN only schedules exact child properties. Full query limits
-  // are reserved for singleton leaves, so failed probes cannot dominate them.
-  return engine.run(maxFrames, property, kDualRailPdrBatchProbeLimits);
+
+  SATSolverWrapper::CadicalWorkBudget budget(
+      secStrategySizeLimitFromEnv(
+          "KEPLER_SEC_PDR_DUAL_RAIL_SINGLETON_CONFLICT_BUDGET",
+          kDefaultDualRailPdrSingletonConflictBudget),
+      secStrategySizeLimitFromEnv(
+          "KEPLER_SEC_PDR_DUAL_RAIL_SINGLETON_DECISION_BUDGET",
+          kDefaultDualRailPdrSingletonDecisionBudget),
+      secStrategySizeLimitFromEnv(
+          "KEPLER_SEC_PDR_DUAL_RAIL_SINGLETON_TICK_BUDGET",
+          kDefaultDualRailPdrSingletonTickBudget));
+  PDRResult result;
+  {
+    SATSolverWrapper::ScopedCadicalWorkBudget budgetScope(budget);
+    result = engine.run(maxFrames, property);
+  }
+  if (pdrStrategyStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: singleton CaDiCaL cumulative budget ",
+        "conflicts=", budget.conflictsUsed(), "/", budget.conflictLimit(),
+        " decisions=", budget.decisionsUsed(), "/", budget.decisionLimit(),
+        " ticks=", budget.ticksUsed(), "/", budget.tickLimit(),
+        " exhausted=", budget.exhausted() ? 1 : 0);
+  }
+  return result;
 }
 
 void applyInitialStateAssignments(
@@ -3153,7 +3194,8 @@ SequentialEquivalenceResult runPdrSecEngine(
           exactBatchProblem, solverType, 0, exactInitCache);
       pdrResult = runPdrOutputBatch(
           pdrEngine, maxK, exactBatchProblem.property,
-          endOutput - firstOutput);
+          endOutput - firstOutput,
+          problem.usesDualRailStateEncoding);
     }
     releasePdrBatchAllocatorPages();
     if (isSecDiagEnabled()) {

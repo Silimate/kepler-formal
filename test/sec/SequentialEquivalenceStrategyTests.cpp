@@ -4471,6 +4471,118 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CadicalCumulativeBudgetLeavesExactQueriesUnboundedAndAssumptionsLocal) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  solver.configureForSecPdrQuery();
+  const int x = solver.newVar() + 2;
+  solver.addClause({x});
+
+  SATSolverWrapper::CadicalWorkBudget budget(
+      /*conflictLimit=*/0,
+      /*decisionLimit=*/0,
+      /*tickLimit=*/0);
+  {
+    SATSolverWrapper::ScopedCadicalWorkBudget budgetScope(budget);
+    // Exact Init queries do not opt into the output budget and must retain a
+    // definite result even after property-local SAT work is exhausted.
+    EXPECT_EQ(
+        solver.solveWithAssumptionsStatus({-x}),
+        SATSolverWrapper::SolveStatus::Unsat);
+    EXPECT_EQ(budget.conflictsUsed(), 0u);
+    EXPECT_EQ(budget.decisionsUsed(), 0u);
+    EXPECT_EQ(budget.ticksUsed(), 0u);
+    // The bounded query returns before enqueueing its assumption.
+    EXPECT_EQ(
+        solver.solveWithAssumptionsStatus(
+            {-x},
+            /*conflictLimit=*/100,
+            /*propagationLimit=*/100),
+        SATSolverWrapper::SolveStatus::Unknown);
+  }
+
+  EXPECT_TRUE(budget.exhausted());
+  SATSolverWrapper::CadicalWorkBudget nextOutputBudget(
+      /*conflictLimit=*/100,
+      /*decisionLimit=*/100,
+      /*tickLimit=*/100);
+  {
+    SATSolverWrapper::ScopedCadicalWorkBudget budgetScope(nextOutputBudget);
+    EXPECT_EQ(
+        solver.solveWithAssumptionsStatus(
+            {x},
+            /*conflictLimit=*/100,
+            /*propagationLimit=*/100),
+        SATSolverWrapper::SolveStatus::Sat);
+  }
+  EXPECT_FALSE(nextOutputBudget.exhausted());
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CadicalCumulativeBudgetChargesActualWorkAcrossSolverInstances) {
+  SATSolverWrapper firstSolver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  firstSolver.configureForSecPdrQuery();
+  const int x = firstSolver.newVar() + 2;
+  const int y = firstSolver.newVar() + 2;
+  firstSolver.addClause({x, y});
+  firstSolver.addClause({-x, y});
+
+  SATSolverWrapper secondSolver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  secondSolver.configureForSecPdrQuery();
+  const int secondX = secondSolver.newVar() + 2;
+  secondSolver.addClause({secondX});
+
+  SATSolverWrapper::CadicalWorkBudget budget(
+      /*conflictLimit=*/100,
+      /*decisionLimit=*/1,
+      /*tickLimit=*/100);
+  {
+    SATSolverWrapper::ScopedCadicalWorkBudget budgetScope(budget);
+    EXPECT_EQ(
+        firstSolver.solveWithResourceLimits(
+            /*conflictLimit=*/100,
+            /*decisionLimit=*/100),
+        SATSolverWrapper::SolveStatus::Unknown);
+    EXPECT_EQ(budget.decisionsUsed(), 1u);
+    EXPECT_TRUE(budget.exhausted());
+    // A different incremental solver still belongs to the same output.
+    EXPECT_EQ(
+        secondSolver.solveWithResourceLimits(
+            /*conflictLimit=*/100,
+            /*decisionLimit=*/100),
+        SATSolverWrapper::SolveStatus::Unknown);
+  }
+
+  EXPECT_EQ(secondSolver.solveStatus(), SATSolverWrapper::SolveStatus::Sat);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       CadicalCumulativeBudgetBoundsPropagationHeavyWorkWithTicks) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  solver.configureForSecPdrQuery();
+  const int x = solver.newVar() + 2;
+  const int y = solver.newVar() + 2;
+  solver.addClause({x, y});
+  solver.addClause({-x, y});
+
+  SATSolverWrapper::CadicalWorkBudget budget(
+      /*conflictLimit=*/100,
+      /*decisionLimit=*/100,
+      /*tickLimit=*/1);
+  {
+    SATSolverWrapper::ScopedCadicalWorkBudget budgetScope(budget);
+    EXPECT_EQ(
+        solver.solveWithResourceLimits(
+            /*conflictLimit=*/100,
+            /*decisionLimit=*/100),
+        SATSolverWrapper::SolveStatus::Unknown);
+  }
+
+  EXPECT_EQ(budget.ticksUsed(), 1u);
+  EXPECT_TRUE(budget.exhausted());
+  EXPECT_EQ(solver.solveStatus(), SATSolverWrapper::SolveStatus::Sat);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        CadicalAssumptionQueriesDoNotPersistAssumptions) {
   EXPECT_EQ(
       SATSolverWrapper::assumptionSolverTypeFor(
@@ -6434,6 +6546,47 @@ TEST_F(SequentialEquivalenceStrategyTests,
       stderrOutput.find("persistent_request_symbols="),
       std::string::npos)
       << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineCumulativeCadicalBudgetExhaustionIsInconclusive) {
+  constexpr size_t state = 2;
+  KInductionProblem problem;
+  problem.usesDualRailStateEncoding = true;
+  problem.state0Symbols = {state};
+  problem.allSymbols = {state};
+  problem.totalStateCount = 1;
+  problem.initialCondition = BoolExpr::Not(BoolExpr::Var(state));
+  problem.initialStateAssignments = {{state, false}};
+  problem.initializedStateCount = 1;
+  problem.transitions0 = {{state, BoolExpr::createFalse()}};
+  problem.bad = BoolExpr::Var(state);
+  problem.property = BoolExpr::Not(problem.bad);
+  problem.inductionProperty = problem.property;
+  problem.inductionBad = problem.bad;
+  problem.observedOutputExprs0 = {BoolExpr::Var(state)};
+  problem.observedOutputExprs1 = {BoolExpr::createFalse()};
+  problem.observedOutputNames = {"bounded_output"};
+
+  SATSolverWrapper::CadicalWorkBudget exhaustedBudget(
+      /*conflictLimit=*/0,
+      /*decisionLimit=*/0,
+      /*tickLimit=*/0);
+  PDRResult boundedResult;
+  {
+    SATSolverWrapper::ScopedCadicalWorkBudget budgetScope(exhaustedBudget);
+    PDREngine boundedEngine(
+        problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+    boundedResult = boundedEngine.run(2);
+  }
+
+  PDREngine unboundedEngine(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  const auto unboundedResult = unboundedEngine.run(2);
+
+  EXPECT_EQ(boundedResult.status, PDRStatus::Inconclusive);
+  EXPECT_TRUE(exhaustedBudget.exhausted());
+  EXPECT_EQ(unboundedResult.status, PDRStatus::Equivalent);
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
@@ -16968,6 +17121,7 @@ TEST_F(SequentialEquivalenceStrategyTests,
   auto* top1 = createDffTop(library, "top1", invModel, false, false);
 
   ScopedEnvVar secDiag("KEPLER_SEC_DIAG", "1");
+  ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
   testing::internal::CaptureStdout();
   testing::internal::CaptureStderr();
   SequentialEquivalenceStrategy strategy(
@@ -16987,6 +17141,9 @@ TEST_F(SequentialEquivalenceStrategyTests,
       std::string::npos);
   EXPECT_NE(
       stderrOutput.find("SEC diag: entering pdr engine"),
+      std::string::npos);
+  EXPECT_NE(
+      stderrOutput.find("singleton CaDiCaL cumulative budget"),
       std::string::npos);
   EXPECT_NE(stdoutOutput.find("SEC diag: aligned_inputs="), std::string::npos);
   EXPECT_NE(
