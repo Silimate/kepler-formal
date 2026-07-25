@@ -7,6 +7,7 @@
 #include "kinduction/KInductionProblem.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
 #include <list>
 #include <memory>
@@ -41,6 +42,10 @@ struct PDRQueryLimits {
   // the caller splits the exact property. Zero retains the engine defaults.
   size_t predecessorEncodingNodeLimit = 0;
   size_t predecessorNodeHintTargetLimit = 0;
+  // Negative retains the deterministic default. This cumulative limit spans
+  // optional invariant certification across every output batch sharing one
+  // SEC model; it never limits an IC3/PDR property query.
+  int64_t invariantCertificationTotalTickLimit = -1;
 };
 
 // Output batches from one SEC problem have the same immutable transition and

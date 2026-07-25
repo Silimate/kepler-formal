@@ -570,7 +570,8 @@ public:
   SolveStatus solveWithAssumptionsStatus( // LCOV_EXCL_LINE
       const std::vector<int>& assumptions,
       int64_t conflictLimit = -1,
-      int64_t propagationLimit = -1) {
+      int64_t propagationLimit = -1,
+      int64_t tickLimit = -1) {
     if (solverType_ == KEPLER_FORMAL::Config::SolverType::GLUCOSE) { // LCOV_EXCL_LINE
       // LCOV_EXCL_START
       Glucose::vec<Glucose::Lit> glucoseAssumptions;  // LCOV_EXCL_LINE
@@ -656,7 +657,7 @@ public:
       // LCOV_EXCL_STOP
     } else if (solverType_ == KEPLER_FORMAL::Config::SolverType::CADICAL) { // LCOV_EXCL_LINE
       const bool useCumulativeBudget =
-          conflictLimit >= 0 || propagationLimit >= 0;
+          conflictLimit >= 0 || propagationLimit >= 0 || tickLimit >= 0;
       lastAssumptions_ = assumptions; // LCOV_EXCL_LINE
       lastAssumptionSolveStatus_ = SolveStatus::Unknown; // LCOV_EXCL_LINE
       // Do not enqueue assumptions if this output has no SAT work left.
@@ -696,7 +697,7 @@ public:
           // CaDiCaL has no propagation budget. Use its decision budget as the
           // closest deterministic limiter for callers that pass both.
           propagationLimit,
-          /*tickLimit=*/-1,
+          tickLimit,
           useCumulativeBudget);
       if (lastAssumptionSolveStatus_ != SolveStatus::Unsat) { // LCOV_EXCL_LINE
         lastAssumptions_.clear(); // LCOV_EXCL_LINE

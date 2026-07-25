@@ -4583,6 +4583,32 @@ TEST_F(SequentialEquivalenceStrategyTests,
 }
 
 TEST_F(SequentialEquivalenceStrategyTests,
+       CadicalAssumptionTickLimitReturnsUnknownWithoutLeakingAssumptions) {
+  SATSolverWrapper solver(KEPLER_FORMAL::Config::SolverType::CADICAL);
+  solver.configureForSecPdrQuery();
+  const int x = solver.newVar() + 2;
+  const int y = solver.newVar() + 2;
+  solver.addClause({x, y});
+  solver.addClause({-x, y});
+
+  EXPECT_EQ(
+      solver.solveWithAssumptionsStatus(
+          {-y},
+          /*conflictLimit=*/100,
+          /*propagationLimit=*/100,
+          /*tickLimit=*/0),
+      SATSolverWrapper::SolveStatus::Unknown);
+  // UNKNOWN clears the bounded query's assumptions and resets all limits on
+  // the following exact call.
+  EXPECT_EQ(
+      solver.solveWithAssumptionsStatus({-y}),
+      SATSolverWrapper::SolveStatus::Unsat);
+  EXPECT_EQ(
+      solver.solveWithAssumptionsStatus({y}),
+      SATSolverWrapper::SolveStatus::Sat);
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
        CadicalAssumptionQueriesDoNotPersistAssumptions) {
   EXPECT_EQ(
       SATSolverWrapper::assumptionSolverTypeFor(
@@ -13797,6 +13823,72 @@ TEST_F(SequentialEquivalenceStrategyTests,
       << stderrOutput;
   EXPECT_EQ(
       stderrOutput.find("reusable invariant inductive solver reused"),
+      std::string::npos)
+      << stderrOutput;
+}
+
+TEST_F(SequentialEquivalenceStrategyTests,
+       PDREngineCumulativeCertificationBudgetDoesNotChangePropertyVerdict) {
+  KInductionProblem problem;
+  constexpr size_t firstState = 2;
+  constexpr size_t delayedState = 3;
+  problem.state0Symbols = {firstState, delayedState};
+  problem.allSymbols = problem.state0Symbols;
+  problem.totalStateCount = 2;
+  problem.initializedStateCount = 2;
+  problem.initialStateAssignments = {
+      {firstState, false}, {delayedState, false}};
+  problem.transitions0 = {
+      {firstState, BoolExpr::createTrue()},
+      {delayedState, BoolExpr::Var(firstState)}};
+  BoolExpr* delayedIsFalse = BoolExpr::Not(BoolExpr::Var(delayedState));
+  problem.property = delayedIsFalse;
+  problem.bad = BoolExpr::Not(delayedIsFalse);
+  problem.usesDualRailStateEncoding = true;
+
+  auto exactInitCache = std::make_shared<PDRExactInitCache>(
+      problem, KEPLER_FORMAL::Config::SolverType::KISSAT);
+  PDREngine engine(
+      problem,
+      KEPLER_FORMAL::Config::SolverType::KISSAT,
+      /*maxPredecessorQueries=*/0,
+      exactInitCache);
+
+  EXPECT_EQ(engine.run(1).status, PDRStatus::Inconclusive);
+
+  const ScopedEnvVar pdrStats("KEPLER_SEC_PDR_STATS", "1");
+  testing::internal::CaptureStderr();
+  PDRQueryLimits limits{
+      /*predecessorConflictLimit=*/100,
+      /*predecessorDecisionLimit=*/100,
+      /*blockingConflictLimit=*/100,
+      /*blockingDecisionLimit=*/100,
+      /*predecessorEncodingNodeLimit=*/0,
+      /*predecessorNodeHintTargetLimit=*/0,
+      /*invariantCertificationTotalTickLimit=*/0};
+  const PDRResult boundedResult =
+      engine.run(1, BoolExpr::createTrue(), limits);
+  const auto retriedResult = engine.run(1, BoolExpr::createTrue());
+  const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+  EXPECT_EQ(boundedResult.status, PDRStatus::Equivalent);
+  EXPECT_EQ(retriedResult.status, PDRStatus::Equivalent);
+  EXPECT_NE(
+      stderrOutput.find(
+          "reusable invariant cumulative certification budget created "
+          "ticks=0"),
+      std::string::npos)
+      << stderrOutput;
+  EXPECT_NE(
+      stderrOutput.find(
+          "reusable invariant cumulative certification budget exhausted; "
+          "disabling optional certification"),
+      std::string::npos)
+      << stderrOutput;
+  // The later run must not retry pending candidates after the shared budget
+  // is exhausted, and no uncertified clause may become reusable.
+  EXPECT_EQ(
+      stderrOutput.find("reusable invariant clauses certified"),
       std::string::npos)
       << stderrOutput;
 }

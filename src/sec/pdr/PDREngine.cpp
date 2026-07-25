@@ -117,6 +117,13 @@ constexpr unsigned kDefaultDualRailBlockingDecisionLimit = 10 * 1000 * 1000;
 // original full limits below.
 constexpr unsigned kNarrowGeneralizationProbeConflictLimit = 10 * 1000;
 constexpr unsigned kNarrowGeneralizationProbeDecisionLimit = 150 * 1000;
+// Reusable-invariant certification is optional strengthening, not an IC3
+// proof obligation. Bound both one query and the aggregate CaDiCaL work across
+// output batches so candidate reuse cannot dominate the exact PDR checks.
+constexpr int64_t kDualRailInvariantCertificationPerQueryTickLimit =
+    100 * 1000 * 1000;
+constexpr uint64_t kDualRailInvariantCertificationTotalTickLimit =
+    100 * 1000 * 1000;
 // Encoding guards are based only on the exact predecessor cone. Every output
 // batch receives the same finite limits; enclosing design or port counts never
 // select a different PDR problem or resource policy.
@@ -1432,6 +1439,9 @@ struct PDRExactInitCache::Impl {
   size_t reusableInvariantCandidateLiteralCount = 0;
   size_t reusableInvariantCandidateRevision = 0;
   size_t reusableInvariantCertifiedRevision = 0;
+  std::optional<SATSolverWrapper::CadicalWorkBudget>
+      reusableInvariantCertificationBudget;
+  bool reusableInvariantCertificationDisabled = false;
   // These structures depend only on the validated transition model. SEC runs
   // output batches serially, so every batch can reuse their exact contents
   // without sharing property-specific proof state or changing query order.
@@ -3389,6 +3399,9 @@ size_t injectReusableInvariantClauses(
 void storeReusableInvariantCandidates(
     PDRExactInitCache::Impl& cache,
     const std::vector<FrameClauses>& frames) {
+  if (cache.reusableInvariantCertificationDisabled) {
+    return;
+  }
   std::vector<StateClause> additions;
   size_t additionalLiterals = 0;
   for (size_t level = 1; level < frames.size(); ++level) {
@@ -3687,7 +3700,7 @@ class ReusableInvariantFinder {
             literal.positive ? -stateLiteral : stateLiteral);
       }
       const SATSolverWrapper::SolveStatus status =
-          solver.solveWithAssumptionsStatus(assumptions);
+          solveCertificationQuery(solver, assumptions);
       if (status == SATSolverWrapper::SolveStatus::Unknown) {
         return std::nullopt;  // LCOV_EXCL_LINE
       }
@@ -3914,6 +3927,45 @@ class ReusableInvariantFinder {
     return removed;
   }
 
+  int64_t certificationConflictLimit() const {
+    return problem_.usesDualRailStateEncoding
+               ? dualRailPredecessorConflictLimit(
+                     PredecessorQueryPurpose::GeneralizeBlocker)
+               : -1;
+  }
+
+  int64_t certificationDecisionLimit() const {
+    return problem_.usesDualRailStateEncoding
+               ? dualRailPredecessorDecisionLimit(
+                     PredecessorQueryPurpose::GeneralizeBlocker)
+               : -1;
+  }
+
+  int64_t certificationTickLimit() const {
+    return problem_.usesDualRailStateEncoding
+               ? kDualRailInvariantCertificationPerQueryTickLimit
+               : -1;
+  }
+
+  SATSolverWrapper::SolveStatus solveCertificationQuery(
+      SATSolverWrapper& solver,
+      const std::vector<int>& assumptions) const {
+    if (!cache_.reusableInvariantCertificationBudget.has_value()) {
+      return solver.solveWithAssumptionsStatus(
+          assumptions,
+          certificationConflictLimit(),
+          certificationDecisionLimit(),
+          certificationTickLimit());
+    }
+    SATSolverWrapper::ScopedCadicalWorkBudget budgetScope(
+        *cache_.reusableInvariantCertificationBudget);
+    return solver.solveWithAssumptionsStatus(
+        assumptions,
+        certificationConflictLimit(),
+        certificationDecisionLimit(),
+        certificationTickLimit());
+  }
+
   void buildInvariant(ReusableInvariantFinderResult& result) const {
     for (size_t index = 0; index < candidates_.size(); ++index) {
       if (active_[index]) {
@@ -3948,7 +4000,13 @@ class ReusableInvariantFinder {
           "symbols=",
           querySymbols.size(),
           " transition_targets=",
-          transitionTargets.size());
+          transitionTargets.size(),
+          " conflict_limit=",
+          certificationConflictLimit(),
+          " decision_limit=",
+          certificationDecisionLimit(),
+          " tick_limit=",
+          certificationTickLimit());
     }
 
     std::vector<int> currentSelectors;
@@ -3960,8 +4018,30 @@ class ReusableInvariantFinder {
           activeAssumptions(currentSelectors, nextHolds);
       ++result.inductiveQueries;
       const SATSolverWrapper::SolveStatus status =
-          solver.solveWithAssumptionsStatus(assumptions);
+          solveCertificationQuery(solver, assumptions);
       if (status == SATSolverWrapper::SolveStatus::Unknown) {
+        const auto& budget = cache_.reusableInvariantCertificationBudget;
+        if (pdrStatsEnabled()) {
+          emitSecDiag(
+              "SEC PDR stats: reusable invariant certification budget "
+              "exhausted query=",
+              result.inductiveQueries,
+              " active_candidates=",
+              std::count(active_.begin(), active_.end(), true),
+              " conflict_limit=",
+              certificationConflictLimit(),
+              " decision_limit=",
+              certificationDecisionLimit(),
+              " tick_limit=",
+              certificationTickLimit(),
+              " total_ticks=",
+              budget.has_value() ? budget->ticksUsed() : 0,
+              "/",
+              budget.has_value() ? budget->tickLimit() : 0);
+        }
+        // Candidate reuse is optional. UNKNOWN leaves the previously certified
+        // invariant unchanged and must not make the exact PDR property query
+        // inconclusive.
         return false;  // LCOV_EXCL_LINE
       }
       if (status == SATSolverWrapper::SolveStatus::Unsat) {
@@ -3988,13 +4068,85 @@ class ReusableInvariantFinder {
   std::vector<bool> active_;
 };
 
+uint64_t reusableInvariantCertificationTotalTickLimit() {
+  if (activePdrQueryLimits != nullptr &&
+      activePdrQueryLimits->invariantCertificationTotalTickLimit >= 0) {
+    return static_cast<uint64_t>(
+        activePdrQueryLimits->invariantCertificationTotalTickLimit);
+  }
+  return kDualRailInvariantCertificationTotalTickLimit;
+}
+
+void retainOnlyCertifiedReusableInvariant(
+    PDRExactInitCache::Impl& cache) {
+  cache.reusableInvariantCandidates = cache.reusableInvariant.clauses;
+  cache.reusableInvariantCandidateLiteralCount = 0;
+  for (const StateClause& clause : cache.reusableInvariantCandidates) {
+    cache.reusableInvariantCandidateLiteralCount += clause.size();
+  }
+  cache.reusableInvariantCertifiedRevision =
+      cache.reusableInvariantCandidateRevision;
+}
+
+void initializeReusableInvariantCertificationBudget(
+    PDRExactInitCache::Impl& cache) {
+  if (cache.reusableInvariantCertificationBudget.has_value() ||
+      !cache.sourceProblem->usesDualRailStateEncoding ||
+      SATSolverWrapper::assumptionSolverTypeFor(cache.solverType) !=
+          KEPLER_FORMAL::Config::SolverType::CADICAL) {
+    return;
+  }
+  const uint64_t tickLimit =
+      reusableInvariantCertificationTotalTickLimit();
+  cache.reusableInvariantCertificationBudget.emplace(
+      std::numeric_limits<uint64_t>::max(),
+      std::numeric_limits<uint64_t>::max(),
+      tickLimit);
+  if (pdrStatsEnabled()) {
+    emitSecDiag(
+        "SEC PDR stats: reusable invariant cumulative certification budget "
+        "created ticks=",
+        tickLimit);
+  }
+}
+
+void disableReusableInvariantCertification(
+    PDRExactInitCache::Impl& cache) {
+  size_t discarded = 0;
+  for (const StateClause& candidate :
+       cache.reusableInvariantCandidates) {
+    if (!hasExactClause(cache.reusableInvariant.clauses, candidate)) {
+      ++discarded;
+    }
+  }
+  retainOnlyCertifiedReusableInvariant(cache);
+  cache.reusableInvariantCertificationDisabled = true;
+  if (pdrStatsEnabled()) {
+    const auto& budget = cache.reusableInvariantCertificationBudget;
+    emitSecDiag(
+        "SEC PDR stats: reusable invariant cumulative certification budget "
+        "exhausted; disabling optional certification ticks=",
+        budget.has_value() ? budget->ticksUsed() : 0,
+        "/",
+        budget.has_value() ? budget->tickLimit() : 0,
+        " discarded_candidates=",
+        discarded,
+        " retained=",
+        cache.reusableInvariant.clauses.size());
+  }
+}
+
 void refreshReusableInvariant(
     PDRExactInitCache::Impl& cache,
     BoolExpr* initFormula) {
+  if (cache.reusableInvariantCertificationDisabled) {
+    return;
+  }
   if (cache.reusableInvariantCandidateRevision ==
       cache.reusableInvariantCertifiedRevision) {
     return;
   }
+  initializeReusableInvariantCertificationBudget(cache);
 
   // Invariant reuse is optional. Any inability to certify the new candidates
   // leaves the previous proven H intact and cannot alter this PDR run.
@@ -4002,6 +4154,10 @@ void refreshReusableInvariant(
     ReusableInvariantFinder finder(cache, initFormula);
     const auto result = finder.run();
     if (!result.has_value()) {
+      if (cache.reusableInvariantCertificationBudget.has_value() &&
+          cache.reusableInvariantCertificationBudget->exhausted()) {
+        disableReusableInvariantCertification(cache);
+      }
       if (pdrStatsEnabled()) {
         emitSecDiag(
             "SEC PDR stats: reusable invariant certification unavailable");
@@ -4014,15 +4170,7 @@ void refreshReusableInvariant(
     // The FMCAD'11 removal loop permanently drops rejected candidates. Keep
     // only certified H so later batches extend that invariant instead of
     // repeatedly solving every clause already rejected by an exact query.
-    cache.reusableInvariantCandidates =
-        cache.reusableInvariant.clauses;
-    cache.reusableInvariantCandidateLiteralCount = 0;
-    for (const StateClause& clause :
-         cache.reusableInvariantCandidates) {
-      cache.reusableInvariantCandidateLiteralCount += clause.size();
-    }
-    cache.reusableInvariantCertifiedRevision =
-        cache.reusableInvariantCandidateRevision;
+    retainOnlyCertifiedReusableInvariant(cache);
     if (pdrStatsEnabled()) {
       emitSecDiag(
           "SEC PDR stats: reusable invariant clauses certified candidates=",
@@ -4036,7 +4184,15 @@ void refreshReusableInvariant(
           " queries=",
           result->inductiveQueries);
     }
+    if (cache.reusableInvariantCertificationBudget.has_value() &&
+        cache.reusableInvariantCertificationBudget->exhausted()) {
+      disableReusableInvariantCertification(cache);
+    }
   } catch (...) {  // LCOV_EXCL_LINE
+    if (cache.reusableInvariantCertificationBudget.has_value() &&  // LCOV_EXCL_LINE
+        cache.reusableInvariantCertificationBudget->exhausted()) {  // LCOV_EXCL_LINE
+      disableReusableInvariantCertification(cache);  // LCOV_EXCL_LINE
+    }  // LCOV_EXCL_LINE
     if (pdrStatsEnabled()) {  // LCOV_EXCL_LINE
       emitSecDiag(  // LCOV_EXCL_LINE
           "SEC PDR stats: reusable invariant certification failed");  // LCOV_EXCL_LINE
