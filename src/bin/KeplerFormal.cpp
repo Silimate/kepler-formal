@@ -349,6 +349,8 @@ static bool validateConfigKeys(const YAML::Node& cfg) {
       "compact_mode",
       "report_skipped_pos",
       "solver",
+      "result_json",
+      "exit_nonzero_on_diff",
       "sv_design1_flist",
       "sv_design2_flist",
       "sv_design1_top",
@@ -415,6 +417,30 @@ bool secInconclusiveStoppedBeforeMaxK(const std::string& reason) {
          reason.find("repair") != std::string::npos ||
          reason.find("projection") != std::string::npos ||
          reason.find("did not prove any observed output") != std::string::npos;
+}
+
+void writeResultJsonFile(
+    const std::string& path,
+    const std::string& verdict,
+    const std::string& mode,
+    const std::string& engine,
+    int k,
+    double runtime_s) {
+  if (path.empty()) {
+    return;
+  }
+  std::ofstream out(path);
+  if (!out) {
+    SPDLOG_ERROR("Failed to write result JSON to {}", path);
+    return;
+  }
+  out << "{"
+      << "\"verdict\":\"" << verdict << "\","
+      << "\"mode\":\"" << mode << "\","
+      << "\"engine\":\"" << engine << "\","
+      << "\"k\":" << k << ","
+      << "\"runtime_s\":" << runtime_s
+      << "}\n";
 }
 
 }  // namespace
@@ -1125,8 +1151,30 @@ int KeplerFormalMain(int argc, char** argv) {
   bool compactMode = false;
   bool reportSkippedPOs = false;
   bool verilogPreprocessing = false;
+  bool exitNonzeroOnDiff = false;
   std::string dumpCnfPath;
   std::string dumpPoCnfPath;
+  std::string resultJsonPath;
+  const auto runStart = std::chrono::steady_clock::now();
+  auto elapsedSeconds = [&]() {
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now() - runStart)
+        .count();
+  };
+  auto finalizeResult = [&](const std::string& verdict,
+                            const std::string& mode,
+                            const std::string& engine,
+                            int k,
+                            int successCode) -> int {
+    writeResultJsonFile(
+        resultJsonPath, verdict, mode, engine, k, elapsedSeconds());
+    if (exitNonzeroOnDiff &&
+        (verdict == "different" || verdict == "inconclusive" ||
+         verdict == "error" || verdict == "unsupported")) {
+      return EXIT_FAILURE;
+    }
+    return successCode;
+  };
 
   KEPLER_FORMAL::Config::setReportSkippedPOs(false);
   KEPLER_FORMAL::Config::setSecTreatUncomputableSeqAsBoundary(true);
@@ -1340,6 +1388,13 @@ int KeplerFormalMain(int argc, char** argv) {
           reportSkippedPOs = cfg["report_skipped_pos"].as<bool>();
         }
         // LCOV_EXCL_STOP
+
+        if (cfg["result_json"] && cfg["result_json"].IsScalar()) {
+          resultJsonPath = cfg["result_json"].as<std::string>();
+        }
+        if (cfg["exit_nonzero_on_diff"] && cfg["exit_nonzero_on_diff"].IsScalar()) {
+          exitNonzeroOnDiff = cfg["exit_nonzero_on_diff"].as<bool>();
+        }
 
         // verilog_preprocessing (optional)
         if (cfg["verilog_preprocessing"] && cfg["verilog_preprocessing"].IsScalar()) {
@@ -1659,6 +1714,19 @@ int KeplerFormalMain(int argc, char** argv) {
         reportSkippedPOs = true;
         continue;
         // LCOV_EXCL_STOP
+      }
+      // LCOV_EXCL_START
+      if (arg == "--result-json") {
+        if (i + 1 >= argc) {
+          SPDLOG_CRITICAL("Missing path after {}", arg);
+          return EXIT_FAILURE;
+        }
+        resultJsonPath = argv[++i];
+        continue;
+      }
+      if (arg == "--exit-nonzero-on-diff") {
+        exitNonzeroOnDiff = true;
+        continue;
       }
       // LCOV_EXCL_START
       if (arg == "--sv_design1_flist" || arg == "--sv_design2_flist" ||
@@ -1994,7 +2062,9 @@ int KeplerFormalMain(int argc, char** argv) {
             SPDLOG_INFO(
                 "No difference was found. SEC proved equivalence at k = {}.",
                 result.bound);
-            return EXIT_SUCCESS;
+            return finalizeResult(
+                "equivalent", "sec", secEngineName(secEngine),
+                static_cast<int>(result.bound), EXIT_SUCCESS);
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Different:
             // LCOV_EXCL_START
             SPDLOG_INFO(
@@ -2005,7 +2075,9 @@ int KeplerFormalMain(int argc, char** argv) {
             if (!result.reason.empty()) {
               SPDLOG_INFO("SEC counterexample details:\n{}", result.reason);
             }
-            return EXIT_SUCCESS;
+            return finalizeResult(
+                "different", "sec", secEngineName(secEngine),
+                static_cast<int>(result.bound), EXIT_SUCCESS);
             // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Inconclusive:
             // LCOV_EXCL_START
@@ -2020,7 +2092,9 @@ int KeplerFormalMain(int argc, char** argv) {
                   secMaxK,
                   result.reason);
             }
-            return EXIT_FAILURE;
+            return finalizeResult(
+                "inconclusive", "sec", secEngineName(secEngine),
+                static_cast<int>(result.bound), EXIT_FAILURE);
             // LCOV_EXCL_STOP
           case KEPLER_FORMAL::SEC::SequentialEquivalenceStatus::Unsupported:
           // LCOV_DISABLED_STOP
@@ -2030,7 +2104,8 @@ int KeplerFormalMain(int argc, char** argv) {
             // LCOV_EXCL_STOP
                 "SEC cannot run on this design pair: {}", result.reason);
             // LCOV_EXCL_START
-            return EXIT_FAILURE;
+            return finalizeResult(
+                "unsupported", "sec", secEngineName(secEngine), -1, EXIT_FAILURE);
             // LCOV_EXCL_STOP
         }
       };
@@ -2251,6 +2326,7 @@ int KeplerFormalMain(int argc, char** argv) {
       top1 = nullptr;
       // LCOV_EXCL_STOP
 
+      bool lecEquivalent = false;
       try {
         // LCOV_EXCL_START
         KEPLER_FORMAL::MiterStrategy MiterS(nullptr, nullptr, logFileName);
@@ -2264,6 +2340,7 @@ int KeplerFormalMain(int argc, char** argv) {
         }
         if (MiterS.runCompactSnapshots(snapshot0, snapshot1)) {
           SPDLOG_INFO("No difference was found.");
+          lecEquivalent = true;
         } else {
           SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");
           // LCOV_EXCL_STOP
@@ -2272,12 +2349,14 @@ int KeplerFormalMain(int argc, char** argv) {
 	      // LCOV_DISABLED_START
 	      } catch (const std::exception& e) {
 	        SPDLOG_ERROR("Workflow failed: {}", e.what());
-	        return EXIT_FAILURE;
+	        return finalizeResult("error", "lec", "miter", -1, EXIT_FAILURE);
       }
       // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
       // LCOV_EXCL_START
-      return EXIT_SUCCESS;
+      return finalizeResult(
+          lecEquivalent ? "equivalent" : "different", "lec", "miter", -1,
+          EXIT_SUCCESS);
     }
     // LCOV_EXCL_STOP
 
@@ -2704,19 +2783,24 @@ int KeplerFormalMain(int argc, char** argv) {
         MiterS.setPoCnfDump(true, outPath);
       }
       MiterS.init();
+      bool lecEquivalent = false;
       if (MiterS.run(compactMode)) {
         SPDLOG_INFO("No difference was found.");
+        lecEquivalent = true;
       } else {
         SPDLOG_INFO("Difference was found. Please refer to the log(miter_log_x.txt) for details.");
         // LCOV_EXCL_STOP
       }
+      return finalizeResult(
+          lecEquivalent ? "equivalent" : "different", "lec", "miter", -1,
+          EXIT_SUCCESS);
     // LCOV_EXCL_START
     } catch (const std::exception& e) {
     // LCOV_EXCL_STOP
       // LCOV_EXCL_START
       // LCOV_DISABLED_START
       SPDLOG_ERROR("Workflow failed: {}", e.what());
-      return EXIT_FAILURE;
+      return finalizeResult("error", "lec", "miter", -1, EXIT_FAILURE);
       // LCOV_DISABLED_STOP
       // LCOV_EXCL_STOP
     // LCOV_EXCL_START
