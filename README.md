@@ -156,6 +156,7 @@ build/src/bin/kepler-formal -sv -v sec \
 | --- | --- |
 | `--help`, `-h` | Print usage. |
 | `--config <file>`, `-c <file>` | Load a YAML config. If present, the YAML file takes precedence over the rest of the CLI. |
+| `--verification <lec\|sec>`, `-v <lec\|sec>` | Select combinational LEC or sequential SEC. Defaults to `lec`. |
 | `-verilog` | Parse both designs as Verilog. |
 | `-naja_if` | Parse both designs as Naja IF. |
 | `-systemverilog`, `-sv` | Parse both designs as SystemVerilog. Requires SEC. |
@@ -176,6 +177,7 @@ build/src/bin/kepler-formal --config <file.yaml>
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `format` | string | `verilog`, `v`, `naja_if`, `systemverilog`, `sv`, or `sv2v`. Defaults to `verilog` if omitted. |
+| `verification` | string | `lec` or `sec`. Defaults to `lec`. |
 | `input_paths` | list | Required. Either `[design0, design1]` or `[[design0_file...], [design1_file...]]`. The nested form is for multi-file Verilog. |
 | `liberty_files` | list[string] | Liberty libraries loaded through `SNLLibertyConstructor`. |
 | `py_tech_files` | list[string] | Python primitive loaders loaded through `SNLPyLoader`. |
