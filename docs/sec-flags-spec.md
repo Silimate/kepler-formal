@@ -20,6 +20,7 @@ Supported SEC flows:
 | --- | --- |
 | Gate-level SEC | Sequential gate-level Verilog/SystemVerilog netlists with Liberty/Python primitive libraries as needed. |
 | RTL-level SEC | RTL Verilog/SystemVerilog sources, including SystemVerilog flists with explicit tops. |
+| SystemVerilog-to-Verilog SEC (`sv2v`) | SystemVerilog design 1 and Verilog design 2 for RTL-vs-gate comparison. |
 
 ## CLI Shape
 
@@ -66,8 +67,10 @@ kepler-formal -sv2v \
   --design1 rtl_pkg.sv rtl_top.sv \
   --design2 gate_top.v \
   -v sec \
+  -k 32 \
   --sec-engine pdr \
-  --sec-encoding dual_rail_steady
+  --sec-encoding dual_rail_steady \
+  --liberty stdcells.lib
 ```
 
 ## YAML Shape
@@ -97,7 +100,7 @@ liberty_files:
 
 | CLI flag | YAML key | Default | Values | Effect |
 | --- | --- | --- | --- | --- |
-| `-v sec`, `--verification sec` | `verification: sec` | `lec` | `lec`, `sec` | Selects SEC instead of combinational LEC. Values are lowercase. |
+| `-v <lec\|sec>`, `--verification <lec\|sec>` | `verification: <lec\|sec>` | `lec` | `lec`, `sec` | Selects combinational LEC or sequential SEC. Values are lowercase. |
 | `-k <n>`, `--max-k <n>` | `max_k: <n>` | `32` | Non-negative integer | Sets the SEC proof/search bound. |
 | `--sec-engine <engine>` | `sec_engine: <engine>` | `pdr` | `k_induction`, `imc`, `pdr` | Selects the top-level SEC proof engine. Engine names are lowercase. |
 | `--sec-encoding <mode>` | `sec_encoding: <mode>` | `dual_rail_steady` | `binary`, `dual_rail_steady` | Selects how SEC models unknown or reset-unanchored state values. Omit the key/flag to use the dual-rail default. |
@@ -246,7 +249,7 @@ SEC still depends on the normal front-end and library flags:
 | `--sv_design1_top`, `--sv_design2_top` | Per-design SystemVerilog top names. In `sv2v` mode, only `--sv_design1_top` is accepted. |
 | `--liberty`, `--lib`, `liberty_files` | Liberty primitives, including structured memory information used during SEC extraction. |
 | `py_tech_files` | Python primitive loaders. Must be provided through YAML, not through `--liberty`. |
-| `solver: kissat|glucose` | SAT solver used by the selected SEC engine. |
+| `solver: kissat|glucose|cadical` | SAT solver used by the selected SEC engine. This selector is YAML-only. |
 | `log_file` | Run log path. SEC defaults to `miter_log_<n>.txt` when no path is provided. |
 
 ## Known Construction Notes
