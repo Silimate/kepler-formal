@@ -27,6 +27,7 @@ This project is supported and funded by NLNet through the [NGI0 Entrust](https:/
 | Gate-level LEC | Post-synthesis or implementation netlists plus Liberty libraries | `lec` |
 | Gate-level SEC | Sequential gate-level netlists plus Liberty libraries | `sec` |
 | RTL-level SEC | RTL Verilog/SystemVerilog sources or SystemVerilog flists | `sec` |
+| SystemVerilog-to-Verilog SEC (`sv2v`) | SystemVerilog design 1 and Verilog design 2, plus Liberty libraries | `sec` |
 
 LEC is the default verification mode. SEC is selected with
 `verification: sec` in YAML or `-v sec` / `--verification sec` on the command
